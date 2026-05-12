@@ -1,0 +1,12 @@
+[package]
+name = "aic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+futures = "0.3"
+rig-core = "0.36"
+serde = "1.0"
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
