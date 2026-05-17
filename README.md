@@ -21,7 +21,7 @@ AI-powered git commit message generator. Analyzes your staged or unstaged change
 **macOS / Linux:**
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
 ```
 
 **Windows (PowerShell):**
