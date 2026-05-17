@@ -4,10 +4,9 @@ use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::CompletionClient;
 use rig::completion::{Prompt, TypedPrompt};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
-use std::env;
 use std::io::Write;
 
-const DEFAULT_PROVIDER: &str = "openai";
+pub const DEFAULT_PROVIDER: &str = "openai";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Provider {
@@ -130,25 +129,12 @@ macro_rules! with_agent {
 
 impl LLM {
     pub fn from_env() -> Self {
-        let provider_name =
-            env::var("LLM_BACKEND").unwrap_or_else(|_| DEFAULT_PROVIDER.to_string());
-        let provider = Provider::from_name(&provider_name);
-
-        let api_key = env::var("LLM_API_KEY")
-            .or_else(|_| {
-                provider
-                    .env_key()
-                    .map(env::var)
-                    .unwrap_or(Ok(String::new()))
-            })
-            .unwrap_or_default();
-
-        let model = env::var("LLM_MODEL").unwrap_or_else(|_| provider.default_model().to_string());
-
+        let config = crate::config::Config::load().ok().flatten();
+        let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
         Self {
-            provider,
-            model,
-            api_key,
+            provider: Provider::from_name(&resolved.backend),
+            model: resolved.model,
+            api_key: resolved.api_key,
         }
     }
 
