@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-clap = { version = "4.6.1", features = ["derive"] }
 futures = "0.3"
 git2 = "0.20.4"
 rig-core = "0.36"
