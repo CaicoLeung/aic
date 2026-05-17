@@ -45,7 +45,13 @@ async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
     .await?;
     #[cfg(debug_assertions)]
     println!("commit result: {:#?}", result);
-    eprintln!("  {}", result.message);
+    eprintln!("✏️ {}", result.message);
+    if let Some(body) = &result.body {
+        for line in body.lines() {
+            eprintln!("     {}", line);
+        }
+    }
+    eprintln!("📁 {}", paths.join(", "));
     Git::commit(result.message, result.body)?;
     Ok(())
 }
@@ -71,7 +77,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         .await?;
         #[cfg(debug_assertions)]
         println!("split_patch result: {:#?}", result);
-        eprintln!("Split into {} commit(s)", result.batches.len());
+        eprintln!("🔀 Split into {} commit(s)", result.batches.len());
         for batch in &result.batches {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;
