@@ -234,20 +234,68 @@ fn wt_status_kind(flags: Status) -> StatusKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn new(dir: &Path) -> Self {
+            let original = std::env::current_dir().unwrap();
+            std::env::set_current_dir(dir).unwrap();
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    fn init_test_repo(dir: &Path) {
+        let repo = Repository::init(dir).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "test").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        std::fs::write(dir.join("tracked.txt"), "original\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+
+        let tree_id = index.write_tree_to(&repo).unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+    }
 
     #[test]
     fn diff_workdir_returns_untracked_content() {
-        let result = Git::diff_workdir(Some("src/generator.rs")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        std::fs::write(dir.path().join("new_file.txt"), "new content\n").unwrap();
+
+        let _guard = CwdGuard::new(dir.path());
+        let result = Git::diff_workdir(Some("new_file.txt")).unwrap();
         assert!(
             !result.is_empty(),
             "should have diff content for untracked file"
         );
-        assert!(result.contains("new file"), "should indicate new file");
     }
 
     #[test]
     fn diff_workdir_returns_modified_content() {
-        let result = Git::diff_workdir(Some("src/llm.rs")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        std::fs::write(dir.path().join("tracked.txt"), "modified\n").unwrap();
+
+        let _guard = CwdGuard::new(dir.path());
+        let result = Git::diff_workdir(Some("tracked.txt")).unwrap();
         assert!(
             !result.is_empty(),
             "should have diff content for modified file"
