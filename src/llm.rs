@@ -2,7 +2,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::CompletionClient;
-use rig::completion::Prompt;
+use rig::completion::{Prompt, TypedPrompt};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use std::env;
 use std::io::Write;
@@ -54,6 +54,7 @@ impl Provider {
     }
 }
 
+#[derive(Clone)]
 pub struct LLM {
     pub provider: Provider,
     pub model: String,
@@ -66,23 +67,65 @@ impl Default for LLM {
     }
 }
 
-macro_rules! stream_provider {
-    ($lock:expr, $output:expr, $client:expr, $model:expr, $prompt:expr) => {{
-        let agent = $client.agent($model).build();
-        let mut stream = agent.stream_prompt($prompt).await;
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                    Text { text },
-                ))) => {
-                    write!($lock, "{text}")?;
-                    $output.push_str(&text);
-                }
-                Ok(_) => {}
-                Err(e) => anyhow::bail!("Stream error: {e}"),
+pub struct LLMAgent {
+    llm: LLM,
+    system_prompt: String,
+}
+
+macro_rules! with_agent {
+    ($self:expr, $agent:ident, $body:expr) => {
+        match &$self.llm.provider {
+            Provider::OpenAI => {
+                let client = rig::providers::openai::Client::new(&$self.llm.api_key)?;
+                let $agent = client
+                    .agent(&$self.llm.model)
+                    .preamble(&$self.system_prompt)
+                    .build();
+                $body
+            }
+            Provider::Anthropic => {
+                let client = rig::providers::anthropic::Client::new(&$self.llm.api_key)?;
+                let $agent = client
+                    .agent(&$self.llm.model)
+                    .preamble(&$self.system_prompt)
+                    .build();
+                $body
+            }
+            Provider::Gemini => {
+                let client = rig::providers::gemini::Client::new(&$self.llm.api_key)?;
+                let $agent = client
+                    .agent(&$self.llm.model)
+                    .preamble(&$self.system_prompt)
+                    .build();
+                $body
+            }
+            Provider::DeepSeek => {
+                let client = rig::providers::deepseek::Client::new(&$self.llm.api_key)?;
+                let $agent = client
+                    .agent(&$self.llm.model)
+                    .preamble(&$self.system_prompt)
+                    .build();
+                $body
+            }
+            Provider::Groq => {
+                let client = rig::providers::groq::Client::new(&$self.llm.api_key)?;
+                let $agent = client
+                    .agent(&$self.llm.model)
+                    .preamble(&$self.system_prompt)
+                    .build();
+                $body
+            }
+            Provider::Ollama => {
+                let client =
+                    rig::providers::ollama::Client::new("http://localhost:11434".to_string())?;
+                let $agent = client
+                    .agent(&$self.llm.model)
+                    .preamble(&$self.system_prompt)
+                    .build();
+                $body
             }
         }
-    }};
+    };
 }
 
 impl LLM {
@@ -109,79 +152,49 @@ impl LLM {
         }
     }
 
-    pub async fn call(prompt: &str) -> Result<String> {
-        let llm = Self::default();
-        match llm.provider {
-            Provider::OpenAI => {
-                let client = rig::providers::openai::Client::new(&llm.api_key)?;
-                let agent = client.agent(&llm.model).build();
-                Ok(agent.prompt(prompt).await?)
-            }
-            Provider::Anthropic => {
-                let client = rig::providers::anthropic::Client::new(&llm.api_key)?;
-                let agent = client.agent(&llm.model).build();
-                Ok(agent.prompt(prompt).await?)
-            }
-            Provider::Gemini => {
-                let client = rig::providers::gemini::Client::new(&llm.api_key)?;
-                let agent = client.agent(&llm.model).build();
-                Ok(agent.prompt(prompt).await?)
-            }
-            Provider::DeepSeek => {
-                let client = rig::providers::deepseek::Client::new(&llm.api_key)?;
-                let agent = client.agent(&llm.model).build();
-                Ok(agent.prompt(prompt).await?)
-            }
-            Provider::Groq => {
-                let client = rig::providers::groq::Client::new(&llm.api_key)?;
-                let agent = client.agent(&llm.model).build();
-                Ok(agent.prompt(prompt).await?)
-            }
-            Provider::Ollama => {
-                let client =
-                    rig::providers::ollama::Client::new("http://localhost:11434".to_string())?;
-                let agent = client.agent(&llm.model).build();
-                Ok(agent.prompt(prompt).await?)
-            }
+    pub fn agent(&self, system_prompt: impl Into<String>) -> LLMAgent {
+        LLMAgent {
+            llm: self.clone(),
+            system_prompt: system_prompt.into(),
         }
     }
+}
 
-    pub async fn stream(prompt: &str) -> Result<String> {
-        let llm = Self::default();
+impl LLMAgent {
+    pub async fn call(&self, prompt: &str) -> Result<String> {
+        with_agent!(self, agent, Ok(agent.prompt(prompt).await?))
+    }
+
+    pub async fn stream(&self, prompt: &str) -> Result<String> {
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
         let mut output = String::new();
 
-        match llm.provider {
-            Provider::OpenAI => {
-                let client = rig::providers::openai::Client::new(&llm.api_key)?;
-                stream_provider!(lock, output, client, &llm.model, prompt);
+        with_agent!(self, agent, {
+            let mut stream = agent.stream_prompt(prompt).await;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::Text(Text { text }),
+                    )) => {
+                        write!(lock, "{text}")?;
+                        output.push_str(&text);
+                    }
+                    Ok(_) => {}
+                    Err(e) => anyhow::bail!("Stream error: {e}"),
+                }
             }
-            Provider::Anthropic => {
-                let client = rig::providers::anthropic::Client::new(&llm.api_key)?;
-                stream_provider!(lock, output, client, &llm.model, prompt);
-            }
-            Provider::Gemini => {
-                let client = rig::providers::gemini::Client::new(&llm.api_key)?;
-                stream_provider!(lock, output, client, &llm.model, prompt);
-            }
-            Provider::DeepSeek => {
-                let client = rig::providers::deepseek::Client::new(&llm.api_key)?;
-                stream_provider!(lock, output, client, &llm.model, prompt);
-            }
-            Provider::Groq => {
-                let client = rig::providers::groq::Client::new(&llm.api_key)?;
-                stream_provider!(lock, output, client, &llm.model, prompt);
-            }
-            Provider::Ollama => {
-                let client =
-                    rig::providers::ollama::Client::new("http://localhost:11434".to_string())?;
-                stream_provider!(lock, output, client, &llm.model, prompt);
-            }
-        }
+        });
 
         writeln!(lock)?;
         lock.flush()?;
         Ok(output)
+    }
+
+    pub async fn schema<T>(&self, prompt: &str) -> Result<T>
+    where
+        T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,
+    {
+        with_agent!(self, agent, Ok(agent.prompt_typed(prompt).await?))
     }
 }
