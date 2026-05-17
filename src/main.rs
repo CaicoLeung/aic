@@ -8,6 +8,26 @@ pub mod prompt;
 use crate::cli::Commands;
 use crate::git::Git;
 use clap::Parser;
+use indicatif::ProgressBar;
+use std::time::Duration;
+
+async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::default_spinner()
+            .template("{spinner} {msg}")?
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+
+    let result = fut.await;
+    pb.finish_and_clear();
+    result
+}
 
 async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
@@ -18,9 +38,14 @@ async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
-    let result = generator::Generator::generate_commit_message(&diff.to_string()).await?;
+    let result = with_spinner(
+        "Generating commit message",
+        generator::Generator::generate_commit_message(&diff.to_string()),
+    )
+    .await?;
     #[cfg(debug_assertions)]
     println!("commit result: {:#?}", result);
+    eprintln!("  {}", result.message);
     Git::commit(result.message, result.body)?;
     Ok(())
 }
@@ -39,9 +64,14 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });
-        let result = generator::Generator::split_patch(&diff.to_string()).await?;
+        let result = with_spinner(
+            "Analyzing changes",
+            generator::Generator::split_patch(&diff.to_string()),
+        )
+        .await?;
         #[cfg(debug_assertions)]
         println!("split_patch result: {:#?}", result);
+        eprintln!("Split into {} commit(s)", result.batches.len());
         for batch in &result.batches {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;
