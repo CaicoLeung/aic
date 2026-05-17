@@ -21,3 +21,5 @@ pr-run-mode = "plan"
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Allow custom modifications to CI workflows (git-cliff integration)
+allow-dirty = ["ci"]
