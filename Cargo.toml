@@ -2,6 +2,13 @@
 name = "aic"
 version = "0.1.0"
 edition = "2024"
+description = "AI-powered git commit message generator"
+repository = "https://github.com/CaicoLeung/aic"
+license = "MIT"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [dependencies]
 anyhow = "1.0"
