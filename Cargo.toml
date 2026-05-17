@@ -5,8 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+clap = { version = "4.6.1", features = ["derive"] }
 futures = "0.3"
+git2 = "0.20.4"
 rig-core = "0.36"
-serde = "1.0"
+schemars = "1"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
