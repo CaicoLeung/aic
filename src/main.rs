@@ -1,9 +1,13 @@
+pub mod cli;
+pub mod config;
 pub mod generator;
 pub mod git;
 pub mod llm;
 pub mod prompt;
 
+use crate::cli::Commands;
 use crate::git::Git;
+use clap::Parser;
 
 async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
@@ -21,8 +25,7 @@ async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run_commit_workflow() -> anyhow::Result<()> {
     let status = Git::status()?;
     let staged_files: Vec<_> = status.iter().filter(|f| f.staged).collect();
 
@@ -50,4 +53,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = cli::Cli::parse();
+
+    match cli.command {
+        Some(Commands::Setup) => config::run_setup(),
+        Some(Commands::List) => config::run_list(),
+        None => run_commit_workflow().await,
+    }
 }
