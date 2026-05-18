@@ -11,6 +11,7 @@ use clap::Parser;
 use indicatif::ProgressBar;
 use owo_colors::OwoColorize;
 use std::time::Duration;
+use tui_banner::{Align, Banner, Fill, Gradient, Palette};
 
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
 where
@@ -52,7 +53,7 @@ async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
             eprintln!("   {}", line.dimmed());
         }
     }
-    eprintln!("📁  {}", paths.join(", ").cyan());
+    eprintln!("📁 {}", paths.join(", ").cyan());
     Git::commit(result.message, result.body)?;
     Ok(())
 }
@@ -97,6 +98,14 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let banner = Banner::new("RUST CLI")?
+            .gradient(Gradient::diagonal(Palette::from_hex(&[
+                "#00E5FF", "#7B5CFF", "#FF5AD9",
+            ])))
+            .fill(Fill::Keep)
+            .align(Align::Center)
+            .padding(1);
+    banner.animate_sweep(5, None)?;
     let cli = cli::Cli::parse();
 
     match cli.command {
