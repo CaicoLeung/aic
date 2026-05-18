@@ -33,7 +33,8 @@ commit_parsers = [
     { message = "^test", group = "<!-- 4 -->Testing" },
     { message = "^doc", group = "<!-- 5 -->Documentation" },
     { message = "^chore\\(deps\\)", skip = true },
-    { message = "^chore", group = "<!-- 6 -->Miscellaneous" },
+    { message = "^style", group = "<!-- 7 -->Styling" },
+    { message = "^chore", group = "<!-- 8 -->Miscellaneous" },
 ]
 protect_breaking_commits = false
 filter_commits = false
