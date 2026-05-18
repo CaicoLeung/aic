@@ -5,6 +5,7 @@ AI-powered git commit message generator. Analyzes your staged or unstaged change
 [![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml)
 [![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
 ## Features
 
@@ -57,11 +58,11 @@ aic
 
 ## Usage
 
-| Command | Description |
-|---|---|
-| `aic` | Generate commit messages for staged files. If nothing is staged, batch-plan all unstaged changes into logical commits. |
-| `aic setup` | Interactive wizard to pick provider, enter API key, and select model. |
-| `aic list` | Show resolved config: provider, model, and where each value comes from (env / config / default). |
+| Command     | Description                                                                                                            |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `aic`       | Generate commit messages for staged files. If nothing is staged, batch-plan all unstaged changes into logical commits. |
+| `aic setup` | Interactive wizard to pick provider, enter API key, and select model.                                                  |
+| `aic list`  | Show resolved config: provider, model, and where each value comes from (env / config / default).                       |
 
 ## Configuration
 
@@ -69,12 +70,12 @@ Config file: `~/.config/aic/config.toml`
 
 ### Environment variables
 
-| Variable | Purpose | Default |
-|---|---|---|
-| `LLM_BACKEND` | Provider name | `openai` |
-| `LLM_API_KEY` | API key (falls back to provider-specific vars) | — |
-| `LLM_MODEL` | Model ID override | Provider default |
-| `AIC_SYSTEM_PROMPT` | Override the commit message system prompt | Built-in prompt |
+| Variable            | Purpose                                        | Default          |
+| ------------------- | ---------------------------------------------- | ---------------- |
+| `LLM_BACKEND`       | Provider name                                  | `openai`         |
+| `LLM_API_KEY`       | API key (falls back to provider-specific vars) | —                |
+| `LLM_MODEL`         | Model ID override                              | Provider default |
+| `AIC_SYSTEM_PROMPT` | Override the commit message system prompt      | Built-in prompt  |
 
 Provider-specific API key env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) are also recognized.
 
@@ -89,14 +90,14 @@ For each of `backend`, `api_key`, `model`:
 
 ### Supported providers
 
-| Provider | Default model | Env key |
-|---|---|---|
-| OpenAI | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| Anthropic | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
-| Gemini | `gemini-2.0-flash` | `GEMINI_API_KEY` |
-| DeepSeek | `deepseek-chat` | `DEEPSEEK_API_KEY` |
-| Groq | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
-| Ollama | `llama3.2` | _(localhost:11434, no key needed)_ |
+| Provider  | Default model              | Env key                            |
+| --------- | -------------------------- | ---------------------------------- |
+| OpenAI    | `gpt-4o-mini`              | `OPENAI_API_KEY`                   |
+| Anthropic | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY`                |
+| Gemini    | `gemini-2.0-flash`         | `GEMINI_API_KEY`                   |
+| DeepSeek  | `deepseek-chat`            | `DEEPSEEK_API_KEY`                 |
+| Groq      | `llama-3.3-70b-versatile`  | `GROQ_API_KEY`                     |
+| Ollama    | `llama3.2`                 | _(localhost:11434, no key needed)_ |
 
 ## How It Works
 
@@ -109,14 +110,11 @@ aic
 
 All commit messages follow Conventional Commits (`feat:`, `fix:`, `refactor:`, etc.) with an optional body.
 
-## Development
+## Contributing
 
-```sh
-cargo build                              # Build
-cargo fmt && cargo build                 # Format + build
-cargo clippy -- -D warnings              # Lint
-cargo test                               # Run tests
-```
+- Run `cargo fmt` before committing
+- Run `cargo clippy -- -D warnings` and fix all warnings
+- Add tests for new behaviour in `src/` or as integration tests in `tests/`
 
 ## License
 
