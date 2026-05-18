@@ -2,16 +2,21 @@
 name = "aic"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "AI-powered git commit message generator"
 repository = "https://github.com/CaicoLeung/aic"
+keywords = ["git", "ai", "cli", "commit", "llm"]
+categories = ["command-line-utilities", "development-tools"]
 license = "MIT"
 
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = "thin" # enable link-time optimization for a smaller binary
+strip = true # strip symbols for a smaller, cleaner binary
+codegen-units = 1 # reduce codegen units to improve compile times
 
 [dependencies]
-anyhow = "1.0"
+anyhow = "1.0.102"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
