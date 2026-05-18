@@ -11,7 +11,7 @@ use clap::Parser;
 use indicatif::ProgressBar;
 use owo_colors::OwoColorize;
 use std::time::Duration;
-use tui_banner::{Align, Banner, Fill, Gradient, Palette};
+use tui_banner::{Align, Banner, Fill, Style};
 
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
 where
@@ -45,8 +45,6 @@ async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
         generator::Generator::generate_commit_message(&diff.to_string()),
     )
     .await?;
-    #[cfg(debug_assertions)]
-    println!("commit result: {:#?}", result);
     eprintln!("✏️  {}", result.message.bold().green());
     if let Some(body) = &result.body {
         for line in body.lines() {
@@ -77,12 +75,15 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             generator::Generator::split_patch(&diff.to_string()),
         )
         .await?;
-        #[cfg(debug_assertions)]
-        println!("split_patch result: {:#?}", result);
-        eprintln!(
-            "🔀 Split into {} commit(s)",
-            result.batches.len().to_string().bold().yellow()
-        );
+        let count = result.batches.len();
+        if count == 1 {
+            eprintln!("🔀 Grouped into {} commit", "1".bold().yellow());
+        } else {
+            eprintln!(
+                "🔀 Split into {} commits",
+                count.to_string().bold().yellow()
+            );
+        }
         for batch in &result.batches {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;
@@ -96,15 +97,18 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn banner() -> Banner {
+    Banner::new("AIC CLI")
+        .expect("failed to create banner")
+        .style(Style::FireWarning)
+        .fill(Fill::Keep)
+        .align(Align::Center)
+        .padding(1)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let banner = Banner::new("RUST CLI")?
-            .gradient(Gradient::diagonal(Palette::from_hex(&[
-                "#00E5FF", "#7B5CFF", "#FF5AD9",
-            ])))
-            .fill(Fill::Keep)
-            .align(Align::Center)
-            .padding(1);
+    let banner = banner();
     banner.animate_sweep(5, None)?;
     let cli = cli::Cli::parse();
 
