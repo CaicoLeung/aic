@@ -9,7 +9,7 @@ pub struct PromptConfig {
 const SYSTEM_PROMPT_GIT_MESSAGE: &str = r#"
 You are an expert at writing Git commit messages following the Conventional Commits v1.0.0 specification.
 
-You will be given a git diff. Analyze the changes and produce a commit message.
+You will be given a git diff grouped by function or code block. Each section starts with the function name in brackets and the affected line range. Use this scope information to write precise commit messages that reflect which functions changed.
 
 Rules:
 1. Use imperative mood in the subject line (e.g., "add feature" not "added feature")

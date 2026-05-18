@@ -36,7 +36,8 @@ async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
         .iter()
         .map(|p| {
             let diff = Git::diff(Some(p.as_str()))?;
-            Ok(serde_json::json!({ "path": p, "diff": diff }))
+            let scoped = git::format_diff_scoped(&diff, p);
+            Ok(serde_json::json!({ "path": p, "diff": scoped }))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
@@ -66,7 +67,8 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             .iter()
             .map(|f| {
                 let diff = Git::diff_workdir(Some(f.path.as_str()))?;
-                Ok(serde_json::json!({ "path": f.path, "diff": diff }))
+                let scoped = git::format_diff_scoped(&diff, &f.path);
+                Ok(serde_json::json!({ "path": f.path, "diff": scoped }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });

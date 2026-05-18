@@ -2,6 +2,65 @@ use anyhow::Context;
 use git2::{DiffFormat, DiffLineType, Repository, Status};
 use std::path::Path;
 
+#[derive(Debug, serde::Serialize)]
+pub struct DiffBlock {
+    pub header: String,
+    pub old_start: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    pub lines: Vec<String>,
+}
+
+fn parse_hunk_header(header: &str) -> Option<(u32, u32, u32, u32, Option<&str>)> {
+    // Parse: @@ -old_start,old_count +new_start,new_count @@ optional_context
+    let rest = header.strip_prefix("@@ ")?;
+    let closing = rest.find("@@")?;
+    let range_part = &rest[..closing];
+    let context = rest
+        .get(closing + 2..)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let mut parts = range_part.split(' ');
+    let old = parts.next()?.strip_prefix('-')?;
+    let new = parts.next()?.strip_prefix('+')?;
+
+    let (old_start, old_count) = parse_range(old)?;
+    let (new_start, new_count) = parse_range(new)?;
+
+    Some((old_start, old_count, new_start, new_count, context))
+}
+
+fn parse_range(range: &str) -> Option<(u32, u32)> {
+    match range.split_once(',') {
+        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+        None => Some((range.parse().ok()?, 1)),
+    }
+}
+
+pub fn parse_diff_blocks(diff: &str) -> Vec<DiffBlock> {
+    let mut blocks: Vec<DiffBlock> = Vec::new();
+
+    for line in diff.lines() {
+        if let Some((old_start, _old_count, new_start, new_count, context)) =
+            parse_hunk_header(line)
+        {
+            let header = context.unwrap_or("(top-level)").to_string();
+            blocks.push(DiffBlock {
+                header,
+                old_start,
+                new_start,
+                new_count,
+                lines: Vec::new(),
+            });
+        } else if let Some(block) = blocks.last_mut() {
+            block.lines.push(line.to_string());
+        }
+    }
+
+    blocks
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct FileStatus {
     pub path: String,
@@ -181,6 +240,35 @@ fn format_line(line: &git2::DiffLine, output: &mut String) {
             output.push_str(&String::from_utf8_lossy(line.content()));
         }
     }
+}
+
+pub fn format_diff_scoped(diff: &str, file_path: &str) -> String {
+    let blocks = parse_diff_blocks(diff);
+    if blocks.is_empty() {
+        return String::new();
+    }
+
+    let mut out = format!("--- {file_path} ---\n");
+    let mut i = 0;
+    while i < blocks.len() {
+        let block = &blocks[i];
+        let end = new_end(block.new_start, block.new_count);
+        out.push_str(&format!(
+            "[{}] lines {}-{}\n",
+            block.header, block.new_start, end
+        ));
+        for line in &block.lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+        i += 1;
+    }
+    out
+}
+
+fn new_end(start: u32, count: u32) -> u32 {
+    if count == 0 { start } else { start + count - 1 }
 }
 
 fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {
