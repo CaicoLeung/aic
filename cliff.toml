@@ -32,9 +32,10 @@ commit_parsers = [
     { message = "^perf", group = "<!-- 3 -->Performance" },
     { message = "^test", group = "<!-- 4 -->Testing" },
     { message = "^doc", group = "<!-- 5 -->Documentation" },
+    { message = "^ci", group = "<!-- 7 -->Continuous Integration" },
     { message = "^chore\\(deps\\)", skip = true },
-    { message = "^style", group = "<!-- 7 -->Styling" },
-    { message = "^chore", group = "<!-- 8 -->Miscellaneous" },
+    { message = "^style", group = "<!-- 8 -->Styling" },
+    { message = "^chore", group = "<!-- 9 -->Miscellaneous" },
 ]
 protect_breaking_commits = false
 filter_commits = false

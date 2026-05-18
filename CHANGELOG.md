@@ -2,7 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.1.1] - 2026-05-18
+
+### Features
+
+- Add style commit parser rule
+- Add colored output for commit messages
+- Add animated startup banner
+- Add scoped diff parsing for function-level grouping
+
+### Refactoring
+
+- Extract banner function and improve output
+
+### Documentation
+
+- Add initial README
+- Add -L flag to curl command in install instructions
+- Add changelog badge and contributing guidelines
+
+### Continuous Integration
+
+- Remove duplicate release step from host command
+
+### Styling
+
+- Format clap command attribute
+
+### Miscellaneous
+
+- Add CLAUDE.md to .gitignore
+- Update Cargo.toml with dist optimizations and metadata
+- Bump version to 0.1.1
+
+## [0.1.0] - 2026-05-17
 
 ### Features
 
@@ -19,6 +52,8 @@ All notable changes to this project will be documented in this file.
 - Add progress spinner for commit generation
 - Enhance commit output with emojis and body details
 - Add CI and release automation
+- Add automatic changelog generation with git-cliff
+- Allow dirty CI workflows for git-cliff
 
 ### Refactoring
 
