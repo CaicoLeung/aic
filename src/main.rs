@@ -9,6 +9,7 @@ use crate::cli::Commands;
 use crate::git::Git;
 use clap::Parser;
 use indicatif::ProgressBar;
+use owo_colors::OwoColorize;
 use std::time::Duration;
 
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
@@ -45,13 +46,13 @@ async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
     .await?;
     #[cfg(debug_assertions)]
     println!("commit result: {:#?}", result);
-    eprintln!("✏️ {}", result.message);
+    eprintln!("✏️  {}", result.message.bold().green());
     if let Some(body) = &result.body {
         for line in body.lines() {
-            eprintln!("     {}", line);
+            eprintln!("   {}", line.dimmed());
         }
     }
-    eprintln!("📁 {}", paths.join(", "));
+    eprintln!("📁  {}", paths.join(", ").cyan());
     Git::commit(result.message, result.body)?;
     Ok(())
 }
@@ -77,7 +78,10 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         .await?;
         #[cfg(debug_assertions)]
         println!("split_patch result: {:#?}", result);
-        eprintln!("🔀 Split into {} commit(s)", result.batches.len());
+        eprintln!(
+            "🔀 Split into {} commit(s)",
+            result.batches.len().to_string().bold().yellow()
+        );
         for batch in &result.batches {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;

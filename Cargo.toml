@@ -2,7 +2,7 @@
 name = "aic"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "AI-powered git commit message generator"
 repository = "https://github.com/CaicoLeung/aic"
 keywords = ["git", "ai", "cli", "commit", "llm"]
@@ -22,6 +22,7 @@ dirs = "6"
 futures = "0.3"
 git2 = "0.20.4"
 indicatif = "0.17"
+owo-colors = "4"
 rig-core = "0.36"
 schemars = "1"
 serde = { version = "1.0", features = ["derive"] }
