@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-05-20
+
+### Features
+
+- Add self-update command for aic
+- Add update command for self-update via GitHub Releases
+
+### Continuous Integration
+
+- Automate changelog update on release
+
+### Miscellaneous
+
+- Shorten banner text
+- Bump version to 0.1.2
+
 ## [0.1.1] - 2026-05-18
 
 ### Features
