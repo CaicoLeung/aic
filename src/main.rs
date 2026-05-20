@@ -8,6 +8,7 @@ pub mod update;
 
 use crate::cli::Commands;
 use crate::git::Git;
+use anyhow::Context;
 use clap::Parser;
 use indicatif::ProgressBar;
 use owo_colors::OwoColorize;
@@ -32,7 +33,10 @@ where
     result
 }
 
-async fn generate_and_commit(paths: &[String]) -> anyhow::Result<()> {
+async fn generate_and_commit(
+    paths: &[String],
+    _reason: Option<&str>,
+) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
         .map(|p| {
@@ -78,6 +82,12 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             generator::Generator::split_patch(&diff.to_string()),
         )
         .await?;
+
+        let original_paths: Vec<String> =
+            unstaged_files.iter().map(|f| f.path.clone()).collect();
+        generator::validate_batch_plan(&result, &original_paths)
+            .context("batch plan validation failed")?;
+
         let count = result.batches.len();
         if count == 1 {
             eprintln!("🔀 Grouped into {} commit", "1".bold().yellow());
@@ -87,14 +97,24 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
                 count.to_string().bold().yellow()
             );
         }
-        for batch in &result.batches {
+        for (i, batch) in result.batches.iter().enumerate() {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;
-            generate_and_commit(&batch.files).await?;
+            if let Err(e) =
+                generate_and_commit(&batch.files, batch.reason.as_deref()).await
+            {
+                anyhow::bail!(
+                    "failed after committing {} of {} batches. \
+                     Batch {} files are staged but uncommitted: {e}",
+                    i,
+                    count,
+                    i + 1
+                );
+            }
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        generate_and_commit(&paths).await?;
+        generate_and_commit(&paths, None).await?;
     }
 
     Ok(())
