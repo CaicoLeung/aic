@@ -44,7 +44,10 @@ fn format_rust_files(paths: &[String]) {
         return;
     }
 
-    match std::process::Command::new("rustfmt").args(&rust_files).status() {
+    match std::process::Command::new("rustfmt")
+        .args(&rust_files)
+        .status()
+    {
         Ok(s) if s.success() => {
             eprintln!("🎨 Formatted {} file(s)", rust_files.len());
         }
