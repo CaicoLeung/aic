@@ -17,4 +17,6 @@ pub enum Commands {
     Setup,
     /// Show current resolved configuration
     List,
+    /// Update aic to the latest version
+    Update,
 }

@@ -4,6 +4,7 @@ pub mod generator;
 pub mod git;
 pub mod llm;
 pub mod prompt;
+pub mod update;
 
 use crate::cli::Commands;
 use crate::git::Git;
@@ -117,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Setup) => config::run_setup(),
         Some(Commands::List) => config::run_list(),
+        Some(Commands::Update) => update::run_update(),
         None => run_commit_workflow().await,
     }
 }
