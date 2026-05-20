@@ -23,3 +23,4 @@ install-path = "CARGO_HOME"
 install-updater = false
 # Allow custom modifications to CI workflows (git-cliff integration)
 allow-dirty = ["ci"]
+unix-archive = ".tar.gz"
