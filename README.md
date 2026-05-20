@@ -58,12 +58,12 @@ aic
 
 ## Usage
 
-| Command     | Description                                                                                                            |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Command      | Description                                                                                                            |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------- |
 | `aic`        | Generate commit messages for staged files. If nothing is staged, batch-plan all unstaged changes into logical commits. |
 | `aic setup`  | Interactive wizard to pick provider, enter API key, and select model.                                                  |
 | `aic list`   | Show resolved config: provider, model, and where each value comes from (env / config / default).                       |
-| `aic update` | Update aic to the latest version from GitHub Releases.                                                                |
+| `aic update` | Update aic to the latest version from GitHub Releases.                                                                 |
 
 ## Configuration
 
