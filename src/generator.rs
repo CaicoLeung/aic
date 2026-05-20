@@ -101,10 +101,7 @@ mod tests {
     #[test]
     fn valid_multiple_batches() {
         let plan = BatchPlanOutput {
-            batches: vec![
-                batch(&["a.rs"], "fix bug"),
-                batch(&["b.rs"], "add feature"),
-            ],
+            batches: vec![batch(&["a.rs"], "fix bug"), batch(&["b.rs"], "add feature")],
         };
         assert!(validate_batch_plan(&plan, &paths(&["a.rs", "b.rs"])).is_ok());
     }
@@ -143,10 +140,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_file_across_batches() {
         let plan = BatchPlanOutput {
-            batches: vec![
-                batch(&["a.rs"], "batch 1"),
-                batch(&["a.rs"], "batch 2"),
-            ],
+            batches: vec![batch(&["a.rs"], "batch 1"), batch(&["a.rs"], "batch 2")],
         };
         let result = validate_batch_plan(&plan, &paths(&["a.rs"]));
         assert!(result.is_err());
