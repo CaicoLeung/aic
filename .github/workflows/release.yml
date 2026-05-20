@@ -229,6 +229,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
       - name: Install cached dist
         uses: actions/download-artifact@v7
         with:
