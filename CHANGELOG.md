@@ -2,12 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.3] - 2026-05-20
+## [0.1.4] - 2026-05-20
 
 ### Features
 
 - Add batch plan validation and improve error handling
 - Add automatic rustfmt formatting before commit
+- Enable compression for self_update updates
+- Add unix-archive setting
+
+### Bug Fixes
+
+- Specify tag for git-cliff changelog generation
 
 ### Refactoring
 
@@ -20,6 +26,7 @@ All notable changes to this project will be documented in this file.
 ### Continuous Integration
 
 - Remove redundant --tag flag from git-cliff
+- Add full git fetch depth in release workflow
 
 ### Styling
 
@@ -30,6 +37,8 @@ All notable changes to this project will be documented in this file.
 
 - Update CHANGELOG.md for v0.1.2
 - Bump version to 0.1.3
+- Update CHANGELOG.md for v0.1.3
+- Bump version to 0.1.4
 
 ## [0.1.2] - 2026-05-20
 
@@ -72,8 +81,8 @@ All notable changes to this project will be documented in this file.
 
 ### Styling
 
+- Format clap command attribute
 
-- Format method chain across multiple lines
 ### Miscellaneous
 
 - Add CLAUDE.md to .gitignore
