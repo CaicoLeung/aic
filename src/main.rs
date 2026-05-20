@@ -101,7 +101,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 }
 
 fn banner() -> Banner {
-    Banner::new("AIC CLI")
+    Banner::new("AIC")
         .expect("failed to create banner")
         .style(Style::FireWarning)
         .fill(Fill::Keep)
