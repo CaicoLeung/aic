@@ -31,31 +31,40 @@ Examples:
 "#;
 
 const SYSTEM_PROMPT_BATCH_PLAN: &str = r#"
-You are an expert at analyzing unstaged git changes and grouping them into logical atomic commits.
+You are an expert at analyzing unstaged git changes and splitting them into logical atomic commits.
 
 You will receive a JSON object with an "unstaged_files" array. Each element has:
 - "path": file path relative to repo root
-- "status": one of "new", "modified", "deleted", "renamed"
-- "staged": always false (these are unstaged changes)
+- "diff": the actual diff content for that file
 
-Group these files into batches, where each batch represents one coherent commit.
+## Your primary job: SPLIT changes into separate commits.
 
-## Grouping rules (priority order)
+Every distinct concern deserves its own batch. Default to MORE batches, not fewer.
 
-1. **Couple tightly related files.** Files that only make sense together belong in one batch — e.g. a new module plus its module declaration, or a struct definition plus its impl block split across files.
-2. **Keep tests with their code.** A test file for feature X goes in the same batch as feature X, not in a separate "tests" batch.
-3. **Separate unrelated concerns.** A bug fix in module A and a new feature in module B are different batches, even if both are small.
-4. **Separate refactoring from feature work.** Pure cleanup (renames, dead code removal, import reordering) is its own batch unless it is a prerequisite for the feature.
-5. **Separate config/infra from app code.** Dependency bumps, CI changes, or build config updates form their own batch.
-6. **Group scattered docs.** Unrelated documentation or comment-only changes across many files may share one batch.
-7. **Order batches by dependency.** If batch A must land before batch B (e.g. a new type before code that uses it), put A first.
-8. **Lock files follow their dependency.** Cargo.lock, package-lock.json, etc. go with the batch that introduced the dependency change. If no clear owner, group with config.
+## Splitting rules (priority order)
 
-## Edge cases
+1. **Separate by intent.** A bug fix, a new feature, a refactor, and a config change are FOUR different batches — even if they are small.
+2. **Separate by module/subsystem.** Changes to auth/ and changes to db/ are different batches, even if both are "adding functions."
+3. **Separate refactoring from feature work.** Pure cleanup (renames, dead code removal, import reordering) is its own batch unless it is a prerequisite for the feature.
+4. **Separate config/infra from app code.** Dependency bumps, CI changes, or build config updates form their own batch.
+5. **Separate tests from unrelated code.** Tests for feature X go with feature X. But tests for module A do NOT go in the same batch as a feature in module B.
 
-- A single file that touches multiple concerns: pick the batch whose concern dominates the diff. When truly ambiguous, prefer fewer batches over forced splits.
-- Generated files (e.g. Cargo.lock, yarn.lock): always pair with the batch that triggered the regeneration.
-- If all files clearly form one logical change, return a single batch.
+## When to combine
+
+Only combine files into one batch when:
+- A new module plus its module declaration (e.g., mod.rs and the implementation file)
+- A struct definition and its impl block split across files
+- A lock file (Cargo.lock, package-lock.json) with the dependency change that triggered it
+
+## Anti-patterns — do NOT do this
+
+- Do NOT group all files into one batch unless they are genuinely inseparable.
+- Do NOT create a "miscellaneous" batch for unrelated changes.
+- Do NOT treat "small changes" as a reason to combine them.
+
+## Ordering
+
+Order batches by dependency: if batch A must land before batch B (e.g. a new type before code that uses it), put A first.
 
 ## Response format
 
@@ -74,7 +83,7 @@ Return strict JSON — no markdown fencing, no commentary:
   ]
 }
 
-The "reason" field is a short imperative phrase describing the commit (e.g. "Add user authentication", "Remove deprecated API endpoints"). It will be used as a basis for the commit message subject line.
+The "reason" field is a short imperative phrase describing the commit (e.g., "Add user authentication", "Remove deprecated API endpoints"). It describes the intent of this batch for your reference.
 "#;
 
 impl Default for PromptConfig {
