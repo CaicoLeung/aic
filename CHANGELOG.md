@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.5] - 2026-05-20
+
+### Miscellaneous
+
+- Skip changelog-update and version-bump commits
+
 ## [0.1.4] - 2026-05-20
 
 ### Features
@@ -35,10 +41,7 @@ All notable changes to this project will be documented in this file.
 
 ### Miscellaneous
 
-- Update CHANGELOG.md for v0.1.2
 - Bump version to 0.1.3
-- Update CHANGELOG.md for v0.1.3
-- Bump version to 0.1.4
 
 ## [0.1.2] - 2026-05-20
 
@@ -54,7 +57,6 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous
 
 - Shorten banner text
-- Bump version to 0.1.2
 
 ## [0.1.1] - 2026-05-18
 
@@ -87,7 +89,6 @@ All notable changes to this project will be documented in this file.
 
 - Add CLAUDE.md to .gitignore
 - Update Cargo.toml with dist optimizations and metadata
-- Bump version to 0.1.1
 
 ## [0.1.0] - 2026-05-17
 
