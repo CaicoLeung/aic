@@ -11,7 +11,9 @@ pub fn run_update() -> Result<()> {
         .build()?
         .update()?;
     match status {
-        self_update::Status::UpToDate(_) => println!("Already up to date (v{})", cargo_crate_version!()),
+        self_update::Status::UpToDate(_) => {
+            println!("Already up to date (v{})", cargo_crate_version!())
+        }
         self_update::Status::Updated(v) => println!("Updated to version {v}"),
     }
     Ok(())
