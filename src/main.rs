@@ -33,10 +33,31 @@ where
     result
 }
 
-async fn generate_and_commit(
-    paths: &[String],
-    _reason: Option<&str>,
-) -> anyhow::Result<()> {
+fn format_rust_files(paths: &[String]) {
+    let rust_files: Vec<&str> = paths
+        .iter()
+        .filter(|p| p.ends_with(".rs"))
+        .map(|s| s.as_str())
+        .collect();
+
+    if rust_files.is_empty() {
+        return;
+    }
+
+    match std::process::Command::new("rustfmt").args(&rust_files).status() {
+        Ok(s) if s.success() => {
+            eprintln!("🎨 Formatted {} file(s)", rust_files.len());
+        }
+        Ok(s) => {
+            eprintln!("⚠️  rustfmt exited with {}", s);
+        }
+        Err(e) => {
+            eprintln!("⚠️  Failed to run rustfmt: {e}");
+        }
+    }
+}
+
+async fn generate_and_commit(paths: &[String], _reason: Option<&str>) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
         .map(|p| {
@@ -83,8 +104,10 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         )
         .await?;
 
-        let original_paths: Vec<String> =
-            unstaged_files.iter().map(|f| f.path.clone()).collect();
+        let all_unstaged: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
+        format_rust_files(&all_unstaged);
+
+        let original_paths: Vec<String> = all_unstaged;
         generator::validate_batch_plan(&result, &original_paths)
             .context("batch plan validation failed")?;
 
@@ -100,9 +123,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         for (i, batch) in result.batches.iter().enumerate() {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;
-            if let Err(e) =
-                generate_and_commit(&batch.files, batch.reason.as_deref()).await
-            {
+            if let Err(e) = generate_and_commit(&batch.files, batch.reason.as_deref()).await {
                 anyhow::bail!(
                     "failed after committing {} of {} batches. \
                      Batch {} files are staged but uncommitted: {e}",
@@ -114,6 +135,9 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
+        format_rust_files(&paths);
+        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        Git::add(&refs)?;
         generate_and_commit(&paths, None).await?;
     }
 
