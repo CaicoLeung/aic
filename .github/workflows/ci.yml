@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly Monday 03:00 UTC — catches new RUSTSEC advisories against the
+    # frozen Cargo.lock even when no PR is open. A failed scheduled run emails
+    # the repo owner.
+    - cron: '0 3 * * 1'
 
 jobs:
   check:
@@ -17,3 +22,16 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+      - run: bash scripts/test_release.sh
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --version
+      - run: cargo deny check

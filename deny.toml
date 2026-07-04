@@ -1,0 +1,60 @@
+# cargo-deny configuration.
+# Fail on: fixable RUSTSEC advisories, yanked crates, unapproved licenses, unknown sources.
+# Warn on: unmaintained crates, duplicate dependency versions.
+# Run locally: cargo deny check. Enforced in .github/workflows/ci.yml (PR gate + weekly cron).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# yanked crate versions are always a release blocker
+yanked = "deny"
+# unmaintained crates warn but do not fail; scope to workspace members so
+# transitive unmaintained deps don't gate the build
+unmaintained = "workspace"
+ignore = [
+    # quick-xml 0.37.x is pinned by `self_update = "0.42"` (it requires
+    # quick-xml "0.37"); the fixes live in >=0.41 and cannot be reached without
+    # a self_update release that bumps the requirement. self_update feeds
+    # quick-xml only GitHub release-API responses, so exploitation requires a
+    # compromised github.com serving malicious data to this client — low
+    # practical risk. Revisit when self_update publishes a quick-xml >=0.41 build.
+    { id = "RUSTSEC-2026-0194", reason = "upstream-pinned by self_update 0.42 (quick-xml 0.37); only trusted GitHub API input reaches the parser" },
+    { id = "RUSTSEC-2026-0195", reason = "upstream-pinned by self_update 0.42 (quick-xml 0.37); only trusted GitHub API input reaches the parser" },
+]
+
+[licenses]
+version = 2
+# Permissive licenses only — deps are baked into shipped binaries.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+    # Mozilla CA root bundle distributed by webpki-roots / webpki-root-certs
+    # (pulled in transitively by reqwest/rustls). Permissive data license.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# duplicate versions are a supply-chain/size concern, usually not actionable
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# only crates.io — no git or unknown-registry deps
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
