@@ -44,8 +44,12 @@ fn format_rust_files(paths: &[String]) {
         return;
     }
 
-    match std::process::Command::new("rustfmt")
-        .args(&rust_files)
+    // Use `cargo fmt --all` rather than bare `rustfmt`: bare rustfmt parses as
+    // edition 2015 (no let-chains; different import ordering / construct
+    // formatting), which diverges from CI's `cargo fmt --all -- --check` and
+    // made commits fail CI. cargo fmt reads the edition from the manifest.
+    match std::process::Command::new("cargo")
+        .args(["fmt", "--all"])
         .status()
     {
         Ok(s) if s.success() => {
