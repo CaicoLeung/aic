@@ -1,0 +1,48 @@
+# Regenerate CHANGELOG.md and rewrite the GitHub Release body with git-cliff
+# notes, decoupled from dist's release.yml so dist can regenerate freely.
+#
+# dist's `host` job creates the release with an auto-generated body; this
+# workflow fires on the `release published` event and overwrites that body
+# with the git-cliff output, then commits CHANGELOG.md back to the default
+# branch.
+
+name: Changelog
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  update-changelog:
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+      - name: Generate release notes
+        run: git-cliff --tag "$TAG" -o "$RUNNER_TEMP/cliff-notes.md"
+      - name: Rewrite release body with git-cliff notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$TAG" --notes-file "$RUNNER_TEMP/cliff-notes.md"
+      - name: Commit CHANGELOG.md to ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
+          git-cliff --tag "$TAG" -o CHANGELOG.md
+          git add CHANGELOG.md
+          git diff --cached --quiet || git commit -m "chore: update CHANGELOG.md for $TAG"
+          git push origin "$DEFAULT_BRANCH"
