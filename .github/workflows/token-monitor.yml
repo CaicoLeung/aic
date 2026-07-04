@@ -1,0 +1,39 @@
+# Weekly liveness probe for HOMEBREW_TAP_TOKEN.
+#
+# The token's exact expiry isn't exposed via the API, so we probe write-repo
+# access (expired/revoked/no-access tokens fail here). On failure we open an
+# issue so the next release doesn't discover a dead token after ~11 min of
+# builds. Pair with the fail-fast preflight in release.yml.
+
+name: Token monitor
+
+on:
+  schedule:
+    # Weekly Monday 03:00 UTC — same cadence as the cargo-deny cron in ci.yml.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  probe-homebrew-tap-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe HOMEBREW_TAP_TOKEN against the tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api repos/CaicoLeung/homebrew-aic >/dev/null
+          echo "HOMEBREW_TAP_TOKEN OK"
+      - name: Open issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "🔋 HOMEBREW_TAP_TOKEN needs rotation" \
+            --body "The weekly token probe failed: \`HOMEBREW_TAP_TOKEN\` is expired, revoked, or lacks access to \`CaicoLeung/homebrew-aic\`. Rotate it before the next release, or the release will fail at the \`publish-homebrew-formula\` step after ~11 min of builds. (Delete this issue's duplicate if one already exists.)" \
+            --label "ci" || true
