@@ -94,8 +94,8 @@ impl Git {
 
         for entry in statuses.iter() {
             let path = match entry.path() {
-                Some(p) => p.to_string(),
-                None => continue,
+                Ok(p) => p.to_string(),
+                Err(_) => continue,
             };
             let flags = entry.status();
 
@@ -192,10 +192,9 @@ impl Git {
         let sig = repo.signature().context("failed to get git signature")?;
 
         let parents: Vec<_> = match repo.head() {
-            Ok(r) => vec![
-                r.peel_to_commit()
-                    .context("failed to peel HEAD to commit")?,
-            ],
+            Ok(r) => vec![r
+                .peel_to_commit()
+                .context("failed to peel HEAD to commit")?],
             Err(_) => vec![],
         };
         let parent_refs: Vec<_> = parents.iter().collect();
@@ -268,7 +267,11 @@ pub fn format_diff_scoped(diff: &str, file_path: &str) -> String {
 }
 
 fn new_end(start: u32, count: u32) -> u32 {
-    if count == 0 { start } else { start + count - 1 }
+    if count == 0 {
+        start
+    } else {
+        start + count - 1
+    }
 }
 
 fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {
@@ -323,6 +326,7 @@ fn wt_status_kind(flags: Status) -> StatusKind {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     struct CwdGuard {
         original: PathBuf,
@@ -360,8 +364,14 @@ mod tests {
             .unwrap();
     }
 
+    /// Serializes tests that mutate the process working directory via `CwdGuard`.
+    /// Parallel CwdGuard tests race on the global CWD and intermittently resolve
+    /// the wrong repository, so any test that chdir()s must hold this lock.
+    static GIT_CWD_MUTEX: Mutex<()> = Mutex::new(());
+
     #[test]
     fn diff_workdir_returns_untracked_content() {
+        let _lock = GIT_CWD_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -377,6 +387,7 @@ mod tests {
 
     #[test]
     fn diff_workdir_returns_modified_content() {
+        let _lock = GIT_CWD_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
