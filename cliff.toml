@@ -36,6 +36,7 @@ commit_parsers = [
     { message = "^chore\\(deps\\)", skip = true },
     { message = "^chore: update CHANGELOG", skip = true },
     { message = "^chore: bump version", skip = true },
+    { message = "^chore\\(release\\)", skip = true },
     { message = "^style", group = "<!-- 8 -->Styling" },
     { message = "^chore", group = "<!-- 9 -->Miscellaneous" },
 ]
