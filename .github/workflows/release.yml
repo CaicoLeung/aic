@@ -56,6 +56,19 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      # Fail fast: a dead/expired HOMEBREW_TAP_TOKEN otherwise only surfaces
+      # after ~11 min of building all targets, at the publish step. This probe
+      # rejects expired/revoked/no-access tokens in seconds. Runs on tag pushes
+      # only — skipped on PR plan runs (where the secret is unavailable anyway).
+      - name: Preflight — verify HOMEBREW_TAP_TOKEN
+        if: ${{ !github.event.pull_request }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api repos/CaicoLeung/homebrew-aic >/dev/null \
+            || { echo "::error::HOMEBREW_TAP_TOKEN is invalid, expired, or lacks access to CaicoLeung/homebrew-aic. Rotate it before retrying the release."; exit 1; }
+          echo "HOMEBREW_TAP_TOKEN OK"
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -144,6 +157,25 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      # Functional smoke test: catches binaries that compile but panic on
+      # startup (bad feature gate, broken clap derive, wrong arch packaged).
+      # aarch64-unknown-linux-gnu is cross-compiled on an x64 runner and can't
+      # execute natively — skip it (the --print=linkage check still covers it).
+      - name: Smoke-test built binary (native targets only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets="${{ join(matrix.targets, ',') }}"
+          case "$targets" in
+            *aarch64-unknown-linux-gnu*) echo "cross target ($targets) — skipping smoke"; exit 0 ;;
+          esac
+          bin="$(find target -type f \( -name aic -o -name aic.exe \) -path '*release*' | head -1)"
+          test -n "$bin" || { echo "::error::no built aic binary found under target/"; exit 1; }
+          echo "smoke-testing: $bin"
+          out="$("$bin" --version)"; echo "$out"
+          echo "$out" | grep -qi aic || { echo "::error::--version output did not contain 'aic'"; exit 1; }
+          "$bin" --help >/dev/null || { echo "::error::aic --help exited non-zero"; exit 1; }
+          echo "smoke OK"
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -192,6 +224,24 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      - name: Install zipsign
+        shell: bash
+        run: |
+          cargo install zipsign --locked --root ~/.cargo
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Sign release archives
+        env:
+          ZIPSIGN_PRIVATE_KEY: ${{ secrets.ZIPSIGN_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$ZIPSIGN_PRIVATE_KEY" | base64 -d > /tmp/zipsign.key
+          shopt -s nullglob
+          for f in target/distrib/*.tar.gz; do zipsign sign tar "$f" /tmp/zipsign.key; done
+          for f in target/distrib/*.zip; do zipsign sign zip "$f" /tmp/zipsign.key; done
+          rm -f /tmp/zipsign.key
+          echo "signed archives:"
+          ls -1 target/distrib/*.tar.gz target/distrib/*.zip 2>/dev/null || true
       - id: cargo-dist
         shell: bash
         run: |
