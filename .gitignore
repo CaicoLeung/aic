@@ -2,5 +2,7 @@
 /target
 .omc
 CLAUDE.md
-docs/agents
-docs/adr
+docs/drawio
+
+# zipsign private key — NEVER commit. Only keys/zipsign.pub is tracked.
+keys/*.key
