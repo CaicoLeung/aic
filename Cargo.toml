@@ -2,7 +2,7 @@
 name = "aic"
 version = "0.1.5"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "AI-powered git commit message generator"
 repository = "https://github.com/CaicoLeung/aic"
 homepage = "https://github.com/CaicoLeung/aic"
@@ -21,7 +21,7 @@ anyhow = "1.0.102"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
-git2 = "0.20.4"
+git2 = "0.21"
 indicatif = "0.17"
 owo-colors = "4"
 rig-core = "0.36"
@@ -30,7 +30,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "0.8"
-self_update = { version = "0.42", features = ["archive-tar", "compression-flate2"] }
+self_update = { version = "0.42", features = ["archive-tar", "archive-zip", "compression-flate2", "signatures"] }
 tui-banner = "0.2.3"
 
 [dev-dependencies]
