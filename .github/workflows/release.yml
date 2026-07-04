@@ -229,7 +229,6 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-          fetch-depth: 0
       - name: Install cached dist
         uses: actions/download-artifact@v7
         with:
@@ -246,7 +245,7 @@ jobs:
       - id: host
         shell: bash
         run: |
-          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --output-format=json > dist-manifest.json
+          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
           echo "artifacts uploaded and released successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -267,42 +266,73 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
-      # -- git-cliff: generate changelog for this release (custom step) --
-      - name: Install git-cliff
-        uses: taiki-e/install-action@v2
-        with:
-          tool: git-cliff
-      - name: Generate changelog
-        id: changelog
-        run: |
-          git-cliff --tag "${{ needs.plan.outputs.tag }}" -o $RUNNER_TEMP/cliff-notes.md
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
+          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/cliff-notes.md" artifacts/*
-      - name: Update CHANGELOG.md
+          # Write and read notes from a file to avoid quoting breaking things
+          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+
+          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+
+  publish-homebrew-formula:
+    needs:
+      - plan
+      - host
+    runs-on: "ubuntu-22.04"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLAN: ${{ needs.plan.outputs.val }}
+      GITHUB_USER: "axo bot"
+      GITHUB_EMAIL: "admin+bot@axo.dev"
+    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: true
+          repository: "CaicoLeung/homebrew-aic"
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      # So we have access to the formula
+      - name: Fetch homebrew formulae
+        uses: actions/download-artifact@v7
+        with:
+          pattern: artifacts-*
+          path: Formula/
+          merge-multiple: true
+      # This is extra complex because you can make your Formula name not match your app name
+      # so we need to find releases with a *.rb file, and publish with that filename.
+      - name: Commit formula files
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git fetch origin ${{ github.event.repository.default_branch }}
-          git checkout -B ${{ github.event.repository.default_branch }} origin/${{ github.event.repository.default_branch }}
-          git-cliff --tag "${{ needs.plan.outputs.tag }}" -o CHANGELOG.md
-          git add CHANGELOG.md
-          git diff --cached --quiet || git commit -m "chore: update CHANGELOG.md for ${{ needs.plan.outputs.tag }}"
-          git push origin ${{ github.event.repository.default_branch }}
+          git config --global user.name "${GITHUB_USER}"
+          git config --global user.email "${GITHUB_EMAIL}"
+
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
+            filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
+            name=$(echo "$filename" | sed "s/\.rb$//")
+            version=$(echo "$release" | jq .app_version --raw-output)
+
+            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+            brew update
+            # We avoid reformatting user-provided data such as the app description and homepage.
+            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+
+            git add "Formula/${filename}"
+            git commit -m "${name} ${version}"
+          done
+          git push
 
   announce:
     needs:
       - plan
       - host
+      - publish-homebrew-formula
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

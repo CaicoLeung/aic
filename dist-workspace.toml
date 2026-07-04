@@ -8,7 +8,11 @@ cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell"]
+installers = ["shell", "powershell", "homebrew"]
+# Homebrew tap (owner/repo) that the publish-homebrew job pushes the formula to
+tap = "CaicoLeung/homebrew-aic"
+# Publish jobs to run at announce time (homebrew pushes the formula to the tap)
+publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Checksums to generate for each App
@@ -21,6 +25,4 @@ pr-run-mode = "plan"
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
-# Allow custom modifications to CI workflows (git-cliff integration)
-allow-dirty = ["ci"]
 unix-archive = ".tar.gz"
