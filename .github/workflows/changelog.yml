@@ -38,11 +38,29 @@ jobs:
         run: gh release edit "$TAG" --notes-file "$RUNNER_TEMP/cliff-notes.md"
       - name: Commit CHANGELOG.md to ${{ github.event.repository.default_branch }}
         run: |
+          set -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin "$DEFAULT_BRANCH"
-          git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
-          git-cliff --tag "$TAG" -o CHANGELOG.md
-          git add CHANGELOG.md
-          git diff --cached --quiet || git commit -m "chore: update CHANGELOG.md for $TAG"
-          git push origin "$DEFAULT_BRANCH"
+          # git-cliff regenerates CHANGELOG.md deterministically from the full
+          # tag history, so each retry can cleanly reset to the latest tip and
+          # reapply — no merge/conflict surface. Retry handles the race where a
+          # concurrent commit lands on the default branch between checkout and push.
+          for attempt in 1 2 3; do
+            git fetch origin "$DEFAULT_BRANCH"
+            git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
+            git-cliff --tag "$TAG" -o CHANGELOG.md
+            git add CHANGELOG.md
+            if git diff --cached --quiet; then
+              echo "nothing to commit; CHANGELOG already up to date"
+              exit 0
+            fi
+            git commit -m "chore: update CHANGELOG.md for $TAG"
+            if git push origin "$DEFAULT_BRANCH"; then
+              echo "CHANGELOG pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "push rejected (race with another commit), retrying in 5s… (attempt $attempt/3)"
+            sleep 5
+          done
+          echo "::error::CHANGELOG push rejected after 3 attempts — re-run this workflow or update CHANGELOG manually."
+          exit 1
