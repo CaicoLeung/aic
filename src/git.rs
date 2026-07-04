@@ -192,9 +192,10 @@ impl Git {
         let sig = repo.signature().context("failed to get git signature")?;
 
         let parents: Vec<_> = match repo.head() {
-            Ok(r) => vec![r
-                .peel_to_commit()
-                .context("failed to peel HEAD to commit")?],
+            Ok(r) => vec![
+                r.peel_to_commit()
+                    .context("failed to peel HEAD to commit")?,
+            ],
             Err(_) => vec![],
         };
         let parent_refs: Vec<_> = parents.iter().collect();
@@ -267,11 +268,7 @@ pub fn format_diff_scoped(diff: &str, file_path: &str) -> String {
 }
 
 fn new_end(start: u32, count: u32) -> u32 {
-    if count == 0 {
-        start
-    } else {
-        start + count - 1
-    }
+    if count == 0 { start } else { start + count - 1 }
 }
 
 fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {

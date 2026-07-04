@@ -76,7 +76,7 @@ pub fn run_update() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exe_is_in_cellar, ZIPSIGN_PUBLIC_KEY};
+    use super::{ZIPSIGN_PUBLIC_KEY, exe_is_in_cellar};
     use std::path::Path;
 
     #[test]
