@@ -31,6 +31,17 @@ curl --proto '=https' --tlsv1.2 -sSfL https://github.com/CaicoLeung/aic/releases
 irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex
 ```
 
+### Homebrew
+
+**macOS / Linux:**
+
+```sh
+brew tap CaicoLeung/aic
+brew install aic
+```
+
+Update with `brew upgrade aic`. Homebrew installs are detected automatically, so `aic update` will redirect you to brew without modifying anything.
+
 ### Build from source
 
 ```sh
