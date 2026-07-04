@@ -39,15 +39,13 @@ fn is_homebrew_install() -> bool {
         return true;
     }
     // Fallback for layouts where the Cellar component isn't visible in the
-    // resolved path: honour an explicit HOMEBREW_PREFIX.
-    if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
-        if let Ok(prefix) = std::path::PathBuf::from(prefix).canonicalize() {
-            if exe.starts_with(prefix) {
-                return true;
-            }
-        }
-    }
-    false
+    // resolved path: honour an explicit HOMEBREW_PREFIX. Iterator chain keeps
+    // it rustfmt-clean without edition-2024 let-chains (aic formats files
+    // without --edition) and avoids clippy::collapsible_if on nested if-lets.
+    std::env::var("HOMEBREW_PREFIX")
+        .ok()
+        .and_then(|p| std::path::PathBuf::from(p).canonicalize().ok())
+        .is_some_and(|prefix| exe.starts_with(&prefix))
 }
 
 pub fn run_update() -> Result<()> {
