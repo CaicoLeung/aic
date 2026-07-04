@@ -2,11 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.5] - 2026-05-20
+## [0.1.6] - 2026-07-04
+
+### Features
+
+- Add Homebrew installer and self-update guard
+- Add workflow to update changelog on release
+- Verify releases with embedded zipsign public key
+- Add cargo-deny supply chain checks and weekly advisory scan
+- Add preflight checks, smoke tests, and archive signing
+- Add weekly token probe workflow
+- Add version comparison and Cargo.toml version update functions
+- Add prepare-release.sh for release preparation
+
+### Bug Fixes
+
+- Handle path() Result and serialize CWD tests
+
+### Documentation
+
+- Add ADRs for self-update guard and signed updates, plus agent docs
+- Add release procedure documentation
+
+### Continuous Integration
+
+- Add retry logic for CHANGELOG commit
+- Remove announce job
 
 ### Miscellaneous
 
 - Skip changelog-update and version-bump commits
+- Add docs ignore patterns and homepage
+- Update dependencies and bump rust-version
+- Skip release commits in changelog
 
 ## [0.1.4] - 2026-05-20
 
@@ -38,10 +66,6 @@ All notable changes to this project will be documented in this file.
 
 - Condense batch vector literals in tests
 - Format method chain across multiple lines
-
-### Miscellaneous
-
-- Bump version to 0.1.3
 
 ## [0.1.2] - 2026-05-20
 
