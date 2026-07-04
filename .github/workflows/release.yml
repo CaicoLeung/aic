@@ -172,7 +172,10 @@ jobs:
           case "$targets" in
             *aarch64-unknown-linux-gnu*) echo "cross target ($targets) — skipping smoke"; exit 0 ;;
           esac
-          bin="$(find target -type f \( -name aic -o -name aic.exe \) -path '*release*' | head -1)"
+          # cargo-dist builds with [profile.dist] (Cargo.toml), so the binary
+          # lands at target/<triple>/dist/aic — not target/<triple>/release/.
+          # Match any non-debug binary, excluding the distrib/ packaging dir.
+          bin="$(find target -type f \( -name aic -o -name aic.exe \) ! -path '*debug*' ! -path '*distrib*' | head -1)"
           test -n "$bin" || { echo "::error::no built aic binary found under target/"; exit 1; }
           echo "smoke-testing: $bin"
           out="$("$bin" --version)"; echo "$out"
