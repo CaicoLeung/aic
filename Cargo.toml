@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.87"
 description = "AI-powered git commit message generator"
 repository = "https://github.com/CaicoLeung/aic"
+homepage = "https://github.com/CaicoLeung/aic"
 keywords = ["git", "ai", "cli", "commit", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 license = "MIT"

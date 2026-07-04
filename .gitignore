@@ -2,3 +2,5 @@
 /target
 .omc
 CLAUDE.md
+docs/agents
+docs/adr
