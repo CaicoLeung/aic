@@ -2,6 +2,8 @@
 
 AI-powered git commit message generator. Analyzes your staged or unstaged changes and writes conventional commit messages for you.
 
+🌐 **Website:** <https://caicoleung.github.io/aic-web/>
+
 [![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml)
 [![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
