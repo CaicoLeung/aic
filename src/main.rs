@@ -13,7 +13,6 @@ use clap::Parser;
 use indicatif::ProgressBar;
 use owo_colors::OwoColorize;
 use std::time::Duration;
-use tui_banner::{Align, Banner, Fill, Style};
 
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
 where
@@ -151,19 +150,8 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn banner() -> Banner {
-    Banner::new("AIC")
-        .expect("failed to create banner")
-        .style(Style::FireWarning)
-        .fill(Fill::Keep)
-        .align(Align::Center)
-        .padding(1)
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let banner = banner();
-    banner.animate_sweep(5, None)?;
     let cli = cli::Cli::parse();
 
     match cli.command {
