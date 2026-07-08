@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.7] - 2026-07-08
+
+### Documentation
+
+- Add Homebrew installation instructions
+- Add website link
+- Add CONTEXT.md with project terminology and concepts
+
+### Styling
+
+- Apply cargo fmt to unblock 0.1.6 release
+
+### Miscellaneous
+
+- Remove banner display
+
 ## [0.1.6] - 2026-07-04
 
 ### Features
@@ -18,6 +34,13 @@ All notable changes to this project will be documented in this file.
 ### Bug Fixes
 
 - Handle path() Result and serialize CWD tests
+- Allow dist plan to run with dirty working directory
+- Use cargo fmt --all instead of bare rustfmt
+- Update binary search path for dist profile builds
+
+### Refactoring
+
+- Simplify HOMEBREW_PREFIX check with iterator chain
 
 ### Documentation
 
@@ -28,6 +51,7 @@ All notable changes to this project will be documented in this file.
 
 - Add retry logic for CHANGELOG commit
 - Remove announce job
+- Add --allow-dirty flag to dist commands
 
 ### Miscellaneous
 
@@ -35,6 +59,9 @@ All notable changes to this project will be documented in this file.
 - Add docs ignore patterns and homepage
 - Update dependencies and bump rust-version
 - Skip release commits in changelog
+- No staged changes
+- Skip empty diff
+- No changes to commit
 
 ## [0.1.4] - 2026-05-20
 
