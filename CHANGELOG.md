@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-07-09
+
+### Features
+
+- Expand to 12 providers, refresh default models, add base URL
+
 ## [0.1.7] - 2026-07-08
 
 ### Documentation
