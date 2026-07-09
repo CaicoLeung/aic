@@ -5,13 +5,14 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::llm::{DEFAULT_PROVIDER, Provider};
+use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub backend: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
+    pub base_url: Option<String>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -72,6 +73,8 @@ pub struct ResolvedConfig {
     pub api_key_source: Source,
     pub model: String,
     pub model_source: Source,
+    pub base_url: Option<String>,
+    pub base_url_source: Source,
 }
 
 impl ResolvedConfig {
@@ -80,6 +83,7 @@ impl ResolvedConfig {
             backend: None,
             api_key: None,
             model: None,
+            base_url: None,
         });
 
         let (backend, backend_source) =
@@ -92,6 +96,8 @@ impl ResolvedConfig {
         let (model, model_source) =
             resolve_field("LLM_MODEL", cfg.model.as_deref(), provider.default_model());
 
+        let (base_url, base_url_source) = resolve_base_url(cfg.base_url.as_deref(), &provider);
+
         ResolvedConfig {
             backend,
             backend_source,
@@ -99,7 +105,31 @@ impl ResolvedConfig {
             api_key_source,
             model,
             model_source,
+            base_url,
+            base_url_source,
         }
+    }
+
+    /// Validate provider-specific requirements (a model or base URL the provider
+    /// cannot default). Called when constructing an `LLM`, not when merely
+    /// displaying resolved config (`aic list`).
+    pub fn validate(&self) -> Result<()> {
+        let provider = Provider::from_name(&self.backend);
+        if provider.base_url_requirement() == BaseUrlRequirement::Required
+            && self.base_url.is_none()
+        {
+            anyhow::bail!(
+                "provider '{}' requires a base URL — set LLM_BASE_URL or `base_url` in config",
+                provider.name()
+            );
+        }
+        if self.model.trim().is_empty() {
+            anyhow::bail!(
+                "provider '{}' has no default model — set LLM_MODEL or `model` in config",
+                provider.name()
+            );
+        }
+        Ok(())
     }
 
     pub fn mask_api_key(&self) -> String {
@@ -139,76 +169,148 @@ fn resolve_api_key(config_value: Option<&str>, provider: &Provider) -> (String, 
     (String::new(), Source::Default)
 }
 
-// --- Interactive setup ---
+fn resolve_base_url(config_value: Option<&str>, provider: &Provider) -> (Option<String>, Source) {
+    if let Ok(v) = env::var("LLM_BASE_URL") {
+        return (Some(v), Source::Env);
+    }
+    if let Some(v) = config_value {
+        return (Some(v.to_string()), Source::Config);
+    }
+    match provider.base_url_requirement() {
+        BaseUrlRequirement::Optional(default) => (Some((*default).to_string()), Source::Default),
+        BaseUrlRequirement::None | BaseUrlRequirement::Required => (None, Source::Default),
+    }
+}
 
-const PROVIDERS: &[&str] = &[
-    "openai",
-    "anthropic",
-    "gemini",
-    "deepseek",
-    "groq",
-    "ollama",
-];
+// --- Interactive setup ---
 
 pub fn run_setup() -> Result<()> {
     println!("aic setup\n");
 
+    let providers = Provider::all();
     println!("Select provider:");
-    for (i, name) in PROVIDERS.iter().enumerate() {
-        println!("  {}. {}", i + 1, name);
+    for (i, provider) in providers.iter().enumerate() {
+        let suffix = match provider.default_model() {
+            "" => "(model required)".to_string(),
+            m => format!("({m})"),
+        };
+        println!("  {}. {} {}", i + 1, provider.display(), suffix);
     }
     print!("> ");
     io::stdout().flush()?;
 
     let choice = read_line()?;
     let index: usize = choice.trim().parse().with_context(|| "invalid number")?;
-    if index == 0 || index > PROVIDERS.len() {
-        anyhow::bail!("invalid choice: must be 1-{}", PROVIDERS.len());
+    if index == 0 || index > providers.len() {
+        anyhow::bail!("invalid choice: must be 1-{}", providers.len());
     }
-    let backend = PROVIDERS[index - 1];
-    let provider = Provider::from_name(backend);
+    let provider = providers[index - 1];
+    let backend = provider.name().to_string();
     println!();
 
-    let api_key = if provider.env_key().is_some() {
-        println!("API key:");
-        print!("> ");
-        io::stdout().flush()?;
-        let key = read_line()?;
-        let key = key.trim().to_string();
-        if key.is_empty() {
-            anyhow::bail!("API key cannot be empty for {backend}");
+    // API key — required for cloud providers, optional for OpenAI-compatible,
+    // unused for Ollama.
+    let api_key = match provider.env_key() {
+        Some(_) => {
+            println!("API key:");
+            print!("> ");
+            io::stdout().flush()?;
+            let key = read_line()?;
+            let key = key.trim().to_string();
+            if key.is_empty() {
+                anyhow::bail!("API key cannot be empty for {backend}");
+            }
+            println!();
+            Some(key)
         }
-        println!();
-        Some(key)
-    } else {
-        println!("Ollama does not require an API key.\n");
-        None
+        None if provider == Provider::OpenAiCompatible => {
+            println!("API key (optional — leave blank for keyless servers):");
+            print!("> ");
+            io::stdout().flush()?;
+            let key = read_line()?;
+            let key = key.trim().to_string();
+            println!();
+            if key.is_empty() { None } else { Some(key) }
+        }
+        None => {
+            println!("{} does not require an API key.\n", provider.display());
+            None
+        }
     };
 
+    // Base URL — required for OpenAI-compatible, optional with a default for
+    // Ollama, unused for cloud providers.
+    let base_url = match provider.base_url_requirement() {
+        BaseUrlRequirement::Required => {
+            println!("Base URL (required — e.g. http://localhost:1234/v1):");
+            print!("> ");
+            io::stdout().flush()?;
+            let url = read_line()?;
+            let url = url.trim().to_string();
+            if url.is_empty() {
+                anyhow::bail!("base URL cannot be empty for {backend}");
+            }
+            println!();
+            Some(url)
+        }
+        BaseUrlRequirement::Optional(default) => {
+            println!("Base URL [{default}]:");
+            print!("> ");
+            io::stdout().flush()?;
+            let url = read_line()?;
+            let trimmed = url.trim().to_string();
+            println!();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        BaseUrlRequirement::None => None,
+    };
+
+    // Model — required when the provider has no default (OpenRouter,
+    // OpenAI-compatible); otherwise the default is offered.
     let default_model = provider.default_model();
-    println!("Model [{default_model}]:");
-    print!("> ");
-    io::stdout().flush()?;
-    let model_input = read_line()?;
-    let model = {
-        let trimmed = model_input.trim();
+    let model = if default_model.is_empty() {
+        println!("Model (required):");
+        print!("> ");
+        io::stdout().flush()?;
+        let m = read_line()?;
+        let m = m.trim().to_string();
+        if m.is_empty() {
+            anyhow::bail!("model cannot be empty for {backend}");
+        }
+        println!();
+        Some(m)
+    } else {
+        println!("Model [{default_model}]:");
+        print!("> ");
+        io::stdout().flush()?;
+        let m = read_line()?;
+        let trimmed = m.trim().to_string();
+        println!();
         if trimmed.is_empty() {
             None
         } else {
-            Some(trimmed.to_string())
+            Some(trimmed)
         }
     };
 
     let config = Config {
-        backend: Some(backend.to_string()),
+        backend: Some(backend.clone()),
         api_key,
         model,
+        base_url,
     };
     config.save()?;
 
     let path = config_path().context("could not determine config path")?;
     println!("Saved to {}\n", path.display());
     println!("  provider: {backend}");
+    if let Some(b) = &config.base_url {
+        println!("  base url: {b}");
+    }
     println!(
         "  model:    {}",
         config.model.as_deref().unwrap_or(default_model)
@@ -233,6 +335,11 @@ pub fn run_list() -> Result<()> {
         "API key:  {} (source: {})",
         resolved.mask_api_key(),
         resolved.api_key_source
+    );
+    println!(
+        "Base URL: {} (source: {})",
+        resolved.base_url.as_deref().unwrap_or("(none)"),
+        resolved.base_url_source
     );
 
     Ok(())

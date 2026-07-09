@@ -11,7 +11,7 @@ AI-powered git commit message generator. Analyzes your staged or unstaged change
 
 ## Features
 
-- **Multi-provider** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, and Ollama
+- **Multi-provider** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, xAI, Mistral, OpenRouter, Perplexity, Together, Ollama, and any OpenAI-compatible server
 - **Batch commits** — no staged files? aic splits your unstaged changes into logical atomic commits
 - **Interactive setup** — `aic setup` walks you through provider, API key, and model selection
 - **Conventional Commits** — messages follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) spec
@@ -89,13 +89,14 @@ Config file: `~/.config/aic/config.toml`
 | `LLM_BACKEND`       | Provider name                                  | `openai`         |
 | `LLM_API_KEY`       | API key (falls back to provider-specific vars) | —                |
 | `LLM_MODEL`         | Model ID override                              | Provider default |
+| `LLM_BASE_URL`      | Endpoint base URL (Ollama / OpenAI-compatible) | Provider default |
 | `AIC_SYSTEM_PROMPT` | Override the commit message system prompt      | Built-in prompt  |
 
 Provider-specific API key env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) are also recognized.
 
 ### Resolution order
 
-For each of `backend`, `api_key`, `model`:
+For each of `backend`, `api_key`, `model`, and `base_url`:
 
 1. Generic env var (`LLM_BACKEND`, `LLM_API_KEY`, `LLM_MODEL`)
 2. Provider-specific env var (API key only)
@@ -104,14 +105,22 @@ For each of `backend`, `api_key`, `model`:
 
 ### Supported providers
 
-| Provider  | Default model              | Env key                            |
-| --------- | -------------------------- | ---------------------------------- |
-| OpenAI    | `gpt-4o-mini`              | `OPENAI_API_KEY`                   |
-| Anthropic | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY`                |
-| Gemini    | `gemini-2.0-flash`         | `GEMINI_API_KEY`                   |
-| DeepSeek  | `deepseek-chat`            | `DEEPSEEK_API_KEY`                 |
-| Groq      | `llama-3.3-70b-versatile`  | `GROQ_API_KEY`                     |
-| Ollama    | `llama3.2`                 | _(localhost:11434, no key needed)_ |
+| Provider          | Default model                              | Env key                                                       |
+| ----------------- | ------------------------------------------ | ------------------------------------------------------------- |
+| OpenAI            | `gpt-5-mini`                               | `OPENAI_API_KEY`                                              |
+| Anthropic         | `claude-haiku-4-5`                         | `ANTHROPIC_API_KEY`                                           |
+| Gemini            | `gemini-2.5-flash`                         | `GEMINI_API_KEY`                                              |
+| DeepSeek          | `deepseek-chat`                            | `DEEPSEEK_API_KEY`                                            |
+| Groq              | `llama-3.3-70b-versatile`                  | `GROQ_API_KEY`                                                |
+| xAI               | `grok-4.3`                                 | `XAI_API_KEY`                                                 |
+| Mistral           | `mistral-small-latest`                     | `MISTRAL_API_KEY`                                             |
+| OpenRouter        | _(model required)_                         | `OPENROUTER_API_KEY`                                          |
+| Perplexity        | `sonar`                                    | `PERPLEXITY_API_KEY`                                          |
+| Together          | `meta-llama/Llama-3.3-70B-Instruct-Turbo`  | `TOGETHER_API_KEY`                                            |
+| Ollama            | `llama3.3`                                 | _(no key; override URL via `LLM_BASE_URL`)_                   |
+| OpenAI-compatible | _(model required)_                         | _(optional; set `LLM_BASE_URL` + `LLM_MODEL`)_                |
+
+OpenRouter and the OpenAI-compatible provider have no default model — set `LLM_MODEL` explicitly. The OpenAI-compatible provider also requires `LLM_BASE_URL` and routes through the OpenAI client against any server that speaks the OpenAI chat-completions API (LM Studio, vLLM, gateways).
 
 ## How It Works
 

@@ -63,12 +63,15 @@ pub fn validate_batch_plan(
 impl Generator {
     pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
         let p = PromptConfig::default().git_message;
-        LLM::from_env().agent(&p).schema::<CommitOutput>(diff).await
+        LLM::from_env()?
+            .agent(&p)
+            .schema::<CommitOutput>(diff)
+            .await
     }
 
     pub async fn split_patch(diff: &str) -> anyhow::Result<BatchPlanOutput> {
         let p = PromptConfig::default().batch_plan_prompt;
-        LLM::from_env()
+        LLM::from_env()?
             .agent(&p)
             .schema::<BatchPlanOutput>(diff)
             .await
