@@ -219,7 +219,7 @@ impl Provider {
             Self::OpenAI => "gpt-5-mini",
             Self::Anthropic => "claude-haiku-4-5",
             Self::Gemini => "gemini-2.5-flash",
-            Self::DeepSeek => "deepseek-chat",
+            Self::DeepSeek => "deepseek-v4-flash",
             Self::Groq => "llama-3.3-70b-versatile",
             Self::Ollama => "llama3.3",
             Self::Xai => "grok-4.3",
@@ -491,6 +491,7 @@ mod tests {
         assert_eq!(Provider::OpenAI.default_model(), "gpt-5-mini");
         assert_eq!(Provider::Anthropic.default_model(), "claude-haiku-4-5");
         assert_eq!(Provider::Gemini.default_model(), "gemini-2.5-flash");
+        assert_eq!(Provider::DeepSeek.default_model(), "deepseek-v4-flash");
         assert_eq!(Provider::Ollama.default_model(), "llama3.3");
         assert_eq!(Provider::Mistral.default_model(), "mistral-small-latest");
     }
