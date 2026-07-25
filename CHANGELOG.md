@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-07-25
+
+### Features
+
+- Update default model to deepseek-v4-flash
+
 ## [0.2.0] - 2026-07-09
 
 ### Features
