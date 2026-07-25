@@ -110,7 +110,7 @@ For each of `backend`, `api_key`, `model`, and `base_url`:
 | OpenAI            | `gpt-5-mini`                               | `OPENAI_API_KEY`                                              |
 | Anthropic         | `claude-haiku-4-5`                         | `ANTHROPIC_API_KEY`                                           |
 | Gemini            | `gemini-2.5-flash`                         | `GEMINI_API_KEY`                                              |
-| DeepSeek          | `deepseek-chat`                            | `DEEPSEEK_API_KEY`                                            |
+| DeepSeek          | `deepseek-v4-flash`                        | `DEEPSEEK_API_KEY`                                            |
 | Groq              | `llama-3.3-70b-versatile`                  | `GROQ_API_KEY`                                                |
 | xAI               | `grok-4.3`                                 | `XAI_API_KEY`                                                 |
 | Mistral           | `mistral-small-latest`                     | `MISTRAL_API_KEY`                                             |
