@@ -29,6 +29,7 @@ where
     pb.enable_steady_tick(Duration::from_millis(80));
 
     let result = fut.await;
+    pb.disable_steady_tick();
     pb.finish_and_clear();
     result
 }
