@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] - 2026-07-26
+
+### Refactoring
+
+- Replace panel UI with line-based output (#5)
+
 ## [0.2.2] - 2026-07-26
 
 ### Features
