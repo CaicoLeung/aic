@@ -207,7 +207,7 @@ impl Git {
         Ok(())
     }
 
-    pub fn commit(message: String, body: Option<String>) -> anyhow::Result<()> {
+    pub fn commit(message: String, body: Option<String>) -> anyhow::Result<String> {
         let repo = Self::repo()?;
         let mut index = repo.index().context("failed to get repository index")?;
         let tree_id = index.write_tree_to(&repo).context("failed to write tree")?;
@@ -227,11 +227,12 @@ impl Git {
             Some(b) => format!("{message}\n\n{b}"),
             None => message.to_string(),
         };
-
-        repo.commit(Some("HEAD"), &sig, &sig, &full_message, &tree, &parent_refs)
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, &full_message, &tree, &parent_refs)
             .context("failed to create commit")?;
 
-        Ok(())
+        // First 7 hex chars — the conventional short hash.
+        Ok(oid.to_string()[..7].to_string())
     }
 }
 

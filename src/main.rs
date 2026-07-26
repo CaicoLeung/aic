@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod display;
 pub mod generator;
 pub mod git;
 pub mod llm;
@@ -7,16 +8,16 @@ pub mod prompt;
 pub mod update;
 
 use crate::cli::Commands;
+use crate::display::{BatchSummary, Display};
 use crate::git::Git;
 use anyhow::Context;
 use clap::Parser;
 use indicatif::ProgressBar;
-use owo_colors::OwoColorize;
 use std::time::Duration;
 
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
 where
-    F: std::future::Future<Output = anyhow::Result<T>>,
+    F: Future<Output = anyhow::Result<T>>,
 {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
@@ -32,7 +33,7 @@ where
     result
 }
 
-fn format_rust_files(paths: &[String]) {
+fn format_rust_files(paths: &[String], display: &Display) {
     let rust_files: Vec<&str> = paths
         .iter()
         .filter(|p| p.ends_with(".rs"))
@@ -52,7 +53,7 @@ fn format_rust_files(paths: &[String]) {
         .status()
     {
         Ok(s) if s.success() => {
-            eprintln!("🎨 Formatted {} file(s)", rust_files.len());
+            display.formatted_notice(rust_files.len());
         }
         Ok(s) => {
             eprintln!("⚠️  rustfmt exited with {}", s);
@@ -63,7 +64,11 @@ fn format_rust_files(paths: &[String]) {
     }
 }
 
-async fn generate_and_commit(paths: &[String], _reason: Option<&str>) -> anyhow::Result<()> {
+async fn generate_and_commit(
+    paths: &[String],
+    _reason: Option<&str>,
+    display: &Display,
+) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
         .map(|p| {
@@ -78,18 +83,13 @@ async fn generate_and_commit(paths: &[String], _reason: Option<&str>) -> anyhow:
         generator::Generator::generate_commit_message(&diff.to_string()),
     )
     .await?;
-    eprintln!("✏️  {}", result.message.bold().green());
-    if let Some(body) = &result.body {
-        for line in body.lines() {
-            eprintln!("   {}", line.dimmed());
-        }
-    }
-    eprintln!("📁 {}", paths.join(", ").cyan());
-    Git::commit(result.message, result.body)?;
+    let hash = Git::commit(result.message.clone(), result.body.clone())?;
+    display.commit_panel(&hash, &result.message, result.body.as_deref(), paths);
     Ok(())
 }
 
 async fn run_commit_workflow() -> anyhow::Result<()> {
+    let display = Display::new();
     let status = Git::status()?;
     let staged_files: Vec<_> = status.iter().filter(|f| f.staged).collect();
 
@@ -111,25 +111,29 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         .await?;
 
         let all_unstaged: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
-        format_rust_files(&all_unstaged);
+        format_rust_files(&all_unstaged, &display);
 
         let original_paths: Vec<String> = all_unstaged;
         generator::validate_batch_plan(&result, &original_paths)
             .context("batch plan validation failed")?;
 
+        let batch_refs: Vec<BatchSummary<'_>> = result
+            .batches
+            .iter()
+            .map(|b| BatchSummary {
+                files: b.files.as_slice(),
+                reason: b.reason.as_deref(),
+            })
+            .collect();
+        display.batch_summary(&batch_refs);
+
         let count = result.batches.len();
-        if count == 1 {
-            eprintln!("🔀 Grouped into {} commit", "1".bold().yellow());
-        } else {
-            eprintln!(
-                "🔀 Split into {} commits",
-                count.to_string().bold().yellow()
-            );
-        }
         for (i, batch) in result.batches.iter().enumerate() {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;
-            if let Err(e) = generate_and_commit(&batch.files, batch.reason.as_deref()).await {
+            if let Err(e) =
+                generate_and_commit(&batch.files, batch.reason.as_deref(), &display).await
+            {
                 anyhow::bail!(
                     "failed after committing {} of {} batches. \
                      Batch {} files are staged but uncommitted: {e}",
@@ -141,10 +145,10 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        format_rust_files(&paths);
+        format_rust_files(&paths, &display);
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         Git::add(&refs)?;
-        generate_and_commit(&paths, None).await?;
+        generate_and_commit(&paths, None, &display).await?;
     }
 
     Ok(())
