@@ -66,7 +66,6 @@ fn format_rust_files(paths: &[String], display: &Display) {
 
 async fn generate_and_commit(
     paths: &[String],
-    _reason: Option<&str>,
     display: &Display,
     prefix: &str,
 ) -> anyhow::Result<()> {
@@ -134,9 +133,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Git::add(&paths)?;
 
             let prefix = format!("[{}/{count}]", i + 1);
-            if let Err(e) =
-                generate_and_commit(&batch.files, batch.reason.as_deref(), &display, &prefix).await
-            {
+            if let Err(e) = generate_and_commit(&batch.files, &display, &prefix).await {
                 anyhow::bail!(
                     "failed after committing {} of {} batches. \
                      Batch {} files are staged but uncommitted: {e}",
@@ -151,7 +148,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         format_rust_files(&paths, &display);
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         Git::add(&refs)?;
-        generate_and_commit(&paths, None, &display, "").await?;
+        generate_and_commit(&paths, &display, "").await?;
     }
 
     Ok(())

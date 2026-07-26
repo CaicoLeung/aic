@@ -124,11 +124,6 @@ pub struct BatchSummary<'a> {
 // Internal formatting helpers
 // ------------------------------------------------------------------
 
-/// The " (+N more)" suffix (leading space intentional) for truncated lists.
-fn more_suffix(more: usize) -> String {
-    format!(" (+{more} more)")
-}
-
 /// Compact one-file preview for batch-summary lines.
 fn format_files_preview(files: &[String]) -> String {
     if files.is_empty() {
@@ -137,7 +132,7 @@ fn format_files_preview(files: &[String]) -> String {
     if files.len() == 1 {
         return files[0].clone();
     }
-    format!("{}{}", files[0], more_suffix(files.len() - 1))
+    format!("{} (+{} more)", files[0], files.len() - 1)
 }
 
 #[cfg(test)]
