@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - 2026-07-26
+
+### Features
+
+- Add status field to unstaged file diffs and handle deletions in prompt
+- Delegate homebrew update to brew upgrade aic
+- Add panel-based terminal output with non-TTY support (#4)
+
+### Bug Fixes
+
+- Handle working-tree deletions in add method
+- Reject untracked absent paths in add
+
 ## [0.2.1] - 2026-07-25
 
 ### Features
