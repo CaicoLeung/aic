@@ -100,7 +100,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             .map(|f| {
                 let diff = Git::diff_workdir(Some(f.path.as_str()))?;
                 let scoped = git::format_diff_scoped(&diff, &f.path);
-                Ok(serde_json::json!({ "path": f.path, "diff": scoped }))
+                Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });

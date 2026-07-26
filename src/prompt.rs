@@ -35,7 +35,10 @@ You are an expert at analyzing unstaged git changes and splitting them into logi
 
 You will receive a JSON object with an "unstaged_files" array. Each element has:
 - "path": file path relative to repo root
+- "status": one of "Added", "Modified", "Deleted", "Renamed", "Untracked"
 - "diff": the actual diff content for that file
+
+A "Deleted" status means the file has been removed entirely — its diff shows only removed lines. Treat file removals as real commits (e.g. "remove unused module", "delete deprecated config"); never return an empty batch list because every change is a deletion.
 
 ## Your primary job: SPLIT changes into separate commits.
 
