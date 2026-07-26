@@ -5,8 +5,11 @@ const MAX_VISIBLE_FILES: usize = 3;
 /// Panel-based terminal output for the commit workflow.
 ///
 /// Every method writes to stderr. Panels use Unicode box-drawing when
-/// colors are enabled, and ASCII (`+`, `-`, `|`) otherwise. Emoji
-/// are only rendered in color mode; non-TTY output is plain text.
+/// colors are enabled, and ASCII (`+`, `-`, `|`) otherwise. Non-TTY
+/// output (pipes, `NO_COLOR`) is plain text with no ANSI escapes.
+///
+/// Write errors are intentionally ignored: this is fire-and-forget
+/// status output to stderr (e.g. a closed pipe), never load-bearing.
 pub struct Display {
     term: Term,
     colors: bool,
@@ -127,7 +130,7 @@ impl Display {
     }
 
     /// Summary panel shown when unstaged changes are split into batches.
-    pub fn batch_summary(&self, batches: &[(&[String], Option<&str>)]) {
+    pub fn batch_summary(&self, batches: &[BatchSummary<'_>]) {
         let count = batches.len();
         let header = match count {
             0 => return,
@@ -137,9 +140,9 @@ impl Display {
 
         let mut body: Vec<String> = Vec::new();
         body.push(String::new());
-        for (i, (files, reason)) in batches.iter().enumerate() {
-            let reason_part = reason.map(|r| format!("[{r}] ")).unwrap_or_default();
-            let file_part = format_files_preview(files);
+        for (i, b) in batches.iter().enumerate() {
+            let reason_part = b.reason.map(|r| format!("[{r}] ")).unwrap_or_default();
+            let file_part = format_files_preview(b.files);
             let line = format!("  {}. {}{}", i + 1, reason_part, file_part);
             body.push(line);
         }
@@ -197,6 +200,16 @@ impl Default for Display {
     }
 }
 
+/// A batch's files and optional reason, passed to [`Display::batch_summary`].
+///
+/// A small view type so callers needn't spell the tuple
+/// `(&[String], Option<&str>)`; `Display` stays decoupled from
+/// `generator::Batch`.
+pub struct BatchSummary<'a> {
+    pub files: &'a [String],
+    pub reason: Option<&'a str>,
+}
+
 // ------------------------------------------------------------------
 // Internal formatting helpers
 // ------------------------------------------------------------------
@@ -210,18 +223,27 @@ struct BoxChars {
     v: &'static str,
 }
 
+/// The " (+N more)" suffix (leading space intentional) for truncated lists.
+fn more_suffix(more: usize) -> String {
+    format!(" (+{more} more)")
+}
+
 /// Collapse a long file list: first N names, then "(+M more)".
 fn format_files_list(files: &[String], max: usize) -> String {
     let visible: Vec<&str> = files.iter().take(max).map(|s| s.as_str()).collect();
     let mut s = visible.join(", ");
     let rem = files.len().saturating_sub(max);
     if rem > 0 {
-        s.push_str(&format!(" (+{rem} more)"));
+        s.push_str(&more_suffix(rem));
     }
     s
 }
 
-/// Compact file preview for batch-summary lines.
+/// Compact one-file preview for batch-summary lines.
+///
+/// Intentionally shows a single file rather than `MAX_VISIBLE_FILES`:
+/// batch lines are inline numbered items, and the full 3-file list
+/// already appears in [`Display::commit_panel`].
 fn format_files_preview(files: &[String]) -> String {
     if files.is_empty() {
         return String::new();
@@ -229,7 +251,7 @@ fn format_files_preview(files: &[String]) -> String {
     if files.len() == 1 {
         return files[0].clone();
     }
-    format!("{} (+{} more)", files[0], files.len() - 1)
+    format!("{}{}", files[0], more_suffix(files.len() - 1))
 }
 
 #[cfg(test)]

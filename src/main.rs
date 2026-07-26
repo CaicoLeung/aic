@@ -8,7 +8,7 @@ pub mod prompt;
 pub mod update;
 
 use crate::cli::Commands;
-use crate::display::Display;
+use crate::display::{BatchSummary, Display};
 use crate::git::Git;
 use anyhow::Context;
 use clap::Parser;
@@ -117,10 +117,13 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         generator::validate_batch_plan(&result, &original_paths)
             .context("batch plan validation failed")?;
 
-        let batch_refs: Vec<(&[String], Option<&str>)> = result
+        let batch_refs: Vec<BatchSummary<'_>> = result
             .batches
             .iter()
-            .map(|b| (b.files.as_slice(), b.reason.as_deref()))
+            .map(|b| BatchSummary {
+                files: b.files.as_slice(),
+                reason: b.reason.as_deref(),
+            })
             .collect();
         display.batch_summary(&batch_refs);
 
