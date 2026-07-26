@@ -1,6 +1,6 @@
 # ADR 0001: Guard `aic update` against Homebrew installs
 
-- **Status:** Accepted
+- **Status:** Superseded by 0004 (2026-07-26)
 - **Date:** 2026-07-04
 
 ## Context

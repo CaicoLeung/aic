@@ -48,10 +48,23 @@ fn is_homebrew_install() -> bool {
         .is_some_and(|prefix| exe.starts_with(&prefix))
 }
 
+/// Build the `brew upgrade aic` command for Homebrew-managed installs.
+///
+/// Extracted as a helper so tests can assert the exact invocation contract
+/// without shelling out to a real brew.
+fn brew_upgrade_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("brew");
+    cmd.args(["upgrade", "aic"]);
+    cmd
+}
+
 pub fn run_update() -> Result<()> {
     if is_homebrew_install() {
-        println!(
-            "aic was installed via Homebrew. Update it with `brew upgrade aic` (or `brew upgrade CaicoLeung/aic/aic`) instead."
+        let status = brew_upgrade_command().status()?;
+        anyhow::ensure!(
+            status.success(),
+            "brew upgrade failed (exit {})",
+            status.code().map_or("signal".to_owned(), |c| c.to_string())
         );
         return Ok(());
     }
@@ -76,7 +89,7 @@ pub fn run_update() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ZIPSIGN_PUBLIC_KEY, exe_is_in_cellar};
+    use super::{ZIPSIGN_PUBLIC_KEY, brew_upgrade_command, exe_is_in_cellar};
     use std::path::Path;
 
     #[test]
@@ -119,5 +132,18 @@ mod tests {
             ZIPSIGN_PUBLIC_KEY.iter().any(|&b| b != 0),
             "embedded zipsign public key must not be all-zero"
         );
+    }
+
+    #[test]
+    fn brew_upgrade_command_invokes_correct_program() {
+        let cmd = brew_upgrade_command();
+        assert_eq!(cmd.get_program(), "brew");
+    }
+
+    #[test]
+    fn brew_upgrade_command_passes_correct_args() {
+        let cmd = brew_upgrade_command();
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(args, vec!["upgrade", "aic"]);
     }
 }
