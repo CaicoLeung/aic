@@ -173,10 +173,33 @@ impl Git {
                 .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
                 .context("failed to add all files to index")?;
         } else {
+            let workdir = repo.workdir();
             for path in paths {
-                index
-                    .add_path(Path::new(path))
-                    .with_context(|| format!("failed to add {path} to index"))?;
+                // Mirror `git add <path>`: a present file is added/updated, a
+                // tracked-but-missing file is staged as a deletion, and a path
+                // that is neither on disk nor tracked is rejected. `index.add_path`
+                // only handles the first case (it stats the file and errors with
+                // NotFound when it's gone), so tracked-but-absent paths route
+                // through `remove_path`. Bailing on absent-and-untracked paths
+                // matters: the batch plan comes from the LLM, and silently
+                // no-oping a hallucinated pathspec would commit without it and
+                // still report success — real `git add` errors with "pathspec ...
+                // did not match any files", and so do we.
+                let on_disk = workdir.is_some_and(|w| w.join(path).exists());
+                let tracked = index.get_path(Path::new(path), 0).is_some();
+                if on_disk {
+                    index
+                        .add_path(Path::new(path))
+                        .with_context(|| format!("failed to add {path} to index"))?;
+                } else if tracked {
+                    index
+                        .remove_path(Path::new(path))
+                        .with_context(|| format!("failed to stage removal of {path}"))?;
+                } else {
+                    anyhow::bail!(
+                        "pathspec '{path}' did not match any tracked or working-tree file"
+                    );
+                }
             }
         }
 
@@ -395,6 +418,92 @@ mod tests {
         assert!(
             !result.is_empty(),
             "should have diff content for modified file"
+        );
+    }
+
+    #[test]
+    fn diff_workdir_returns_deleted_content() {
+        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        std::fs::remove_file(dir.path().join("tracked.txt")).unwrap();
+
+        let _guard = CwdGuard::new(dir.path());
+        let result = Git::diff_workdir(Some("tracked.txt")).unwrap();
+        assert!(
+            !result.is_empty(),
+            "should have diff content for deleted file"
+        );
+    }
+
+    /// Regression: `Git::add` must stage a working-tree deletion. Previously it
+    /// called `index.add_path`, which stats the file on disk and failed with
+    /// NotFound for deleted files — breaking the whole unstaged-deletion flow.
+    #[test]
+    fn add_stages_working_tree_deletion() {
+        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        std::fs::remove_file(dir.path().join("tracked.txt")).unwrap();
+
+        let _guard = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).expect("add should stage a deleted file");
+
+        let repo = Repository::open(dir.path()).unwrap();
+        let statuses = repo.statuses(None).unwrap();
+        let entry = statuses
+            .iter()
+            .find(|s| s.path() == Ok("tracked.txt"))
+            .unwrap();
+        assert!(
+            entry.status().contains(Status::INDEX_DELETED),
+            "deletion should be staged in the index"
+        );
+    }
+
+    /// `Git::add` must reject a pathspec that is neither on disk nor tracked,
+    /// matching `git add`'s "did not match any files" error. Without this, a
+    /// hallucinated path from the LLM batch plan would be silently dropped
+    /// and the commit would report success while missing a file.
+    #[test]
+    fn add_rejects_untracked_absent_path() {
+        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        let _guard = CwdGuard::new(dir.path());
+        let err = Git::add(&["does-not-exist.txt"])
+            .expect_err("add should reject an absent, untracked path");
+        assert!(
+            format!("{err:#}").contains("did not match any tracked or working-tree file"),
+            "error should explain the pathspec mismatch, got: {err:#}"
+        );
+    }
+
+    /// Guard: `Git::diff` (tree-to-index) must return content for a staged
+    /// deletion so the commit-message LLM has something to describe. This is
+    /// load-bearing for the deletion flow — `generate_and_commit` calls
+    /// `Git::diff` after staging a removal.
+    #[test]
+    fn diff_returns_content_for_staged_deletion() {
+        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        {
+            let repo = Repository::open(dir.path()).unwrap();
+            let mut index = repo.index().unwrap();
+            index.remove_path(Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+        }
+
+        let _guard = CwdGuard::new(dir.path());
+        let result = Git::diff(Some("tracked.txt")).unwrap();
+        assert!(
+            !result.is_empty(),
+            "should have diff content for a staged deletion"
         );
     }
 }
