@@ -23,7 +23,7 @@ dirs = "6"
 futures = "0.3"
 git2 = "0.21"
 indicatif = "0.17"
-owo-colors = "4"
+console = "0.16"
 rig-core = "0.36"
 schemars = "1"
 serde = { version = "1.0", features = ["derive"] }
