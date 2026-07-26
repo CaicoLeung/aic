@@ -29,6 +29,7 @@ where
     pb.enable_steady_tick(Duration::from_millis(80));
 
     let result = fut.await;
+    pb.disable_steady_tick();
     pb.finish_and_clear();
     result
 }
@@ -66,8 +67,8 @@ fn format_rust_files(paths: &[String], display: &Display) {
 
 async fn generate_and_commit(
     paths: &[String],
-    _reason: Option<&str>,
     display: &Display,
+    prefix: &str,
 ) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
@@ -84,7 +85,7 @@ async fn generate_and_commit(
     )
     .await?;
     let hash = Git::commit(result.message.clone(), result.body.clone())?;
-    display.commit_panel(&hash, &result.message, result.body.as_deref(), paths);
+    display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
     Ok(())
 }
 
@@ -131,9 +132,9 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         for (i, batch) in result.batches.iter().enumerate() {
             let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
             Git::add(&paths)?;
-            if let Err(e) =
-                generate_and_commit(&batch.files, batch.reason.as_deref(), &display).await
-            {
+
+            let prefix = format!("[{}/{count}]", i + 1);
+            if let Err(e) = generate_and_commit(&batch.files, &display, &prefix).await {
                 anyhow::bail!(
                     "failed after committing {} of {} batches. \
                      Batch {} files are staged but uncommitted: {e}",
@@ -148,7 +149,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         format_rust_files(&paths, &display);
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         Git::add(&refs)?;
-        generate_and_commit(&paths, None, &display).await?;
+        generate_and_commit(&paths, &display, "").await?;
     }
 
     Ok(())
