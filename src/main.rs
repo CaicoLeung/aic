@@ -89,8 +89,173 @@ async fn generate_and_commit(
     Ok(())
 }
 
+/// Read a y/n answer from stdin. The label is written to stderr (Display is
+/// stderr-only) so piped stdout stays clean.
+fn prompt_yes_no(label: &str) -> anyhow::Result<bool> {
+    use std::io::Write as _;
+    eprint!("{label} [y/n] ");
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+/// Unified line diff between two strings for the resolution review (ADR 0005).
+/// Computed in-memory via `similar` so the diff is shown *before* the resolved
+/// content is written to disk — review must precede `git add`.
+fn unified_diff(old: &str, new: &str) -> String {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = String::new();
+    for op in diff.ops() {
+        for change in diff.iter_changes(op) {
+            let sign = match change.tag() {
+                ChangeTag::Delete => '-',
+                ChangeTag::Insert => '+',
+                ChangeTag::Equal => ' ',
+            };
+            out.push(sign);
+            out.push_str(change.value());
+            if !change.value().ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// `aic resolve` — resolve merge conflicts per-file via the LLM, review the
+/// combined diff, apply approved files (sticky), and finalize when all are
+/// resolved (ADR 0005).
+async fn run_resolve_workflow() -> anyhow::Result<()> {
+    let display = Display::new();
+    let state = Git::state()?;
+
+    if !state.is_conflicted() {
+        display.no_conflicts();
+        return Ok(());
+    }
+    if !state.resolvable() {
+        // rebase / am — detected but refused in v1.
+        display.refused(state);
+        anyhow::bail!("aic cannot resolve a {} state in v1", state.label());
+    }
+
+    let files = Git::conflicted_files()?;
+    if files.is_empty() {
+        // Conflicted state but no unmerged index entries — the user resolved
+        // every file by hand and only the finalize step remains.
+        display.all_resolved_offer_finalize(state);
+        if prompt_yes_no("finalize now?")? {
+            Git::finalize(state)?;
+            display.finalize_done(state);
+        }
+        return Ok(());
+    }
+
+    display.conflict_detected(state, files.len());
+    display.conflicted_summary(&files);
+
+    // Per-file resolution. `plans` carries (path, original, resolved) so the
+    // review diff can be built without re-reading disk.
+    let mut plans: Vec<(String, String, String)> = Vec::new();
+    for f in &files {
+        if !f.kind.resolvable() {
+            display.skipped(&f.path, f.kind.reason());
+            continue;
+        }
+        let original_bytes = Git::read_worktree(&f.path)?;
+        let original = String::from_utf8(original_bytes)
+            .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
+
+        let resolved = match with_spinner(
+            &format!("Resolving {}", f.path),
+            generator::Generator::resolve_conflict(&original),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                display.skipped(&f.path, &format!("LLM error: {e:#}"));
+                continue;
+            }
+        };
+
+        // Marker validation — auto-retry once (ADR 0005).
+        let resolved = if git::has_conflict_markers(&resolved) {
+            match with_spinner(
+                &format!("Retrying {}", f.path),
+                generator::Generator::resolve_conflict(&original),
+            )
+            .await
+            {
+                Ok(retry) if !git::has_conflict_markers(&retry) => retry,
+                _ => {
+                    display.skipped(&f.path, "markers remain after retry");
+                    continue;
+                }
+            }
+        } else {
+            resolved
+        };
+
+        plans.push((f.path.clone(), original, resolved));
+    }
+
+    if plans.is_empty() {
+        anyhow::bail!("no files could be resolved; resolve the conflicts manually");
+    }
+
+    // Combined review diff, then per-file sticky approval.
+    let mut combined = String::new();
+    for (path, original, resolved) in &plans {
+        combined.push_str(&format!("--- {path} ---\n"));
+        combined.push_str(&unified_diff(original, resolved));
+        combined.push('\n');
+    }
+    display.review_section(&combined);
+
+    let mut approved = 0usize;
+    for (path, _original, resolved) in &plans {
+        if prompt_yes_no(&format!("apply {path}?"))? {
+            Git::write_worktree(path, resolved)?;
+            Git::add(&[path.as_str()])?;
+            display.resolved(path);
+            approved += 1;
+        } else {
+            display.rejected(path);
+        }
+    }
+
+    let unresolved = files.len() - approved;
+    if unresolved == 0 {
+        Git::finalize(state)?;
+        display.finalize_done(state);
+    } else {
+        display.handoff(approved, unresolved, state);
+    }
+
+    Ok(())
+}
+
 async fn run_commit_workflow() -> anyhow::Result<()> {
     let display = Display::new();
+
+    // Auto-detect a conflicted repo and offer `aic resolve` before the normal
+    // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
+    // deeper net; this prompt is the friendly front door.
+    let state = Git::state()?;
+    if state.is_conflicted() {
+        display.resolve_prompt(state);
+        if prompt_yes_no("resolve now?")? {
+            return run_resolve_workflow().await;
+        }
+        anyhow::bail!(
+            "aborted: repo is mid-{}; resolve conflicts first",
+            state.label()
+        );
+    }
+
     let status = Git::status()?;
     let staged_files: Vec<_> = status.iter().filter(|f| f.staged).collect();
 
@@ -163,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Setup) => config::run_setup(),
         Some(Commands::List) => config::run_list(),
         Some(Commands::Update) => update::run_update(),
+        Some(Commands::Resolve) => run_resolve_workflow().await,
         None => run_commit_workflow().await,
     }
 }

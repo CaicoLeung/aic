@@ -31,3 +31,17 @@ _Avoid_: custom provider, generic provider, passthrough
 **Default Model**:
 The model used for a Provider when the user has not set one (env/config). Chosen for speed and cost, since aic's workload (commit messages) is lightweight.
 _Avoid_: fallback model, base model
+
+### Conflict resolution
+
+**Conflict**:
+A repository state where `Repository::state()` reports an active merge-style operation (`Merge`, `CherryPick`, `CherryPickSequence`, `Revert`, `RevertSequence`) and the index holds unmerged entries with conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) in working-tree files. aic resolves and finalizes these; it detects but refuses `Rebase`/`RebaseInteractive`/`RebaseMerge`/`ApplyMailbox` states.
+_Avoid_: merge issue, clash, collision
+
+**Resolution**:
+The marker-free file content the LLM produces for one conflicted file. Approved Resolutions are written to the working tree and staged; rejected or skipped Resolutions leave the file untouched.
+_Avoid_: fix, merged file, resolved content
+
+**Finalize**:
+The git operation that ends a Conflict after all its Resolutions are approved: `git commit` for a Merge, `git cherry-pick --continue` for a CherryPick, `git revert --continue` for a Revert. aic finalizes with git's default message — it does not call the LLM for a Finalize message.
+_Avoid_: complete, finish, commit (overloaded — see Run, Drafted Message)

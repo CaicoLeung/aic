@@ -19,4 +19,6 @@ pub enum Commands {
     List,
     /// Update aic to the latest version
     Update,
+    /// Resolve git merge conflicts in the working tree via the LLM
+    Resolve,
 }

@@ -1,5 +1,7 @@
 use console::{Style, Term};
 
+use crate::git::{ConflictedFile, RepoState};
+
 /// Clean line-based terminal output — no panels, no box-drawing.
 ///
 /// Every method writes to stderr. Color-aware: when colors are disabled
@@ -106,6 +108,169 @@ impl Display {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Conflict resolution (ADR 0005)
+    // ------------------------------------------------------------------
+
+    /// Header shown when a conflicted repo state is detected.
+    pub fn conflict_detected(&self, state: RepoState, count: usize) {
+        let yellow = Style::new().yellow().bold();
+        let word = if count == 1 { "file" } else { "files" };
+        self.writeln(&format!(
+            "{} conflicts detected — repo is mid-{} ({} {})",
+            self.styled("\u{26A0}", yellow.clone()),
+            state.label(),
+            count,
+            word,
+        ));
+    }
+
+    /// One-line prompt for the default-run auto-detect: `Resolve now? [y/n]`.
+    pub fn resolve_prompt(&self, state: RepoState) {
+        let yellow = Style::new().yellow();
+        self.writeln(&self.styled(
+            &format!("repo is mid-{}; resolve with aic now?", state.label()),
+            yellow,
+        ));
+    }
+
+    /// List conflicted files with their kind. Resolvable files are unmarked;
+    /// unresolvable ones carry a `(reason)` tag.
+    pub fn conflicted_summary(&self, files: &[ConflictedFile]) {
+        let dim = Style::new().dim();
+        let yellow = Style::new().yellow();
+        for f in files {
+            let tag = if f.kind.resolvable() {
+                String::new()
+            } else {
+                format!(
+                    " {}",
+                    self.styled(&format!("({})", f.kind.reason()), yellow.clone())
+                )
+            };
+            self.writeln(&format!("  {}{}", f.path, tag));
+            if let crate::git::ConflictKind::Oversized { bytes, lines } = &f.kind {
+                self.writeln(&format!(
+                    "    {}",
+                    self.styled(
+                        &format!("{bytes} bytes, {lines} lines (> cap)"),
+                        dim.clone()
+                    ),
+                ));
+            }
+        }
+        self.writeln("");
+    }
+
+    /// Render the combined review diff (original worktree -> LLM resolution).
+    pub fn review_section(&self, diff: &str) {
+        let dim = Style::new().dim();
+        self.writeln(&self.styled("proposed resolutions:", dim));
+        for line in diff.lines() {
+            let styled = match line.chars().next() {
+                Some('+') => self.styled(line, Style::new().green()),
+                Some('-') => self.styled(line, Style::new().red()),
+                _ => line.to_string(),
+            };
+            self.writeln(&styled);
+        }
+        self.writeln("");
+    }
+
+    /// Per-file outcome lines.
+    pub fn resolved(&self, path: &str) {
+        let green = Style::new().green().bold();
+        self.writeln(&format!(
+            "  {} resolved + staged: {}",
+            self.styled("\u{2713}", green),
+            path,
+        ));
+    }
+
+    pub fn skipped(&self, path: &str, reason: &str) {
+        let yellow = Style::new().yellow();
+        self.writeln(&format!(
+            "  {} skipped: {} ({})",
+            self.styled("\u{26A0}", yellow.clone()),
+            path,
+            reason,
+        ));
+    }
+
+    pub fn rejected(&self, path: &str) {
+        let dim = Style::new().dim();
+        self.writeln(&format!(
+            "  {} rejected: {}",
+            self.styled("\u{2717}", Style::new().red()),
+            self.styled(path, dim),
+        ));
+    }
+
+    /// Finalize succeeded.
+    pub fn finalize_done(&self, state: RepoState) {
+        let green = Style::new().green().bold();
+        self.writeln(&format!(
+            "\n{} {} finalized",
+            self.styled("\u{2713}", green.clone()),
+            self.styled(state.label(), green),
+        ));
+    }
+
+    /// Partial: approved files staged, but some unresolved — hand off to git.
+    pub fn handoff(&self, approved: usize, unresolved: usize, state: RepoState) {
+        let yellow = Style::new().yellow();
+        let dim = Style::new().dim();
+        self.writeln(&format!(
+            "\n{} {approved} resolved+staged; {unresolved} unresolved — not finalized",
+            self.styled("\u{26A0}", yellow),
+        ));
+        self.writeln(&format!(
+            "  {}",
+            self.styled(
+                "finish the unresolved files manually, then run the matching git continue:",
+                dim,
+            ),
+        ));
+        self.writeln(&format!(
+            "    {}",
+            self.styled(finalize_hint(state), Style::new().cyan()),
+        ));
+    }
+
+    /// `aic resolve` on a clean repo.
+    pub fn no_conflicts(&self) {
+        let dim = Style::new().dim();
+        self.writeln(&self.styled("no conflicts — nothing to resolve", dim));
+    }
+
+    /// `aic resolve` on a rebase/am state — detected but refused in v1.
+    pub fn refused(&self, state: RepoState) {
+        let red = Style::new().red().bold();
+        self.writeln(&format!(
+            "{} cannot resolve a {} state in v1",
+            self.styled("\u{2717}", red),
+            state.label(),
+        ));
+        self.writeln(&format!(
+            "  resolve manually, then run {}",
+            self.styled(finalize_hint(state), Style::new().cyan()),
+        ));
+    }
+
+    /// State is conflicted but the index has no unmerged entries — the user
+    /// resolved everything by hand and just needs the finalize step.
+    pub fn all_resolved_offer_finalize(&self, state: RepoState) {
+        let dim = Style::new().dim();
+        self.writeln(&self.styled(
+            "no unmerged files remain — conflicts already resolved manually",
+            dim,
+        ));
+        self.writeln(&format!(
+            "  finalize with {}",
+            self.styled(finalize_hint(state), Style::new().cyan()),
+        ));
+    }
 }
 
 impl Default for Display {
@@ -133,6 +298,22 @@ fn format_files_preview(files: &[String]) -> String {
         return files[0].clone();
     }
     format!("{} (+{} more)", files[0], files.len() - 1)
+}
+
+/// The git command a user runs to finalize a state by hand, for hand-off /
+/// refuse messages. Mirrors `RepoState::finalize_invocation` but as a single
+/// display string (no aic involvement).
+fn finalize_hint(state: RepoState) -> &'static str {
+    match state {
+        RepoState::Merge => "git commit",
+        RepoState::CherryPick | RepoState::CherryPickSequence => "git cherry-pick --continue",
+        RepoState::Revert | RepoState::RevertSequence => "git revert --continue",
+        RepoState::Rebase | RepoState::RebaseInteractive | RepoState::RebaseMerge => {
+            "git rebase --continue"
+        }
+        RepoState::ApplyMailbox | RepoState::ApplyMailboxOrRebase => "git am --continue",
+        RepoState::Clean => "git commit",
+    }
 }
 
 #[cfg(test)]
