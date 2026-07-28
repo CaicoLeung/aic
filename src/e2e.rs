@@ -100,6 +100,21 @@ fn resolver_recording() -> (Resolver, Arc<Mutex<Vec<String>>>) {
     (r, seen)
 }
 
+/// Resolver that always fails, with a call counter so a test can assert the
+/// error branch was actually reached (not a different skip path). Exercises
+/// the `skipped_failed` arm of the resolve loop.
+fn resolver_error() -> (Resolver, Arc<Mutex<u32>>) {
+    let calls = Arc::new(Mutex::new(0u32));
+    let calls2 = calls.clone();
+    let r: Resolver = Box::new(
+        move |_content: String| -> BoxFuture<anyhow::Result<String>> {
+            *calls2.lock().unwrap() += 1;
+            Box::pin(async { Err(anyhow::anyhow!("LLM unreachable (stub)")) })
+        },
+    );
+    (r, calls)
+}
+
 /// Prompt that pops answers from a queue; panics if exhausted so an
 /// under-specified test fails loudly instead of silently defaulting.
 fn prompt_queue(answers: Vec<bool>) -> Prompt {
@@ -185,6 +200,82 @@ fn rebase_conflict(dir: &Path) {
     git_in(dir, &["add", "tracked.txt"]);
     git_in(dir, &["commit", "-m", "topic side"]);
     git_in(dir, &["rebase", "master"]);
+}
+
+/// Join `n` lines `"{prefix} {i}\n"`. Used to build a file over the
+/// `MAX_CONFLICT_LINES` cap so `classify_worktree` returns `Oversized`.
+fn make_lines(prefix: &str, n: usize) -> String {
+    (0..n).map(|i| format!("{prefix} {i}\n")).collect()
+}
+
+/// Cherry-pick conflict: master and topic both change `tracked.txt` from the
+/// initial commit differently; `git cherry-pick topic` on master hits a content
+/// conflict. Repo ends in the CherryPick state.
+fn cherry_pick_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    git_in(dir, &["branch", "topic"]);
+    std::fs::write(dir.join("tracked.txt"), "on master\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master side"]);
+    git_in(dir, &["checkout", "topic"]);
+    std::fs::write(dir.join("tracked.txt"), "on topic\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "topic side"]);
+    git_in(dir, &["checkout", "master"]);
+    git_in(dir, &["cherry-pick", "topic"]);
+}
+
+/// Revert conflict: commit A changes `tracked.txt`, commit B changes it again,
+/// then reverting A conflicts with B. Repo ends in the Revert state.
+fn revert_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    std::fs::write(dir.join("tracked.txt"), "changed\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "change tracked"]);
+    std::fs::write(dir.join("tracked.txt"), "master override\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master override"]);
+    git_in(dir, &["revert", "HEAD~1"]);
+}
+
+/// Delete/modify conflict: master deletes `tracked.txt`, other modifies it.
+/// The index carries no `our` stage for the path, so `conflicted_files()`
+/// classifies it `DeleteModify`. Repo ends in the Merge state.
+fn merge_delete_modify_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    git_in(dir, &["branch", "other"]);
+    std::fs::remove_file(dir.join("tracked.txt")).unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master deletes"]);
+    git_in(dir, &["checkout", "other"]);
+    std::fs::write(dir.join("tracked.txt"), "modified on other\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "other modifies"]);
+    git_in(dir, &["checkout", "master"]);
+    git_in(dir, &["merge", "other"]);
+}
+
+/// One small text conflict (`tracked.txt`) and one oversized text conflict
+/// (`big.txt`, > `MAX_CONFLICT_LINES` on both sides) in one merge. Repo ends in
+/// the Merge state.
+fn merge_oversized_and_text(dir: &Path) {
+    gh::init_test_repo(dir);
+    let big_base = make_lines("base", 2500);
+    std::fs::write(dir.join("big.txt"), &big_base).unwrap();
+    git_in(dir, &["add", "big.txt"]);
+    git_in(dir, &["commit", "-m", "add big base"]);
+    git_in(dir, &["branch", "other"]);
+    std::fs::write(dir.join("tracked.txt"), "master\n").unwrap();
+    std::fs::write(dir.join("big.txt"), make_lines("master", 2500)).unwrap();
+    git_in(dir, &["add", "tracked.txt", "big.txt"]);
+    git_in(dir, &["commit", "-m", "master side"]);
+    git_in(dir, &["checkout", "other"]);
+    std::fs::write(dir.join("tracked.txt"), "other\n").unwrap();
+    std::fs::write(dir.join("big.txt"), make_lines("other", 2500)).unwrap();
+    git_in(dir, &["add", "tracked.txt", "big.txt"]);
+    git_in(dir, &["commit", "-m", "other side"]);
+    git_in(dir, &["checkout", "master"]);
+    git_in(dir, &["merge", "other"]);
 }
 
 // ---------------------------------------------------------------------
@@ -504,4 +595,175 @@ async fn resolve_offers_finalize_when_all_manual() {
         "resolver must not run when nothing's unmerged"
     );
     assert!(is_clean(dir.path()), "merge must be finalized");
+}
+
+// =====================================================================
+// Coverage: non-Merge finalize states, conflict-kind classification, LLM
+// error path. These close the gaps flagged in the PR #8 e2e review.
+// =====================================================================
+
+/// Cherry-pick conflict resolved + finalized end-to-end (ADR 0005). Unlike
+/// Merge, finalize shells out to `git cherry-pick --continue` — this verifies
+/// that path actually clears the CherryPick state in a real repo, not merely
+/// that `finalize_invocation` maps the enum (unit-tested in git.rs).
+#[tokio::test]
+async fn resolve_finalizes_cherry_pick() {
+    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    cherry_pick_conflict(dir.path());
+
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::CherryPick,
+        "setup must leave the repo mid-cherry-pick"
+    );
+
+    let resolver = resolver_returning("merged\n");
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    assert!(
+        result.is_ok(),
+        "cherry-pick resolve should succeed: {:?}",
+        result
+    );
+
+    assert!(is_clean(dir.path()), "cherry-pick must be finalized");
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+}
+
+/// Revert conflict resolved + finalized end-to-end (ADR 0005). Finalize runs
+/// `git revert --continue`; verifies the Revert state is cleared in a real repo.
+#[tokio::test]
+async fn resolve_finalizes_revert() {
+    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    revert_conflict(dir.path());
+
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::Revert,
+        "setup must leave the repo mid-revert"
+    );
+
+    let resolver = resolver_returning("merged\n");
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    assert!(
+        result.is_ok(),
+        "revert resolve should succeed: {:?}",
+        result
+    );
+
+    assert!(is_clean(dir.path()), "revert must be finalized");
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+}
+
+/// Delete/modify conflict (master deleted, other modified) is classified
+/// `DeleteModify` and skipped — never reaches the LLM. With no resolvable
+/// files, the workflow bails (ADR 0005: structural conflicts need manual
+/// resolution).
+#[tokio::test]
+async fn resolve_skips_delete_modify_conflict() {
+    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    merge_delete_modify_conflict(dir.path());
+
+    let (resolver, seen) = resolver_recording();
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    let files = git::Git::conflicted_files().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "tracked.txt");
+    assert_eq!(files[0].kind, git::ConflictKind::DeleteModify);
+
+    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]))
+        .await
+        .expect_err("delete/modify has no resolvable file");
+    assert!(
+        format!("{err:#}").contains("no files could be resolved"),
+        "expected bail, got: {err:#}"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "resolver must not run on a DeleteModify file"
+    );
+    assert!(!is_clean(dir.path()), "merge must not be finalized");
+}
+
+/// An oversized text file (> `MAX_CONFLICT_LINES`) is classified `Oversized`
+/// and skipped, while a normal text conflict in the same merge still resolves +
+/// stages (ADR 0005: oversized doesn't abort the run). Finalize is blocked by
+/// the oversized file.
+#[tokio::test]
+async fn resolve_skips_oversized_and_stages_text() {
+    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    merge_oversized_and_text(dir.path());
+
+    let resolver = resolver_returning("merged\n");
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    assert!(
+        result.is_ok(),
+        "oversized skip should hand off, not error: {:?}",
+        result
+    );
+
+    assert!(!is_clean(dir.path()), "oversized conflict blocks finalize");
+
+    // Small text file resolved + staged clean.
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!staged_blob_has_markers(dir.path(), "tracked.txt"));
+
+    // Big file classified Oversized, still unmerged.
+    let files = git::Git::conflicted_files().unwrap();
+    let big = files
+        .iter()
+        .find(|f| f.path == "big.txt")
+        .expect("big.txt should be conflicted");
+    assert!(
+        matches!(big.kind, git::ConflictKind::Oversized { .. }),
+        "expected Oversized, got {:?}",
+        big.kind
+    );
+    assert!(is_unmerged(dir.path(), "big.txt"));
+}
+
+/// An LLM error on the only resolvable file skips it as `failed` and bails
+/// (plans empty) — same workflow outcome as persistent markers, but via the
+/// `skipped_failed` arm. The file is left untouched for a re-run. Errors do
+/// not trigger the marker-retry path (only marker-laden `Ok` does).
+#[tokio::test]
+async fn resolve_llm_error_bails_when_only_file_fails() {
+    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+
+    let (resolver, calls) = resolver_error();
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]))
+        .await
+        .expect_err("must bail when the LLM call fails");
+    assert!(
+        format!("{err:#}").contains("no files could be resolved"),
+        "expected bail, got: {err:#}"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "resolver called once; errors do not retry"
+    );
+    assert!(!is_clean(dir.path()), "merge must not be finalized");
+    assert!(
+        file_has_markers(dir.path(), "tracked.txt"),
+        "file left untouched after LLM error"
+    );
 }
