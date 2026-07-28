@@ -4,6 +4,7 @@ use std::env;
 pub struct PromptConfig {
     pub git_message: String,
     pub batch_plan_prompt: String,
+    pub resolve_prompt: String,
 }
 
 const SYSTEM_PROMPT_GIT_MESSAGE: &str = r#"
@@ -89,21 +90,50 @@ Return strict JSON — no markdown fencing, no commentary:
 The "reason" field is a short imperative phrase describing the commit (e.g., "Add user authentication", "Remove deprecated API endpoints"). It describes the intent of this batch for your reference.
 "#;
 
+const SYSTEM_PROMPT_RESOLVE_CONFLICT: &str = r#"
+You are an expert at resolving git merge conflicts inside a source file.
+
+You will receive the FULL content of one file that contains git conflict markers:
+
+    <<<<<<< ours (or HEAD)
+    ...our side...
+    =======
+    ...their side...
+    >>>>>>> theirs (or branch)
+
+Return the FULL resolved file content — with ALL conflict markers removed.
+
+Rules:
+1. Output ONLY the resolved file content. No prose, no explanation, no markdown code fences, no preamble, no trailing commentary.
+2. Remove every `<<<<<<<`, `=======`, and `>>>>>>>` marker line.
+3. For each conflict, produce the single correct merged result:
+   - If both sides add complementary things, combine both.
+   - If one side is clearly a fix/upgrade of the other, keep the better one.
+   - If they genuinely contradict with no signal, keep the `ours`/HEAD side and drop the other.
+4. Keep every non-conflicted line byte-for-byte identical — same order, same whitespace, same blank lines. Do not reformat, reorder, or "clean up" code outside conflicts.
+5. Preserve the file's final newline behavior.
+6. Never invent new code that is not implied by either side of a conflict.
+
+Resolve the whole file, not just the first conflict.
+"#;
+
 impl Default for PromptConfig {
     fn default() -> Self {
         Self {
             git_message: SYSTEM_PROMPT_GIT_MESSAGE.trim().to_string(),
             batch_plan_prompt: SYSTEM_PROMPT_BATCH_PLAN.trim().to_string(),
+            resolve_prompt: SYSTEM_PROMPT_RESOLVE_CONFLICT.trim().to_string(),
         }
     }
 }
 
 impl PromptConfig {
     pub fn from_env() -> Self {
+        let default = Self::default();
         Self {
-            git_message: env::var("AIC_SYSTEM_PROMPT")
-                .unwrap_or_else(|_| Self::default().git_message),
-            batch_plan_prompt: Self::default().batch_plan_prompt,
+            git_message: env::var("AIC_SYSTEM_PROMPT").unwrap_or(default.git_message),
+            batch_plan_prompt: default.batch_plan_prompt,
+            resolve_prompt: default.resolve_prompt,
         }
     }
 }

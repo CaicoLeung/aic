@@ -76,6 +76,39 @@ impl Generator {
             .schema::<BatchPlanOutput>(diff)
             .await
     }
+
+    /// Resolve one conflicted file. The LLM returns the full marker-free file
+    /// content as raw text (not JSON) — feeding a whole source file through a
+    /// JSON string field would bloat and risk truncation. Any accidental
+    /// markdown code fence around the output is stripped (ADR 0005).
+    pub async fn resolve_conflict(file_content: &str) -> anyhow::Result<String> {
+        let p = PromptConfig::default().resolve_prompt;
+        let raw = LLM::from_env()?.agent(&p).call(file_content).await?;
+        Ok(strip_code_fence(&raw).to_string())
+    }
+}
+
+/// Strip a surrounding ```…``` code fence if the model ignored the "no fences"
+/// instruction. Only touches a fence that wraps the entire output; partial
+/// fences (e.g. a fenced block legitimately inside the file) are left alone.
+fn strip_code_fence(mut s: &str) -> &str {
+    s = s.strip_suffix('\n').unwrap_or(s).trim();
+    if !s.starts_with("```") {
+        return s;
+    }
+    // Drop the opening fence line (``` or ```lang).
+    let Some(nl) = s.find('\n') else {
+        return s;
+    };
+    s = &s[nl + 1..];
+    // Drop a trailing closing fence.
+    let trimmed_end = s.trim_end();
+    if let Some(idx) = trimmed_end.rfind("```")
+        && trimmed_end[idx..].trim() == "```"
+    {
+        return trimmed_end[..idx].trim();
+    }
+    s.trim()
 }
 
 #[cfg(test)]
@@ -177,5 +210,28 @@ mod tests {
         let json = r#"{"batches":[{"files":["a.rs"]}]}"#;
         let plan: BatchPlanOutput = serde_json::from_str(json).unwrap();
         assert!(plan.batches[0].reason.is_none());
+    }
+
+    #[test]
+    fn strip_fence_removes_wrapping_fence() {
+        assert_eq!(strip_code_fence("```\nfn main() {}\n```"), "fn main() {}");
+    }
+
+    #[test]
+    fn strip_fence_removes_language_tag() {
+        assert_eq!(strip_code_fence("```rust\nlet x = 1;\n```"), "let x = 1;");
+    }
+
+    #[test]
+    fn strip_fence_leaves_plain_content_alone() {
+        assert_eq!(strip_code_fence("fn main() {}"), "fn main() {}");
+    }
+
+    #[test]
+    fn strip_fence_leaves_inner_fences_alone() {
+        // A fenced block that is legitimately part of the file is not stripped —
+        // only a fence wrapping the *entire* output is.
+        let inner = "text before\n\n```rs\ncode\n```\n\ntext after";
+        assert_eq!(strip_code_fence(inner), inner);
     }
 }
