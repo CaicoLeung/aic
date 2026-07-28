@@ -7,13 +7,29 @@ pub mod llm;
 pub mod prompt;
 pub mod update;
 
+#[cfg(test)]
+mod e2e;
+
 use crate::cli::Commands;
 use crate::display::{BatchSummary, Display};
 use crate::git::Git;
 use anyhow::Context;
 use clap::Parser;
 use indicatif::ProgressBar;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
+
+/// A boxed, `Send` future — the return type of the resolver seam.
+pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+/// Erased resolver: a closure that takes the conflicted file content and
+/// returns a future yielding the resolved (marker-free) content. Boxed so the
+/// workflow signature stays concrete — no generic `where` clauses — while tests
+/// can swap in stubs without touching the LLM.
+pub(crate) type Resolver = Box<dyn Fn(String) -> BoxFuture<anyhow::Result<String>>>;
+/// Erased y/n prompt: answers a labeled question. Boxed for the same reason.
+pub(crate) type Prompt = Box<dyn Fn(&str) -> anyhow::Result<bool>>;
 
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
 where
@@ -127,7 +143,15 @@ fn unified_diff(old: &str, new: &str) -> String {
 /// `aic resolve` — resolve merge conflicts per-file via the LLM, review the
 /// combined diff, apply approved files (sticky), and finalize when all are
 /// resolved (ADR 0005).
-async fn run_resolve_workflow() -> anyhow::Result<()> {
+///
+/// `resolve` and `prompt` are seams so the full workflow can be driven
+/// end-to-end in tests without a live LLM or a TTY. Production callers use
+/// [`run_resolve_workflow`], which wires in `Generator::resolve_conflict` and
+/// stdin `prompt_yes_no`.
+pub(crate) async fn run_resolve_workflow_impl(
+    resolve: Resolver,
+    prompt: Prompt,
+) -> anyhow::Result<()> {
     let display = Display::new();
     let state = Git::state()?;
 
@@ -146,7 +170,7 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
         // Conflicted state but no unmerged index entries — the user resolved
         // every file by hand and only the finalize step remains.
         display.all_resolved_offer_finalize(state);
-        if prompt_yes_no("finalize now?")? {
+        if prompt("finalize now?")? {
             Git::finalize(state)?;
             display.finalize_done(state);
         }
@@ -175,28 +199,19 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
 
-        let resolved = match with_spinner(
-            &format!("Resolving {}", f.path),
-            generator::Generator::resolve_conflict(&original),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                display.skipped(&f.path, &format!("LLM error: {e:#}"));
-                skipped_failed += 1;
-                continue;
-            }
-        };
+        let resolved =
+            match with_spinner(&format!("Resolving {}", f.path), resolve(original.clone())).await {
+                Ok(r) => r,
+                Err(e) => {
+                    display.skipped(&f.path, &format!("LLM error: {e:#}"));
+                    skipped_failed += 1;
+                    continue;
+                }
+            };
 
         // Marker validation — auto-retry once (ADR 0005).
         let resolved = if git::has_conflict_markers(&resolved) {
-            match with_spinner(
-                &format!("Retrying {}", f.path),
-                generator::Generator::resolve_conflict(&original),
-            )
-            .await
-            {
+            match with_spinner(&format!("Retrying {}", f.path), resolve(original.clone())).await {
                 Ok(retry) if !git::has_conflict_markers(&retry) => retry,
                 _ => {
                     display.skipped(&f.path, "markers remain after retry");
@@ -232,7 +247,7 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
     let mut approved = 0usize;
     let mut rejected = 0usize;
     for (path, _original, resolved) in &plans {
-        if prompt_yes_no(&format!("apply {path}?"))? {
+        if prompt(&format!("apply {path}?"))? {
             Git::write_worktree(path, resolved)?;
             Git::add(&[path.as_str()])?;
             display.resolved(path);
@@ -269,7 +284,23 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_commit_workflow() -> anyhow::Result<()> {
+/// Production entry point for `aic resolve` — wires the real LLM resolver and
+/// stdin y/n prompt into [`run_resolve_workflow_impl`].
+async fn run_resolve_workflow() -> anyhow::Result<()> {
+    let resolver: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
+        Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
+    });
+    let prompt: Prompt = Box::new(prompt_yes_no);
+    run_resolve_workflow_impl(resolver, prompt).await
+}
+
+/// Default `aic` run. `resolve`/`prompt` are seams mirroring
+/// [`run_resolve_workflow_impl`]; they only matter on the conflicted-repo
+/// auto-detect branch, which hands off to the resolve workflow.
+pub(crate) async fn run_commit_workflow_impl(
+    resolve: Resolver,
+    prompt: Prompt,
+) -> anyhow::Result<()> {
     let display = Display::new();
 
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
@@ -278,8 +309,8 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     let state = Git::state()?;
     if state.is_conflicted() {
         display.resolve_prompt(state);
-        if prompt_yes_no("resolve now?")? {
-            return run_resolve_workflow().await;
+        if prompt("resolve now?")? {
+            return run_resolve_workflow_impl(resolve, prompt).await;
         }
         anyhow::bail!(
             "aborted: repo is mid-{}; resolve conflicts first",
@@ -349,6 +380,16 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Production entry point for the default `aic` run — wires the real LLM
+/// resolver and stdin y/n prompt into [`run_commit_workflow_impl`].
+async fn run_commit_workflow() -> anyhow::Result<()> {
+    let resolver: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
+        Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
+    });
+    let prompt: Prompt = Box::new(prompt_yes_no);
+    run_commit_workflow_impl(resolver, prompt).await
 }
 
 #[tokio::main]

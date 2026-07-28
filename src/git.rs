@@ -659,17 +659,17 @@ fn classify_worktree(repo: &Repository, path: &str) -> ConflictKind {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    struct CwdGuard {
+    pub(crate) struct CwdGuard {
         original: PathBuf,
     }
 
     impl CwdGuard {
-        fn new(dir: &Path) -> Self {
+        pub(crate) fn new(dir: &Path) -> Self {
             let original = std::env::current_dir().unwrap();
             std::env::set_current_dir(dir).unwrap();
             Self { original }
@@ -682,7 +682,7 @@ mod tests {
         }
     }
 
-    fn init_test_repo(dir: &Path) {
+    pub(crate) fn init_test_repo(dir: &Path) {
         let repo = Repository::init(dir).unwrap();
         let mut config = repo.config().unwrap();
         config.set_str("user.name", "test").unwrap();
@@ -703,7 +703,7 @@ mod tests {
     /// Serializes tests that mutate the process working directory via `CwdGuard`.
     /// Parallel CwdGuard tests race on the global CWD and intermittently resolve
     /// the wrong repository, so any test that chdir()s must hold this lock.
-    static GIT_CWD_MUTEX: Mutex<()> = Mutex::new(());
+    pub(crate) static GIT_CWD_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn diff_workdir_returns_untracked_content() {
@@ -890,7 +890,7 @@ mod tests {
     /// `other` both change the same line of `tracked.txt` differently, then
     /// `git merge other` produces a conflict. Repo ends in the Merge state with
     /// conflict markers in `tracked.txt`.
-    fn make_content_conflict(dir: &Path) {
+    pub(crate) fn make_content_conflict(dir: &Path) {
         let git = |args: &[&str]| {
             Command::new("git")
                 .args(["-C"])
