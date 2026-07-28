@@ -2,6 +2,19 @@ use console::{Style, Term};
 
 use crate::git::{ConflictedFile, RepoState};
 
+/// Line-based write seam behind [`Display`].
+///
+/// Prod wires it to [`TermWrite`] (stderr via `console::Term`); tests wire it
+/// to an in-memory buffer so emitted wording can be asserted without
+/// capturing the process's real stderr. Every method on `Display` ultimately
+/// funnels through [`DisplayWrite::write_line`], so swapping the sink is the
+/// only seam needed — styling helpers stay unchanged.
+pub trait DisplayWrite: Send + Sync {
+    /// Append a line to the sink. Implementations must be fire-and-forget:
+    /// write failures never propagate (status output, never load-bearing).
+    fn write_line(&self, line: &str);
+}
+
 /// Clean line-based terminal output — no panels, no box-drawing.
 ///
 /// Every method writes to stderr. Color-aware: when colors are disabled
@@ -11,15 +24,35 @@ use crate::git::{ConflictedFile, RepoState};
 /// Write errors are intentionally ignored: this is fire-and-forget
 /// status output to stderr (e.g. a closed pipe), never load-bearing.
 pub struct Display {
-    term: Term,
+    out: Box<dyn DisplayWrite>,
     colors: bool,
 }
 
+/// Prod sink: stderr via `console::Term`. Write errors are dropped to keep the
+/// fire-and-forget contract from [`Display`] intact.
+struct TermWrite(Term);
+
+impl DisplayWrite for TermWrite {
+    fn write_line(&self, line: &str) {
+        let _ = self.0.write_line(line);
+    }
+}
+
 impl Display {
+    /// Prod constructor: stderr sink, color-aware (`colors_enabled_stderr()`),
+    /// fire-and-forget. Byte-identical to the pre-seam behavior.
     pub fn new() -> Self {
-        let term = Term::stderr();
+        Self::with(TermWrite(Term::stderr()))
+    }
+
+    /// Injectable constructor: route every emitted line through `out`. Used by
+    /// tests to capture wording; prod keeps [`Display::new`].
+    pub fn with(out: impl DisplayWrite + 'static) -> Self {
         let colors = console::colors_enabled_stderr();
-        Self { term, colors }
+        Self {
+            out: Box::new(out),
+            colors,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -36,9 +69,9 @@ impl Display {
         }
     }
 
-    /// Write a line to stderr, ignoring errors.
+    /// Write a line through the seam, ignoring errors.
     fn writeln(&self, line: &str) {
-        let _ = self.term.write_line(line);
+        self.out.write_line(line);
     }
 
     // ------------------------------------------------------------------

@@ -144,15 +144,15 @@ fn unified_diff(old: &str, new: &str) -> String {
 /// combined diff, apply approved files (sticky), and finalize when all are
 /// resolved (ADR 0005).
 ///
-/// `resolve` and `prompt` are seams so the full workflow can be driven
-/// end-to-end in tests without a live LLM or a TTY. Production callers use
-/// [`run_resolve_workflow`], which wires in `Generator::resolve_conflict` and
-/// stdin `prompt_yes_no`.
+/// `resolve`, `prompt`, and `display` are seams so the full workflow can be
+/// driven end-to-end in tests without a live LLM, a TTY, or capturing real
+/// stderr. Production callers use [`run_resolve_workflow`], which wires in
+/// `Generator::resolve_conflict`, stdin `prompt_yes_no`, and [`Display::new`].
 pub(crate) async fn run_resolve_workflow_impl(
     resolve: Resolver,
     prompt: Prompt,
+    display: Display,
 ) -> anyhow::Result<()> {
-    let display = Display::new();
     let state = Git::state()?;
 
     if !state.is_conflicted() {
@@ -291,18 +291,17 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
     let prompt: Prompt = Box::new(prompt_yes_no);
-    run_resolve_workflow_impl(resolver, prompt).await
+    run_resolve_workflow_impl(resolver, prompt, Display::new()).await
 }
 
-/// Default `aic` run. `resolve`/`prompt` are seams mirroring
+/// Default `aic` run. `resolve`/`prompt`/`display` are seams mirroring
 /// [`run_resolve_workflow_impl`]; they only matter on the conflicted-repo
 /// auto-detect branch, which hands off to the resolve workflow.
 pub(crate) async fn run_commit_workflow_impl(
     resolve: Resolver,
     prompt: Prompt,
+    display: Display,
 ) -> anyhow::Result<()> {
-    let display = Display::new();
-
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
     // deeper net; this prompt is the friendly front door.
@@ -310,7 +309,7 @@ pub(crate) async fn run_commit_workflow_impl(
     if state.is_conflicted() {
         display.resolve_prompt(state);
         if prompt("resolve now?")? {
-            return run_resolve_workflow_impl(resolve, prompt).await;
+            return run_resolve_workflow_impl(resolve, prompt, display).await;
         }
         anyhow::bail!(
             "aborted: repo is mid-{}; resolve conflicts first",
@@ -389,7 +388,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
     let prompt: Prompt = Box::new(prompt_yes_no);
-    run_commit_workflow_impl(resolver, prompt).await
+    run_commit_workflow_impl(resolver, prompt, Display::new()).await
 }
 
 #[tokio::main]
