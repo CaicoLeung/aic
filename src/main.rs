@@ -157,11 +157,18 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
     display.conflicted_summary(&files);
 
     // Per-file resolution. `plans` carries (path, original, resolved) so the
-    // review diff can be built without re-reading disk.
+    // review diff can be built without re-reading disk. Track why each
+    // non-approved file didn't make it into `plans` so the hand-off message
+    // can distinguish structural skips (binary/oversized — user must resolve
+    // by hand) from transient failures (LLM error / markers after retry —
+    // user can re-run `aic resolve`).
     let mut plans: Vec<(String, String, String)> = Vec::new();
+    let mut skipped_unresolvable = 0usize;
+    let mut skipped_failed = 0usize;
     for f in &files {
         if !f.kind.resolvable() {
             display.skipped(&f.path, f.kind.reason());
+            skipped_unresolvable += 1;
             continue;
         }
         let original_bytes = Git::read_worktree(&f.path)?;
@@ -177,6 +184,7 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
             Ok(r) => r,
             Err(e) => {
                 display.skipped(&f.path, &format!("LLM error: {e:#}"));
+                skipped_failed += 1;
                 continue;
             }
         };
@@ -192,6 +200,7 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
                 Ok(retry) if !git::has_conflict_markers(&retry) => retry,
                 _ => {
                     display.skipped(&f.path, "markers remain after retry");
+                    skipped_failed += 1;
                     continue;
                 }
             }
@@ -206,16 +215,22 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
         anyhow::bail!("no files could be resolved; resolve the conflicts manually");
     }
 
-    // Combined review diff, then per-file sticky approval.
+    // Combined review diff, then per-file sticky approval. Each file's path
+    // is emitted bare on its own line so `review_section` can render it as a
+    // header — unified-diff bodies only ever start with `+`/`-`/` `, so a
+    // bare path is unambiguously a boundary (a `--- path ---` prefix would
+    // tint it red as a deletion line).
     let mut combined = String::new();
     for (path, original, resolved) in &plans {
-        combined.push_str(&format!("--- {path} ---\n"));
+        combined.push_str(path);
+        combined.push('\n');
         combined.push_str(&unified_diff(original, resolved));
         combined.push('\n');
     }
     display.review_section(&combined);
 
     let mut approved = 0usize;
+    let mut rejected = 0usize;
     for (path, _original, resolved) in &plans {
         if prompt_yes_no(&format!("apply {path}?"))? {
             Git::write_worktree(path, resolved)?;
@@ -224,15 +239,31 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
             approved += 1;
         } else {
             display.rejected(path);
+            rejected += 1;
         }
     }
 
-    let unresolved = files.len() - approved;
-    if unresolved == 0 {
+    // Finalize is all-or-nothing: git's `--continue` blocks on any unmerged
+    // path regardless (ADR 0005), so a single remaining blocker stops it.
+    // Three blocker kinds, tracked separately so the hand-off message tells
+    // the user what to do next instead of an opaque count:
+    //   - rejected             resolvable file the user declined to apply
+    //   - skipped_failed       resolvable kind, but the LLM/markers step failed
+    //   - skipped_unresolvable binary / oversized / delete-modify — aic can't
+    // Equivalent to the old `files.len() - approved == 0` test (every file
+    // lands in exactly one of: skipped_unresolvable, skipped_failed, plans).
+    let needs_manual = rejected + skipped_failed + skipped_unresolvable;
+    if needs_manual == 0 {
         Git::finalize(state)?;
         display.finalize_done(state);
     } else {
-        display.handoff(approved, unresolved, state);
+        display.handoff(
+            approved,
+            rejected,
+            skipped_failed,
+            skipped_unresolvable,
+            state,
+        );
     }
 
     Ok(())

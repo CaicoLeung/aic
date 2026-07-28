@@ -438,13 +438,23 @@ impl Git {
                 state.label()
             )
         })?;
-        let status = Command::new(prog)
+        // Capture stdout/stderr so a refusal (git's own marker check, a missing
+        // merge message, a hook veto) surfaces the real reason instead of a bare
+        // exit code.
+        let output = Command::new(prog)
             .args(args)
             .env("GIT_EDITOR", "true")
-            .status()
+            .output()
             .with_context(|| format!("failed to run {prog} {}", args.join(" ")))?;
-        if !status.success() {
-            anyhow::bail!("{prog} {} exited with {status}", args.join(" "));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr_trim = stderr.trim();
+            let detail = if stderr_trim.is_empty() {
+                format!("exited with {}", output.status)
+            } else {
+                format!("exited with {} — {stderr_trim}", output.status)
+            };
+            anyhow::bail!("{prog} {} {detail}", args.join(" "));
         }
         Ok(())
     }
@@ -463,6 +473,13 @@ impl Git {
             );
         }
 
+        // Scan the staged *blobs*, not the working-tree files. The tree a
+        // commit writes is built from the index (`write_tree_to` in
+        // `Git::commit`), so a marker in a staged blob is what would ship —
+        // even if the worktree was since cleaned without re-staging. Reading
+        // the blob matches the real commit payload and the documented contract
+        // ("scans staged file contents for markers").
+        let index = repo.index().context("failed to get repository index")?;
         let statuses = repo
             .statuses(None)
             .context("failed to get repository status")?;
@@ -476,18 +493,19 @@ impl Git {
                 Ok(p) => p.to_string(),
                 Err(_) => continue,
             };
-            let Some(workdir) = repo.workdir() else {
-                break;
+            // Stage-0 entry = the resolved/staged version. A conflicted repo is
+            // already caught above, so any staged path here has a stage-0 entry.
+            let Some(idx_entry) = index.get_path(Path::new(&path), 0) else {
+                continue;
             };
-            let bytes = match fs::read(workdir.join(&path)) {
-                Ok(b) => b,
-                Err(_) => continue, // deleted / unreadable — nothing to scan
-            };
-            let content = String::from_utf8_lossy(&bytes);
+            let blob = repo
+                .find_blob(idx_entry.id)
+                .with_context(|| format!("failed to read staged blob for {path}"))?;
+            let content = String::from_utf8_lossy(blob.content());
             if has_conflict_markers(&content) {
                 anyhow::bail!(
-                    "cannot commit: {path} still contains conflict markers; \
-                     run `aic resolve`"
+                    "cannot commit: staged {path} still contains conflict markers; \
+                     run `aic resolve` or re-stage after editing"
                 );
             }
         }
@@ -949,6 +967,38 @@ mod tests {
         assert!(
             format!("{err:#}").contains("conflict markers"),
             "expected marker message, got: {err:#}"
+        );
+    }
+
+    /// Regression: the guard must scan the staged *blob*, not the worktree
+    /// file. A user can `git add` a marker-laden file then clean the worktree
+    /// without re-staging — the index (what gets committed) still has markers,
+    /// but the worktree file is clean. Reading the worktree would let the
+    /// marker-laden blob ship; reading the index blob catches it.
+    #[test]
+    fn assert_commit_safe_scans_index_blob_not_worktree() {
+        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        // Stage a marker-laden version of a tracked file.
+        std::fs::write(
+            dir.path().join("tracked.txt"),
+            "<<<<<<< HEAD\nmine\n=======\nyours\n>>>>>>> branch\n",
+        )
+        .unwrap();
+
+        let _guard = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+
+        // Clean the worktree WITHOUT re-staging: index still holds the markers.
+        std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
+
+        let err = Git::assert_commit_safe()
+            .expect_err("guard must read the staged blob, not the worktree");
+        assert!(
+            format!("{err:#}").contains("conflict markers"),
+            "expected marker message from staged blob, got: {err:#}"
         );
     }
 }

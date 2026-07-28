@@ -164,14 +164,23 @@ impl Display {
     }
 
     /// Render the combined review diff (original worktree -> LLM resolution).
+    /// Coloring by leading sign so a glance distinguishes additions, context,
+    /// and the per-file path header:
+    ///   `+` addition → green, `-` deletion → red, ` ` context → dim,
+    ///   anything else → a bare file path acting as a section header → bold
+    ///   cyan. A path can't be mistaken for a diff line because unified-diff
+    ///   bodies only ever start with `+`/`-`/` `.
     pub fn review_section(&self, diff: &str) {
         let dim = Style::new().dim();
-        self.writeln(&self.styled("proposed resolutions:", dim));
+        self.writeln(&self.styled("proposed resolutions:", dim.clone()));
+        let header = Style::new().bold().cyan();
         for line in diff.lines() {
             let styled = match line.chars().next() {
                 Some('+') => self.styled(line, Style::new().green()),
                 Some('-') => self.styled(line, Style::new().red()),
-                _ => line.to_string(),
+                Some(' ') => self.styled(line, dim.clone()),
+                None => String::new(),
+                _ => self.styled(line, header.clone()),
             };
             self.writeln(&styled);
         }
@@ -217,25 +226,57 @@ impl Display {
         ));
     }
 
-    /// Partial: approved files staged, but some unresolved — hand off to git.
-    pub fn handoff(&self, approved: usize, unresolved: usize, state: RepoState) {
+    /// Partial: approved files staged, but some files still block finalize.
+    /// Breaks the blockers down by kind so the user knows whether to re-run
+    /// `aic resolve` (rejected/failed), retry a flaky LLM call (failed), or
+    /// resolve a binary/oversized file by hand (unresolvable). The old single
+    /// "unresolved" count conflated all three.
+    pub fn handoff(
+        &self,
+        approved: usize,
+        rejected: usize,
+        failed: usize,
+        unresolvable: usize,
+        state: RepoState,
+    ) {
         let yellow = Style::new().yellow();
+        let green = Style::new().green().bold();
         let dim = Style::new().dim();
+        let cyan = Style::new().cyan();
+
         self.writeln(&format!(
-            "\n{} {approved} resolved+staged; {unresolved} unresolved — not finalized",
+            "\n{} {approved} resolved + staged",
+            self.styled("\u{2713}", green),
+        ));
+
+        // Only list blocker categories that actually occurred.
+        let mut blockers: Vec<String> = Vec::new();
+        if rejected > 0 {
+            blockers.push(format!("{rejected} rejected"));
+        }
+        if failed > 0 {
+            blockers.push(format!("{failed} failed to resolve"));
+        }
+        if unresolvable > 0 {
+            blockers.push(format!("{unresolvable} need manual resolution"));
+        }
+        let blocker_text = if blockers.is_empty() {
+            String::from("nothing left")
+        } else {
+            blockers.join(", ")
+        };
+        self.writeln(&format!(
+            "{} not finalized — {blocker_text}",
             self.styled("\u{26A0}", yellow),
         ));
         self.writeln(&format!(
             "  {}",
             self.styled(
-                "finish the unresolved files manually, then run the matching git continue:",
+                "resolve the remaining files (or re-run `aic resolve`), then:",
                 dim,
             ),
         ));
-        self.writeln(&format!(
-            "    {}",
-            self.styled(finalize_hint(state), Style::new().cyan()),
-        ));
+        self.writeln(&format!("    {}", self.styled(finalize_hint(state), cyan)));
     }
 
     /// `aic resolve` on a clean repo.
