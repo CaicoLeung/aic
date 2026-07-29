@@ -2,6 +2,32 @@ use console::{Style, Term};
 
 use crate::git::{ConflictedFile, RepoState};
 
+/// Line-based write seam behind [`Display`].
+///
+/// Prod wires it to [`TermWrite`] (stderr via `console::Term`); tests wire it
+/// to an in-memory buffer so emitted wording can be asserted without
+/// capturing the process's real stderr. Every method on `Display` ultimately
+/// funnels through [`DisplayWrite::write_line`], so swapping the sink is the
+/// only seam needed — styling helpers stay unchanged.
+///
+/// Color capability is a property of the sink, not the environment: a sink
+/// that renders to a real terminal reports its color support via
+/// [`DisplayWrite::colors_enabled`], and a non-terminal sink (e.g. an
+/// in-memory buffer) inherits the `false` default. This keeps `Display` from
+/// probing the real stderr when its lines are routed elsewhere.
+pub trait DisplayWrite: Send + Sync {
+    /// Append a line to the sink. Implementations must be fire-and-forget:
+    /// write failures never propagate (status output, never load-bearing).
+    fn write_line(&self, line: &str);
+
+    /// Whether the sink can render ANSI color. Terminal sinks override this
+    /// to report real color support; non-terminal sinks inherit the `false`
+    /// default. `Display` caches the value once at construction.
+    fn colors_enabled(&self) -> bool {
+        false
+    }
+}
+
 /// Clean line-based terminal output — no panels, no box-drawing.
 ///
 /// Every method writes to stderr. Color-aware: when colors are disabled
@@ -11,15 +37,47 @@ use crate::git::{ConflictedFile, RepoState};
 /// Write errors are intentionally ignored: this is fire-and-forget
 /// status output to stderr (e.g. a closed pipe), never load-bearing.
 pub struct Display {
-    term: Term,
+    out: Box<dyn DisplayWrite>,
     colors: bool,
 }
 
+/// Prod sink: stderr via `console::Term`. Write errors are dropped to keep the
+/// fire-and-forget contract from [`Display`] intact.
+struct TermWrite(Term);
+
+impl DisplayWrite for TermWrite {
+    fn write_line(&self, line: &str) {
+        let _ = self.0.write_line(line);
+    }
+
+    // Colors are a property of where lines land: this sink writes to stderr,
+    // so it reports stderr's real color capability rather than letting `Display`
+    // probe the environment regardless of sink.
+    fn colors_enabled(&self) -> bool {
+        console::colors_enabled_stderr()
+    }
+}
+
 impl Display {
+    /// Prod constructor: stderr sink, color-aware, fire-and-forget. Behavior
+    /// matches the pre-seam `Display` on every axis the fire-and-forget
+    /// contract cares about — same sink (stderr via `console::Term`), same
+    /// color probe (`colors_enabled_stderr()`), write errors still ignored.
     pub fn new() -> Self {
-        let term = Term::stderr();
-        let colors = console::colors_enabled_stderr();
-        Self { term, colors }
+        Self::with(TermWrite(Term::stderr()))
+    }
+
+    /// Injectable constructor: route every emitted line through `out`. Color
+    /// capability is read from the sink itself
+    /// ([`DisplayWrite::colors_enabled`]), so a non-terminal sink never probes
+    /// the real stderr. Used by tests to capture wording; prod keeps
+    /// [`Display::new`].
+    pub fn with(out: impl DisplayWrite + 'static) -> Self {
+        let colors = out.colors_enabled();
+        Self {
+            out: Box::new(out),
+            colors,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -36,9 +94,9 @@ impl Display {
         }
     }
 
-    /// Write a line to stderr, ignoring errors.
+    /// Write a line through the seam, ignoring errors.
     fn writeln(&self, line: &str) {
-        let _ = self.term.write_line(line);
+        self.out.write_line(line);
     }
 
     // ------------------------------------------------------------------

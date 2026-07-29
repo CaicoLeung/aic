@@ -21,6 +21,7 @@
 // mutex and run on single-threaded runtimes, so the guard can't deadlock.
 #![allow(clippy::await_holding_lock)]
 
+use crate::display::{Display, DisplayWrite};
 use crate::git;
 use crate::git::tests as gh;
 use crate::{BoxFuture, Prompt, Resolver, run_commit_workflow_impl, run_resolve_workflow_impl};
@@ -115,6 +116,30 @@ fn resolver_error() -> (Resolver, Arc<Mutex<u32>>) {
     (r, calls)
 }
 
+/// Resolver that returns `"merged\n"` for every file *except* ones whose
+/// conflicted content contains `marker`, which it fails. Used by the
+/// mixed-blocker test to drive exactly one file down the `skipped_failed` arm
+/// while the other text files resolve cleanly. Includes a call counter.
+fn resolver_error_on(marker: &str) -> (Resolver, Arc<Mutex<u32>>) {
+    let calls = Arc::new(Mutex::new(0u32));
+    let calls2 = calls.clone();
+    let marker = marker.to_string();
+    let r: Resolver = Box::new(
+        move |content: String| -> BoxFuture<anyhow::Result<String>> {
+            *calls2.lock().unwrap() += 1;
+            let fail = content.contains(&marker);
+            Box::pin(async move {
+                if fail {
+                    Err(anyhow::anyhow!("LLM unreachable (stub)"))
+                } else {
+                    Ok("merged\n".to_string())
+                }
+            })
+        },
+    );
+    (r, calls)
+}
+
 /// Prompt that pops answers from a queue; panics if exhausted so an
 /// under-specified test fails loudly instead of silently defaulting.
 fn prompt_queue(answers: Vec<bool>) -> Prompt {
@@ -123,6 +148,37 @@ fn prompt_queue(answers: Vec<bool>) -> Prompt {
         Some(b) => Ok(b),
         None => panic!("prompt_queue exhausted — test did not provide enough answers"),
     })
+}
+
+// ---------------------------------------------------------------------
+// Display seam: an in-memory sink so emitted wording can be asserted.
+// ---------------------------------------------------------------------
+
+/// In-memory [`DisplayWrite`] capturing every line the workflow emits. Clones
+/// share the underlying buffer so a test can hand one clone to `Display::with`
+/// and read the lines back from the other. Most tests just want a quiet sink
+/// (via [`sink`]); the mixed-blocker test inspects the captured lines.
+#[derive(Clone, Default)]
+struct BufferWrite(Arc<Mutex<Vec<String>>>);
+
+impl BufferWrite {
+    /// Snapshot of every line written so far, in order.
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl DisplayWrite for BufferWrite {
+    fn write_line(&self, line: &str) {
+        self.0.lock().unwrap().push(line.to_string());
+    }
+}
+
+/// A `Display` backed by a fresh, discarded [`BufferWrite`] — a quiet sink for
+/// tests that don't assert on emitted wording. Keeps `cargo test` output free
+/// of real merge-conflict noise the workflow would otherwise write to stderr.
+fn sink() -> Display {
+    Display::with(BufferWrite::default())
 }
 
 // ---------------------------------------------------------------------
@@ -278,6 +334,57 @@ fn merge_oversized_and_text(dir: &Path) {
     git_in(dir, &["merge", "other"]);
 }
 
+/// Four conflicts in one merge, one of each disposition the resolve workflow
+/// can land on, so the hand-off message must carry every blocker category at
+/// once:
+///   - `tracked.txt`  resolvable text, approved   → staged
+///   - `second.txt`   resolvable text, rejected    → rejected
+///   - `third.txt`    resolvable text, LLM errors   → failed to resolve
+///   - `binary.bin`   binary conflict              → need manual resolution
+///
+/// `third.txt` carries the `LLM_FAIL` sentinel so [`resolver_error_on`] can
+/// fail exactly that file while leaving the other text files clean. Repo ends
+/// in the Merge state.
+fn merge_mixed_blockers(dir: &Path) {
+    gh::init_test_repo(dir);
+    git_in(dir, &["branch", "other"]);
+    // master side
+    std::fs::write(dir.join("tracked.txt"), "master\n").unwrap();
+    std::fs::write(dir.join("second.txt"), "from master\n").unwrap();
+    std::fs::write(dir.join("third.txt"), "LLM_FAIL master\n").unwrap();
+    std::fs::write(dir.join("binary.bin"), [0u8, 1, 2]).unwrap();
+    git_in(
+        dir,
+        &[
+            "add",
+            "tracked.txt",
+            "second.txt",
+            "third.txt",
+            "binary.bin",
+        ],
+    );
+    git_in(dir, &["commit", "-m", "master side"]);
+    // other side
+    git_in(dir, &["checkout", "other"]);
+    std::fs::write(dir.join("tracked.txt"), "other\n").unwrap();
+    std::fs::write(dir.join("second.txt"), "from other\n").unwrap();
+    std::fs::write(dir.join("third.txt"), "LLM_FAIL other\n").unwrap();
+    std::fs::write(dir.join("binary.bin"), [0u8, 3, 4]).unwrap();
+    git_in(
+        dir,
+        &[
+            "add",
+            "tracked.txt",
+            "second.txt",
+            "third.txt",
+            "binary.bin",
+        ],
+    );
+    git_in(dir, &["commit", "-m", "other side"]);
+    git_in(dir, &["checkout", "master"]);
+    git_in(dir, &["merge", "other"]);
+}
+
 // ---------------------------------------------------------------------
 // Assertion helpers.
 // ---------------------------------------------------------------------
@@ -336,7 +443,7 @@ async fn resolve_clean_repo_is_a_noop() {
     let prompt = prompt_queue(vec![]); // empty — must not be asked
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_resolve_workflow_impl(resolver, prompt).await;
+    let result = run_resolve_workflow_impl(resolver, prompt, sink()).await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
     assert!(
         seen.lock().unwrap().is_empty(),
@@ -355,7 +462,7 @@ async fn resolve_refuses_rebase_state() {
     let (resolver, seen) = resolver_recording();
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]))
+    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]), sink())
         .await
         .expect_err("rebase must be refused");
     let msg = format!("{err:#}");
@@ -382,7 +489,7 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
     let (resolver, seen) = resolver_recording();
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let err = run_commit_workflow_impl(resolver, prompt_queue(vec![false]))
+    let err = run_commit_workflow_impl(resolver, prompt_queue(vec![false]), sink())
         .await
         .expect_err("must abort when user declines resolve");
     let msg = format!("{err:#}");
@@ -410,7 +517,7 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
     // [0] = "resolve now?" yes, [1] = "apply tracked.txt?" yes
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_commit_workflow_impl(resolver, prompt_queue(vec![true, true])).await;
+    let result = run_commit_workflow_impl(resolver, prompt_queue(vec![true, true]), sink()).await;
     assert!(
         result.is_ok(),
         "full resolve via commit run should succeed: {:?}",
@@ -433,7 +540,7 @@ async fn resolve_full_flow_finalizes_merge() {
     let resolver = resolver_returning("merged\n");
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
     assert!(result.is_ok(), "happy path should succeed: {:?}", result);
 
     assert!(is_clean(dir.path()), "merge must be finalized");
@@ -457,7 +564,7 @@ async fn resolve_partial_approval_keeps_approved_staged() {
     let prompt: Prompt = Box::new(|label: &str| Ok(label.contains("tracked.txt")));
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_resolve_workflow_impl(resolver, prompt).await;
+    let result = run_resolve_workflow_impl(resolver, prompt, sink()).await;
     assert!(
         result.is_ok(),
         "partial approval handoff should not error: {:?}",
@@ -491,7 +598,7 @@ async fn resolve_skips_binary_and_stages_text() {
     let resolver = resolver_returning("merged\n");
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
     assert!(
         result.is_ok(),
         "binary skip should hand off, not error: {:?}",
@@ -528,7 +635,7 @@ async fn resolve_retries_after_markers_then_succeeds() {
         resolver_then("<<<<<<< HEAD\nbad\n=======\nworse\n>>>>>>> x\n", "merged\n");
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
     assert!(
         result.is_ok(),
         "retry-then-clean should succeed: {:?}",
@@ -552,7 +659,7 @@ async fn resolve_gives_up_when_markers_persist() {
     let (resolver, calls) = resolver_always_markers();
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]))
+    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]), sink())
         .await
         .expect_err("must bail when no file could be resolved");
     assert!(
@@ -584,7 +691,7 @@ async fn resolve_offers_finalize_when_all_manual() {
     let (resolver, seen) = resolver_recording();
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
     assert!(
         result.is_ok(),
         "manual-finalize should succeed: {:?}",
@@ -622,7 +729,7 @@ async fn resolve_finalizes_cherry_pick() {
 
     let resolver = resolver_returning("merged\n");
 
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
     assert!(
         result.is_ok(),
         "cherry-pick resolve should succeed: {:?}",
@@ -652,7 +759,7 @@ async fn resolve_finalizes_revert() {
 
     let resolver = resolver_returning("merged\n");
 
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
     assert!(
         result.is_ok(),
         "revert resolve should succeed: {:?}",
@@ -682,7 +789,7 @@ async fn resolve_skips_delete_modify_conflict() {
     assert_eq!(files[0].path, "tracked.txt");
     assert_eq!(files[0].kind, git::ConflictKind::DeleteModify);
 
-    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]))
+    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]), sink())
         .await
         .expect_err("delete/modify has no resolvable file");
     assert!(
@@ -709,7 +816,7 @@ async fn resolve_skips_oversized_and_stages_text() {
     let resolver = resolver_returning("merged\n");
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true])).await;
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
     assert!(
         result.is_ok(),
         "oversized skip should hand off, not error: {:?}",
@@ -749,7 +856,7 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
     let (resolver, calls) = resolver_error();
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]))
+    let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]), sink())
         .await
         .expect_err("must bail when the LLM call fails");
     assert!(
@@ -765,5 +872,93 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
     assert!(
         file_has_markers(dir.path(), "tracked.txt"),
         "file left untouched after LLM error"
+    );
+}
+
+// =====================================================================
+// Display seam: assert the emitted hand-off wording (issue #9).
+// =====================================================================
+
+/// Mixed-blocker scenario (1 approved + 1 rejected + 1 LLM-error + 1 binary)
+/// drives every blocker category into the hand-off message at once. Before the
+/// `DisplayWrite` seam, this wording was asserted by zero tests: the three
+/// existing single-blocker tests only assert repo state, so a regression that
+/// swapped labels, dropped a category, or mis-counted would ship green. This
+/// test captures the emitted line via [`BufferWrite`] and pins the full
+/// three-way breakdown on a single line.
+#[tokio::test]
+async fn resolve_handoff_lists_all_three_blocker_kinds() {
+    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    merge_mixed_blockers(dir.path());
+
+    // Fail exactly `third.txt` (its content carries the LLM_FAIL sentinel);
+    // the other text files resolve to "merged\n".
+    let (resolver, calls) = resolver_error_on("LLM_FAIL");
+    // Approve tracked.txt, reject second.txt — path-based so it follows the
+    // file regardless of the order conflicted_files() returns them in.
+    let prompt: Prompt = Box::new(|label: &str| Ok(label.contains("tracked.txt")));
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    let buf = BufferWrite::default();
+    let display = Display::with(buf.clone());
+    let result = run_resolve_workflow_impl(resolver, prompt, display).await;
+    assert!(
+        result.is_ok(),
+        "mixed-blocker handoff should not error: {:?}",
+        result
+    );
+
+    // --- repo state: approved staged, the other three still blocking ---
+    assert!(
+        !is_clean(dir.path()),
+        "binary + rejected + failed block finalize"
+    );
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!staged_blob_has_markers(dir.path(), "tracked.txt"));
+    assert!(!is_unmerged(dir.path(), "tracked.txt"));
+    // Rejected: untouched, still unmerged with markers.
+    assert!(file_has_markers(dir.path(), "second.txt"));
+    assert!(is_unmerged(dir.path(), "second.txt"));
+    // Failed: untouched, still unmerged with markers.
+    assert!(file_has_markers(dir.path(), "third.txt"));
+    assert!(is_unmerged(dir.path(), "third.txt"));
+    // Binary: aic can't resolve, still unmerged.
+    assert!(is_unmerged(dir.path(), "binary.bin"));
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        3,
+        "resolver runs once per resolvable text file (errors do not retry)"
+    );
+
+    // --- the whole point: the emitted hand-off line carries all three
+    // categories with correct counts, on one line. ---
+    let handoff = buf
+        .lines()
+        .into_iter()
+        .find(|l| l.contains("not finalized"))
+        .expect("expected a hand-off 'not finalized' line");
+    assert!(
+        handoff.contains("1 rejected")
+            && handoff.contains("1 failed to resolve")
+            && handoff.contains("1 need manual resolution"),
+        "hand-off line must list all three blocker kinds with counts, got: {handoff:?}"
+    );
+    // And the approved count is reported separately, not conflated.
+    assert!(
+        buf.lines()
+            .iter()
+            .any(|l| l.contains("1 resolved + staged")),
+        "expected an 'approved' line separate from the blockers, got: {:?}",
+        buf.lines()
+    );
+
+    // The buffer sink reports no color capability, so nothing it captures
+    // should carry ANSI escapes — guards the sink-derived `colors` fix.
+    assert!(
+        buf.lines().iter().all(|l| !l.contains('\u{1b}')),
+        "buffer sink must emit plain text (no ANSI), got: {:?}",
+        buf.lines()
     );
 }
