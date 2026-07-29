@@ -13,6 +13,7 @@ AI-powered git commit message generator. Analyzes your staged or unstaged change
 
 - **Multi-provider** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, xAI, Mistral, OpenRouter, Perplexity, Together, Ollama, and any OpenAI-compatible server
 - **Batch commits** — no staged files? aic splits your unstaged changes into logical atomic commits
+- **Conflict resolution** — mid-merge? `aic resolve` proposes per-file resolutions you review and approve, then finalizes the merge
 - **Interactive setup** — `aic setup` walks you through provider, API key, and model selection
 - **Conventional Commits** — messages follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) spec
 - **Configurable** — config file, environment variables, or per-override
@@ -71,12 +72,13 @@ aic
 
 ## Usage
 
-| Command      | Description                                                                                                            |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `aic`        | Generate commit messages for staged files. If nothing is staged, batch-plan all unstaged changes into logical commits. |
-| `aic setup`  | Interactive wizard to pick provider, enter API key, and select model.                                                  |
-| `aic list`   | Show resolved config: provider, model, and where each value comes from (env / config / default).                       |
-| `aic update` | Update aic to the latest version from GitHub Releases.                                                                 |
+| Command       | Description                                                                                                            |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `aic`         | Generate commit messages for staged files. If nothing is staged, batch-plan all unstaged changes into logical commits. |
+| `aic resolve` | Resolve git merge conflicts via the LLM. Proposes per-file resolutions to review, then finalizes the merge.            |
+| `aic setup`   | Interactive wizard to pick provider, enter API key, and select model.                                                  |
+| `aic list`    | Show resolved config: provider, model, and where each value comes from (env / config / default).                       |
+| `aic update`  | Update aic to the latest version from GitHub Releases.                                                                 |
 
 ## Configuration
 
@@ -129,9 +131,23 @@ aic
   ├─ staged files? → diff staged files → LLM generates message → commit
   └─ no staged?    → diff workdir → LLM splits into batches → for each batch:
                         git add → LLM generates message → commit
+
+aic resolve
+  └─ conflicted repo? → for each conflicted file:
+        LLM proposes a resolution → validate markers (retry once)
+        → review diff → apply? [y/n] → git add
+        → finalize (git --continue) when all resolved
 ```
 
 All commit messages follow Conventional Commits (`feat:`, `fix:`, `refactor:`, etc.) with an optional body.
+
+## Resolving merge conflicts
+
+Run `aic resolve` when your repo is mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. Approve the ones you trust; the rest stay untouched. When nothing is left unmerged, it runs the merge's `--continue` for you.
+
+You can also run plain `aic` in a conflicted repo — it notices and offers to hand off to resolve, and a commit guard blocks any commit that still carries conflict markers.
+
+**v1 limits:** `aic resolve` handles conflicted **merge** state — a rebase or `am` in flight is detected and refused. Binary, oversized, and delete/modify conflicts are skipped with a reason for you to resolve by hand. Finalize is all-or-nothing: `--continue` blocks on any unmerged path, and the hand-off tells you exactly what's left.
 
 ## Contributing
 
