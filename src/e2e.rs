@@ -953,4 +953,12 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
         "expected an 'approved' line separate from the blockers, got: {:?}",
         buf.lines()
     );
+
+    // The buffer sink reports no color capability, so nothing it captures
+    // should carry ANSI escapes — guards the sink-derived `colors` fix.
+    assert!(
+        buf.lines().iter().all(|l| !l.contains('\u{1b}')),
+        "buffer sink must emit plain text (no ANSI), got: {:?}",
+        buf.lines()
+    );
 }
