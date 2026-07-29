@@ -2,7 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-07-29
+
+### Features
+
+- Add AI merge-conflict resolution and commit guard
+- Enhance user feedback and fix marker detection in staged blobs
+- Add e2e test infrastructure for resolve workflow
+- Expand e2e coverage to cherry-pick/revert finalize + conflict-kind skips
+
+### Refactoring
+
+- Make writer injectable so hand-off wording can be tested (#10)
+
 ## [0.2.3] - 2026-07-26
+
+### Bug Fixes
+
+- Make gh release create idempotent on re-runs
 
 ### Refactoring
 
