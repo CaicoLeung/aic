@@ -452,6 +452,27 @@ async fn resolve_clean_repo_is_a_noop() {
     assert!(is_clean(dir.path()));
 }
 
+/// `aic` on a clean repo (nothing staged, nothing unstaged) prints the
+/// nothing-to-commit notice and returns without calling the LLM or prompting.
+#[tokio::test]
+async fn commit_clean_repo_is_a_noop() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    let (resolver, seen) = resolver_recording();
+    let prompt = prompt_queue(vec![]); // empty — must not be asked
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(resolver, prompt, sink()).await;
+    assert!(result.is_ok(), "clean repo should not error: {:?}", result);
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "LLM resolver must not run when there are no changes"
+    );
+    assert!(is_clean(dir.path()));
+}
+
 /// `aic resolve` on a rebase state is detected but refused in v1 (ADR 0005).
 #[tokio::test]
 async fn resolve_refuses_rebase_state() {

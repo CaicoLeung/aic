@@ -318,6 +318,12 @@ impl Display {
         self.writeln(&self.styled("no conflicts — nothing to resolve", dim));
     }
 
+    /// `aic` with nothing staged and nothing unstaged — no work for the LLM.
+    pub fn nothing_to_commit(&self) {
+        let dim = Style::new().dim();
+        self.writeln(&self.styled("nothing to commit — working tree clean", dim));
+    }
+
     /// `aic resolve` on a rebase/am state — detected but refused in v1.
     pub fn refused(&self, state: RepoState) {
         let red = Style::new().red().bold();

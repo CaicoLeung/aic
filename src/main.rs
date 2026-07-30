@@ -420,6 +420,11 @@ pub(crate) async fn run_commit_workflow_impl(
 
     if staged_files.is_empty() {
         let unstaged_files: Vec<_> = status.iter().filter(|f| !f.staged).collect();
+        if unstaged_files.is_empty() {
+            // Nothing staged *and* nothing unstaged — no work for the LLM.
+            display.nothing_to_commit();
+            return Ok(());
+        }
         let all_unstaged: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
 
         // Format Rust files FIRST, so the diff the model sees — and the hunk
