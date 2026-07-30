@@ -52,7 +52,7 @@ where
 }
 
 /// How many reasoning lines the "Analyzing changes" spinner keeps on screen.
-const THINKING_MAX_LINES: usize = 5;
+const THINKING_MAX_LINES: usize = 10;
 
 /// A rolling window over the model's streamed reasoning, kept to the last
 /// [`THINKING_MAX_LINES`] non-blank lines. Rendered in place under the spinner
@@ -531,36 +531,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thinking_view_keeps_last_five_lines_and_drops_blanks() {
+    fn thinking_view_keeps_last_n_lines_and_drops_blanks() {
         let mut v = ThinkingView::new();
-        for i in 1..=8 {
+        for i in 1..=12 {
             v.push(&format!("line {i}\n\n"));
         }
-        // lines 1-3 scrolled off; lines 4-8 remain (blank lines dropped).
+        // lines 1-2 scrolled off; lines 3-12 remain (blank lines dropped).
+        let mut expected = vec!["Analyzing changes".to_string()];
+        for i in 3..=12 {
+            expected.push(format!("  │ line {i}"));
+        }
         let rendered = v.render("Analyzing changes");
-        assert_eq!(
-            rendered.lines().collect::<Vec<_>>(),
-            vec![
-                "Analyzing changes",
-                "  │ line 4",
-                "  │ line 5",
-                "  │ line 6",
-                "  │ line 7",
-                "  │ line 8",
-            ]
-        );
+        assert_eq!(rendered.lines().collect::<Vec<_>>(), expected);
     }
 
     #[test]
-    fn thinking_view_shows_partial_line_and_caps_at_five() {
+    fn thinking_view_shows_partial_line_and_caps_at_max() {
         let mut v = ThinkingView::new();
-        v.push("a\nb\nc\nd\n");
-        v.push("in progress"); // no trailing newline → partial current line
+        for i in 1..=THINKING_MAX_LINES {
+            v.push(&format!("line {i}\n"));
+        }
+        v.push("in progress"); // partial current line (no trailing newline)
         let rendered = v.render("Analyzing changes");
         let visible: Vec<&str> = rendered.lines().collect();
-        // 4 complete + 1 partial = 5 reasoning lines under the title.
+        // max complete + 1 partial → render caps at THINKING_MAX_LINES lines.
         assert_eq!(visible.len(), 1 + THINKING_MAX_LINES);
         assert_eq!(visible.last(), Some(&"  │ in progress"));
+        // "line 1" scrolled off; the partial takes the 10th slot.
+        assert!(!visible.iter().any(|l| l.ends_with("line 1")));
     }
 
     #[test]
