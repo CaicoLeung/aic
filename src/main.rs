@@ -32,6 +32,16 @@ pub(crate) type Resolver = Box<dyn Fn(String) -> BoxFuture<anyhow::Result<String
 /// Erased y/n prompt: answers a labeled question. Boxed for the same reason.
 pub(crate) type Prompt = Box<dyn Fn(&str) -> anyhow::Result<bool>>;
 
+/// Erased batch planner: takes the combined unstaged diff JSON and returns the
+/// per-hunk batch plan. Boxed for the same reason as [`Resolver`] — tests swap
+/// in a stub plan without touching the LLM.
+pub(crate) type BatchPlanner =
+    Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>>>;
+/// Erased commit-message writer: takes one batch's staged diff JSON and returns
+/// its Conventional-Commits message + body. Boxed for the same reason.
+pub(crate) type CommitMessenger =
+    Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
+
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
 where
     F: Future<Output = anyhow::Result<T>>,
@@ -183,6 +193,7 @@ async fn generate_and_commit(
     paths: &[String],
     display: &Display,
     prefix: &str,
+    messenger: &CommitMessenger,
 ) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
@@ -193,14 +204,45 @@ async fn generate_and_commit(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
-    let result = with_spinner(
-        "Generating commit message",
-        generator::Generator::generate_commit_message(&diff.to_string()),
-    )
-    .await?;
+    let result = with_spinner("Generating commit message", messenger(diff.to_string())).await?;
     let hash = Git::commit(result.message.clone(), result.body.clone())?;
     display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
     Ok(())
+}
+
+/// Stage every change in one batch. Each file's selected hunks (the whole file
+/// when the plan left `hunks` empty) are applied from the diff captured before
+/// the loop, so hunk numbering stays stable across earlier commits to the same
+/// file.
+fn stage_batch_hunks(
+    batch: &generator::BatchPlanBatch,
+    raw_diffs: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    for change in &batch.changes {
+        let raw = raw_diffs
+            .get(&change.file)
+            .with_context(|| format!("no captured diff for {}", change.file))?;
+        let hunks: Vec<usize> = if change.hunks.is_empty() {
+            (1..=git::parse_file_patch(raw).hunks.len()).collect()
+        } else {
+            change.hunks.clone()
+        };
+        Git::stage_hunks(raw, &hunks)
+            .with_context(|| format!("staging hunks for {}", change.file))?;
+    }
+    Ok(())
+}
+
+/// De-duplicated file paths in a batch, in first-seen order. A file listed in
+/// several `changes` entries of one batch still produces one commit message.
+fn unique_batch_files(batch: &generator::BatchPlanBatch) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for change in &batch.changes {
+        if !paths.contains(&change.file) {
+            paths.push(change.file.clone());
+        }
+    }
+    paths
 }
 
 /// Read a y/n answer from stdin. The label is written to stderr (Display is
@@ -399,6 +441,8 @@ pub(crate) async fn run_commit_workflow_impl(
     resolve: Resolver,
     prompt: Prompt,
     display: Display,
+    planner: BatchPlanner,
+    messenger: CommitMessenger,
 ) -> anyhow::Result<()> {
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
@@ -450,45 +494,31 @@ pub(crate) async fn run_commit_workflow_impl(
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });
-        let result = analyze_changes(&diff.to_string()).await?;
+        let result = planner(diff.to_string()).await?;
 
         generator::validate_batch_plan(&result, &file_hunk_counts)
             .context("batch plan validation failed")?;
 
         let count = result.batches.len();
         for (i, batch) in result.batches.iter().enumerate() {
-            // Stage only this batch's hunks — `git add -p` style — so a single
-            // file can be committed across several batches.
-            for change in &batch.changes {
-                let raw = raw_diffs
-                    .get(&change.file)
-                    .with_context(|| format!("no captured diff for {}", change.file))?;
-                let hunks: Vec<usize> = if change.hunks.is_empty() {
-                    (1..=git::parse_file_patch(raw).hunks.len()).collect()
-                } else {
-                    change.hunks.clone()
-                };
-                Git::stage_hunks(raw, &hunks)
-                    .with_context(|| format!("staging hunks for {}", change.file))?;
-            }
-
-            // Unique files in this batch drive the message (a file may appear
-            // in more than one change within a batch).
-            let mut paths: Vec<String> = Vec::new();
-            for change in &batch.changes {
-                if !paths.contains(&change.file) {
-                    paths.push(change.file.clone());
-                }
-            }
-
             let prefix = format!("[{}/{count}]", i + 1);
-            if let Err(e) = generate_and_commit(&paths, &display, &prefix).await {
+            // Stage this batch's hunks, then generate + commit. Either step
+            // failing after earlier batches already committed leaves the repo
+            // partially committed, so both share one abort message naming how
+            // far we got and that the rest is recoverable by re-running `aic`.
+            let outcome = async {
+                stage_batch_hunks(batch, &raw_diffs)?;
+                let paths = unique_batch_files(batch);
+                generate_and_commit(&paths, &display, &prefix, &messenger).await
+            };
+            if let Err(e) = outcome.await {
                 anyhow::bail!(
-                    "failed after committing {} of {} batches. \
-                     Batch {} changes are staged but uncommitted: {e}",
-                    i,
+                    "aborted on batch {} of {} after {} batch(es) committed. \
+                     Remaining changes are still in the working tree — re-run \
+                     `aic` to continue: {e}",
+                    i + 1,
                     count,
-                    i + 1
+                    i
                 );
             }
         }
@@ -497,7 +527,7 @@ pub(crate) async fn run_commit_workflow_impl(
         format_rust_files(&paths, &display);
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         Git::add(&refs)?;
-        generate_and_commit(&paths, &display, "").await?;
+        generate_and_commit(&paths, &display, "", &messenger).await?;
     }
 
     Ok(())
@@ -510,7 +540,17 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
     let prompt: Prompt = Box::new(prompt_yes_no);
-    run_commit_workflow_impl(resolver, prompt, Display::new()).await
+    let planner: BatchPlanner = Box::new(
+        |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+            Box::pin(async move { analyze_changes(&diff).await })
+        },
+    );
+    let messenger: CommitMessenger = Box::new(
+        |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
+            Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
+        },
+    );
+    run_commit_workflow_impl(resolver, prompt, Display::new(), planner, messenger).await
 }
 
 #[tokio::main]

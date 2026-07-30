@@ -24,12 +24,16 @@
 use crate::display::{Display, DisplayWrite};
 use crate::git;
 use crate::git::tests as gh;
-use crate::{BoxFuture, Prompt, Resolver, run_commit_workflow_impl, run_resolve_workflow_impl};
+use crate::{
+    BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver, generator,
+    run_commit_workflow_impl, run_resolve_workflow_impl,
+};
 use git2::Repository;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------
 // Test seams: a boxed resolver future and a queue-backed prompt.
@@ -144,10 +148,88 @@ fn resolver_error_on(marker: &str) -> (Resolver, Arc<Mutex<u32>>) {
 /// under-specified test fails loudly instead of silently defaulting.
 fn prompt_queue(answers: Vec<bool>) -> Prompt {
     let q = Arc::new(Mutex::new(VecDeque::from(answers)));
-    Box::new(move |_label: &str| match q.lock().unwrap().pop_front() {
+    Box::new(move |_label: &str| match q.lock().pop_front() {
         Some(b) => Ok(b),
         None => panic!("prompt_queue exhausted — test did not provide enough answers"),
     })
+}
+
+/// Planner that returns the same plan regardless of input. Drives the batch
+/// loop with a fixed hunk partition so the orchestration — not the LLM — is
+/// what's under test.
+fn planner_fixed(plan: generator::BatchPlanOutput) -> BatchPlanner {
+    Box::new(
+        move |_diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+            let plan = plan.clone();
+            Box::pin(async move { Ok(plan) })
+        },
+    )
+}
+
+/// Messenger that returns the same commit message regardless of input, so the
+/// batch loop's stage + commit mechanics are exercised without an LLM.
+fn messenger_fixed(msg: &str) -> CommitMessenger {
+    let msg = msg.to_string();
+    Box::new(
+        move |_diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
+            let m = msg.clone();
+            Box::pin(async move {
+                Ok(generator::CommitOutput {
+                    message: m,
+                    body: None,
+                })
+            })
+        },
+    )
+}
+
+/// Messenger that succeeds for the first `ok_for` calls then errors, with a
+/// call counter. Drives the partial-failure path: an early batch commits, then
+/// a later batch's message step fails mid-loop.
+fn messenger_then_error(ok_for: usize) -> (CommitMessenger, Arc<Mutex<u32>>) {
+    let calls = Arc::new(Mutex::new(0u32));
+    let calls2 = calls.clone();
+    let m: CommitMessenger = Box::new(
+        move |_diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
+            let n = {
+                let mut g = calls2.lock();
+                *g += 1;
+                *g
+            };
+            Box::pin(async move {
+                if n <= ok_for as u32 {
+                    Ok(generator::CommitOutput {
+                        message: format!("ok {n}"),
+                        body: None,
+                    })
+                } else {
+                    Err(anyhow::anyhow!("messenger failure (stub)"))
+                }
+            })
+        },
+    );
+    (m, calls)
+}
+
+/// Planner stub that panics if called — for tests whose path exits before the
+/// batch-plan step, so a regression that reaches the LLM fails loudly instead
+/// of silently hitting the network.
+fn unreachable_planner() -> BatchPlanner {
+    Box::new(
+        |_diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+            Box::pin(async { panic!("BatchPlanner reached on a path that must skip the LLM") })
+        },
+    )
+}
+
+/// Messenger stub that panics if called — same purpose as
+/// [`unreachable_planner`] for the commit-message step.
+fn unreachable_messenger() -> CommitMessenger {
+    Box::new(
+        |_diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
+            Box::pin(async { panic!("CommitMessenger reached on a path that must skip the LLM") })
+        },
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -427,6 +509,29 @@ fn is_clean(dir: &Path) -> bool {
     Repository::open(dir).unwrap().state() == git2::RepositoryState::Clean
 }
 
+/// File content as recorded at a git revision (e.g. "HEAD", "HEAD~1"), via
+/// `git show`. Asserts what each batch commit actually contains.
+fn file_at_ref(dir: &Path, rev: &str, rel: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["show", &format!("{rev}:{rel}")])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Total commits reachable from HEAD.
+fn commit_count(dir: &Path) -> usize {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-list", "--count", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+}
+
 // =====================================================================
 // Tests
 // =====================================================================
@@ -464,10 +569,17 @@ async fn commit_clean_repo_is_a_noop() {
     let prompt = prompt_queue(vec![]); // empty — must not be asked
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_commit_workflow_impl(resolver, prompt, sink()).await;
+    let result = run_commit_workflow_impl(
+        resolver,
+        prompt,
+        sink(),
+        unreachable_planner(),
+        unreachable_messenger(),
+    )
+    .await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
     assert!(
-        seen.lock().unwrap().is_empty(),
+        seen.lock().is_empty(),
         "LLM resolver must not run when there are no changes"
     );
     assert!(is_clean(dir.path()));
@@ -510,18 +622,21 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
     let (resolver, seen) = resolver_recording();
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let err = run_commit_workflow_impl(resolver, prompt_queue(vec![false]), sink())
-        .await
-        .expect_err("must abort when user declines resolve");
+    let err = run_commit_workflow_impl(
+        resolver,
+        prompt_queue(vec![false]),
+        sink(),
+        unreachable_planner(),
+        unreachable_messenger(),
+    )
+    .await
+    .expect_err("must abort when user declines resolve");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("aborted") && msg.contains("mid-merge"),
         "expected abort message, got: {msg}"
     );
-    assert!(
-        seen.lock().unwrap().is_empty(),
-        "resolver must not run on decline"
-    );
+    assert!(seen.lock().is_empty(), "resolver must not run on decline");
     assert!(!is_clean(dir.path()));
 }
 
@@ -538,7 +653,14 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
     // [0] = "resolve now?" yes, [1] = "apply tracked.txt?" yes
     let _guard = gh::CwdGuard::new(dir.path());
 
-    let result = run_commit_workflow_impl(resolver, prompt_queue(vec![true, true]), sink()).await;
+    let result = run_commit_workflow_impl(
+        resolver,
+        prompt_queue(vec![true, true]),
+        sink(),
+        unreachable_planner(),
+        unreachable_messenger(),
+    )
+    .await;
     assert!(
         result.is_ok(),
         "full resolve via commit run should succeed: {:?}",
@@ -548,6 +670,142 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
     assert!(is_clean(dir.path()), "merge must be finalized");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
     assert!(!file_has_markers(dir.path(), "tracked.txt"));
+}
+
+/// Headline hunk-split behavior: one file with two unrelated changes lands as
+/// TWO atomic commits, each carrying only its assigned hunk. Drives the full
+/// batch loop (capture diff → validate → per-batch stage + commit) against a
+/// real repo with a stub plan and stub commit messages, so no LLM is contacted.
+#[tokio::test]
+async fn commit_splits_one_file_across_two_batches() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // Two change sites far enough apart that git emits two separate hunks.
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}c0\n");
+    let changed = format!("a1\n{pad}c1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    // Stub plan: split the single file's two hunks across two batches.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![1],
+                }],
+                reason: Some("change a".into()),
+            },
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![2],
+                }],
+                reason: Some("change c".into()),
+            },
+        ],
+    };
+    let _g = gh::CwdGuard::new(dir.path());
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: stub"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "two-batch split should succeed: {:?}",
+        result
+    );
+
+    // initial + base + 2 batch commits.
+    assert_eq!(commit_count(dir.path()), 4);
+    // Batch 1 (HEAD~1): only hunk 1 (a1) applied; hunk 2 (c1) still absent.
+    let after_batch1 = file_at_ref(dir.path(), "HEAD~1", "tracked.txt");
+    assert!(after_batch1.contains("a1"), "batch 1 must include hunk 1");
+    assert!(
+        !after_batch1.contains("c1"),
+        "batch 1 must NOT include hunk 2"
+    );
+    // Batch 2 (HEAD): both hunks present, working tree clean.
+    let after_batch2 = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(after_batch2.contains("a1") && after_batch2.contains("c1"));
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean at the end"
+    );
+}
+
+/// A mid-loop failure (here: the 2nd batch's message step errors after batch 1
+/// already committed) must abort with the unified message naming how many
+/// batches committed — and those earlier commits must persist in the repo.
+/// Guards the [important] partial-failure UX contract.
+#[tokio::test]
+async fn commit_batch_loop_aborts_after_partial_commit() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}c0\n");
+    let changed = format!("a1\n{pad}c1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    let plan = generator::BatchPlanOutput {
+        batches: vec![
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![1],
+                }],
+                reason: Some("change a".into()),
+            },
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![2],
+                }],
+                reason: Some("change c".into()),
+            },
+        ],
+    };
+    let (messenger, calls) = messenger_then_error(1); // batch 1 ok, batch 2 fails
+    let _g = gh::CwdGuard::new(dir.path());
+    let err = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger,
+    )
+    .await
+    .expect_err("must abort when a later batch fails");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("aborted on batch 2"),
+        "expected batch-2 abort, got: {msg}"
+    );
+    assert!(
+        msg.contains("1 batch(es) committed"),
+        "expected 1 committed, got: {msg}"
+    );
+    assert_eq!(*calls.lock(), 2, "messenger called once per batch");
+    // Batch 1 DID commit — its hunk is in HEAD despite the later failure; the
+    // failed batch 2's hunk is staged but NOT committed.
+    let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(head.contains("a1"), "batch 1 must be committed");
+    assert!(!head.contains("c1"), "batch 2 must NOT be committed");
 }
 
 /// Marquee happy path: one content conflict → resolver → review → approve →
