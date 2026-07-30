@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.5] - 2026-07-30
+
+### Features
+
+- Per-hunk batch splitting with a live reasoning view (#12)
+
+### Documentation
+
+- Document aic resolve for v0.3.0 (#11)
+
 ## [0.3.0] - 2026-07-29
 
 ### Features
