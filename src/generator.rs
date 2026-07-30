@@ -121,12 +121,21 @@ impl Generator {
             .await
     }
 
-    pub async fn split_patch(diff: &str) -> anyhow::Result<BatchPlanOutput> {
+    /// Split the workdir diff into logical commit batches, streaming the
+    /// model's reasoning to `on_reasoning` as it thinks. We stream the raw
+    /// completion (rather than `prompt_typed`) so reasoning tokens are
+    /// surfaced live; the system prompt already demands strict JSON, so we
+    /// parse the accumulated text ourselves.
+    pub async fn split_patch_streaming(
+        diff: &str,
+        on_reasoning: impl FnMut(&str),
+    ) -> anyhow::Result<BatchPlanOutput> {
         let p = PromptConfig::default().batch_plan_prompt;
-        LLM::from_env()?
+        let raw = LLM::from_env()?
             .agent(&p)
-            .schema::<BatchPlanOutput>(diff)
-            .await
+            .stream_with_reasoning(diff, on_reasoning)
+            .await?;
+        parse_json_response::<BatchPlanOutput>(&raw)
     }
 
     /// Resolve one conflicted file. The LLM returns the full marker-free file
@@ -163,9 +172,49 @@ fn strip_code_fence(mut s: &str) -> &str {
     s.trim()
 }
 
+/// Parse a JSON-structured LLM response, tolerating the stray prose or code
+/// fence models occasionally emit around the payload. Strips a wrapping
+/// ```` ``` ````-fence, jumps to the first value start (skipping any leading
+/// prose), and lets serde_json's streaming deserializer parse exactly one value
+/// — so trailing commentary is ignored without us hand-rolling brace matching.
+fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> anyhow::Result<T> {
+    let body = strip_code_fence(raw);
+    let start = body.find(['{', '[']).unwrap_or(0);
+    let mut stream =
+        serde_json::Deserializer::from_str(body[start..].trim_start()).into_iter::<T>();
+    match stream.next() {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(e)) => anyhow::bail!("failed to parse LLM JSON response: {e}\n--- raw ---\n{raw}"),
+        None => anyhow::bail!("LLM response contained no JSON value"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_json_response_ignores_leading_prose_and_trailing_junk() {
+        // Fence sits inside leading prose (so strip_code_fence can't help);
+        // jump-to-`{` + serde_json's streaming parser handle both ends.
+        let raw = "Here is the plan:\n```json\n{\"batches\": []}\n```\ndone";
+        let out: BatchPlanOutput = parse_json_response(raw).unwrap();
+        assert!(out.batches.is_empty());
+    }
+
+    #[test]
+    fn parse_json_response_handles_escaped_quotes() {
+        let raw =
+            r#"{"batches": [{"changes": [{"file": "a\"b.rs", "hunks": []}], "reason": "x"}]}"#;
+        let out: BatchPlanOutput = parse_json_response(raw).unwrap();
+        assert_eq!(out.batches[0].changes[0].file, "a\"b.rs");
+    }
+
+    #[test]
+    fn parse_json_response_returns_err_when_no_json() {
+        let res: anyhow::Result<BatchPlanOutput> = parse_json_response("no json here at all");
+        assert!(res.is_err());
+    }
 
     fn change(file: &str, hunks: &[usize]) -> BatchChange {
         BatchChange {
