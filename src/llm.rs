@@ -429,6 +429,42 @@ impl LLMAgent {
         Ok(output)
     }
 
+    /// Like [`Self::stream`], but routes the model's "thinking"/reasoning
+    /// deltas to `on_reasoning` instead of printing them, and returns only the
+    /// accumulated assistant text. Providers that emit no reasoning (e.g. plain
+    /// completions, Ollama) simply produce text and never call `on_reasoning`.
+    pub async fn stream_with_reasoning(
+        &self,
+        prompt: &str,
+        mut on_reasoning: impl FnMut(&str),
+    ) -> Result<String> {
+        let mut output = String::new();
+        with_agent!(self, agent, {
+            let mut stream = agent.stream_prompt(prompt).await;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::Text(Text { text }),
+                    )) => output.push_str(&text),
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                    )) => on_reasoning(&reasoning),
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::Reasoning(r),
+                    )) => {
+                        let text = r.display_text();
+                        if !text.is_empty() {
+                            on_reasoning(&text);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => anyhow::bail!("Stream error: {e}"),
+                }
+            }
+        });
+        Ok(output)
+    }
+
     pub async fn schema<T>(&self, prompt: &str) -> Result<T>
     where
         T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,

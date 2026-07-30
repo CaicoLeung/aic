@@ -63,6 +63,53 @@ pub fn parse_diff_blocks(diff: &str) -> Vec<DiffBlock> {
     blocks
 }
 
+/// A single-file unified diff split into its stable header and raw `@@` hunks.
+///
+/// Preserves enough of the original patch text to reconstruct a partial patch
+/// (a subset of hunks) for `git apply --cached` — the non-interactive analogue
+/// of `git add -p`. Hunk order matches the diff, so a 1-based index into
+/// `hunks` is a stable handle the LLM can reference.
+#[derive(Debug, Clone)]
+pub struct FilePatch {
+    /// Lines before the first `@@` hunk header: `diff --git`, `index`,
+    /// `---`, `+++` (and any leading noise).
+    pub header: String,
+    /// Each hunk's full text, starting at its `@@ … @@` line and including
+    /// every body line, in file order.
+    pub hunks: Vec<String>,
+}
+
+/// Parse a single-file unified diff into its header and raw hunks.
+pub fn parse_file_patch(raw: &str) -> FilePatch {
+    let mut header = String::new();
+    let mut hunks: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+
+    for line in raw.lines() {
+        if line.starts_with("@@") {
+            if let Some(prev) = current.take() {
+                hunks.push(prev);
+            }
+            current = Some(String::new());
+        }
+        match &mut current {
+            Some(hunk) => {
+                hunk.push_str(line);
+                hunk.push('\n');
+            }
+            None => {
+                header.push_str(line);
+                header.push('\n');
+            }
+        }
+    }
+    if let Some(prev) = current {
+        hunks.push(prev);
+    }
+
+    FilePatch { header, hunks }
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct FileStatus {
     pub path: String,
@@ -348,6 +395,65 @@ impl Git {
         index.write().context("failed to write index")?;
         Ok(())
     }
+    /// Stage a subset of one file's hunks into the index — the non-interactive
+    /// analogue of `git add -p`. `raw_diff` is the file's original workdir-vs-
+    /// HEAD diff (captured once so hunk numbering stays stable across commits
+    /// to the same file); `hunk_indices` are 1-based positions in that diff's
+    /// hunk order. The selected hunks are rebuilt into a patch and applied with
+    /// `git apply --cached`, which relocates each hunk by its context lines —
+    /// so it still lands correctly after an earlier batch's commit shifted line
+    /// numbers.
+    pub fn stage_hunks(raw_diff: &str, hunk_indices: &[usize]) -> anyhow::Result<()> {
+        let patch = parse_file_patch(raw_diff);
+        let mut body = patch.header;
+        for &idx in hunk_indices {
+            let i = idx
+                .checked_sub(1)
+                .context("hunk indices are 1-based and must be >= 1")?;
+            let hunk = patch.hunks.get(i).with_context(|| {
+                format!(
+                    "hunk {idx} is out of range (file has {} hunk(s))",
+                    patch.hunks.len()
+                )
+            })?;
+            body.push_str(hunk);
+        }
+
+        let mut child = Command::new("git")
+            .args(["apply", "--cached", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("failed to spawn `git apply --cached`")?;
+        {
+            use std::io::Write as _;
+            let mut stdin = child
+                .stdin
+                .take()
+                .context("failed to open stdin for `git apply --cached`")?;
+            stdin
+                .write_all(body.as_bytes())
+                .context("failed to write patch to `git apply --cached`")?;
+            // stdin drops here → git sees EOF and applies the patch.
+        }
+        let output = child
+            .wait_with_output()
+            .context("failed to wait on `git apply --cached`")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.trim();
+            anyhow::bail!(
+                "git apply --cached rejected the selected hunks{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                }
+            );
+        }
+        Ok(())
+    }
 
     pub fn commit(message: String, body: Option<String>) -> anyhow::Result<String> {
         Self::assert_commit_safe()?;
@@ -555,8 +661,11 @@ pub fn format_diff_scoped(diff: &str, file_path: &str) -> String {
         let block = &blocks[i];
         let end = new_end(block.new_start, block.new_count);
         out.push_str(&format!(
-            "[{}] lines {}-{}\n",
-            block.header, block.new_start, end
+            "[{}] hunk {}, lines {}-{}\n",
+            block.header,
+            i + 1,
+            block.new_start,
+            end
         ));
         for line in &block.lines {
             out.push_str(line);
@@ -661,8 +770,8 @@ fn classify_worktree(repo: &Repository, path: &str) -> ConflictKind {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     pub(crate) struct CwdGuard {
         original: PathBuf,
@@ -704,10 +813,80 @@ pub(crate) mod tests {
     /// Parallel CwdGuard tests race on the global CWD and intermittently resolve
     /// the wrong repository, so any test that chdir()s must hold this lock.
     pub(crate) static GIT_CWD_MUTEX: Mutex<()> = Mutex::new(());
+    #[test]
+    fn parse_file_patch_splits_header_and_hunks() {
+        let raw = "diff --git a/f.rs b/f.rs\n\
+index 1..2 100644\n\
+--- a/f.rs\n\
++++ b/f.rs\n\
+@@ -1,3 +1,3 @@\n\
+ ctx\n\
+-old\n\
++new\n\
+ ctx\n\
+@@ -10,3 +10,3 @@ fn b\n\
+ ctx\n\
+-old2\n\
++new2\n\
+ ctx\n";
+        let patch = parse_file_patch(raw);
+        assert!(patch.header.starts_with("diff --git"));
+        assert!(
+            !patch.header.contains("@@"),
+            "header must not include hunks"
+        );
+        assert_eq!(patch.hunks.len(), 2);
+        assert!(patch.hunks[0].starts_with("@@ -1,3 +1,3 @@"));
+        assert!(patch.hunks[1].starts_with("@@ -10,3 +10,3 @@ fn b"));
+    }
+
+    /// Core of the hunk-split feature: stage only some of a file's hunks via
+    /// `git apply --cached`, then confirm the index holds exactly those hunks.
+    #[test]
+    fn stage_hunks_stages_only_selected_hunk() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        // A base with two change sites far enough apart that git emits two
+        // separate hunks (>= ~6 unchanged lines between them).
+        let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+        let base = format!("a0\n{pad}c0\n");
+        let changed = format!("a1\n{pad}c1\n");
+        std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+        {
+            let _g = CwdGuard::new(dir.path());
+            Git::add(&["tracked.txt"]).unwrap();
+            Git::commit("base".into(), None).unwrap();
+        }
+        std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+        let _g = CwdGuard::new(dir.path());
+        let raw = Git::diff_workdir(Some("tracked.txt")).unwrap();
+        let patch = parse_file_patch(&raw);
+        assert_eq!(patch.hunks.len(), 2, "expected two separate hunks");
+
+        // Stage ONLY hunk 1; hunk 2 must stay unstaged.
+        Git::stage_hunks(&raw, &[1]).unwrap();
+        let staged = Git::diff(Some("tracked.txt")).unwrap();
+        assert!(
+            staged.contains("a1"),
+            "staged index must include hunk 1 (a1)"
+        );
+        assert!(
+            !staged.contains("c1"),
+            "staged index must NOT include hunk 2 (c1)"
+        );
+
+        // Now stage hunk 2 as well and confirm both are present.
+        Git::stage_hunks(&raw, &[2]).unwrap();
+        let staged = Git::diff(Some("tracked.txt")).unwrap();
+        assert!(staged.contains("a1") && staged.contains("c1"));
+    }
 
     #[test]
     fn diff_workdir_returns_untracked_content() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -723,7 +902,7 @@ pub(crate) mod tests {
 
     #[test]
     fn diff_workdir_returns_modified_content() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -739,7 +918,7 @@ pub(crate) mod tests {
 
     #[test]
     fn diff_workdir_returns_deleted_content() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -758,7 +937,7 @@ pub(crate) mod tests {
     /// NotFound for deleted files — breaking the whole unstaged-deletion flow.
     #[test]
     fn add_stages_working_tree_deletion() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -785,7 +964,7 @@ pub(crate) mod tests {
     /// and the commit would report success while missing a file.
     #[test]
     fn add_rejects_untracked_absent_path() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -804,7 +983,7 @@ pub(crate) mod tests {
     /// `Git::diff` after staging a removal.
     #[test]
     fn diff_returns_content_for_staged_deletion() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -918,7 +1097,7 @@ pub(crate) mod tests {
 
     #[test]
     fn conflicted_files_classifies_content_conflict() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
         make_content_conflict(dir.path());
@@ -934,7 +1113,7 @@ pub(crate) mod tests {
 
     #[test]
     fn assert_commit_safe_blocks_mid_merge() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
         make_content_conflict(dir.path());
@@ -949,7 +1128,7 @@ pub(crate) mod tests {
 
     #[test]
     fn assert_commit_safe_blocks_staged_markers() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -977,7 +1156,7 @@ pub(crate) mod tests {
     /// marker-laden blob ship; reading the index blob catches it.
     #[test]
     fn assert_commit_safe_scans_index_blob_not_worktree() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 

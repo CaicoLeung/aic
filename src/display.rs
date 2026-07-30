@@ -113,55 +113,30 @@ impl Display {
         self.writeln(&msg);
     }
 
-    /// Batch plan summary shown when unstaged changes are split into
-    /// logical commits.
-    pub fn batch_summary(&self, batches: &[BatchSummary<'_>]) {
-        let count = batches.len();
-        if count == 0 {
-            return;
-        }
-
-        let label = match count {
-            1 => "1 commit planned:".to_string(),
-            n => format!("{n} commits planned:"),
-        };
-        self.writeln(&label);
-
-        for (i, b) in batches.iter().enumerate() {
-            let reason_part = b.reason.map(|r| format!("[{r}] ")).unwrap_or_default();
-            let file_part = format_files_preview(b.files);
-            let line = format!("  {}. {}{}", i + 1, reason_part, file_part);
-            self.writeln(&line);
-        }
-
-        self.writeln(""); // blank separator
-    }
-
     /// Commit-completion line — shown after each commit.
     ///
     /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
     /// pass `""` for single-commit or staged workflows.
     pub fn commit_line(&self, hash: &str, message: &str, body: Option<&str>, prefix: &str) {
-        let green_bold = Style::new().green().bold();
-        let dim = Style::new().dim();
+        let gray = Style::new().true_color(138, 143, 159);
 
         // Main line: [prefix] ✓ <hash> <message>
-        let check = self.styled("\u{2713}", green_bold.clone());
-        let hash_styled = self.styled(hash, Style::new().cyan());
-        let msg_styled = self.styled(message, green_bold);
+        let check = self.styled("\u{2713}", Style::new().green().bold());
+        let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
+        let msg_styled = self.styled(message, Style::new().true_color(255, 255, 255).bold());
         let pre = if prefix.is_empty() {
             String::new()
         } else {
-            format!("{prefix} ")
+            format!("{} ", self.styled(prefix, gray.clone()))
         };
         self.writeln(&format!("{pre}{check} {hash_styled} {msg_styled}"));
 
-        // Optional body — indented, dim
+        // Optional body — indented, gray
         if let Some(b) = body {
             let trimmed = b.trim();
             if !trimmed.is_empty() {
                 for bline in trimmed.lines() {
-                    self.writeln(&format!("  {}", self.styled(bline, dim.clone())));
+                    self.writeln(&format!("  {}", self.styled(bline, gray.clone())));
                 }
             }
         }
@@ -343,6 +318,12 @@ impl Display {
         self.writeln(&self.styled("no conflicts — nothing to resolve", dim));
     }
 
+    /// `aic` with nothing staged and nothing unstaged — no work for the LLM.
+    pub fn nothing_to_commit(&self) {
+        let dim = Style::new().dim();
+        self.writeln(&self.styled("nothing to commit — working tree clean", dim));
+    }
+
     /// `aic resolve` on a rebase/am state — detected but refused in v1.
     pub fn refused(&self, state: RepoState) {
         let red = Style::new().red().bold();
@@ -378,26 +359,9 @@ impl Default for Display {
     }
 }
 
-/// A batch's files and optional reason, passed to [`Display::batch_summary`].
-pub struct BatchSummary<'a> {
-    pub files: &'a [String],
-    pub reason: Option<&'a str>,
-}
-
 // ------------------------------------------------------------------
 // Internal formatting helpers
 // ------------------------------------------------------------------
-
-/// Compact one-file preview for batch-summary lines.
-fn format_files_preview(files: &[String]) -> String {
-    if files.is_empty() {
-        return String::new();
-    }
-    if files.len() == 1 {
-        return files[0].clone();
-    }
-    format!("{} (+{} more)", files[0], files.len() - 1)
-}
 
 /// The git command a user runs to finalize a state by hand, for hand-off /
 /// refuse messages. Mirrors `RepoState::finalize_invocation` but as a single
@@ -418,23 +382,86 @@ fn finalize_hint(state: RepoState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
-    #[test]
-    fn file_preview_empty() {
-        assert_eq!(format_files_preview(&[]), "");
+    /// Forces `console` to emit ANSI escapes for the guard's lifetime,
+    /// restoring the prior state on drop. `console::Style` only renders
+    /// escapes when the global `colors_enabled()` is true; in the test runner
+    /// stdout isn't a TTY, so we flip it to observe the truecolor bytes. Safe
+    /// here: no other test in this crate renders console styles, so the global
+    /// can't race a concurrent assertion.
+    struct ColorGuard {
+        prev: bool,
+    }
+    impl ColorGuard {
+        fn force() -> Self {
+            let prev = console::colors_enabled();
+            console::set_colors_enabled(true);
+            ColorGuard { prev }
+        }
+    }
+    impl Drop for ColorGuard {
+        fn drop(&mut self) {
+            console::set_colors_enabled(self.prev);
+        }
+    }
+
+    /// In-memory sink: shares its line buffer via `Arc` so the test can read
+    /// what `Display` wrote after the fact. `colors_enabled` is configurable to
+    /// exercise both the styled and plain branches.
+    struct Buf {
+        colors: bool,
+        lines: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl DisplayWrite for Buf {
+        fn write_line(&self, line: &str) {
+            self.lines.lock().push(line.to_string());
+        }
+        fn colors_enabled(&self) -> bool {
+            self.colors
+        }
     }
 
     #[test]
-    fn file_preview_one() {
-        assert_eq!(format_files_preview(&["foo.rs".into()]), "foo.rs");
+    fn plain_when_colors_disabled() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
+        let got = lines.lock().clone();
+        // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
+        assert_eq!(got[0], "[1/3] \u{2713} abc1234 feat: add thing");
+        assert_eq!(got[1], "  body line");
     }
 
     #[test]
-    fn file_preview_many() {
-        let files: Vec<String> = ["a.rs", "b.rs", "c.rs"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(format_files_preview(&files), "a.rs (+2 more)");
+    fn truecolor_when_colors_enabled() {
+        let _guard = ColorGuard::force();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: true,
+            lines: lines.clone(),
+        });
+        d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
+        let joined = lines.lock().join("\n");
+        // hash #f3b340, subject #ffffff, body + prefix gray #8a8f9f.
+        assert!(
+            joined.contains("243;179;64"),
+            "hash color missing: {joined:?}"
+        );
+        assert!(
+            joined.contains("255;255;255"),
+            "subject color missing: {joined:?}"
+        );
+        assert!(
+            joined.contains("138;143;159"),
+            "gray color missing: {joined:?}"
+        );
+        // [n/m] prefix text survives styling (format kept, not "n.").
+        assert!(joined.contains("[1/3]"), "prefix text missing: {joined:?}");
     }
 }
