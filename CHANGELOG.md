@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.6] - 2026-07-30
+
+### Features
+
+- Streaming multi-batch commit splitting with testable orchestration (#13)
+
 ## [0.3.5] - 2026-07-30
 
 ### Features
