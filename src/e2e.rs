@@ -62,7 +62,7 @@ fn resolver_always_markers() -> (Resolver, Arc<Mutex<u32>>) {
     let marker = "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\n".to_string();
     let r: Resolver = Box::new(
         move |_content: String| -> BoxFuture<anyhow::Result<String>> {
-            *calls2.lock().unwrap() += 1;
+            *calls2.lock() += 1;
             let m = marker.clone();
             Box::pin(async move { Ok(m) })
         },
@@ -80,7 +80,7 @@ fn resolver_then(first: &str, then: &str) -> (Resolver, Arc<Mutex<u32>>) {
     let r: Resolver = Box::new(
         move |_content: String| -> BoxFuture<anyhow::Result<String>> {
             let n = {
-                let mut g = calls2.lock().unwrap();
+                let mut g = calls2.lock();
                 *g += 1;
                 *g
             };
@@ -98,7 +98,7 @@ fn resolver_recording() -> (Resolver, Arc<Mutex<Vec<String>>>) {
     let seen2 = seen.clone();
     let r: Resolver = Box::new(
         move |content: String| -> BoxFuture<anyhow::Result<String>> {
-            seen2.lock().unwrap().push(content);
+            seen2.lock().push(content);
             Box::pin(async move { Ok("resolved\n".to_string()) })
         },
     );
@@ -113,7 +113,7 @@ fn resolver_error() -> (Resolver, Arc<Mutex<u32>>) {
     let calls2 = calls.clone();
     let r: Resolver = Box::new(
         move |_content: String| -> BoxFuture<anyhow::Result<String>> {
-            *calls2.lock().unwrap() += 1;
+            *calls2.lock() += 1;
             Box::pin(async { Err(anyhow::anyhow!("LLM unreachable (stub)")) })
         },
     );
@@ -130,7 +130,7 @@ fn resolver_error_on(marker: &str) -> (Resolver, Arc<Mutex<u32>>) {
     let marker = marker.to_string();
     let r: Resolver = Box::new(
         move |content: String| -> BoxFuture<anyhow::Result<String>> {
-            *calls2.lock().unwrap() += 1;
+            *calls2.lock() += 1;
             let fail = content.contains(&marker);
             Box::pin(async move {
                 if fail {
@@ -246,13 +246,13 @@ struct BufferWrite(Arc<Mutex<Vec<String>>>);
 impl BufferWrite {
     /// Snapshot of every line written so far, in order.
     fn lines(&self) -> Vec<String> {
-        self.0.lock().unwrap().clone()
+        self.0.lock().clone()
     }
 }
 
 impl DisplayWrite for BufferWrite {
     fn write_line(&self, line: &str) {
-        self.0.lock().unwrap().push(line.to_string());
+        self.0.lock().push(line.to_string());
     }
 }
 
@@ -551,7 +551,7 @@ async fn resolve_clean_repo_is_a_noop() {
     let result = run_resolve_workflow_impl(resolver, prompt, sink()).await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
     assert!(
-        seen.lock().unwrap().is_empty(),
+        seen.lock().is_empty(),
         "resolver must not run on clean repo"
     );
     assert!(is_clean(dir.path()));
@@ -604,7 +604,7 @@ async fn resolve_refuses_rebase_state() {
         "expected rebase refusal, got: {msg}"
     );
     assert!(
-        seen.lock().unwrap().is_empty(),
+        seen.lock().is_empty(),
         "resolver must not run on refused state"
     );
     assert!(!is_clean(dir.path()), "rebase must not be finalized");
@@ -921,7 +921,7 @@ async fn resolve_retries_after_markers_then_succeeds() {
         result
     );
 
-    assert_eq!(*calls.lock().unwrap(), 2, "exactly one retry (2 calls)");
+    assert_eq!(*calls.lock(), 2, "exactly one retry (2 calls)");
     assert!(is_clean(dir.path()), "merge must be finalized after retry");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
 }
@@ -945,7 +945,7 @@ async fn resolve_gives_up_when_markers_persist() {
         format!("{err:#}").contains("no files could be resolved"),
         "expected give-up message, got: {err:#}"
     );
-    assert_eq!(*calls.lock().unwrap(), 2, "one attempt + one retry");
+    assert_eq!(*calls.lock(), 2, "one attempt + one retry");
     assert!(!is_clean(dir.path()), "merge must not be finalized");
     assert!(
         file_has_markers(dir.path(), "tracked.txt"),
@@ -977,7 +977,7 @@ async fn resolve_offers_finalize_when_all_manual() {
         result
     );
     assert!(
-        seen.lock().unwrap().is_empty(),
+        seen.lock().is_empty(),
         "resolver must not run when nothing's unmerged"
     );
     assert!(is_clean(dir.path()), "merge must be finalized");
@@ -1076,7 +1076,7 @@ async fn resolve_skips_delete_modify_conflict() {
         "expected bail, got: {err:#}"
     );
     assert!(
-        seen.lock().unwrap().is_empty(),
+        seen.lock().is_empty(),
         "resolver must not run on a DeleteModify file"
     );
     assert!(!is_clean(dir.path()), "merge must not be finalized");
@@ -1143,7 +1143,7 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
         "expected bail, got: {err:#}"
     );
     assert_eq!(
-        *calls.lock().unwrap(),
+        *calls.lock(),
         1,
         "resolver called once; errors do not retry"
     );
@@ -1206,7 +1206,7 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
     assert!(is_unmerged(dir.path(), "binary.bin"));
 
     assert_eq!(
-        *calls.lock().unwrap(),
+        *calls.lock(),
         3,
         "resolver runs once per resolvable text file (errors do not retry)"
     );
