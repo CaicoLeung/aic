@@ -435,7 +435,7 @@ fn is_clean(dir: &Path) -> bool {
 /// or the prompt.
 #[tokio::test]
 async fn resolve_clean_repo_is_a_noop() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -455,7 +455,7 @@ async fn resolve_clean_repo_is_a_noop() {
 /// `aic resolve` on a rebase state is detected but refused in v1 (ADR 0005).
 #[tokio::test]
 async fn resolve_refuses_rebase_state() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     rebase_conflict(dir.path());
 
@@ -482,7 +482,7 @@ async fn resolve_refuses_rebase_state() {
 /// or the normal commit flow.
 #[tokio::test]
 async fn commit_run_auto_detect_aborts_when_user_declines() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
@@ -509,7 +509,7 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
 /// through the commit-workflow entry point.
 #[tokio::test]
 async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
@@ -533,7 +533,7 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
 /// finalize. Repo ends clean, file holds the resolution, no markers remain.
 #[tokio::test]
 async fn resolve_full_flow_finalizes_merge() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
@@ -553,7 +553,7 @@ async fn resolve_full_flow_finalizes_merge() {
 /// markers; the merge is *not* finalized (git's `--continue` would block).
 #[tokio::test]
 async fn resolve_partial_approval_keeps_approved_staged() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_two_conflicts(dir.path());
 
@@ -591,7 +591,7 @@ async fn resolve_partial_approval_keeps_approved_staged() {
 /// staged — partial progress is preserved (ADR 0005).
 #[tokio::test]
 async fn resolve_skips_binary_and_stages_text() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_text_and_binary(dir.path());
 
@@ -627,7 +627,7 @@ async fn resolve_skips_binary_and_stages_text() {
 /// first call, clean content on the retry. The file is resolved + finalized.
 #[tokio::test]
 async fn resolve_retries_after_markers_then_succeeds() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
@@ -652,7 +652,7 @@ async fn resolve_retries_after_markers_then_succeeds() {
 /// "no files could be resolved" message.
 #[tokio::test]
 async fn resolve_gives_up_when_markers_persist() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
@@ -679,7 +679,7 @@ async fn resolve_gives_up_when_markers_persist() {
 /// finalize. The resolver must not be invoked.
 #[tokio::test]
 async fn resolve_offers_finalize_when_all_manual() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
@@ -715,7 +715,7 @@ async fn resolve_offers_finalize_when_all_manual() {
 /// that `finalize_invocation` maps the enum (unit-tested in git.rs).
 #[tokio::test]
 async fn resolve_finalizes_cherry_pick() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     cherry_pick_conflict(dir.path());
 
@@ -745,7 +745,7 @@ async fn resolve_finalizes_cherry_pick() {
 /// `git revert --continue`; verifies the Revert state is cleared in a real repo.
 #[tokio::test]
 async fn resolve_finalizes_revert() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     revert_conflict(dir.path());
 
@@ -777,7 +777,7 @@ async fn resolve_finalizes_revert() {
 /// resolution).
 #[tokio::test]
 async fn resolve_skips_delete_modify_conflict() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_delete_modify_conflict(dir.path());
 
@@ -809,7 +809,7 @@ async fn resolve_skips_delete_modify_conflict() {
 /// the oversized file.
 #[tokio::test]
 async fn resolve_skips_oversized_and_stages_text() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_oversized_and_text(dir.path());
 
@@ -849,7 +849,7 @@ async fn resolve_skips_oversized_and_stages_text() {
 /// not trigger the marker-retry path (only marker-laden `Ok` does).
 #[tokio::test]
 async fn resolve_llm_error_bails_when_only_file_fails() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
@@ -888,7 +888,7 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
 /// three-way breakdown on a single line.
 #[tokio::test]
 async fn resolve_handoff_lists_all_three_blocker_kinds() {
-    let _lock = gh::GIT_CWD_MUTEX.lock().unwrap();
+    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_mixed_blockers(dir.path());
 

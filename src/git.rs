@@ -770,8 +770,8 @@ fn classify_worktree(repo: &Repository, path: &str) -> ConflictKind {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     pub(crate) struct CwdGuard {
         original: PathBuf,
@@ -902,7 +902,7 @@ index 1..2 100644\n\
 
     #[test]
     fn diff_workdir_returns_modified_content() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -918,7 +918,7 @@ index 1..2 100644\n\
 
     #[test]
     fn diff_workdir_returns_deleted_content() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -937,7 +937,7 @@ index 1..2 100644\n\
     /// NotFound for deleted files — breaking the whole unstaged-deletion flow.
     #[test]
     fn add_stages_working_tree_deletion() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -964,7 +964,7 @@ index 1..2 100644\n\
     /// and the commit would report success while missing a file.
     #[test]
     fn add_rejects_untracked_absent_path() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -983,7 +983,7 @@ index 1..2 100644\n\
     /// `Git::diff` after staging a removal.
     #[test]
     fn diff_returns_content_for_staged_deletion() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1097,7 +1097,7 @@ index 1..2 100644\n\
 
     #[test]
     fn conflicted_files_classifies_content_conflict() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
         make_content_conflict(dir.path());
@@ -1113,7 +1113,7 @@ index 1..2 100644\n\
 
     #[test]
     fn assert_commit_safe_blocks_mid_merge() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
         make_content_conflict(dir.path());
@@ -1128,7 +1128,7 @@ index 1..2 100644\n\
 
     #[test]
     fn assert_commit_safe_blocks_staged_markers() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1156,7 +1156,7 @@ index 1..2 100644\n\
     /// marker-laden blob ship; reading the index blob catches it.
     #[test]
     fn assert_commit_safe_scans_index_blob_not_worktree() {
-        let _lock = GIT_CWD_MUTEX.lock().unwrap();
+        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
