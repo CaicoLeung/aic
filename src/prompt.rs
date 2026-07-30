@@ -37,34 +37,41 @@ You are an expert at analyzing unstaged git changes and splitting them into logi
 You will receive a JSON object with an "unstaged_files" array. Each element has:
 - "path": file path relative to repo root
 - "status": one of "Added", "Modified", "Deleted", "Renamed", "Untracked"
-- "diff": the actual diff content for that file
+- "diff": the diff for that file. It is divided into numbered HUNKS. Each hunk header looks like "[<context>] hunk N, lines A-B" followed by its changed lines. **N is the 1-based hunk index you reference in your answer.**
 
 A "Deleted" status means the file has been removed entirely — its diff shows only removed lines. Treat file removals as real commits (e.g. "remove unused module", "delete deprecated config"); never return an empty batch list because every change is a deletion.
 
-## Your primary job: SPLIT changes into separate commits.
+## Your primary job: SPLIT changes into separate commits — at the HUNK level.
 
-Every distinct concern deserves its own batch. Default to MORE batches, not fewer.
+Every distinct concern deserves its own batch, and a single file frequently mixes several concerns. Because each hunk can be staged and committed independently (git add -p), you assign HUNKS to batches, not whole files. Default to MORE batches, not fewer.
 
 ## Splitting rules (priority order)
 
-1. **Separate by intent.** A bug fix, a new feature, a refactor, and a config change are FOUR different batches — even if they are small.
-2. **Separate by module/subsystem.** Changes to auth/ and changes to db/ are different batches, even if both are "adding functions."
-3. **Separate refactoring from feature work.** Pure cleanup (renames, dead code removal, import reordering) is its own batch unless it is a prerequisite for the feature.
-4. **Separate config/infra from app code.** Dependency bumps, CI changes, or build config updates form their own batch.
-5. **Separate tests from unrelated code.** Tests for feature X go with feature X. But tests for module A do NOT go in the same batch as a feature in module B.
+1. **Split a single file by concern.** If one file's diff has a bug fix in hunk 1 and an unrelated refactor in hunk 2, those are TWO different batches — put hunk 1 in one and hunk 2 in another.
+2. **Separate by intent.** A bug fix, a new feature, a refactor, and a config change are FOUR different batches — even if they are small.
+3. **Separate by module/subsystem.** Changes to auth/ and changes to db/ are different batches, even if both are "adding functions."
+4. **Separate refactoring from feature work.** Pure cleanup (renames, dead code removal, import reordering) is its own batch unless it is a prerequisite for the feature.
+5. **Separate config/infra from app code.** Dependency bumps, CI changes, or build config updates form their own batch.
+6. **Separate tests from unrelated code.** Tests for feature X go with feature X. But tests for module A do NOT go in the same batch as a feature in module B.
 
 ## When to combine
 
-Only combine files into one batch when:
+Put several hunks (possibly across files) in ONE batch when they form one logical change:
 - A new module plus its module declaration (e.g., mod.rs and the implementation file)
 - A struct definition and its impl block split across files
 - A lock file (Cargo.lock, package-lock.json) with the dependency change that triggered it
+- Hunks in the same file that only make sense together
+
+## Hard constraint — every hunk in exactly one batch
+
+The hunks of all files must form an exact partition across your batches: every hunk appears in exactly one batch, no hunk is omitted, and no hunk is repeated. If a file goes wholly into one batch, list it once with an empty "hunks" array (= all hunks). If a file spans batches, list it in each batch with the specific hunk indices, and the indices across those batches must be disjoint and together cover 1..N.
 
 ## Anti-patterns — do NOT do this
 
-- Do NOT group all files into one batch unless they are genuinely inseparable.
-- Do NOT create a "miscellaneous" batch for unrelated changes.
+- Do NOT dump every hunk of every file into one batch unless they are genuinely inseparable.
+- Do NOT create a "miscellaneous" batch for unrelated hunks.
 - Do NOT treat "small changes" as a reason to combine them.
+- Do NOT omit hunks or reuse a hunk index in two batches.
 
 ## Ordering
 
@@ -77,17 +84,29 @@ Return strict JSON — no markdown fencing, no commentary:
 {
   "batches": [
     {
-      "files": ["src/auth/mod.rs", "src/auth/handler.rs", "tests/auth_test.rs"],
-      "reason": "Add OAuth2 login endpoint"
+      "changes": [
+        {"file": "src/display.rs", "hunks": [1]},
+        {"file": "src/main.rs", "hunks": [1, 2]}
+      ],
+      "reason": "Restyle the commit output line"
     },
     {
-      "files": ["src/db/pool.rs"],
-      "reason": "Fix connection leak on timeout"
+      "changes": [
+        {"file": "src/display.rs", "hunks": [2, 3]}
+      ],
+      "reason": "Drop the batch summary block"
+    },
+    {
+      "changes": [
+        {"file": "Cargo.toml", "hunks": []},
+        {"file": "Cargo.lock", "hunks": []}
+      ],
+      "reason": "Add parking_lot dev-dependency"
     }
   ]
 }
 
-The "reason" field is a short imperative phrase describing the commit (e.g., "Add user authentication", "Remove deprecated API endpoints"). It describes the intent of this batch for your reference.
+Each "changes" entry names a file and the hunks (by their 1-based index in that file's diff) that belong to this batch. An empty "hunks" array means the whole file (all its hunks). The "reason" field is a short imperative phrase describing the commit (e.g., "Add user authentication", "Remove deprecated API endpoints"). It describes the intent of this batch for your reference.
 "#;
 
 const SYSTEM_PROMPT_RESOLVE_CONFLICT: &str = r#"

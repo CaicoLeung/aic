@@ -11,11 +11,12 @@ pub mod update;
 mod e2e;
 
 use crate::cli::Commands;
-use crate::display::{BatchSummary, Display};
+use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::Parser;
 use indicatif::ProgressBar;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -322,10 +323,26 @@ pub(crate) async fn run_commit_workflow_impl(
 
     if staged_files.is_empty() {
         let unstaged_files: Vec<_> = status.iter().filter(|f| !f.staged).collect();
+        let all_unstaged: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
+
+        // Format Rust files FIRST, so the diff the model sees — and the hunk
+        // numbering we stage by — reflects the final formatted source. Doing it
+        // after capturing the diff (as before) would let `cargo fmt` shift
+        // hunks out from under the indices the model returned.
+        format_rust_files(&all_unstaged, &display);
+
+        // Capture each file's raw workdir-vs-HEAD diff once. The numbered view
+        // goes to the model; the raw hunks are staged per-batch. Numbering is
+        // stable because both derive from this same snapshot.
+        let mut raw_diffs: HashMap<String, String> = HashMap::new();
+        let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
             .map(|f| {
                 let diff = Git::diff_workdir(Some(f.path.as_str()))?;
+                let hunk_count = git::parse_file_patch(&diff).hunks.len();
+                raw_diffs.insert(f.path.clone(), diff.clone());
+                file_hunk_counts.push((f.path.clone(), hunk_count));
                 let scoped = git::format_diff_scoped(&diff, &f.path);
                 Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
             })
@@ -337,33 +354,40 @@ pub(crate) async fn run_commit_workflow_impl(
         )
         .await?;
 
-        let all_unstaged: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
-        format_rust_files(&all_unstaged, &display);
-
-        let original_paths: Vec<String> = all_unstaged;
-        generator::validate_batch_plan(&result, &original_paths)
+        generator::validate_batch_plan(&result, &file_hunk_counts)
             .context("batch plan validation failed")?;
-
-        let batch_refs: Vec<BatchSummary<'_>> = result
-            .batches
-            .iter()
-            .map(|b| BatchSummary {
-                files: b.files.as_slice(),
-                reason: b.reason.as_deref(),
-            })
-            .collect();
-        display.batch_summary(&batch_refs);
 
         let count = result.batches.len();
         for (i, batch) in result.batches.iter().enumerate() {
-            let paths: Vec<&str> = batch.files.iter().map(|s| s.as_str()).collect();
-            Git::add(&paths)?;
+            // Stage only this batch's hunks — `git add -p` style — so a single
+            // file can be committed across several batches.
+            for change in &batch.changes {
+                let raw = raw_diffs
+                    .get(&change.file)
+                    .with_context(|| format!("no captured diff for {}", change.file))?;
+                let hunks: Vec<usize> = if change.hunks.is_empty() {
+                    (1..=git::parse_file_patch(raw).hunks.len()).collect()
+                } else {
+                    change.hunks.clone()
+                };
+                Git::stage_hunks(raw, &hunks)
+                    .with_context(|| format!("staging hunks for {}", change.file))?;
+            }
+
+            // Unique files in this batch drive the message (a file may appear
+            // in more than one change within a batch).
+            let mut paths: Vec<String> = Vec::new();
+            for change in &batch.changes {
+                if !paths.contains(&change.file) {
+                    paths.push(change.file.clone());
+                }
+            }
 
             let prefix = format!("[{}/{count}]", i + 1);
-            if let Err(e) = generate_and_commit(&batch.files, &display, &prefix).await {
+            if let Err(e) = generate_and_commit(&paths, &display, &prefix).await {
                 anyhow::bail!(
                     "failed after committing {} of {} batches. \
-                     Batch {} files are staged but uncommitted: {e}",
+                     Batch {} changes are staged but uncommitted: {e}",
                     i,
                     count,
                     i + 1
