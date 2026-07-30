@@ -51,6 +51,103 @@ where
     result
 }
 
+/// How many reasoning lines the "Analyzing changes" spinner keeps on screen.
+const THINKING_MAX_LINES: usize = 5;
+
+/// A rolling window over the model's streamed reasoning, kept to the last
+/// [`THINKING_MAX_LINES`] non-blank lines. Rendered in place under the spinner
+/// so it reads like a scrolling "thinking" feed.
+struct ThinkingView {
+    lines: Vec<String>,
+    cur: String,
+}
+
+impl ThinkingView {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            cur: String::new(),
+        }
+    }
+
+    /// Ingest a reasoning delta (may be a partial line, many lines, or empty).
+    /// Blank lines are dropped to keep the window information-dense.
+    fn push(&mut self, delta: &str) {
+        for ch in delta.chars() {
+            if ch == '\n' {
+                let line = std::mem::take(&mut self.cur);
+                if !line.trim().is_empty() {
+                    self.lines.push(line);
+                    if self.lines.len() > THINKING_MAX_LINES {
+                        self.lines.remove(0);
+                    }
+                }
+            } else {
+                self.cur.push(ch);
+            }
+        }
+    }
+
+    /// `title` (e.g. "Analyzing changes") on the first line, then up to
+    /// [`THINKING_MAX_LINES`] reasoning lines indented under it — the latest
+    /// visible, older ones having scrolled off.
+    fn render(&self, title: &str) -> String {
+        let width = terminal_width().saturating_sub(6).clamp(20, 200);
+        let mut out = String::from(title);
+        let mut shown = self.lines.clone();
+        if !self.cur.trim().is_empty() {
+            shown.push(self.cur.clone());
+        }
+        let start = shown.len().saturating_sub(THINKING_MAX_LINES);
+        for line in &shown[start..] {
+            out.push_str("\n  │ ");
+            out.push_str(&truncate(line, width));
+        }
+        out
+    }
+}
+
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&w: &usize| (20..=500).contains(&w))
+        .unwrap_or(100)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
+    t.push('…');
+    t
+}
+
+/// Run the batch-plan analysis behind a spinner that streams the model's
+/// reasoning live, keeping the latest [`THINKING_MAX_LINES`] lines on screen.
+async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::default_spinner()
+            .template("{spinner} {msg}")?
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    pb.set_message("Analyzing changes");
+    pb.enable_steady_tick(Duration::from_millis(80));
+
+    let mut view = ThinkingView::new();
+    let result = generator::Generator::split_patch_streaming(diff, |delta| {
+        view.push(delta);
+        pb.set_message(view.render("Analyzing changes"));
+    })
+    .await;
+
+    pb.disable_steady_tick();
+    pb.finish_and_clear();
+    result
+}
+
 fn format_rust_files(paths: &[String], display: &Display) {
     let rust_files: Vec<&str> = paths
         .iter()
@@ -348,11 +445,7 @@ pub(crate) async fn run_commit_workflow_impl(
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });
-        let result = with_spinner(
-            "Analyzing changes",
-            generator::Generator::split_patch(&diff.to_string()),
-        )
-        .await?;
+        let result = analyze_changes(&diff.to_string()).await?;
 
         generator::validate_batch_plan(&result, &file_hunk_counts)
             .context("batch plan validation failed")?;
@@ -425,5 +518,56 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Update) => update::run_update(),
         Some(Commands::Resolve) => run_resolve_workflow().await,
         None => run_commit_workflow().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_view_keeps_last_five_lines_and_drops_blanks() {
+        let mut v = ThinkingView::new();
+        for i in 1..=8 {
+            v.push(&format!("line {i}\n\n"));
+        }
+        // lines 1-3 scrolled off; lines 4-8 remain (blank lines dropped).
+        let rendered = v.render("Analyzing changes");
+        assert_eq!(
+            rendered.lines().collect::<Vec<_>>(),
+            vec![
+                "Analyzing changes",
+                "  │ line 4",
+                "  │ line 5",
+                "  │ line 6",
+                "  │ line 7",
+                "  │ line 8",
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_view_shows_partial_line_and_caps_at_five() {
+        let mut v = ThinkingView::new();
+        v.push("a\nb\nc\nd\n");
+        v.push("in progress"); // no trailing newline → partial current line
+        let rendered = v.render("Analyzing changes");
+        let visible: Vec<&str> = rendered.lines().collect();
+        // 4 complete + 1 partial = 5 reasoning lines under the title.
+        assert_eq!(visible.len(), 1 + THINKING_MAX_LINES);
+        assert_eq!(visible.last(), Some(&"  │ in progress"));
+    }
+
+    #[test]
+    fn thinking_view_assembles_split_chunks() {
+        let mut v = ThinkingView::new();
+        // one logical line delivered across several deltas
+        v.push("hel");
+        v.push("lo");
+        v.push(" world\n");
+        assert_eq!(
+            v.render("t").lines().collect::<Vec<_>>(),
+            vec!["t", "  │ hello world"]
+        );
     }
 }
