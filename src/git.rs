@@ -266,24 +266,19 @@ pub fn has_conflict_markers(content: &str) -> bool {
         .any(|line| line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>"))
 }
 
-/// Captured stdout/stderr of a `git` CLI invocation.
-///
-/// Both fields are the helper's stated contract (#18): the authored-commit
-/// migration consumes captured output. No production caller reads them yet,
-/// so the dead-code lint is suppressed for non-test builds only.
-#[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
-struct GitOutput {
-    stdout: String,
-    stderr: String,
-}
-
 /// Run the real `git` CLI inside the repo: spawns `git` with `args`, writes
-/// `stdin` to its stdin when `Some`, applies `envs` when non-empty, and
-/// captures stdout/stderr. A non-zero exit is an error carrying git's own
-/// stderr — the real reason (a hook veto, a missing merge message, a refused
-/// patch), never a bare exit code.
-fn run_git(args: &[&str], stdin: Option<&str>, envs: &[(&str, &str)]) -> anyhow::Result<GitOutput> {
+/// `stdin` to its stdin when `Some`, applies `envs` when non-empty, and returns
+/// captured **stdout**.
+///
+/// stderr is captured too, but only to surface git's own diagnostic on a
+/// non-zero exit — the real reason (a hook veto, a missing merge message, a
+/// refused patch), never a bare exit code. No success-path caller needs stderr,
+/// so it stays out of the return type; the authored-commit migration consumes
+/// the returned stdout. The command line appears in the error exactly once
+/// (here), so callers propagate with a bare `?` and never re-wrap it — that
+/// would duplicate the command and mislabel a clean non-zero exit as a
+/// spawn failure.
+fn run_git(args: &[&str], stdin: Option<&str>, envs: &[(&str, &str)]) -> anyhow::Result<String> {
     let command_line = format!("git {}", args.join(" "));
     let mut cmd = Command::new("git");
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -319,10 +314,7 @@ fn run_git(args: &[&str], stdin: Option<&str>, envs: &[(&str, &str)]) -> anyhow:
         };
         anyhow::bail!("{command_line}: {detail}");
     }
-    Ok(GitOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 pub struct Git;
@@ -478,8 +470,9 @@ impl Git {
             body.push_str(hunk);
         }
 
-        run_git(&["apply", "--cached", "-"], Some(&body), &[])
-            .context("git apply --cached rejected the selected hunks")?;
+        // The helper owns the full diagnostic (command + git's stderr); a
+        // bare `?` keeps the command line out of the error chain twice.
+        run_git(&["apply", "--cached", "-"], Some(&body), &[])?;
         Ok(())
     }
 
@@ -565,15 +558,18 @@ impl Git {
     /// is set to `true` so `--continue` / `commit --no-edit` never block on an
     /// editor and git's default message is kept verbatim (ADR 0005).
     pub fn finalize(state: RepoState) -> anyhow::Result<()> {
-        let (prog, args) = state.finalize_invocation().ok_or_else(|| {
+        // `finalize_invocation` always pairs prog="git" with args; `run_git`
+        // assumes the program is git, so only the args are needed. A bare `?`
+        // lets the helper's message stand — no "failed to run ..." wrapper that
+        // would mislabel a clean non-zero exit (git ran fine, it just refused).
+        let (_, args) = state.finalize_invocation().ok_or_else(|| {
             anyhow::anyhow!(
                 "aic cannot finalize a {} state in v1; resolve manually \
                  (e.g. `git rebase --continue`)",
                 state.label()
             )
         })?;
-        run_git(args, None, &[("GIT_EDITOR", "true")])
-            .with_context(|| format!("failed to run {prog} {}", args.join(" ")))?;
+        run_git(args, None, &[("GIT_EDITOR", "true")])?;
         Ok(())
     }
 
@@ -907,12 +903,7 @@ index 1..2 100644\n\
         // stdout — proves stdin delivery and stdout capture in one shot. The
         // expected value is the independent blob hash of `hello\n`.
         let out = run_git(&["hash-object", "--stdin"], Some("hello\n"), &[]).unwrap();
-        assert_eq!(
-            out.stdout.trim(),
-            "ce013625030ba8dba906f756967f9e9ca394464a"
-        );
-        // A clean invocation emits no diagnostics on stderr.
-        assert!(out.stderr.is_empty(), "got: {}", out.stderr);
+        assert_eq!(out.trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
     }
 
     #[test]
@@ -930,7 +921,7 @@ index 1..2 100644\n\
             &[("GIT_AUTHOR_NAME", "Ada")],
         )
         .unwrap();
-        assert!(out.stdout.starts_with("Ada <"), "got: {}", out.stdout);
+        assert!(out.starts_with("Ada <"), "got: {}", out);
     }
 
     #[test]
