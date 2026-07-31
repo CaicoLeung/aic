@@ -1,5 +1,7 @@
 # aic
 
+> **简体中文:** [README.zh-CN.md](./README.zh-CN.md)
+
 AI-powered git commit tool that writes Conventional Commit messages for you — and splits your work into **hunk-level** atomic commits, not file-level ones.
 
 🌐 **Website:** <https://caicoleung.github.io/aic-web/>
