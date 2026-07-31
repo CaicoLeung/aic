@@ -2,7 +2,7 @@ use anyhow::Context;
 use git2::{DiffFormat, DiffLineType, Repository, Status};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, serde::Serialize)]
 pub struct DiffBlock {
@@ -266,6 +266,57 @@ pub fn has_conflict_markers(content: &str) -> bool {
         .any(|line| line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>"))
 }
 
+/// Run the real `git` CLI inside the repo: spawns `git` with `args`, writes
+/// `stdin` to its stdin when `Some`, applies `envs` when non-empty, and returns
+/// captured **stdout**.
+///
+/// stderr is captured too, but only to surface git's own diagnostic on a
+/// non-zero exit — the real reason (a hook veto, a missing merge message, a
+/// refused patch), never a bare exit code. No success-path caller needs stderr,
+/// so it stays out of the return type; the authored-commit migration consumes
+/// the returned stdout. The command line appears in the error exactly once
+/// (here), so callers propagate with a bare `?` and never re-wrap it — that
+/// would duplicate the command and mislabel a clean non-zero exit as a
+/// spawn failure.
+fn run_git(args: &[&str], stdin: Option<&str>, envs: &[(&str, &str)]) -> anyhow::Result<String> {
+    let command_line = format!("git {}", args.join(" "));
+    let mut cmd = Command::new("git");
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn {command_line}"))?;
+    if let Some(body) = stdin {
+        use std::io::Write as _;
+        let mut child_stdin = child.stdin.take().context("failed to open stdin for git")?;
+        child_stdin
+            .write_all(body.as_bytes())
+            .with_context(|| format!("failed to write stdin to {command_line}"))?;
+        // child_stdin drops here → git sees EOF and processes the input.
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("failed to wait on {command_line}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_trim = stderr.trim();
+        let detail = if stderr_trim.is_empty() {
+            format!("exited with {}", output.status)
+        } else {
+            format!("exited with {} — {stderr_trim}", output.status)
+        };
+        anyhow::bail!("{command_line}: {detail}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 pub struct Git;
 
 impl Git {
@@ -419,39 +470,9 @@ impl Git {
             body.push_str(hunk);
         }
 
-        let mut child = Command::new("git")
-            .args(["apply", "--cached", "-"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("failed to spawn `git apply --cached`")?;
-        {
-            use std::io::Write as _;
-            let mut stdin = child
-                .stdin
-                .take()
-                .context("failed to open stdin for `git apply --cached`")?;
-            stdin
-                .write_all(body.as_bytes())
-                .context("failed to write patch to `git apply --cached`")?;
-            // stdin drops here → git sees EOF and applies the patch.
-        }
-        let output = child
-            .wait_with_output()
-            .context("failed to wait on `git apply --cached`")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = stderr.trim();
-            anyhow::bail!(
-                "git apply --cached rejected the selected hunks{}",
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {detail}")
-                }
-            );
-        }
+        // The helper owns the full diagnostic (command + git's stderr); a
+        // bare `?` keeps the command line out of the error chain twice.
+        run_git(&["apply", "--cached", "-"], Some(&body), &[])?;
         Ok(())
     }
 
@@ -537,31 +558,18 @@ impl Git {
     /// is set to `true` so `--continue` / `commit --no-edit` never block on an
     /// editor and git's default message is kept verbatim (ADR 0005).
     pub fn finalize(state: RepoState) -> anyhow::Result<()> {
-        let (prog, args) = state.finalize_invocation().ok_or_else(|| {
+        // `finalize_invocation` always pairs prog="git" with args; `run_git`
+        // assumes the program is git, so only the args are needed. A bare `?`
+        // lets the helper's message stand — no "failed to run ..." wrapper that
+        // would mislabel a clean non-zero exit (git ran fine, it just refused).
+        let (_, args) = state.finalize_invocation().ok_or_else(|| {
             anyhow::anyhow!(
                 "aic cannot finalize a {} state in v1; resolve manually \
                  (e.g. `git rebase --continue`)",
                 state.label()
             )
         })?;
-        // Capture stdout/stderr so a refusal (git's own marker check, a missing
-        // merge message, a hook veto) surfaces the real reason instead of a bare
-        // exit code.
-        let output = Command::new(prog)
-            .args(args)
-            .env("GIT_EDITOR", "true")
-            .output()
-            .with_context(|| format!("failed to run {prog} {}", args.join(" ")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr_trim = stderr.trim();
-            let detail = if stderr_trim.is_empty() {
-                format!("exited with {}", output.status)
-            } else {
-                format!("exited with {} — {stderr_trim}", output.status)
-            };
-            anyhow::bail!("{prog} {} {detail}", args.join(" "));
-        }
+        run_git(args, None, &[("GIT_EDITOR", "true")])?;
         Ok(())
     }
 
@@ -882,6 +890,67 @@ index 1..2 100644\n\
         Git::stage_hunks(&raw, &[2]).unwrap();
         let staged = Git::diff(Some("tracked.txt")).unwrap();
         assert!(staged.contains("a1") && staged.contains("c1"));
+    }
+
+    #[test]
+    fn run_git_delivers_stdin_and_captures_stdout() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+        let _guard = CwdGuard::new(dir.path());
+
+        // `git hash-object --stdin` hashes stdin and prints the object id to
+        // stdout — proves stdin delivery and stdout capture in one shot. The
+        // expected value is the independent blob hash of `hello\n`.
+        let out = run_git(&["hash-object", "--stdin"], Some("hello\n"), &[]).unwrap();
+        assert_eq!(out.trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
+    }
+
+    #[test]
+    fn run_git_applies_env() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+        let _guard = CwdGuard::new(dir.path());
+
+        // `git var GIT_AUTHOR_IDENT` honors GIT_AUTHOR_NAME from the
+        // environment, proving the env passthrough reaches the child.
+        let out = run_git(
+            &["var", "GIT_AUTHOR_IDENT"],
+            None,
+            &[("GIT_AUTHOR_NAME", "Ada")],
+        )
+        .unwrap();
+        assert!(out.starts_with("Ada <"), "got: {}", out);
+    }
+
+    #[test]
+    fn run_git_surfaces_git_stderr_on_failure() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+        let _guard = CwdGuard::new(dir.path());
+
+        // A well-formed patch for a file the index doesn't have: git refuses
+        // with its own diagnostic. The error must carry that stderr plus the
+        // exit status — never a bare exit code.
+        let patch = "diff --git a/nope.txt b/nope.txt\n\
+                     index 0000000..3b18e51 100644\n\
+                     --- a/nope.txt\n\
+                     +++ b/nope.txt\n\
+                     @@ -0,0 +1 @@\n\
+                     +hello\n";
+        let err = run_git(&["apply", "--cached", "-"], Some(patch), &[])
+            .expect_err("git apply must reject a patch for a missing file");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("does not exist in index"),
+            "git's real stderr must be surfaced: {msg}"
+        );
+        assert!(
+            msg.contains("exit status"),
+            "exit status must be surfaced: {msg}"
+        );
     }
 
     #[test]
