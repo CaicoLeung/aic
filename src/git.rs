@@ -1,5 +1,5 @@
 use anyhow::Context;
-use git2::{DiffFormat, DiffLineType, Repository, Status};
+use git2::{DiffFormat, DiffLineType, ObjectType, Repository, Status, Tree};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -552,7 +552,12 @@ impl Git {
     /// first, before any shell-out. With nothing staged, `git commit` refuses
     /// ("nothing to commit") instead of silently landing an empty commit as
     /// libgit2 did — aic always stages before committing, so this only fires
-    /// on a state we would not want to commit anyway.
+    /// on a state we would not want to commit anyway. An empty message is
+    /// refused the same way ("empty commit message") where libgit2 created
+    /// the commit. The guard scans the index *before* hooks run, and a hook
+    /// can re-stage files the scan never saw — so the landed tree is verified
+    /// again after the commit (`verify_commit_clean`): marker-bearing hook
+    /// output is reported as the landed commit it is, with the recovery path.
     ///
     /// Returns the first 7 hex chars of the new HEAD — the same format the
     /// libgit2 path returned (`oid.to_string()[..7]`), the conventional short
@@ -576,7 +581,84 @@ impl Git {
         // returned (`oid.to_string()[..7]`), the conventional short hash.
         let head = run_git(&["rev-parse", "HEAD"], None, &[])
             .with_context(|| "commit landed, but the new HEAD could not be resolved")?;
-        Ok(head.trim()[..7].to_string())
+        let short = head
+            .trim()
+            .get(..7)
+            .ok_or_else(|| anyhow::anyhow!("unexpected HEAD output from rev-parse: {head:?}"))?;
+        // Verify what actually shipped: the pre-commit guard scanned the index
+        // *before* hooks ran; a hook that re-staged content is not in that
+        // scan. Check the landed tree so marker-bearing hook output surfaces
+        // instead of silently shipping.
+        Self::verify_commit_clean()?;
+        Ok(short.to_string())
+    }
+
+    /// Post-commit verification — the enforcement half of the hook window.
+    ///
+    /// [`Git::commit`]'s guard (`assert_commit_safe`) scans the index *before*
+    /// the shell-out, but a `pre-commit` hook (husky / lint-staged / prettier)
+    /// runs after it and can re-stage files the scan never saw. Under libgit2
+    /// the guard-time index was always the committed tree; with hooks it is
+    /// not. This scans the tree the commit actually landed and reports any
+    /// marker-bearing blob — as the landed commit it is, naming the file and
+    /// the recovery path, never as a "commit failed" lie.
+    fn verify_commit_clean() -> anyhow::Result<()> {
+        let repo = Self::repo()?;
+        let head = repo.head().context("failed to resolve HEAD after commit")?;
+        let tree = head.peel_to_tree().context("failed to read HEAD tree")?;
+        let mut marked = Vec::new();
+        Self::collect_marked_paths(&repo, &tree, "", &mut marked)?;
+        if let Some(first) = marked.first() {
+            let list = if marked.len() == 1 {
+                first.clone()
+            } else {
+                format!("{first} (and {} more)", marked.len() - 1)
+            };
+            anyhow::bail!(
+                "commit landed, but its tree still contains conflict markers in {list}; \
+                 fix the file(s) and run `git commit --amend --no-edit`, \
+                 or `git reset --soft HEAD~1` and recommit"
+            );
+        }
+        Ok(())
+    }
+
+    /// Depth-first walk of a tree, collecting paths whose blob content trips
+    /// [`has_conflict_markers`] — the same detector the pre-commit guard uses,
+    /// over the tree git actually committed. Submodules (commits) and any
+    /// other non-blob entries cannot hold marker text and are skipped.
+    fn collect_marked_paths(
+        repo: &Repository,
+        tree: &Tree,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) -> anyhow::Result<()> {
+        for entry in tree.iter() {
+            let path = format!("{prefix}{}", entry.name().unwrap_or("?"));
+            match entry.kind() {
+                Some(ObjectType::Tree) => {
+                    let sub = entry
+                        .to_object(repo)
+                        .with_context(|| format!("failed to read subtree {path}"))?
+                        .peel_to_tree()
+                        .context("failed to peel subtree to tree")?;
+                    Self::collect_marked_paths(repo, &sub, &format!("{path}/"), out)?;
+                }
+                Some(ObjectType::Blob) => {
+                    let blob = entry
+                        .to_object(repo)
+                        .with_context(|| format!("failed to read blob {path}"))?
+                        .peel_to_blob()
+                        .context("failed to peel blob object")?;
+                    let content = String::from_utf8_lossy(blob.content());
+                    if has_conflict_markers(&content) {
+                        out.push(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -649,6 +731,11 @@ impl Git {
     /// Feature #2 commit guard. Aborts before any commit when the repo is
     /// mid-operation or a staged file still contains conflict markers. Called
     /// at the top of [`Git::commit`] so every commit path inherits it.
+    ///
+    /// The scan covers the index at call time. Hooks run *after* this guard
+    /// (that is the point of #19) and can re-stage files the scan never saw —
+    /// `Git::commit` re-verifies the landed tree (`verify_commit_clean`) to
+    /// close that window.
     pub fn assert_commit_safe() -> anyhow::Result<()> {
         let repo = Self::repo()?;
         let state = RepoState::from_git2(repo.state());
@@ -1509,5 +1596,102 @@ index 1..2 100644\n\
         );
         let count = run_git(&["rev-list", "--count", "HEAD"], None, &[]).unwrap();
         assert_eq!(count.trim(), "1", "no commit may land");
+    }
+
+    /// The husky / lint-staged flow this PR exists for: a `pre-commit` hook
+    /// edits a file and re-stages it; the landed commit must contain the
+    /// hook's change. (The other hook tests prove hooks *run*; this proves
+    /// hook-staged content *ships*.)
+    #[test]
+    fn commit_includes_hook_staged_changes() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        // lint-staged-style: rewrite a file and stage it from the hook.
+        install_hook(
+            dir.path(),
+            "pre-commit",
+            "echo 'auto-fixed by hook' > hook-fixed.txt\ngit add hook-fixed.txt",
+        );
+
+        std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        let _g = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+
+        let hash = Git::commit("chore: hook staged".into(), None).unwrap();
+        assert_eq!(hash.len(), 7);
+
+        let content = run_git(&["show", "HEAD:hook-fixed.txt"], None, &[]).unwrap();
+        assert_eq!(content.trim(), "auto-fixed by hook");
+    }
+
+    /// The enforcement half of the hook window: a `pre-commit` hook re-stages
+    /// a file that holds conflict markers — content the pre-commit guard never
+    /// scanned (it runs before hooks). The post-commit tree scan catches it:
+    /// the commit landed, but `Git::commit` reports the violation, names the
+    /// file, and offers the recovery path instead of shipping silently.
+    #[test]
+    fn commit_reports_markers_staged_by_hook() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        install_hook(
+            dir.path(),
+            "pre-commit",
+            "printf '<<<<<<< ours\\nbad\\n>>>>>>> theirs\\n' > sneaky.txt\ngit add sneaky.txt",
+        );
+
+        std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        let _g = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+        let before = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+
+        let err = Git::commit("chore: sneaky".into(), None)
+            .expect_err("hook-staged conflict markers must be reported");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("sneaky.txt"),
+            "the marked file must be named, got: {msg}"
+        );
+        assert!(
+            msg.contains("commit landed"),
+            "the error must say the commit exists, got: {msg}"
+        );
+        assert!(
+            msg.contains("amend"),
+            "the error must offer the recovery path, got: {msg}"
+        );
+
+        let after = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        assert_ne!(before, after, "the commit landed despite the markers");
+    }
+
+    /// `git commit -F -` refuses an empty message ("empty commit message")
+    /// where libgit2 created the commit — a silent empty-subject commit is
+    /// worse than a loud refusal. aic's message comes from the LLM, so an
+    /// empty string is a realistic input.
+    #[test]
+    fn commit_refuses_empty_message() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        let _g = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+        let before = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+
+        let err =
+            Git::commit(String::new(), None).expect_err("an empty message must abort the commit");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("empty commit message"),
+            "git's refusal must surface, got: {msg}"
+        );
+
+        let after = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        assert_eq!(before, after, "no commit may land with an empty message");
     }
 }
