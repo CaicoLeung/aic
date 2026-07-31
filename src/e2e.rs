@@ -293,6 +293,20 @@ fn git_in(dir: &Path, args: &[&str]) {
         .status();
 }
 
+/// Run a read-only `git` command in `dir` and return its stdout. Used by the
+/// state-assertion helpers (`file_at_ref`, `commit_count`) and the hook e2e
+/// tests (issue #20), which all shell out to inspect repo state the workflow
+/// just produced. Panics on failure — these are test assertions, not logic.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-C"])
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// `init_test_repo` + diverge `tracked.txt` on two branches, then merge so the
 /// repo ends in the Merge state with a content conflict in `tracked.txt`.
 /// `make_content_conflict` assumes the repo is already initialized (its git.rs
@@ -528,24 +542,15 @@ fn is_clean(dir: &Path) -> bool {
 /// File content as recorded at a git revision (e.g. "HEAD", "HEAD~1"), via
 /// `git show`. Asserts what each batch commit actually contains.
 fn file_at_ref(dir: &Path, rev: &str, rel: &str) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["show", &format!("{rev}:{rel}")])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    git_out(dir, &["show", &format!("{rev}:{rel}")])
 }
 
 /// Total commits reachable from HEAD.
 fn commit_count(dir: &Path) -> usize {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-list", "--count", "HEAD"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    git_out(dir, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 // =====================================================================
@@ -884,13 +889,7 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
     );
     // commit-msg ran → its trailer is in the committed message, alongside the
     // authored subject.
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir.path())
-        .args(["log", "-1", "--pretty=%B"])
-        .output()
-        .unwrap();
-    let msg = String::from_utf8_lossy(&out.stdout).into_owned();
+    let msg = git_out(dir.path(), &["log", "-1", "--pretty=%B"]);
     assert!(
         msg.contains("Signed-off-by: aic-e2e"),
         "commit-msg hook must run during a Run; got message:\n{msg}"
