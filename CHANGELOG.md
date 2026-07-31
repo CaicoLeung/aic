@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.7] - 2026-07-31
+
+### Bug Fixes
+
+- Commit authored messages via the git CLI (#19) (#22)
+
+### Refactoring
+
+- Extract shared git-CLI runner (#18) (#21)
+
+### Testing
+
+- Prove git hooks run and can veto during a Run (#20) (#23)
+
+### Documentation
+
+- Document hunk-level atomic commit splitting
+- Add Simplified Chinese translation (#14)
+
+### Miscellaneous
+
+- Add pull request template (#17)
+
 ## [0.3.6] - 2026-07-30
 
 ### Features
