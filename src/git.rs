@@ -2,7 +2,7 @@ use anyhow::Context;
 use git2::{DiffFormat, DiffLineType, Repository, Status};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 #[derive(Debug, serde::Serialize)]
 pub struct DiffBlock {
@@ -205,15 +205,14 @@ impl RepoState {
         }
     }
 
-    /// The git invocation that finalizes this state (`(program, args)`), or
-    /// `None` when aic won't finalize it (rebase / am).
-    pub fn finalize_invocation(&self) -> Option<(&'static str, &'static [&'static str])> {
+    /// The git args that finalize this state, or `None` when aic won't
+    /// finalize it (rebase / am). The program is always `git` — `run_git`
+    /// spawns it — so it is not part of the contract.
+    pub fn finalize_invocation(&self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Merge => Some(("git", &["commit", "--no-edit"][..])),
-            Self::CherryPick | Self::CherryPickSequence => {
-                Some(("git", &["cherry-pick", "--continue"][..]))
-            }
-            Self::Revert | Self::RevertSequence => Some(("git", &["revert", "--continue"][..])),
+            Self::Merge => Some(&["commit", "--no-edit"][..]),
+            Self::CherryPick | Self::CherryPickSequence => Some(&["cherry-pick", "--continue"][..]),
+            Self::Revert | Self::RevertSequence => Some(&["revert", "--continue"][..]),
             _ => None,
         }
     }
@@ -272,12 +271,19 @@ pub fn has_conflict_markers(content: &str) -> bool {
 ///
 /// stderr is captured too, but only to surface git's own diagnostic on a
 /// non-zero exit — the real reason (a hook veto, a missing merge message, a
-/// refused patch), never a bare exit code. No success-path caller needs stderr,
-/// so it stays out of the return type; the authored-commit migration consumes
-/// the returned stdout. The command line appears in the error exactly once
-/// (here), so callers propagate with a bare `?` and never re-wrap it — that
-/// would duplicate the command and mislabel a clean non-zero exit as a
-/// spawn failure.
+/// refused patch), never a bare exit code. Some refusals (`git commit`'s
+/// "nothing to commit") write to stdout instead, so stdout is the fallback
+/// detail when stderr is empty. No success-path caller needs stderr, so it
+/// stays out of the return type; the authored-commit migration consumes
+/// the returned stdout.
+///
+/// The command line appears in the error exactly once (here). Callers
+/// propagate with a bare `?`, except where they name the user-facing operation
+/// (hunk staging) or correct the state the failure implies (a commit that
+/// landed) — a context layer must never mislabel a clean non-zero exit as a
+/// spawn failure. If git exits before consuming stdin, the broken pipe is
+/// discarded in favor of git's own stderr: the refusal that closed the pipe is
+/// the reason the caller needs.
 fn run_git(args: &[&str], stdin: Option<&str>, envs: &[(&str, &str)]) -> anyhow::Result<String> {
     let command_line = format!("git {}", args.join(" "));
     let mut cmd = Command::new("git");
@@ -296,25 +302,69 @@ fn run_git(args: &[&str], stdin: Option<&str>, envs: &[(&str, &str)]) -> anyhow:
     if let Some(body) = stdin {
         use std::io::Write as _;
         let mut child_stdin = child.stdin.take().context("failed to open stdin for git")?;
-        child_stdin
-            .write_all(body.as_bytes())
-            .with_context(|| format!("failed to write stdin to {command_line}"))?;
+        if let Err(write_err) = child_stdin.write_all(body.as_bytes()) {
+            // git exited before consuming stdin (e.g. it already knew it would
+            // refuse). Drop the handle so git sees EOF, wait for its verdict,
+            // and surface its stderr — the write error is just the symptom.
+            drop(child_stdin);
+            let output = child
+                .wait_with_output()
+                .with_context(|| format!("failed to wait on {command_line}"))?;
+            if !output.status.success() {
+                return Err(nonzero_exit(
+                    &command_line,
+                    output.status,
+                    &output.stderr,
+                    &output.stdout,
+                ));
+            }
+            // Bizarre: git exited 0 without reading stdin. The write error is
+            // the only explanation left.
+            return Err(write_err)
+                .with_context(|| format!("failed to write stdin to {command_line}"));
+        }
         // child_stdin drops here → git sees EOF and processes the input.
     }
     let output = child
         .wait_with_output()
         .with_context(|| format!("failed to wait on {command_line}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr_trim = stderr.trim();
-        let detail = if stderr_trim.is_empty() {
-            format!("exited with {}", output.status)
-        } else {
-            format!("exited with {} — {stderr_trim}", output.status)
-        };
-        anyhow::bail!("{command_line}: {detail}");
+        return Err(nonzero_exit(
+            &command_line,
+            output.status,
+            &output.stderr,
+            &output.stdout,
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The canonical non-zero-exit diagnostic: the command line (once), the exit
+/// status, and git's own diagnostic when it has one — the real reason (a hook
+/// veto, a missing merge message, a refused patch), never a bare exit code.
+/// stderr is the convention for errors; some refusals (e.g. `git commit`'s
+/// "nothing to commit") go to stdout instead, so it is the fallback.
+fn nonzero_exit(
+    command_line: &str,
+    status: ExitStatus,
+    stderr: &[u8],
+    stdout: &[u8],
+) -> anyhow::Error {
+    let stderr_trim = String::from_utf8_lossy(stderr).trim().to_owned();
+    let stdout_trim = String::from_utf8_lossy(stdout).trim().to_owned();
+    let reason = if !stderr_trim.is_empty() {
+        stderr_trim
+    } else if !stdout_trim.is_empty() {
+        stdout_trim
+    } else {
+        String::new()
+    };
+    let detail = if reason.is_empty() {
+        format!("exited with {status}")
+    } else {
+        format!("exited with {status} — {reason}")
+    };
+    anyhow::anyhow!("{command_line}: {detail}")
 }
 
 pub struct Git;
@@ -470,9 +520,10 @@ impl Git {
             body.push_str(hunk);
         }
 
-        // The helper owns the full diagnostic (command + git's stderr); a
-        // bare `?` keeps the command line out of the error chain twice.
-        run_git(&["apply", "--cached", "-"], Some(&body), &[])?;
+        // Name the aic operation the user can act on; the helper's cause layer
+        // carries the command and git's own stderr.
+        run_git(&["apply", "--cached", "-"], Some(&body), &[])
+            .with_context(|| "git apply --cached rejected the selected hunks")?;
         Ok(())
     }
 
@@ -489,15 +540,27 @@ impl Git {
     /// staging already wrote a git-compatible index that `git commit` consumes.
     ///
     /// The message (and optional body) travel over stdin via `-F -`, so quotes,
-    /// `%` substitutions, and newlines survive verbatim with no shell escaping;
-    /// `--cleanup=verbatim` keeps git from collapsing blank lines or stripping
-    /// `#`-prefixed body lines the LLM authored (libgit2 committed the exact
-    /// string). `-F` already suppresses the editor, so no `GIT_EDITOR=true` is
+    /// `%` substitutions, and newlines survive with no shell escaping;
+    /// `--cleanup=verbatim` keeps git from cleaning the message up (the default
+    /// `strip` collapses consecutive blank lines and strips trailing
+    /// whitespace) — the LLM's body lands byte-for-byte, as libgit2 committed
+    /// it. `-F` already suppresses the editor, so no `GIT_EDITOR=true` is
     /// needed (unlike the finalize `--continue` path).
     ///
     /// The always-on commit guard (`assert_commit_safe`: refuse while the repo
     /// is mid-operation, or a staged blob still holds conflict markers) runs
-    /// first, before any shell-out.
+    /// first, before any shell-out. With nothing staged, `git commit` refuses
+    /// ("nothing to commit") instead of silently landing an empty commit as
+    /// libgit2 did — aic always stages before committing, so this only fires
+    /// on a state we would not want to commit anyway.
+    ///
+    /// Returns the first 7 hex chars of the new HEAD — the same format the
+    /// libgit2 path returned (`oid.to_string()[..7]`), the conventional short
+    /// hash. The value is the commit git just created: commit hooks run before
+    /// the commit object is written, so HEAD is that commit (only a hook that
+    /// itself commits could move HEAD further — and then the displayed hash is
+    /// the state the user actually sees). If resolving HEAD fails after the
+    /// commit landed, the error says so instead of implying the commit failed.
     pub fn commit(message: String, body: Option<String>) -> anyhow::Result<String> {
         Self::assert_commit_safe()?;
         let full_message = match body {
@@ -511,7 +574,8 @@ impl Git {
         )?;
         // First 7 hex chars of the new HEAD — the same format the libgit2 path
         // returned (`oid.to_string()[..7]`), the conventional short hash.
-        let head = run_git(&["rev-parse", "HEAD"], None, &[])?;
+        let head = run_git(&["rev-parse", "HEAD"], None, &[])
+            .with_context(|| "commit landed, but the new HEAD could not be resolved")?;
         Ok(head.trim()[..7].to_string())
     }
 
@@ -568,11 +632,10 @@ impl Git {
     /// is set to `true` so `--continue` / `commit --no-edit` never block on an
     /// editor and git's default message is kept verbatim (ADR 0005).
     pub fn finalize(state: RepoState) -> anyhow::Result<()> {
-        // `finalize_invocation` always pairs prog="git" with args; `run_git`
-        // assumes the program is git, so only the args are needed. A bare `?`
-        // lets the helper's message stand — no "failed to run ..." wrapper that
-        // would mislabel a clean non-zero exit (git ran fine, it just refused).
-        let (_, args) = state.finalize_invocation().ok_or_else(|| {
+        // A bare `?` lets the helper's message stand — no "failed to run ..."
+        // wrapper that would mislabel a clean non-zero exit (git ran fine, it
+        // just refused).
+        let args = state.finalize_invocation().ok_or_else(|| {
             anyhow::anyhow!(
                 "aic cannot finalize a {} state in v1; resolve manually \
                  (e.g. `git rebase --continue`)",
@@ -597,11 +660,11 @@ impl Git {
             );
         }
 
-        // Scan the staged *blobs*, not the working-tree files. The tree a
-        // commit writes is built from the index (`write_tree_to` in
-        // `Git::commit`), so a marker in a staged blob is what would ship —
-        // even if the worktree was since cleaned without re-staging. Reading
-        // the blob matches the real commit payload and the documented contract
+        // Scan the staged *blobs*, not the working-tree files. The tree `git
+        // commit` writes is built from the index, so a marker in a staged blob
+        // is what would ship — even if the worktree was since cleaned without
+        // re-staging. Reading the blob matches the real commit payload and the
+        // documented contract
         // ("scans staged file contents for markers").
         let index = repo.index().context("failed to get repository index")?;
         let statuses = repo
@@ -1121,15 +1184,15 @@ index 1..2 100644\n\
     fn repo_state_finalize_invocation() {
         assert_eq!(
             RepoState::Merge.finalize_invocation(),
-            Some(("git", &["commit", "--no-edit"][..]))
+            Some(&["commit", "--no-edit"][..])
         );
         assert_eq!(
             RepoState::CherryPick.finalize_invocation(),
-            Some(("git", &["cherry-pick", "--continue"][..]))
+            Some(&["cherry-pick", "--continue"][..])
         );
         assert_eq!(
             RepoState::Revert.finalize_invocation(),
-            Some(("git", &["revert", "--continue"][..]))
+            Some(&["revert", "--continue"][..])
         );
         assert_eq!(RepoState::Rebase.finalize_invocation(), None);
         assert_eq!(RepoState::Clean.finalize_invocation(), None);
@@ -1360,8 +1423,10 @@ index 1..2 100644\n\
     }
 
     /// A drafted body must land verbatim in the committed message — the
-    /// `--cleanup=verbatim` flag keeps git from collapsing blank lines or
-    /// stripping body content the LLM authored.
+    /// `--cleanup=verbatim` flag keeps git from collapsing consecutive blank
+    /// lines or stripping trailing whitespace (the default `strip` cleanup
+    /// does both). The body also carries a `#`-prefixed line, which git treats
+    /// as commentary in interactive messages.
     #[test]
     fn commit_preserves_authored_body() {
         let _lock = GIT_CWD_MUTEX.lock();
@@ -1374,14 +1439,75 @@ index 1..2 100644\n\
 
         let hash = Git::commit(
             "fix: subject".into(),
-            Some("explanation line\nsecond line".into()),
+            Some(
+                "explanation line\n\n\nsecond paragraph\n\n# a comment-looking line\nline with trailing spaces  "
+                    .into(),
+            ),
         )
         .unwrap();
         assert_eq!(hash.len(), 7);
 
         let msg = run_git(&["log", "-1", "--pretty=%B"], None, &[]).unwrap();
-        assert!(msg.contains("fix: subject"));
-        assert!(msg.contains("explanation line"));
-        assert!(msg.contains("second line"));
+        // Byte-for-byte: the blank run, the `#` line, and the trailing
+        // whitespace all survive; git appends the closing newline.
+        assert_eq!(
+            msg,
+            "fix: subject\n\nexplanation line\n\n\nsecond paragraph\n\n# a comment-looking line\nline with trailing spaces  \n"
+        );
+    }
+
+    /// The enforcement half of #19's AC2: a hook that vetoes the commit
+    /// aborts `Git::commit`, surfaces the hook's own stderr, and lands
+    /// nothing. (The happy-path test above proves hooks run; this proves a
+    /// refusal is reported, not swallowed.)
+    #[test]
+    fn commit_vetoed_by_hook_surfaces_stderr_and_lands_nothing() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        install_hook(
+            dir.path(),
+            "pre-commit",
+            "echo 'blocked by policy' >&2; exit 1",
+        );
+
+        std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        let _g = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+        let before = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+
+        let err = Git::commit("chore: vetoed".into(), None)
+            .expect_err("a vetoing pre-commit hook must abort Git::commit");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("blocked by policy"),
+            "the hook's stderr must surface, got: {msg}"
+        );
+
+        let after = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        assert_eq!(before, after, "a vetoed commit must not move HEAD");
+    }
+
+    /// With nothing staged, `git commit` refuses instead of silently landing
+    /// an empty commit (libgit2 created one). aic always stages before
+    /// committing, so this only fires on a state that must not be committed —
+    /// and the refusal carries git's own message.
+    #[test]
+    fn commit_refuses_when_nothing_staged() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+        let _g = CwdGuard::new(dir.path());
+
+        let err = Git::commit("chore: nothing".into(), None)
+            .expect_err("git must refuse a commit with nothing staged");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("nothing to commit"),
+            "git's refusal must surface, got: {msg}"
+        );
+        let count = run_git(&["rev-list", "--count", "HEAD"], None, &[]).unwrap();
+        assert_eq!(count.trim(), "1", "no commit may land");
     }
 }
