@@ -166,6 +166,22 @@ fn planner_fixed(plan: generator::BatchPlanOutput) -> BatchPlanner {
     )
 }
 
+/// A one-batch plan carrying hunk 1 of a single file — the whole change, in
+/// one commit. The hook e2e tests (issue #20) only need one commit, so the
+/// plan is trivially small; the split tests build their multi-batch plans
+/// inline instead.
+fn plan_single_batch(file: &str, reason: &str) -> generator::BatchPlanOutput {
+    generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![generator::BatchChange {
+                file: file.to_string(),
+                hunks: vec![1],
+            }],
+            reason: Some(reason.into()),
+        }],
+    }
+}
+
 /// Messenger that returns the same commit message regardless of input, so the
 /// batch loop's stage + commit mechanics are exercised without an LLM.
 fn messenger_fixed(msg: &str) -> CommitMessenger {
@@ -275,6 +291,20 @@ fn git_in(dir: &Path, args: &[&str]) {
         .arg(dir)
         .args(args)
         .status();
+}
+
+/// Run a read-only `git` command in `dir` and return its stdout. Used by the
+/// state-assertion helpers (`file_at_ref`, `commit_count`) and the hook e2e
+/// tests (issue #20), which all shell out to inspect repo state the workflow
+/// just produced. Panics on failure — these are test assertions, not logic.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-C"])
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// `init_test_repo` + diverge `tracked.txt` on two branches, then merge so the
@@ -512,24 +542,15 @@ fn is_clean(dir: &Path) -> bool {
 /// File content as recorded at a git revision (e.g. "HEAD", "HEAD~1"), via
 /// `git show`. Asserts what each batch commit actually contains.
 fn file_at_ref(dir: &Path, rev: &str, rel: &str) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["show", &format!("{rev}:{rel}")])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    git_out(dir, &["show", &format!("{rev}:{rel}")])
 }
 
 /// Total commits reachable from HEAD.
 fn commit_count(dir: &Path) -> usize {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-list", "--count", "HEAD"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    git_out(dir, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 // =====================================================================
@@ -806,6 +827,133 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
     let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
     assert!(head.contains("a1"), "batch 1 must be committed");
     assert!(!head.contains("c1"), "batch 2 must NOT be committed");
+}
+
+// =====================================================================
+// Git hooks run during a Run (issue #20)
+// =====================================================================
+
+/// Issue #20 AC1: git hooks fire during a full Run. The Run commits through
+/// the real `git commit` CLI (`Git::commit`), so `pre-commit` and `commit-msg`
+/// execute mid-Run. Under the pre-#19 libgit2 commit path neither ever ran
+/// (libgit2 has no hook machinery) — this e2e test pins the shell-out behavior
+/// from the orchestration layer down: LLM stubbed, repo real, hooks installed
+/// in the repo's `.git/hooks`.
+#[tokio::test]
+async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // pre-commit drops a sentinel file in the worktree — proves the hook
+    // executed during the Run.
+    gh::install_hook(dir.path(), "pre-commit", "echo ran > sentinel.txt");
+    // commit-msg appends a trailer to the message file ($1) — proves the hook
+    // executed AND its edit survived into the landed commit.
+    gh::install_hook(
+        dir.path(),
+        "commit-msg",
+        "echo 'Signed-off-by: aic-e2e' >> \"$1\"",
+    );
+
+    // One change site → one hunk → one batch. Same shape as the marquee
+    // split test, minus the split.
+    std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
+    let plan = plan_single_batch("tracked.txt", "hook test");
+
+    let _g = gh::CwdGuard::new(dir.path());
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: hook run"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "Run with hooks installed should succeed: {:?}",
+        result
+    );
+
+    // The change itself landed in the commit (the Run did not silently drop
+    // the file while hooks ran).
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "tracked.txt"),
+        "changed by hook test\n"
+    );
+    // pre-commit ran → its sentinel exists.
+    assert!(
+        dir.path().join("sentinel.txt").exists(),
+        "pre-commit hook must run during a Run"
+    );
+    // commit-msg ran → its trailer is in the committed message, alongside the
+    // authored subject.
+    let msg = git_out(dir.path(), &["log", "-1", "--pretty=%B"]);
+    assert!(
+        msg.contains("Signed-off-by: aic-e2e"),
+        "commit-msg hook must run during a Run; got message:\n{msg}"
+    );
+    assert!(
+        msg.contains("chore: hook run"),
+        "the authored subject must survive alongside the hook's trailer"
+    );
+}
+
+/// Issue #20 AC2: a hook that vetoes the commit aborts the Run cleanly with
+/// the hook's own message, and lands nothing — the staged index survives
+/// intact. `git commit` refuses before writing the commit object, so the
+/// batch's staged hunks stay staged, ready for a re-run. Guards against a
+/// regression back to libgit2, which would commit past the veto silently.
+#[tokio::test]
+async fn commit_run_hook_veto_aborts_with_index_intact() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    gh::install_hook(
+        dir.path(),
+        "pre-commit",
+        "echo 'blocked by policy' >&2; exit 1",
+    );
+
+    std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
+    let plan = plan_single_batch("tracked.txt", "hook veto");
+
+    let _g = gh::CwdGuard::new(dir.path());
+    let before = commit_count(dir.path());
+
+    let err = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: vetoed"),
+    )
+    .await
+    .expect_err("a vetoing pre-commit hook must abort the Run");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("blocked by policy"),
+        "the hook's stderr must surface, got: {msg}"
+    );
+    assert!(
+        msg.contains("aborted on batch 1 of 1"),
+        "the Run must abort cleanly at the batch boundary, got: {msg}"
+    );
+
+    // No commit landed.
+    assert_eq!(
+        commit_count(dir.path()),
+        before,
+        "a vetoed Run must not create a commit"
+    );
+    // The staged index is intact: the batch's hunks are still staged.
+    let staged = git::Git::diff(Some("tracked.txt")).unwrap();
+    assert!(
+        staged.contains("changed by hook test"),
+        "staged hunks must survive the veto; staged diff:\n{staged}"
+    );
 }
 
 /// Marquee happy path: one content conflict → resolver → review → approve →

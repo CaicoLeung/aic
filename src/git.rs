@@ -1424,8 +1424,10 @@ index 1..2 100644\n\
     #[cfg(not(unix))]
     fn make_hook_executable(_path: &Path) {}
 
-    /// Install an executable hook script at `.git/hooks/<name>`.
-    fn install_hook(dir: &Path, name: &str, body: &str) {
+    /// Install an executable hook script at `.git/hooks/<name>`. Shared by the
+    /// git.rs unit tests and the e2e suite (issue #20), which both need a real
+    /// hook the `git commit` shell-out will execute.
+    pub(crate) fn install_hook(dir: &Path, name: &str, body: &str) {
         let hooks_dir = dir.join(".git/hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
         let hook = hooks_dir.join(name);
