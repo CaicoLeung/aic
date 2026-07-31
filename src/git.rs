@@ -476,33 +476,43 @@ impl Git {
         Ok(())
     }
 
+    /// Author a commit by shelling out to the real `git commit` (issue #19).
+    ///
+    /// libgit2 never runs git hooks, so a Run landed commits that bypassed
+    /// husky / prettier / lint-staged and `commit-msg` enforcement. Shelling
+    /// out delegates everything libgit2 skipped: `pre-commit`,
+    /// `prepare-commit-msg`, and `commit-msg` hooks run in order, `commit.gpgsign`
+    /// is honored, and the commit is signed with the repo's own
+    /// `user.name` / `user.email` signature — the same reason the
+    /// conflict-finalize path already shells out (ADR 0005: "the native CLI
+    /// does the right thing"). Staging is untouched: `Git::add` and hunk
+    /// staging already wrote a git-compatible index that `git commit` consumes.
+    ///
+    /// The message (and optional body) travel over stdin via `-F -`, so quotes,
+    /// `%` substitutions, and newlines survive verbatim with no shell escaping;
+    /// `--cleanup=verbatim` keeps git from collapsing blank lines or stripping
+    /// `#`-prefixed body lines the LLM authored (libgit2 committed the exact
+    /// string). `-F` already suppresses the editor, so no `GIT_EDITOR=true` is
+    /// needed (unlike the finalize `--continue` path).
+    ///
+    /// The always-on commit guard (`assert_commit_safe`: refuse while the repo
+    /// is mid-operation, or a staged blob still holds conflict markers) runs
+    /// first, before any shell-out.
     pub fn commit(message: String, body: Option<String>) -> anyhow::Result<String> {
         Self::assert_commit_safe()?;
-        let repo = Self::repo()?;
-        let mut index = repo.index().context("failed to get repository index")?;
-        let tree_id = index.write_tree_to(&repo).context("failed to write tree")?;
-        let tree = repo.find_tree(tree_id).context("failed to find tree")?;
-        let sig = repo.signature().context("failed to get git signature")?;
-
-        let parents: Vec<_> = match repo.head() {
-            Ok(r) => vec![
-                r.peel_to_commit()
-                    .context("failed to peel HEAD to commit")?,
-            ],
-            Err(_) => vec![],
-        };
-        let parent_refs: Vec<_> = parents.iter().collect();
-
         let full_message = match body {
             Some(b) => format!("{message}\n\n{b}"),
-            None => message.to_string(),
+            None => message,
         };
-        let oid = repo
-            .commit(Some("HEAD"), &sig, &sig, &full_message, &tree, &parent_refs)
-            .context("failed to create commit")?;
-
-        // First 7 hex chars — the conventional short hash.
-        Ok(oid.to_string()[..7].to_string())
+        run_git(
+            &["commit", "-F", "-", "--cleanup=verbatim"],
+            Some(&full_message),
+            &[],
+        )?;
+        // First 7 hex chars of the new HEAD — the same format the libgit2 path
+        // returned (`oid.to_string()[..7]`), the conventional short hash.
+        let head = run_git(&["rev-parse", "HEAD"], None, &[])?;
+        Ok(head.trim()[..7].to_string())
     }
 
     // ------------------------------------------------------------------
@@ -1248,5 +1258,130 @@ index 1..2 100644\n\
             format!("{err:#}").contains("conflict markers"),
             "expected marker message from staged blob, got: {err:#}"
         );
+    }
+
+    /// Make a hook file executable so git will actually invoke it. git skips a
+    /// non-executable hook silently, which would mask a regression in the
+    /// shell-out path. No-op off Unix — Windows runs hooks through `sh`
+    /// without checking the exec bit.
+    #[cfg(unix)]
+    fn make_hook_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+    #[cfg(not(unix))]
+    fn make_hook_executable(_path: &Path) {}
+
+    /// Install an executable hook script at `.git/hooks/<name>`.
+    fn install_hook(dir: &Path, name: &str, body: &str) {
+        let hooks_dir = dir.join(".git/hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hook = hooks_dir.join(name);
+        fs::write(&hook, format!("#!/bin/sh\n{body}\n")).unwrap();
+        make_hook_executable(&hook);
+    }
+
+    /// The core claim of issue #19 (AC#2): a normal Run commits through the
+    /// real `git commit`, so all three commit hooks — `pre-commit`,
+    /// `prepare-commit-msg`, and `commit-msg` — run. libgit2 never runs hooks,
+    /// so this test is red under the old implementation and green only once
+    /// `Git::commit` shells out.
+    #[test]
+    fn commit_runs_pre_commit_and_commit_msg_hooks() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        // pre-commit drops a sentinel file — proves the hook executed.
+        install_hook(dir.path(), "pre-commit", "echo ran > sentinel.txt");
+        // prepare-commit-msg drops its own sentinel — proves it ran too. It
+        // receives `$1` (message file) and `$2` (source = "message" for `-F`);
+        // we only need the side effect.
+        install_hook(
+            dir.path(),
+            "prepare-commit-msg",
+            "echo ran > prepare-ran.txt",
+        );
+        // commit-msg appends a trailer to the message file ($1) — proves the
+        // hook executed AND its edit survived into the landed commit.
+        install_hook(
+            dir.path(),
+            "commit-msg",
+            "echo 'Signed-off-by: aic-test' >> \"$1\"",
+        );
+
+        std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        let _g = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+
+        let hash = Git::commit("chore: hook test".into(), None).unwrap();
+
+        // pre-commit ran → sentinel exists.
+        assert!(
+            dir.path().join("sentinel.txt").exists(),
+            "pre-commit hook must run during Git::commit"
+        );
+        // prepare-commit-msg ran → its sentinel exists.
+        assert!(
+            dir.path().join("prepare-ran.txt").exists(),
+            "prepare-commit-msg hook must run during Git::commit"
+        );
+        // commit-msg ran → its trailer is in the committed message.
+        let msg = run_git(&["log", "-1", "--pretty=%B"], None, &[]).unwrap();
+        assert!(
+            msg.contains("Signed-off-by: aic-test"),
+            "commit-msg hook must run during Git::commit; got message:\n{msg}"
+        );
+        // The authored subject survives alongside the hook's trailer.
+        assert!(msg.contains("chore: hook test"));
+        // Hash still the 7-char HEAD prefix.
+        assert_eq!(hash.len(), 7);
+    }
+
+    /// The returned short hash must be exactly the first 7 hex chars of the new
+    /// HEAD — the format the libgit2 path returned (`oid.to_string()[..7]`).
+    #[test]
+    fn commit_returns_seven_char_head_prefix() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        let _g = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+
+        let hash = Git::commit("chore: hash format".into(), None).unwrap();
+
+        let full = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        assert_eq!(hash, &full.trim()[..7]);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A drafted body must land verbatim in the committed message — the
+    /// `--cleanup=verbatim` flag keeps git from collapsing blank lines or
+    /// stripping body content the LLM authored.
+    #[test]
+    fn commit_preserves_authored_body() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        let _g = CwdGuard::new(dir.path());
+        Git::add(&["tracked.txt"]).unwrap();
+
+        let hash = Git::commit(
+            "fix: subject".into(),
+            Some("explanation line\nsecond line".into()),
+        )
+        .unwrap();
+        assert_eq!(hash.len(), 7);
+
+        let msg = run_git(&["log", "-1", "--pretty=%B"], None, &[]).unwrap();
+        assert!(msg.contains("fix: subject"));
+        assert!(msg.contains("explanation line"));
+        assert!(msg.contains("second line"));
     }
 }
