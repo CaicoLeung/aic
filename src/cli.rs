@@ -21,4 +21,32 @@ pub enum Commands {
     Update,
     /// Resolve git merge conflicts in the working tree via the LLM
     Resolve,
+    /// Generate shell completion script
+    ///
+    /// Prints a completion script for the given shell to stdout. Redirect it to
+    /// the location your shell expects, for example:
+    ///
+    ///   aic generate-completion zsh > _aic   # place on a directory in $fpath
+    GenerateCompletion {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum CompletionShell {
+    #[value(name = "bash")]
+    Bash,
+    #[value(name = "elvish")]
+    Elvish,
+    #[value(name = "fish")]
+    Fish,
+    #[value(name = "nushell")]
+    Nushell,
+    #[value(name = "powershell")]
+    PowerShell,
+    #[value(name = "zsh")]
+    Zsh,
+    #[value(name = "carapace-spec")]
+    Spec,
 }

@@ -14,7 +14,7 @@ use crate::cli::Commands;
 use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use indicatif::ProgressBar;
 use std::collections::HashMap;
 use std::future::Future;
@@ -553,6 +553,33 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     run_commit_workflow_impl(resolver, prompt, Display::new(), planner, messenger).await
 }
 
+/// Writes the completion script for `shell` to `out`.
+///
+/// Factored out of `main` so the code path can be exercised from tests with
+/// an in-memory buffer instead of stdout. `clap_complete::generate` itself
+/// returns `()` and does not surface write errors, so this helper mirrors that
+/// contract rather than silently swallowing a `Result`.
+fn write_completion(shell: cli::CompletionShell, out: &mut dyn std::io::Write) {
+    use carapace_spec_clap::Spec;
+    use clap_complete::{Shell, generate};
+    use clap_complete_nushell::Nushell;
+
+    // Build a fresh `Command` from the derive. `bin_name` is owned so it does
+    // not alias `cmd`, which `generate` needs mutably.
+    let mut cmd = cli::Cli::command();
+    let bin_name = cmd.get_name().to_owned();
+
+    match shell {
+        cli::CompletionShell::Bash => generate(Shell::Bash, &mut cmd, &bin_name, out),
+        cli::CompletionShell::Elvish => generate(Shell::Elvish, &mut cmd, &bin_name, out),
+        cli::CompletionShell::Fish => generate(Shell::Fish, &mut cmd, &bin_name, out),
+        cli::CompletionShell::PowerShell => generate(Shell::PowerShell, &mut cmd, &bin_name, out),
+        cli::CompletionShell::Zsh => generate(Shell::Zsh, &mut cmd, &bin_name, out),
+        cli::CompletionShell::Nushell => generate(Nushell, &mut cmd, &bin_name, out),
+        cli::CompletionShell::Spec => generate(Spec, &mut cmd, &bin_name, out),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
@@ -562,6 +589,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::List) => config::run_list(),
         Some(Commands::Update) => update::run_update(),
         Some(Commands::Resolve) => run_resolve_workflow().await,
+        Some(Commands::GenerateCompletion { shell }) => {
+            write_completion(shell, &mut std::io::stdout());
+            Ok(())
+        }
         None => run_commit_workflow().await,
     }
 }
@@ -569,6 +600,30 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_completion_emits_nonempty_script_naming_aic_for_every_shell() {
+        use crate::cli::CompletionShell;
+
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Elvish,
+            CompletionShell::Fish,
+            CompletionShell::Nushell,
+            CompletionShell::PowerShell,
+            CompletionShell::Zsh,
+            CompletionShell::Spec,
+        ] {
+            let mut buf = Vec::new();
+            write_completion(shell, &mut buf);
+            let script = String::from_utf8(buf).expect("completion output must be valid UTF-8");
+            assert!(!script.is_empty(), "{shell:?}: completion script was empty");
+            assert!(
+                script.contains("aic"),
+                "{shell:?}: completion script did not reference the `aic` binary"
+            );
+        }
+    }
 
     #[test]
     fn thinking_view_keeps_last_n_lines_and_drops_blanks() {
