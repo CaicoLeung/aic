@@ -1,0 +1,9 @@
+# Normalize line endings to LF for all text files, in the repo and on
+# checkout, regardless of the contributor's platform. Without this, Windows
+# contributors (core.autocrlf=true by default) introduce CRLF diffs that
+# pollute commits and conflict with the LF-based assertions in the test
+# suite. See PR #52.
+* text=auto eol=lf
+
+# Raw zipsign public key — binary crypto material, never normalize or diff.
+keys/*.pub binary
