@@ -470,6 +470,44 @@ fn rebase_conflict(dir: &Path) {
     git_in(dir, &["rebase", "master"]);
 }
 
+/// `git am` that conflicts: master diverges `tracked.txt` from the patch's
+/// expected base (`original`), so a hand-crafted mbox patch (original→patched)
+/// fails to apply and leaves the repo in an ApplyMailbox state. This is the
+/// second refusal path alongside [`rebase_conflict`] (issue #33): same bail
+/// code, no test before. Without `--3way`, `git am` never falls back to a
+/// 3-way merge, so the state is `ApplyMailbox` (not `ApplyMailboxOrRebase`);
+/// both map to the `"am"` label and are refused.
+fn am_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    // Diverge master so the patch's context (`original`) no longer matches.
+    std::fs::write(dir.join("tracked.txt"), "modified on master\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master override"]);
+    // A single well-formed patch that fails to apply. `git am` of a valid mbox
+    // that doesn't fit lands in the am state; the `From ` line and `Subject:`
+    // header are what make it a mailbox rather than a bare diff.
+    let mbox = "\
+From 4b825dc642cb6eb9a060e54bf8d69288fbee4904 Mon Sep 17 00:00:00 2001
+From: test <test@test.com>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] patch change
+
+---
+ tracked.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tracked.txt b/tracked.txt
+--- a/tracked.txt
++++ b/tracked.txt
+@@ -1 +1 @@
+-original
++patched
+
+";
+    std::fs::write(dir.join("patch.mbox"), mbox).unwrap();
+    git_in(dir, &["am", "patch.mbox"]);
+}
+
 /// Join `n` lines `"{prefix} {i}\n"`. Used to build a file over the
 /// `MAX_CONFLICT_LINES` cap so `classify_worktree` returns `Oversized`.
 fn make_lines(prefix: &str, n: usize) -> String {
@@ -788,29 +826,47 @@ async fn commit_clean_repo_is_a_noop() {
     assert!(is_clean(dir.path()));
 }
 
-/// `aic resolve` on a rebase state is detected but refused in v1 (ADR 0005).
-#[tokio::test]
-async fn resolve_refuses_rebase_state() {
+/// Contract shared by every `aic resolve` refusal (ADR 0005): rebase and am
+/// states are detected but never finalized in v1. Pinned once here so each
+/// refusal path is a one-line test — a bail message naming the state, no
+/// Resolver call, and the repo left in its conflicted state.
+async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
     let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
-    rebase_conflict(dir.path());
+    setup(dir.path());
 
     let (resolver, seen) = resolver_recording();
     let _guard = gh::CwdGuard::new(dir.path());
 
     let err = run_resolve_workflow_impl(resolver, prompt_queue(vec![]), sink())
         .await
-        .expect_err("rebase must be refused");
+        .expect_err("refused state must error, not succeed");
     let msg = format!("{err:#}");
+    // Pin the literal "<label> state" phrase, not just the bare label — a bare
+    // `contains("am")` would false-pass on common words like "stream".
     assert!(
-        msg.contains("rebase") && msg.contains("v1"),
-        "expected rebase refusal, got: {msg}"
+        msg.contains(&format!("{label} state")) && msg.contains("v1"),
+        "expected {label} refusal, got: {msg}"
     );
     assert!(
         seen.lock().is_empty(),
         "resolver must not run on refused state"
     );
-    assert!(!is_clean(dir.path()), "rebase must not be finalized");
+    assert!(!is_clean(dir.path()), "{label} must not be finalized");
+}
+
+/// `aic resolve` on a rebase state is detected but refused in v1 (ADR 0005).
+#[tokio::test]
+async fn resolve_refuses_rebase_state() {
+    assert_resolve_refused(rebase_conflict, "rebase").await;
+}
+
+/// `aic resolve` on an am (ApplyMailbox) state is detected but refused in v1
+/// (ADR 0005). The am path shares the rebase bail code but had no test
+/// before (issue #33): this pins the same refusal contract.
+#[tokio::test]
+async fn resolve_refuses_am_state() {
+    assert_resolve_refused(am_conflict, "am").await;
 }
 
 /// Default `aic` run auto-detects a conflicted repo and, when the user declines
