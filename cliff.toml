@@ -18,7 +18,7 @@ body = """
 {% endfor %}\
 {% set handles = commits | map(attribute="github.username") | unique %}
 ### Contributors
-{% for handle in handles %}{% if handle and not handle is containing("[bot]") %}<a href="https://github.com/{{ handle }}"><img src="https://github.com/{{ handle }}.png?size=64" width="32" height="32" alt="@{{ handle }}" title="@{{ handle }}"></a> {% endif %}{% endfor %}\n
+<table><tr>{% for handle in handles %}{% if handle and not handle is containing("[bot]") %}<td align="center"><a href="https://github.com/{{ handle }}"><img src="https://github.com/{{ handle }}.png?size=96" width="64" height="64"><br><sub><b>@{{ handle }}</b></sub></a></td>{% endif %}{% endfor %}</tr></table>\n
 """
 trim = true
 footer = ""

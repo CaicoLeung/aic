@@ -2,14 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.0] - 2026-08-01
+## [Unreleased]
 
 ### Features
 
 - Resolve contributor @handles via GitHub API (#54)
+- Contributor avatars in release notes (#55)
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.4.0] - 2026-08-01
 
 ### Features
@@ -55,7 +56,7 @@ All notable changes to this project will be documented in this file.
 - Enforce LF via .gitattributes
 
 ### Contributors
-<a href="https://github.com/Paul-16098"><img src="https://github.com/Paul-16098.png?size=64" width="32" height="32" alt="@Paul-16098" title="@Paul-16098"></a> <a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/Paul-16098"><img src="https://github.com/Paul-16098.png?size=96" width="64" height="64"><br><sub><b>@Paul-16098</b></sub></a></td><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.7] - 2026-07-31
 
 ### Bug Fixes
@@ -80,7 +81,7 @@ All notable changes to this project will be documented in this file.
 - Add pull request template (#17)
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.6] - 2026-07-30
 
 ### Features
@@ -88,7 +89,7 @@ All notable changes to this project will be documented in this file.
 - Streaming multi-batch commit splitting with testable orchestration (#13)
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.5] - 2026-07-30
 
 ### Features
@@ -100,7 +101,7 @@ All notable changes to this project will be documented in this file.
 - Document aic resolve for v0.3.0 (#11)
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.0] - 2026-07-29
 
 ### Features
@@ -115,7 +116,7 @@ All notable changes to this project will be documented in this file.
 - Make writer injectable so hand-off wording can be tested (#10)
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.3] - 2026-07-26
 
 ### Bug Fixes
@@ -127,7 +128,7 @@ All notable changes to this project will be documented in this file.
 - Replace panel UI with line-based output (#5)
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.2] - 2026-07-26
 
 ### Features
@@ -142,7 +143,7 @@ All notable changes to this project will be documented in this file.
 - Reject untracked absent paths in add
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.1] - 2026-07-25
 
 ### Features
@@ -150,7 +151,7 @@ All notable changes to this project will be documented in this file.
 - Update default model to deepseek-v4-flash
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.0] - 2026-07-09
 
 ### Features
@@ -158,7 +159,7 @@ All notable changes to this project will be documented in this file.
 - Expand to 12 providers, refresh default models, add base URL
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.7] - 2026-07-08
 
 ### Documentation
@@ -176,7 +177,7 @@ All notable changes to this project will be documented in this file.
 - Remove banner display
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.6] - 2026-07-04
 
 ### Features
@@ -223,7 +224,7 @@ All notable changes to this project will be documented in this file.
 - No changes to commit
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.4] - 2026-05-20
 
 ### Features
@@ -256,7 +257,7 @@ All notable changes to this project will be documented in this file.
 - Format method chain across multiple lines
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.2] - 2026-05-20
 
 ### Features
@@ -273,7 +274,7 @@ All notable changes to this project will be documented in this file.
 - Shorten banner text
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.1] - 2026-05-18
 
 ### Features
@@ -307,7 +308,7 @@ All notable changes to this project will be documented in this file.
 - Update Cargo.toml with dist optimizations and metadata
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.0] - 2026-05-17
 
 ### Features
@@ -344,5 +345,5 @@ All notable changes to this project will be documented in this file.
 - Add Rust toolchain configuration
 
 ### Contributors
-<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 
