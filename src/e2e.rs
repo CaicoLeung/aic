@@ -1414,6 +1414,83 @@ async fn resolve_offers_finalize_when_all_manual() {
     assert!(is_clean(dir.path()), "merge must be finalized");
 }
 
+/// The escape hatch of [`resolve_offers_finalize_when_all_manual`]: same
+/// setup (mid-merge, every file resolved + staged by hand so the index has
+/// no unmerged entries), but the user declines `finalize now?`. No Finalize
+/// operation runs, the repo is left untouched in its conflicted state, the
+/// Resolver is never called, and the workflow returns `Ok` — the user's
+/// "I staged my hand-merge but I'm not ready to commit yet" stays intact.
+/// Pinned by issue #28, which guards this branch alongside its `yes`
+/// counterpart so a regression that silently finalizes (or errors) on a
+/// decline would fail loudly instead of shipping green.
+#[tokio::test]
+async fn resolve_declines_finalize_when_all_manual() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+
+    // Resolve by hand + stage, leaving the repo in the Merge state with no
+    // unmerged entries — identical entry condition to the `yes` test.
+    std::fs::write(dir.path().join("tracked.txt"), "hand-merged\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+
+    let (resolver, seen) = resolver_recording();
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    // Confirm the entry condition holds before the workflow runs: mid-merge,
+    // but nothing unmerged in the index. (`Git::state` / `conflicted_files`
+    // read the process CWD, so the guard must already be held.)
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::Merge,
+        "setup must leave the repo mid-merge"
+    );
+    assert!(
+        git::Git::conflicted_files().unwrap().is_empty(),
+        "setup must leave no unmerged entries"
+    );
+
+    let before = commit_count(dir.path());
+
+    // Answer "finalize now?" with no — the only prompt on this path.
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![false]), sink()).await;
+    assert!(
+        result.is_ok(),
+        "declining finalize should not error: {:?}",
+        result
+    );
+
+    // No finalize ran: the repo is still mid-merge, and no commit landed.
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::Merge,
+        "repo must stay mid-merge when finalize is declined"
+    );
+    assert!(!is_clean(dir.path()), "decline must not finalize the merge");
+    assert_eq!(
+        commit_count(dir.path()),
+        before,
+        "declining finalize must not create a commit"
+    );
+
+    // The hand-merge is untouched on disk and in the index: the staged blob
+    // is exactly what the user staged, with no markers and no re-resolution.
+    assert_eq!(
+        read_file(dir.path(), "tracked.txt"),
+        "hand-merged\n",
+        "hand-merge must be preserved untouched"
+    );
+    assert!(!staged_blob_has_markers(dir.path(), "tracked.txt"));
+
+    // The Resolver was never reached — declining finalize must short-circuit
+    // before any per-file work (and there are no unmerged files to resolve
+    // anyway).
+    assert!(
+        seen.lock().is_empty(),
+        "resolver must not run when finalize is declined"
+    );
+}
+
 // =====================================================================
 // Coverage: non-Merge finalize states, conflict-kind classification, LLM
 // error path. These close the gaps flagged in the PR #8 e2e review.
