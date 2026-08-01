@@ -47,8 +47,8 @@ All notable changes to this project will be documented in this file.
 - Enforce LF via .gitattributes
 
 ### Contributors
-- Paul
-- Caico Leung
+- @Paul-16098
+- @CaicoLeung
 
 ## [0.3.7] - 2026-07-31
 
@@ -74,7 +74,7 @@ All notable changes to this project will be documented in this file.
 - Add pull request template (#17)
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.3.6] - 2026-07-30
 
@@ -83,7 +83,7 @@ All notable changes to this project will be documented in this file.
 - Streaming multi-batch commit splitting with testable orchestration (#13)
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.3.5] - 2026-07-30
 
@@ -96,7 +96,7 @@ All notable changes to this project will be documented in this file.
 - Document aic resolve for v0.3.0 (#11)
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.3.0] - 2026-07-29
 
@@ -112,7 +112,7 @@ All notable changes to this project will be documented in this file.
 - Make writer injectable so hand-off wording can be tested (#10)
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.2.3] - 2026-07-26
 
@@ -125,7 +125,7 @@ All notable changes to this project will be documented in this file.
 - Replace panel UI with line-based output (#5)
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.2.2] - 2026-07-26
 
@@ -141,7 +141,7 @@ All notable changes to this project will be documented in this file.
 - Reject untracked absent paths in add
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.2.1] - 2026-07-25
 
@@ -150,7 +150,7 @@ All notable changes to this project will be documented in this file.
 - Update default model to deepseek-v4-flash
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.2.0] - 2026-07-09
 
@@ -159,7 +159,7 @@ All notable changes to this project will be documented in this file.
 - Expand to 12 providers, refresh default models, add base URL
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.1.7] - 2026-07-08
 
@@ -178,7 +178,7 @@ All notable changes to this project will be documented in this file.
 - Remove banner display
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.1.6] - 2026-07-04
 
@@ -226,7 +226,7 @@ All notable changes to this project will be documented in this file.
 - No changes to commit
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.1.4] - 2026-05-20
 
@@ -260,7 +260,7 @@ All notable changes to this project will be documented in this file.
 - Format method chain across multiple lines
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.1.2] - 2026-05-20
 
@@ -278,7 +278,7 @@ All notable changes to this project will be documented in this file.
 - Shorten banner text
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.1.1] - 2026-05-18
 
@@ -313,7 +313,7 @@ All notable changes to this project will be documented in this file.
 - Update Cargo.toml with dist optimizations and metadata
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 ## [0.1.0] - 2026-05-17
 
@@ -351,6 +351,6 @@ All notable changes to this project will be documented in this file.
 - Add Rust toolchain configuration
 
 ### Contributors
-- Caico Leung
+- @CaicoLeung
 
 

@@ -114,6 +114,13 @@ main() {
 
   # 6. regenerate CHANGELOG.md for the target tag, before the tag exists.
   #    git-cliff rebuilds the file deterministically from the full tag history.
+  #    [remote.github] in cliff.toml resolves @handles for the Contributors
+  #    section; it needs a GitHub token. Honour a pre-set GITHUB_TOKEN, else
+  #    fall back to the gh CLI if available (offline/no-handles is graceful).
+  if [ -z "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+    GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+    export GITHUB_TOKEN
+  fi
   git-cliff --tag "v${version}" -o CHANGELOG.md \
     || fail "git-cliff failed to regenerate CHANGELOG.md"
 
