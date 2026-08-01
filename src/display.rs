@@ -113,9 +113,19 @@ impl Display {
         }
     }
 
-    /// Write a line through the seam, ignoring errors.
-    fn writeln(&self, line: &str) {
-        self.out.write_line(line);
+    /// Write one line through the seam with the shared [`MARGIN`] prefix,
+    /// ignoring errors. Every status/banner line funnels through here so the
+    /// whole output block sits at a uniform inset — nothing flush with the
+    /// terminal edge. Content that wants deeper nesting keeps its own leading
+    /// indent in the formatted string; `emit` adds the base margin on top.
+    fn emit(&self, line: &str) {
+        self.out.write_line(&format!("{MARGIN}{line}"));
+    }
+
+    /// Blank separator line — written bare (no margin) to avoid trailing
+    /// whitespace.
+    fn emit_blank(&self) {
+        self.out.write_line("");
     }
 
     /// Effective text width for wrapped output: the terminal width clamped to
@@ -141,10 +151,10 @@ impl Display {
     pub fn formatted_notice(&self, count: usize) {
         let word = if count == 1 { "file" } else { "files" };
         let msg = self.styled(
-            &format!("  Formatted {} Rust {}", count, word),
+            &format!("Formatted {} Rust {}", count, word),
             Style::new().dim(),
         );
-        self.writeln(&msg);
+        self.emit(&msg);
     }
 
     /// Commit-completion line — shown after each commit.
@@ -187,8 +197,7 @@ impl Display {
             format!("{} ", self.styled(prefix, gray.clone()))
         };
         // Subject: margin only, never wrapped (title line).
-        let margin = " ".repeat(LEFT_MARGIN);
-        self.writeln(&format!("{margin}{pre}{check} {hash_styled} {msg_styled}"));
+        self.emit(&format!("{pre}{check} {hash_styled} {msg_styled}"));
 
         // Optional body — margin + greedy word-wrap to text_width, gray.
         // The body's old ad-hoc `  ` indent is subsumed by the shared margin so
@@ -199,12 +208,12 @@ impl Display {
                 let width = self.text_width();
                 for src_line in trimmed.lines() {
                     if src_line.is_empty() {
-                        // Blank line: emit empty (no trailing-whitespace margin).
-                        self.writeln("");
+                        // Blank line: no trailing-whitespace margin.
+                        self.emit_blank();
                         continue;
                     }
                     for piece in wrap_line(src_line, width) {
-                        self.writeln(&format!("{margin}{}", self.styled(&piece, gray.clone())));
+                        self.emit(&self.styled(&piece, gray.clone()));
                     }
                 }
             }
@@ -219,7 +228,7 @@ impl Display {
     pub fn conflict_detected(&self, state: RepoState, count: usize) {
         let yellow = Style::new().yellow().bold();
         let word = if count == 1 { "file" } else { "files" };
-        self.writeln(&format!(
+        self.emit(&format!(
             "{} conflicts detected — repo is mid-{} ({} {})",
             self.styled("\u{26A0}", yellow.clone()),
             state.label(),
@@ -231,7 +240,7 @@ impl Display {
     /// One-line prompt for the default-run auto-detect: `Resolve now? [y/n]`.
     pub fn resolve_prompt(&self, state: RepoState) {
         let yellow = Style::new().yellow();
-        self.writeln(&self.styled(
+        self.emit(&self.styled(
             &format!("repo is mid-{}; resolve with aic now?", state.label()),
             yellow,
         ));
@@ -251,9 +260,9 @@ impl Display {
                     self.styled(&format!("({})", f.kind.reason()), yellow.clone())
                 )
             };
-            self.writeln(&format!("  {}{}", f.path, tag));
+            self.emit(&format!("  {}{}", f.path, tag));
             if let crate::git::ConflictKind::Oversized { bytes, lines } = &f.kind {
-                self.writeln(&format!(
+                self.emit(&format!(
                     "    {}",
                     self.styled(
                         &format!("{bytes} bytes, {lines} lines (> cap)"),
@@ -262,7 +271,7 @@ impl Display {
                 ));
             }
         }
-        self.writeln("");
+        self.emit_blank();
     }
 
     /// Render the combined review diff (original worktree -> LLM resolution).
@@ -274,9 +283,13 @@ impl Display {
     ///   bodies only ever start with `+`/`-`/` `.
     pub fn review_section(&self, diff: &str) {
         let dim = Style::new().dim();
-        self.writeln(&self.styled("proposed resolutions:", dim.clone()));
+        self.emit(&self.styled("proposed resolutions:", dim.clone()));
         let header = Style::new().bold().cyan();
         for line in diff.lines() {
+            // Color is computed on the original diff line (leading +,-, or
+            // space), then the shared margin is prepended by `emit` — so the
+            // sign-based coloring stays correct while the whole diff block
+            // sits at the uniform inset.
             let styled = match line.chars().next() {
                 Some('+') => self.styled(line, Style::new().green()),
                 Some('-') => self.styled(line, Style::new().red()),
@@ -284,16 +297,16 @@ impl Display {
                 None => String::new(),
                 _ => self.styled(line, header.clone()),
             };
-            self.writeln(&styled);
+            self.emit(&styled);
         }
-        self.writeln("");
+        self.emit_blank();
     }
 
     /// Per-file outcome lines.
     pub fn resolved(&self, path: &str) {
         let green = Style::new().green().bold();
-        self.writeln(&format!(
-            "  {} resolved + staged: {}",
+        self.emit(&format!(
+            "{} resolved + staged: {}",
             self.styled("\u{2713}", green),
             path,
         ));
@@ -301,8 +314,8 @@ impl Display {
 
     pub fn skipped(&self, path: &str, reason: &str) {
         let yellow = Style::new().yellow();
-        self.writeln(&format!(
-            "  {} skipped: {} ({})",
+        self.emit(&format!(
+            "{} skipped: {} ({})",
             self.styled("\u{26A0}", yellow.clone()),
             path,
             reason,
@@ -311,8 +324,8 @@ impl Display {
 
     pub fn rejected(&self, path: &str) {
         let dim = Style::new().dim();
-        self.writeln(&format!(
-            "  {} rejected: {}",
+        self.emit(&format!(
+            "{} rejected: {}",
             self.styled("\u{2717}", Style::new().red()),
             self.styled(path, dim),
         ));
@@ -321,8 +334,9 @@ impl Display {
     /// Finalize succeeded.
     pub fn finalize_done(&self, state: RepoState) {
         let green = Style::new().green().bold();
-        self.writeln(&format!(
-            "\n{} {} finalized",
+        self.emit_blank();
+        self.emit(&format!(
+            "{} {} finalized",
             self.styled("\u{2713}", green.clone()),
             self.styled(state.label(), green),
         ));
@@ -346,8 +360,9 @@ impl Display {
         let dim = Style::new().dim();
         let cyan = Style::new().cyan();
 
-        self.writeln(&format!(
-            "\n{} {approved} resolved + staged",
+        self.emit_blank();
+        self.emit(&format!(
+            "{} {approved} resolved + staged",
             self.styled("\u{2713}", green),
         ));
 
@@ -367,41 +382,41 @@ impl Display {
         } else {
             blockers.join(", ")
         };
-        self.writeln(&format!(
+        self.emit(&format!(
             "{} not finalized — {blocker_text}",
             self.styled("\u{26A0}", yellow),
         ));
-        self.writeln(&format!(
+        self.emit(&format!(
             "  {}",
             self.styled(
                 "resolve the remaining files (or re-run `aic resolve`), then:",
                 dim,
             ),
         ));
-        self.writeln(&format!("    {}", self.styled(finalize_hint(state), cyan)));
+        self.emit(&format!("    {}", self.styled(finalize_hint(state), cyan)));
     }
 
     /// `aic resolve` on a clean repo.
     pub fn no_conflicts(&self) {
         let dim = Style::new().dim();
-        self.writeln(&self.styled("no conflicts — nothing to resolve", dim));
+        self.emit(&self.styled("no conflicts — nothing to resolve", dim));
     }
 
     /// `aic` with nothing staged and nothing unstaged — no work for the LLM.
     pub fn nothing_to_commit(&self) {
         let dim = Style::new().dim();
-        self.writeln(&self.styled("nothing to commit — working tree clean", dim));
+        self.emit(&self.styled("nothing to commit — working tree clean", dim));
     }
 
     /// `aic resolve` on a rebase/am state — detected but refused in v1.
     pub fn refused(&self, state: RepoState) {
         let red = Style::new().red().bold();
-        self.writeln(&format!(
+        self.emit(&format!(
             "{} cannot resolve a {} state in v1",
             self.styled("\u{2717}", red),
             state.label(),
         ));
-        self.writeln(&format!(
+        self.emit(&format!(
             "  resolve manually, then run {}",
             self.styled(finalize_hint(state), Style::new().cyan()),
         ));
@@ -411,14 +426,23 @@ impl Display {
     /// resolved everything by hand and just needs the finalize step.
     pub fn all_resolved_offer_finalize(&self, state: RepoState) {
         let dim = Style::new().dim();
-        self.writeln(&self.styled(
+        self.emit(&self.styled(
             "no unmerged files remain — conflicts already resolved manually",
             dim,
         ));
-        self.writeln(&format!(
+        self.emit(&format!(
             "  finalize with {}",
             self.styled(finalize_hint(state), Style::new().cyan()),
         ));
+    }
+
+    /// Generic warning line, routed through the shared margin so ad-hoc
+    /// status failures (e.g. a non-fatal `rustfmt` exit) stay visually
+    /// consistent with the rest of the run's output instead of being dumped
+    /// flush to the edge via raw `eprintln!`.
+    pub fn warn(&self, msg: &str) {
+        let yellow = Style::new().yellow().bold();
+        self.emit(&format!("{} {msg}", self.styled("\u{26A0}", yellow)));
     }
 }
 
@@ -435,6 +459,11 @@ impl Default for Display {
 /// Left inset (columns) for the commit-line block. Replaces the body's old
 /// ad-hoc `  ` indent so subject and body share one uniform margin.
 const LEFT_MARGIN: usize = 2;
+
+/// The actual prefix string corresponding to [`LEFT_MARGIN`] (two spaces),
+/// kept as a `&str` so [`Display::emit`] can prepend it without allocating on
+/// every line.
+const MARGIN: &str = "  ";
 
 /// Right inset (columns) of breathing room, achieved by wrapping shorter — no
 /// trailing spaces are ever printed (they break copy-paste and some terminals
