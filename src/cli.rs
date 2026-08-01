@@ -9,6 +9,16 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Resume an interrupted batch-plan run from its frozen snapshot, instead
+    /// of re-planning. Errors if no interrupted run is on disk.
+    #[arg(long, conflicts_with = "no_resume")]
+    pub resume: bool,
+
+    /// Discard any interrupted run's state and start a fresh plan. Silences the
+    /// auto-detected resume offer.
+    #[arg(long, conflicts_with = "resume")]
+    pub no_resume: bool,
 }
 
 #[derive(Subcommand)]

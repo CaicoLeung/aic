@@ -424,6 +424,76 @@ impl Display {
         ));
     }
 
+    // ------------------------------------------------------------------
+    // Resume (interrupted-run recovery)
+    // ------------------------------------------------------------------
+
+    /// Offer to resume an interrupted batch-plan run.
+    /// `committed`/`total` are committed-vs-planned batch counts;
+    /// `skipped` counts batches previously deferred during this state.
+    pub fn resume_offer(&self, committed: usize, total: usize, skipped: usize) {
+        let cyan = Style::new().cyan().bold();
+        self.emit_blank();
+        self.emit(&self.styled(
+            &format!("an interrupted run is resumable — {committed}/{total} batches committed",),
+            cyan,
+        ));
+        if skipped > 0 {
+            let dim = Style::new().dim();
+            self.emit(&self.styled(&format!("{skipped} batch(es) were deferred"), dim));
+        }
+    }
+
+    /// The previous run's state was discarded (user declined or `--no-resume`).
+    pub fn resume_discarded(&self) {
+        let dim = Style::new().dim();
+        self.emit(&self.styled("discarded previous run state; starting fresh", dim));
+    }
+
+    /// Header at the start of a resume replay.
+    pub fn resume_start(&self, committed: usize, total: usize) {
+        let cyan = Style::new().cyan();
+        self.emit(&self.styled(
+            &format!("resuming: {committed}/{total} batches already committed"),
+            cyan,
+        ));
+    }
+
+    /// A batch was deferred because one of its files changed since plan time.
+    pub fn resume_skipped(&self, batch: usize, files: &[String]) {
+        let yellow = Style::new().yellow();
+        self.emit(&format!(
+            "{} batch {batch} deferred: file(s) changed since the plan — {}",
+            self.styled("\u{21BB}", yellow.clone()),
+            files.join(", "),
+        ));
+    }
+
+    /// Resume finished with everything committed.
+    pub fn resume_completed(&self, committed: usize, total: usize) {
+        let green = Style::new().green().bold();
+        self.emit_blank();
+        self.emit(&self.styled(
+            &format!("resume complete: {committed}/{total} batches committed"),
+            green,
+        ));
+    }
+
+    /// Resume finished with some batches deferred (left unstaged for a fresh run).
+    pub fn resume_completed_with_skipped(&self, committed: usize, total: usize, skipped: usize) {
+        let green = Style::new().green().bold();
+        let yellow = Style::new().yellow();
+        self.emit_blank();
+        self.emit(&self.styled(
+            &format!("resume complete: {committed}/{total} committed, {skipped} deferred"),
+            green,
+        ));
+        self.emit(&self.styled(
+            "deferred changes remain unstaged — re-run `aic` to plan them fresh",
+            yellow,
+        ));
+    }
+
     /// State is conflicted but the index has no unmerged entries — the user
     /// resolved everything by hand and just needs the finalize step.
     pub fn all_resolved_offer_finalize(&self, state: RepoState) {

@@ -200,7 +200,7 @@ async fn generate_and_commit(
     display: &Display,
     prefix: &str,
     messenger: &CommitMessenger,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(String, String)> {
     let files: Vec<serde_json::Value> = paths
         .iter()
         .map(|p| {
@@ -213,11 +213,11 @@ async fn generate_and_commit(
     let result = with_spinner("Generating commit message", messenger(diff.to_string())).await?;
     let hash = Git::commit(result.message.clone(), result.body.clone())?;
     display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
-    Ok(())
+    Ok((hash, result.message))
 }
 
-/// One file's planned hunks for a batch, split into two views that must
-/// never be confused:
+/// One file's planned hunks for a batch, split into two views that must never
+/// be confused:
 ///
 /// - `original`: 1-based indices in the file's **plan-time** diff — the
 ///   numbering the model saw and the plan refers to. Recorded into `committed`
@@ -229,45 +229,34 @@ async fn generate_and_commit(
 ///
 /// Hunks already committed are dropped from both. Surviving hunks keep their
 /// original relative order, so an uncommitted original hunk `h` lands at
-/// current position `h - (#committed original indices < h)`. Splitting the two
-/// spaces into named fields (rather than returning one ambiguous `Vec`) is
-/// what stops callers from writing a remapped position back as an original
-/// index — the class of bug that aborted 3+-hunks-one-file Runs.
+/// current position `h - (#committed original indices < h)`.
 struct HunkMapping {
     original: Vec<usize>,
     current: Vec<usize>,
 }
 
 /// Resolve a batch's planned hunks for one file against what's already
-/// committed.
-///
-/// `planned` is the plan's `hunks` array for the file (empty = every hunk of
-/// the file); `committed` is the set of **original** hunk indices already
-/// landed by earlier batches; `current_count` is how many hunks the current
-/// diff still has. When `planned` is empty the original count is reconstructed
-/// as `current_count + committed.len()` (each committed hunk removed one from
-/// the current diff).
+/// committed. See [`HunkMapping`]. `planned` is the plan's `hunks` array for
+/// the file (empty = every hunk); `committed` is the set of **original** hunk
+/// indices already landed; `current_count` is how many hunks the current diff
+/// still has. When `planned` is empty the original count is reconstructed as
+/// `current_count + committed.len()`.
 fn map_planned_hunks(
     planned: &[usize],
     committed: &HashSet<usize>,
     current_count: usize,
 ) -> HunkMapping {
-    // Empty `planned` means "the whole file"; rebuild the original hunk count
-    // from what the current diff still shows plus what's already gone.
     let wanted: Vec<usize> = if planned.is_empty() {
         (1..=(current_count + committed.len())).collect()
     } else {
         planned.to_vec()
     };
-
     let mut original = Vec::with_capacity(wanted.len());
     let mut current = Vec::with_capacity(wanted.len());
     for h in wanted {
         if committed.contains(&h) {
             continue;
         }
-        // Every committed original hunk before `h` shifts it down by one slot
-        // in the current (shrunk) diff.
         let shift = committed.iter().filter(|&&c| c < h).count();
         original.push(h);
         current.push(h - shift);
@@ -279,31 +268,18 @@ fn map_planned_hunks(
 /// the paths actually staged — deduplicated by file, in first-seen order.
 ///
 /// Staging from a fresh diff (rather than the plan-time snapshot) is what keeps
-/// a Run alive when a pre-commit hook commits more than the batch staged:
-/// lint-staged/prettier re-add whole files, so the first batch to touch a file
-/// can land *all* of its hunks, and the plan's later batches for that file have
-/// nothing left to stage. Replaying the stale snapshot then dies with `git
-/// apply`'s "patch does not apply". Files whose changes already landed are
-/// skipped (with a notice) and the run continues with the rest.
-///
-/// A file split across several `changes` entries of one batch (disjoint hunks)
-/// is merged into a single staging pass and a single entry of the returned
-/// list, so it produces one commit message — the contract the old
-/// `unique_batch_files` enforced. Grouping also stages all of a file's hunks
-/// in one `git apply` (cheaper than one call per entry) and keeps
-/// `committed_hunks` free of within-batch cross-entry remapping: each file's
-/// current-diff fetch happens once, before any of its hunks are staged.
+/// a live Run alive when a pre-commit hook (lint-staged/prettier) commits more
+/// than the batch staged: such a hook re-adds whole files, so the first batch
+/// to touch a file can land *all* of its hunks, leaving later batches nothing
+/// to stage. Replaying the stale snapshot would die with `git apply`'s "patch
+/// does not apply". Files whose changes already landed are skipped (with a
+/// notice) and the run continues. Plan-time indices are remapped onto the
+/// current diff via `committed_hunks`.
 fn stage_batch_hunks(
     batch: &generator::BatchPlanBatch,
     committed_hunks: &mut HashMap<String, HashSet<usize>>,
     display: &Display,
 ) -> anyhow::Result<Vec<String>> {
-    // Gather each file's planned hunks across its (possibly several) `changes`
-    // entries, preserving first-seen file order. An empty `hunks` slice means
-    // "the whole file" for that entry; `validate_batch_plan` rejects mixing
-    // whole-file and per-hunk entries for the same file, so concatenating the
-    // slices yields the right `planned` for every reachable plan (a lone
-    // whole-file entry stays empty → `map_planned_hunks` expands it).
     let mut files: Vec<String> = Vec::new();
     let mut hunks_by_file: HashMap<String, Vec<usize>> = HashMap::new();
     for change in &batch.changes {
@@ -338,12 +314,47 @@ fn stage_batch_hunks(
         }
         Git::stage_hunks(&current, &mapping.current)
             .with_context(|| format!("staging hunks for {}", file))?;
-        // Record ORIGINAL indices (not the remapped current positions) so the
-        // plan-time numbering the model saw stays stable for later batches.
         committed.extend(mapping.original);
         staged_paths.push(file.clone());
     }
     Ok(staged_paths)
+}
+
+/// Replay one batch's hunks from the **frozen** plan-time snapshot captured at
+/// plan time. Used only by the resume path, which recovers an interrupted Run
+/// by replaying exactly what was captured — never re-formatting or re-capturing
+/// diffs. Unlike the live [`stage_batch_hunks`], this stages the snapshot's
+/// plan-time hunk numbering verbatim (after a `reset_index_to_head`), so it
+/// does not remap against `committed_hunks`.
+fn stage_batch_hunks_from_snapshot(
+    batch: &generator::BatchPlanBatch,
+    raw_diffs: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    for change in &batch.changes {
+        let raw = raw_diffs
+            .get(&change.file)
+            .with_context(|| format!("no captured diff for {}", change.file))?;
+        let hunks: Vec<usize> = if change.hunks.is_empty() {
+            (1..=git::parse_file_patch(raw).hunks.len()).collect()
+        } else {
+            change.hunks.clone()
+        };
+        Git::stage_hunks(raw, &hunks)
+            .with_context(|| format!("staging hunks for {}", change.file))?;
+    }
+    Ok(())
+}
+
+/// De-duplicated file paths in a batch, in first-seen order. A file listed in
+/// several `changes` entries of one batch still produces one commit message.
+fn unique_batch_files(batch: &generator::BatchPlanBatch) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for change in &batch.changes {
+        if !paths.contains(&change.file) {
+            paths.push(change.file.clone());
+        }
+    }
+    paths
 }
 
 /// Read a y/n answer from stdin. The label is written to stderr (Display is
@@ -560,6 +571,30 @@ pub(crate) async fn run_commit_workflow_impl(
         );
     }
 
+    // Hold the advisory lock for the whole Run so two concurrent `aic` in one
+    // worktree cannot corrupt the shared `.aic/active.json`. Dropped on return.
+    let _lock = runstate::RunLock::acquire()?;
+
+    // Resume offer: an interrupted Run's frozen plan may still be recoverable.
+    // `--no-resume` is handled by the production wrapper (state cleared first);
+    // `--resume` short-circuits to the replay path there and never reaches here.
+    if let Some(prev) = runstate::RunState::load()? {
+        display.resume_offer(
+            prev.count_committed(),
+            prev.batches.len(),
+            prev.count_skipped(),
+        );
+        if prompt("resume this run?")? {
+            return run_resume_workflow_impl(display, messenger, prev).await;
+        }
+        runstate::RunState::clear()?;
+        runstate::log(&format!(
+            "discarded previous run state ({} batch(es)) — starting fresh",
+            prev.batches.len()
+        ));
+        display.resume_discarded();
+    }
+
     let status = Git::status()?;
     let staged_files: Vec<_> = status.iter().filter(|f| f.staged).collect();
 
@@ -579,18 +614,19 @@ pub(crate) async fn run_commit_workflow_impl(
         format_rust_files(&all_unstaged, &display);
 
         // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
-        // feeds the two consumers that must agree on hunk numbering: the
-        // numbered view sent to the model, and `file_hunk_counts` for
-        // `validate_batch_plan`. Staging does NOT read from it —
-        // `stage_batch_hunks` re-reads a fresh diff per batch (so the Run
-        // survives pre-commit hooks that re-stage whole files) and remaps the
-        // plan-time indices onto the current diff via `committed_hunks`.
+        // feeds the model's numbered view, `file_hunk_counts` for plan
+        // validation, and — persisted into the run state — the pure-snapshot
+        // replay resume uses. Staging does NOT read from it: the live loop
+        // re-reads a fresh diff per batch (so it survives pre-commit hooks that
+        // re-stage whole files) via `stage_batch_hunks` + `committed_hunks`.
+        let mut raw_diffs: HashMap<String, String> = HashMap::new();
         let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
             .map(|f| {
                 let diff = Git::diff_workdir(Some(f.path.as_str()))?;
                 let hunk_count = git::parse_file_patch(&diff).hunks.len();
+                raw_diffs.insert(f.path.clone(), diff.clone());
                 file_hunk_counts.push((f.path.clone(), hunk_count));
                 let scoped = git::format_diff_scoped(&diff, &f.path);
                 Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
@@ -603,33 +639,91 @@ pub(crate) async fn run_commit_workflow_impl(
             .context("batch plan validation failed")?;
 
         let count = result.batches.len();
+
+        // Persist the frozen plan so an interrupted Run can be replayed. The
+        // fingerprint of every planned file is captured now and rechecked on
+        // resume; a file the user mutates since plan time defers its batch.
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let head = Git::head_short().unwrap_or_default();
+        let mut file_hashes: HashMap<String, String> = HashMap::new();
+        for batch in &result.batches {
+            for f in unique_batch_files(batch) {
+                file_hashes
+                    .entry(f.clone())
+                    .or_insert_with(|| runstate::fingerprint(&f));
+            }
+        }
+        let file_count = file_hashes.len();
+        let mut rs = runstate::RunState {
+            created_at,
+            head_at_plan: head.clone(),
+            plan: result.clone(),
+            raw_diffs: raw_diffs.clone(),
+            file_hashes,
+            batches: vec![runstate::BatchEntry::Pending; count],
+        };
+        rs.save()?;
+        runstate::log(&format!(
+            "plan captured: {count} batch(es) over {file_count} file(s) (head {head})"
+        ));
         let mut committed_hunks: HashMap<String, HashSet<usize>> = HashMap::new();
+
         for (i, batch) in result.batches.iter().enumerate() {
             let prefix = format!("[{}/{count}]", i + 1);
             // Stage this batch's hunks, then generate + commit. Either step
             // failing after earlier batches already committed leaves the repo
-            // partially committed, so both share one abort message naming how
-            // far we got and that the rest is recoverable by re-running `aic`.
+            // partially committed; the persisted state lets the Run resume.
             let outcome = async {
                 let paths = stage_batch_hunks(batch, &mut committed_hunks, &display)?;
                 if paths.is_empty() {
                     // Every file in this batch already landed via an earlier
                     // batch or a pre-commit hook — nothing to commit.
-                    return Ok(());
+                    return Ok::<Option<(String, String)>, anyhow::Error>(None);
                 }
-                generate_and_commit(&paths, &display, &prefix, &messenger).await
+                let committed = generate_and_commit(&paths, &display, &prefix, &messenger).await?;
+                Ok(Some(committed))
             };
-            if let Err(e) = outcome.await {
-                anyhow::bail!(
-                    "aborted on batch {} of {} after {} batch(es) committed. \
-                     Remaining changes are still in the working tree — re-run \
-                     `aic` to continue: {e:#}",
-                    i + 1,
-                    count,
-                    i
-                );
+            match outcome.await {
+                Ok(Some((sha, msg))) => {
+                    rs.batches[i] = runstate::BatchEntry::Committed { sha: sha.clone() };
+                    let _ = rs.save();
+                    runstate::log(&format!(
+                        "batch {}/{} committed {sha}: {}",
+                        i + 1,
+                        count,
+                        msg.lines().next().unwrap_or("")
+                    ));
+                }
+                Ok(None) => {
+                    // Nothing staged (pre-commit hook landed it earlier) —
+                    // record the batch as done so resume doesn't re-attempt it.
+                    rs.batches[i] = runstate::BatchEntry::Committed { sha: String::new() };
+                    let _ = rs.save();
+                    runstate::log(&format!(
+                        "batch {}/{} had nothing left to stage — recorded as done",
+                        i + 1,
+                        count
+                    ));
+                }
+                Err(e) => {
+                    runstate::log(&format!("batch {}/{} failed: {e:#}", i + 1, count));
+                    anyhow::bail!(
+                        "aborted on batch {} of {} after {} batch(es) committed. \
+                         Re-run `aic` to resume the remaining batches, or `aic --no-resume` \
+                         to discard the plan and start fresh: {e:#}",
+                        i + 1,
+                        count,
+                        i
+                    );
+                }
             }
         }
+
+        let _ = runstate::RunState::clear();
+        runstate::log(&format!("run completed: {count} batch(es) committed"));
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
         format_rust_files(&paths, &display);
@@ -641,9 +735,82 @@ pub(crate) async fn run_commit_workflow_impl(
     Ok(())
 }
 
+/// Replay the pending batches of an interrupted Run from its frozen snapshot.
+/// Already-committed batches are skipped; batches whose files changed since plan
+/// time are deferred (left unstaged, never lost). Never re-plans or re-captures
+/// diffs — pure replay of the captured hunks via the proven staging path.
+pub(crate) async fn run_resume_workflow_impl(
+    display: Display,
+    messenger: CommitMessenger,
+    mut rs: runstate::RunState,
+) -> anyhow::Result<()> {
+    let count = rs.batches.len();
+    let committed_before = rs.count_committed();
+    runstate::log(&format!(
+        "resume started: {committed_before}/{count} batch(es) already committed"
+    ));
+    display.resume_start(committed_before, count);
+
+    // Integrity: defer pending batches whose files drifted since plan time.
+    for (i, files) in rs.integrity_violations() {
+        rs.batches[i] = runstate::BatchEntry::Skipped {
+            reason: format!("files changed since plan: {}", files.join(", ")),
+        };
+        display.resume_skipped(i + 1, &files);
+        runstate::log(&format!(
+            "batch {}/{} deferred: files changed since plan: {}",
+            i + 1,
+            count,
+            files.join(", ")
+        ));
+    }
+    let _ = rs.save();
+
+    // Replay every still-pending batch from the frozen diffs.
+    for i in rs.pending_indices() {
+        let batch = &rs.plan.batches[i];
+        let prefix = format!("[{}/{count}]", i + 1);
+        let paths = unique_batch_files(batch);
+        // A prior failed attempt may have staged this batch's hunks without
+        // committing; reset to HEAD so re-staging starts from a clean index.
+        Git::reset_index_to_head()?;
+        stage_batch_hunks_from_snapshot(batch, &rs.raw_diffs)?;
+        let (sha, msg) = generate_and_commit(&paths, &display, &prefix, &messenger).await?;
+        rs.batches[i] = runstate::BatchEntry::Committed { sha: sha.clone() };
+        let _ = rs.save();
+        runstate::log(&format!(
+            "batch {}/{} committed {sha}: {}",
+            i + 1,
+            count,
+            msg.lines().next().unwrap_or("")
+        ));
+    }
+
+    let committed = rs.count_committed();
+    let skipped = rs.count_skipped();
+    let _ = runstate::RunState::clear();
+    if skipped == 0 {
+        runstate::log(&format!(
+            "resume completed: {committed}/{count} batch(es) committed"
+        ));
+        display.resume_completed(committed, count);
+    } else {
+        runstate::log(&format!(
+            "resume completed: {committed}/{count} committed, {skipped} deferred"
+        ));
+        display.resume_completed_with_skipped(committed, count, skipped);
+    }
+    Ok(())
+}
+
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver and stdin y/n prompt into [`run_commit_workflow_impl`].
-async fn run_commit_workflow() -> anyhow::Result<()> {
+///
+/// `resume` mirrors the CLI flags:
+/// - `Some(true)`  → `--resume`: short-circuit straight to the replay path.
+/// - `Some(false)` → `--no-resume`: clear any in-flight state, then run fresh.
+/// - `None`        → auto: the resume offer surfaces inside the workflow.
+async fn run_commit_workflow(resume: Option<bool>) -> anyhow::Result<()> {
     let resolver: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
@@ -658,6 +825,28 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
+
+    match resume {
+        // `--resume`: jump straight to replay. No state → nothing to resume.
+        Some(true) => match runstate::RunState::load()? {
+            Some(rs) => {
+                // Hold the advisory lock for the replay just as the live Run
+                // does, so two concurrent `aic --resume` cannot both replay.
+                let _lock = runstate::RunLock::acquire()?;
+                return run_resume_workflow_impl(Display::new(), messenger, rs).await;
+            }
+            None => {
+                eprintln!("no interrupted run to resume");
+                return Ok(());
+            }
+        },
+        // `--no-resume`: discard any in-flight plan before a fresh run.
+        Some(false) => {
+            let _ = runstate::RunState::clear();
+        }
+        None => {}
+    }
+
     run_commit_workflow_impl(resolver, prompt, Display::new(), planner, messenger).await
 }
 
@@ -691,6 +880,13 @@ fn write_completion(shell: cli::CompletionShell, out: &mut dyn std::io::Write) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
+    let resume = if cli.resume {
+        Some(true)
+    } else if cli.no_resume {
+        Some(false)
+    } else {
+        None
+    };
 
     match cli.command {
         Some(Commands::Setup) => config::run_setup(),
@@ -701,7 +897,7 @@ async fn main() -> anyhow::Result<()> {
             write_completion(shell, &mut std::io::stdout());
             Ok(())
         }
-        None => run_commit_workflow().await,
+        None => run_commit_workflow(resume).await,
     }
 }
 
@@ -779,6 +975,7 @@ mod tests {
 
     #[test]
     fn map_planned_hunks_splits_original_and_current_indices() {
+        use std::collections::HashSet;
         // Hunks 1-2 already committed → plan's 3-7 survive as original 3-7 and
         // map onto the current diff's 1-5. The two views differ precisely when
         // something is committed; conflating them is the bug this struct exists
@@ -788,8 +985,7 @@ mod tests {
         assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
         assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
 
-        // Empty planned hunks = every hunk of the file; the original count is
-        // reconstructed as current + already-committed.
+        // Empty planned hunks = every hunk; original count = current + committed.
         let m = map_planned_hunks(&[], &committed, 5);
         assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
         assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
@@ -799,19 +995,9 @@ mod tests {
         assert_eq!(m.original, vec![1, 2]);
         assert_eq!(m.current, vec![1, 2]);
 
-        // Interleaved committed hunks are dropped and current positions
-        // recomputed.
-        let committed: HashSet<usize> = [1usize, 3, 5].into_iter().collect();
-        let m = map_planned_hunks(&[2, 4, 6], &committed, 3);
-        assert_eq!(m.original, vec![2, 4, 6]);
-        assert_eq!(m.current, vec![1, 2, 3]);
-
-        // The regression: three hunks of one file, split across three batches
-        // with NO hook. After batch 1 commits original hunk 1, batch 2's hunk
-        // 2 must map to current position 1; after batch 2, hunk 3 must map to
-        // current position 1 of a 1-hunk diff. Storing the remapped position
-        // (1) instead of the original (2 / 3) here used to corrupt `committed`
-        // and make batch 3 address a non-existent hunk 2.
+        // Three hunks of one file across three batches, no hook: storing the
+        // remapped position instead of the original used to corrupt `committed`
+        // and make batch 3 address a non-existent hunk.
         let mut committed: HashSet<usize> = [1usize].into_iter().collect();
         let m = map_planned_hunks(&[2], &committed, 2);
         assert_eq!(m.original, vec![2]);
