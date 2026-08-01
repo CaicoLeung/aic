@@ -248,6 +248,14 @@ fn unreachable_messenger() -> CommitMessenger {
     )
 }
 
+/// Resolver stub that panics if called — same purpose as
+/// [`unreachable_planner`] for the conflict-resolution step.
+fn unreachable_resolver() -> Resolver {
+    Box::new(|_content: String| -> BoxFuture<anyhow::Result<String>> {
+        Box::pin(async { panic!("Resolver reached on a path that must skip the LLM") })
+    })
+}
+
 // ---------------------------------------------------------------------
 // Display seam: an in-memory sink so emitted wording can be asserted.
 // ---------------------------------------------------------------------
@@ -773,7 +781,7 @@ async fn commit_splits_one_file_across_two_batches() {
 /// counterpart so a regression that drops the staged file or routes staged
 /// work into the planner would fail loudly instead of shipping green.
 #[tokio::test]
-async fn commit_staged_files_single_commit() {
+async fn commit_staged_files_in_one_commit() {
     let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
@@ -785,11 +793,10 @@ async fn commit_staged_files_single_commit() {
     git_in(dir.path(), &["add", "tracked.txt"]);
 
     let before = commit_count(dir.path());
-    let (resolver, seen) = resolver_recording();
     let _g = gh::CwdGuard::new(dir.path());
 
     let result = run_commit_workflow_impl(
-        resolver,
+        unreachable_resolver(), // non-conflicted path must NOT resolve
         prompt_queue(vec![]),
         sink(),
         unreachable_planner(), // staged path must NOT plan
@@ -814,10 +821,12 @@ async fn commit_staged_files_single_commit() {
         "staged change\n",
         "the commit's tree must contain the staged change"
     );
-    // The drafted message survived into the commit — pins that the messenger
-    // (not some skip path) produced it.
-    assert!(
-        git_out(dir.path(), &["log", "-1", "--pretty=%B"]).contains("feat: staged change"),
+    // The drafted message survived into the commit verbatim — pins that the
+    // messenger (not some skip path) produced it. Exact because `Git::commit`
+    // writes the message with `--cleanup=verbatim`.
+    assert_eq!(
+        git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
+        "feat: staged change",
         "the messenger's drafted message must land in the commit"
     );
     // The working tree is clean afterward: no merge/rebase state, and nothing
@@ -827,11 +836,6 @@ async fn commit_staged_files_single_commit() {
         git_out(dir.path(), &["status", "--porcelain"]).trim(),
         "",
         "working tree must be clean after the staged commit"
-    );
-    // Neither the resolver nor the planner was reached on this path.
-    assert!(
-        seen.lock().is_empty(),
-        "resolver must not run on the non-conflicted staged path"
     );
 }
 
