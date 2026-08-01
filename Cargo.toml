@@ -29,7 +29,7 @@ schemars = "1"
 similar = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 toml = "0.8"
 self_update = { version = "0.42", features = ["archive-tar", "archive-zip", "compression-flate2", "signatures"] }
 clap_complete = "4.6.8"
