@@ -123,7 +123,10 @@ impl Display {
         // Main line: [prefix] ✓ <hash> <message>
         let check = self.styled("\u{2713}", Style::new().green().bold());
         let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
-        let msg_styled = self.styled(message, Style::new().true_color(255, 255, 255).bold());
+        // Theme-adaptive: no hardcoded color — the terminal's default
+        // foreground is dark on light themes and light on dark themes, so
+        // the subject stays readable on both. Bold keeps it prominent.
+        let msg_styled = self.styled(message, Style::new().bold());
         let pre = if prefix.is_empty() {
             String::new()
         } else {
@@ -448,14 +451,20 @@ mod tests {
         });
         d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
         let joined = lines.lock().join("\n");
-        // hash #f3b340, subject #ffffff, body + prefix gray #8a8f9f.
+        // hash #f3b340, subject bold default foreground (theme-adaptive:
+        // readable on both light and dark backgrounds), body + prefix gray
+        // #8a8f9f.
         assert!(
             joined.contains("243;179;64"),
             "hash color missing: {joined:?}"
         );
         assert!(
-            joined.contains("255;255;255"),
-            "subject color missing: {joined:?}"
+            joined.contains("\u{1b}[1mfeat: add thing"),
+            "subject must be bold with theme default fg: {joined:?}"
+        );
+        assert!(
+            !joined.contains("255;255;255"),
+            "subject must not use hardcoded white: {joined:?}"
         );
         assert!(
             joined.contains("138;143;159"),
