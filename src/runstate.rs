@@ -16,6 +16,9 @@
 //!
 //! A `.aic/lock` advisory file (created exclusively, removed on drop) prevents
 //! two concurrent `aic` Runs in one worktree from corrupting `active.json`.
+//! On Unix the lock records its owner PID and self-heals: a lock left behind
+//! by a crashed process is detected (owner no longer alive) and reclaimed, so
+//! an interrupt can never wedge future Runs.
 //!
 //! Resume is pure replay: the captured diffs are staged per-batch exactly as
 //! the live loop does, so the proven within-Run staging path is reused
@@ -191,28 +194,71 @@ pub fn log(line: &str) {
     }
 }
 
-/// Exclusive advisory lock at `.aic/lock`. Created with `O_CREAT|O_EXCL`; a
-/// second concurrent `aic` in the same worktree is refused. Removed on drop —
-/// but a crashed process leaves a stale lock, recoverable by deleting the file.
+/// Exclusive advisory lock at `.aic/lock`. Created with `O_CREAT|O_EXCL` and
+/// stamped with the owner's PID; a second concurrent `aic` in the same
+/// worktree is refused — *unless* the held lock's owner is no longer alive
+/// (Unix), in which case the stale lock is reclaimed. Removed on drop.
 pub struct RunLock {
     path: PathBuf,
 }
 
 impl RunLock {
-    /// Acquire the lock, refusing if another Run holds it.
+    /// Acquire the lock, refusing if a *live* Run holds it. A lock whose owner
+    /// process has died (crash, kill -9) is reclaimed so an interrupt can never
+    /// wedge future Runs.
     pub fn acquire() -> Result<Self> {
         let dir = aic_dir()?;
         std::fs::create_dir_all(&dir)?;
         ensure_self_ignored(&dir);
         let path = dir.join(LOCK);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => Ok(Self { path }),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(
-                "another aic run is in progress in this worktree; remove .aic/lock if it is stale"
-            ),
-            Err(e) => Err(e).with_context(|| format!("acquire {path:?}")),
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    // Stamp the owner PID so a later acquire can tell a live
+                    // holder from a crashed one. Write failures (read-only fs,
+                    // full disk) are non-fatal: the lock still excludes via its
+                    // mere existence, just without self-heal.
+                    let _ = write!(f, "{}", std::process::id());
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if owner_alive(&path)? {
+                        anyhow::bail!(
+                            "another aic run is in progress in this worktree; \
+                             remove .aic/lock only if you are sure it is stale"
+                        );
+                    }
+                    // Stale lock (owner gone) — remove and retry the create.
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                Err(e) => return Err(e).with_context(|| format!("acquire {path:?}")),
+            }
         }
     }
+}
+
+/// Whether the RunLock at `path` is held by a still-living process. On Unix we
+/// read the stamped PID and probe it with `kill(pid, 0)`; a dead owner yields
+/// `false` so the caller reclaims. On non-Unix we can't probe, so we conservatively
+/// assume the lock is live (never auto-reclaim — manual removal stays the escape).
+#[cfg(unix)]
+fn owner_alive(path: &Path) -> Result<bool> {
+    let pid_str = std::fs::read_to_string(path).unwrap_or_default();
+    let Some(pid) = pid_str.trim().parse::<i32>().ok() else {
+        return Ok(false); // unreadable / unparseable → treat as stale
+    };
+    // kill(pid, 0) sends no signal; it only checks the process exists.
+    //   0         → process exists (alive)
+    //   -1, ESRCH → no such process (stale lock → reclaim)
+    //   -1, EPERM → exists but we may not signal it (assume alive)
+    let alive = unsafe { libc::kill(pid, 0) == 0 };
+    Ok(alive)
+}
+
+#[cfg(not(unix))]
+fn owner_alive(_path: &Path) -> Result<bool> {
+    Ok(true)
 }
 
 impl Drop for RunLock {
@@ -287,5 +333,54 @@ mod tests {
         assert_eq!(iso_utc(951_868_800), "2000-03-01T00:00:00Z");
         // 1999-12-31T23:59:59Z = 946684799.
         assert_eq!(iso_utc(946_684_799), "1999-12-31T23:59:59Z");
+    }
+
+    // --- RunLock stale-heal (Unix PID-based reclaim) --------------------------
+    //
+    // A lock left behind by a crashed `aic` must not wedge future runs. The
+    // owner PID stamped into the lock is probed with `kill(pid, 0)`; a dead
+    // owner yields "stale" so `RunLock::acquire` reclaims the file.
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_alive_detects_a_dead_pid() {
+        // Spawn a child, read its PID, reap it — now the PID is guaranteed dead.
+        let dead_pid = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = child.id() as i32;
+            child.wait().unwrap();
+            pid
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        std::fs::write(&lock, dead_pid.to_string()).unwrap();
+        assert!(
+            !owner_alive(&lock).unwrap(),
+            "a reaped process's lock must be detected as stale"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_alive_detects_a_live_pid() {
+        // Our own process is alive → its lock is not stale.
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        std::fs::write(&lock, std::process::id().to_string()).unwrap();
+        assert!(
+            owner_alive(&lock).unwrap(),
+            "the current process's lock must be detected as live"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_alive_treats_an_unparseable_lock_as_stale() {
+        // A corrupt or empty lock file can't identify a live owner → treat as
+        // stale so acquire reclaims instead of wedging.
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        std::fs::write(&lock, "not-a-pid").unwrap();
+        assert!(!owner_alive(&lock).unwrap());
     }
 }
