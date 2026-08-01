@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- Resolve contributor @handles via GitHub API (#54)
+
+### Contributors
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
+## [0.4.0] - 2026-08-01
+
+### Features
+
 - Add `generate-completion` command to generate shell completions (#16)
 - Colorize commit type prefixes in output (#39)
 - Inset run output and wrap commit body to terminal width (#51)
@@ -47,9 +55,7 @@ All notable changes to this project will be documented in this file.
 - Enforce LF via .gitattributes
 
 ### Contributors
-- @Paul-16098
-- @CaicoLeung
-
+<a href="https://github.com/Paul-16098"><img src="https://github.com/Paul-16098.png?size=64" width="32" height="32" alt="@Paul-16098" title="@Paul-16098"></a> <a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.3.7] - 2026-07-31
 
 ### Bug Fixes
@@ -74,8 +80,7 @@ All notable changes to this project will be documented in this file.
 - Add pull request template (#17)
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.3.6] - 2026-07-30
 
 ### Features
@@ -83,8 +88,7 @@ All notable changes to this project will be documented in this file.
 - Streaming multi-batch commit splitting with testable orchestration (#13)
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.3.5] - 2026-07-30
 
 ### Features
@@ -96,8 +100,7 @@ All notable changes to this project will be documented in this file.
 - Document aic resolve for v0.3.0 (#11)
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.3.0] - 2026-07-29
 
 ### Features
@@ -112,8 +115,7 @@ All notable changes to this project will be documented in this file.
 - Make writer injectable so hand-off wording can be tested (#10)
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.2.3] - 2026-07-26
 
 ### Bug Fixes
@@ -125,8 +127,7 @@ All notable changes to this project will be documented in this file.
 - Replace panel UI with line-based output (#5)
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.2.2] - 2026-07-26
 
 ### Features
@@ -141,8 +142,7 @@ All notable changes to this project will be documented in this file.
 - Reject untracked absent paths in add
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.2.1] - 2026-07-25
 
 ### Features
@@ -150,8 +150,7 @@ All notable changes to this project will be documented in this file.
 - Update default model to deepseek-v4-flash
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.2.0] - 2026-07-09
 
 ### Features
@@ -159,8 +158,7 @@ All notable changes to this project will be documented in this file.
 - Expand to 12 providers, refresh default models, add base URL
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.1.7] - 2026-07-08
 
 ### Documentation
@@ -178,8 +176,7 @@ All notable changes to this project will be documented in this file.
 - Remove banner display
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.1.6] - 2026-07-04
 
 ### Features
@@ -226,8 +223,7 @@ All notable changes to this project will be documented in this file.
 - No changes to commit
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.1.4] - 2026-05-20
 
 ### Features
@@ -260,8 +256,7 @@ All notable changes to this project will be documented in this file.
 - Format method chain across multiple lines
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.1.2] - 2026-05-20
 
 ### Features
@@ -278,8 +273,7 @@ All notable changes to this project will be documented in this file.
 - Shorten banner text
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.1.1] - 2026-05-18
 
 ### Features
@@ -313,8 +307,7 @@ All notable changes to this project will be documented in this file.
 - Update Cargo.toml with dist optimizations and metadata
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 ## [0.1.0] - 2026-05-17
 
 ### Features
@@ -351,6 +344,5 @@ All notable changes to this project will be documented in this file.
 - Add Rust toolchain configuration
 
 ### Contributors
-- @CaicoLeung
-
+<a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=64" width="32" height="32" alt="@CaicoLeung" title="@CaicoLeung"></a> 
 
