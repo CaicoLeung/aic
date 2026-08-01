@@ -569,7 +569,7 @@ async fn main() -> anyhow::Result<()> {
             use std::io;
 
             let mut cmd = cli::Cli::command();
-            let bin_name = env!("CARGO_BIN_NAME");
+            let bin_name = &cmd.get_name().to_string();
 
             match shell {
                 cli::CompletionShell::Bash => {
