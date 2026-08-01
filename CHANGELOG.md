@@ -4,10 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> 🎉 **Unreleased** — 4 changes · 1 contributor
+> 🎉 **Unreleased** — 6 changes · 1 contributor
 
 ### Features
 
+- Resume interrupted batch-plan runs from a frozen snapshot (`--resume` / `--no-resume`)
+- Retry LLM calls (transient transport errors and empty/budget-starved model responses) with exponential backoff
 - Resolve contributor @handles via GitHub API (#54)
 - Contributor avatars in release notes (#55)
 - Contributor table — avatar + @handle below (#56)
