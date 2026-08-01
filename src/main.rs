@@ -837,8 +837,7 @@ async fn run_commit_workflow(resume: Option<bool>) -> anyhow::Result<()> {
                 return run_resume_workflow_impl(Display::new(), messenger, rs).await;
             }
             None => {
-                eprintln!("no interrupted run to resume");
-                return Ok(());
+                anyhow::bail!("no interrupted run to resume");
             }
         },
         // `--no-resume`: discard any in-flight plan before a fresh run.
