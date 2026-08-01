@@ -1,4 +1,6 @@
 use console::{Style, Term};
+use std::future::Future;
+use std::time::Duration;
 
 use crate::git::{ConflictedFile, RepoState};
 use crate::types::CommitType;
@@ -130,19 +132,13 @@ impl Display {
         self.out.write_line("");
     }
 
-    /// Effective text width for wrapped output: the terminal width clamped to
-    /// [`HARD_CAP`], minus both margins. `cols == 0` (non-TTY / piped) resolves
-    /// to [`FALLBACK_COLS`]. A sub-margin reported width saturates down to `0`,
-    /// which [`wrap_line`] treats as "don't wrap" — so a pathologically tiny
-    /// terminal never panics, it just emits the body unwrapped.
+    /// Effective text width for wrapped output: the shared width resolution
+    /// ([`resolve_cols`] — fallback + [`HARD_CAP`] cap), minus both margins.
+    /// A sub-margin reported width saturates down to `0`, which [`wrap_line`]
+    /// treats as "don't wrap" — so a pathologically tiny terminal never
+    /// panics, it just emits the body unwrapped.
     fn text_width(&self) -> usize {
-        let cols = if self.cols == 0 {
-            FALLBACK_COLS
-        } else {
-            self.cols
-        };
-        cols.min(HARD_CAP)
-            .saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
+        resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
     }
 
     // ------------------------------------------------------------------
@@ -263,14 +259,8 @@ impl Display {
                 )
             };
             self.emit(&format!("  {}{}", f.path, tag));
-            if let crate::git::ConflictKind::Oversized { bytes, lines } = &f.kind {
-                self.emit(&format!(
-                    "    {}",
-                    self.styled(
-                        &format!("{bytes} bytes, {lines} lines (> cap)"),
-                        dim.clone()
-                    ),
-                ));
+            if let Some(note) = f.kind.size_note() {
+                self.emit(&format!("    {}", self.styled(&note, dim.clone())));
             }
         }
         self.emit_blank();
@@ -395,7 +385,7 @@ impl Display {
                 dim,
             ),
         ));
-        self.emit(&format!("    {}", self.styled(finalize_hint(state), cyan)));
+        self.emit(&format!("    {}", self.styled(&finalize_hint(state), cyan)));
     }
 
     /// `aic resolve` on a clean repo.
@@ -420,7 +410,7 @@ impl Display {
         ));
         self.emit(&format!(
             "  resolve manually, then run {}",
-            self.styled(finalize_hint(state), Style::new().cyan()),
+            self.styled(&finalize_hint(state), Style::new().cyan()),
         ));
     }
 
@@ -434,7 +424,7 @@ impl Display {
         ));
         self.emit(&format!(
             "  finalize with {}",
-            self.styled(finalize_hint(state), Style::new().cyan()),
+            self.styled(&finalize_hint(state), Style::new().cyan()),
         ));
     }
 
@@ -480,6 +470,25 @@ const HARD_CAP: usize = 100;
 /// Terminal width assumed when the real width is unknown (`cols == 0`, i.e.
 /// piped / non-TTY output). Matches console's own unix default.
 const FALLBACK_COLS: usize = 80;
+
+/// Minimum usable width for in-place progress rendering: the spinner glyph +
+/// its label need at least this much room, so a pathologically narrow terminal
+/// (or a misreported size) doesn't crush the spinner. Applies only to
+/// [`terminal_width`] (progress); wrapped body text instead saturates its
+/// margin-subtracted width down to `0` (see [`Display::text_width`]).
+const MIN_PROGRESS_WIDTH: usize = 20;
+
+/// Resolve a raw terminal column count into a usable width — the single
+/// resolution shared by [`terminal_width`] (progress rendering) and
+/// [`Display::text_width`] (wrapped body). `cols == 0` (non-TTY / piped, where
+/// `Term::stderr()` reports no size) falls back to [`FALLBACK_COLS`]; the
+/// result is capped at [`HARD_CAP`] so ultrawide terminals don't sprawl body
+/// prose. Consumers add their own tail: progress floors at
+/// [`MIN_PROGRESS_WIDTH`], body text subtracts its margins.
+fn resolve_cols(cols: usize) -> usize {
+    let cols = if cols == 0 { FALLBACK_COLS } else { cols };
+    cols.min(HARD_CAP)
+}
 
 /// Greedy word-wrap of a single line (no embedded newlines) to `width` display
 /// columns, counted in `char`s (not bytes) so CJK commit bodies wrap correctly.
@@ -527,18 +536,120 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 }
 
 /// The git command a user runs to finalize a state by hand, for hand-off /
-/// refuse messages. Mirrors `RepoState::finalize_invocation` but as a single
-/// display string (no aic involvement).
-fn finalize_hint(state: RepoState) -> &'static str {
-    match state {
-        RepoState::Merge => "git commit",
-        RepoState::CherryPick | RepoState::CherryPickSequence => "git cherry-pick --continue",
-        RepoState::Revert | RepoState::RevertSequence => "git revert --continue",
-        RepoState::Rebase | RepoState::RebaseInteractive | RepoState::RebaseMerge => {
-            "git rebase --continue"
+/// refuse messages. Derived from [`RepoState::finalize_invocation`] (what aic
+/// runs) and [`RepoState::manual_finalize_command`] (what the user runs for
+/// states aic refuses) — one mapping, no hand-mirroring.
+fn finalize_hint(state: RepoState) -> String {
+    if state == RepoState::Clean {
+        // Unreachable in practice: hints render only for conflict states.
+        return "git commit".to_string();
+    }
+    let args = state
+        .finalize_invocation()
+        .or_else(|| state.manual_finalize_command())
+        .expect("every conflict state has a finalize or manual command");
+    format!("git {}", args.join(" "))
+}
+
+// ------------------------------------------------------------------
+// Progress: in-place spinner + streaming reasoning feed
+// ------------------------------------------------------------------
+
+/// Terminal width for in-place progress rendering. Shares the codebase's one
+/// width resolution with [`Display::text_width`] via [`resolve_cols`]
+/// (`Term::stderr()`, `0`→[`FALLBACK_COLS`], capped at [`HARD_CAP`]); progress
+/// additionally floors at [`MIN_PROGRESS_WIDTH`] so the spinner + label keep
+/// room, where `text_width` instead subtracts its margins. The reasoning feed
+/// below and the spinner templates consume this.
+pub(crate) fn terminal_width() -> usize {
+    resolve_cols(Term::stderr().size().1 as usize).max(MIN_PROGRESS_WIDTH)
+}
+
+/// Shared indicatif spinner style: a braille tick and a prefix matching
+/// [`MARGIN`] so the spinner glyph sits at the same 2-column inset as the rest
+/// of the run's stderr block — not flush against the edge. One place to
+/// change the inset or tick animation for every spinner in the run.
+pub(crate) fn spinner_style() -> anyhow::Result<indicatif::ProgressStyle> {
+    Ok(indicatif::ProgressStyle::default_spinner()
+        .template(&format!("{MARGIN}{{spinner}} {{msg}}"))?
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"))
+}
+
+/// Run `fut` behind an in-place spinner labeled `msg`; the spinner is cleared
+/// when the future completes, success or error.
+pub(crate) async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(spinner_style()?);
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+
+    let result = fut.await;
+    pb.disable_steady_tick();
+    pb.finish_and_clear();
+    result
+}
+
+/// How many reasoning lines the "Analyzing changes" spinner keeps on screen.
+pub(crate) const THINKING_MAX_LINES: usize = 10;
+
+/// A rolling window over the model's streamed reasoning, kept to the last
+/// [`THINKING_MAX_LINES`] non-blank lines. Rendered in place under the spinner
+/// so it reads like a scrolling "thinking" feed.
+///
+/// Each reasoning line is greedy-wrapped with [`wrap_line`] to `width` — the
+/// feed's content budget — never ellipsized; a line longer than the budget
+/// folds into several `│ `-indented display lines under the shared [`MARGIN`].
+pub(crate) struct ThinkingView {
+    lines: Vec<String>,
+    cur: String,
+}
+
+impl ThinkingView {
+    pub(crate) fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            cur: String::new(),
         }
-        RepoState::ApplyMailbox | RepoState::ApplyMailboxOrRebase => "git am --continue",
-        RepoState::Clean => "git commit",
+    }
+
+    /// Ingest a reasoning delta (may be a partial line, many lines, or empty).
+    /// Blank lines are dropped to keep the window information-dense.
+    pub(crate) fn push(&mut self, delta: &str) {
+        for ch in delta.chars() {
+            if ch == '\n' {
+                let line = std::mem::take(&mut self.cur);
+                if !line.trim().is_empty() {
+                    self.lines.push(line);
+                    if self.lines.len() > THINKING_MAX_LINES {
+                        self.lines.remove(0);
+                    }
+                }
+            } else {
+                self.cur.push(ch);
+            }
+        }
+    }
+
+    /// `title` (e.g. "Analyzing changes") on the first line, then up to
+    /// [`THINKING_MAX_LINES`] reasoning lines wrapped to `width` display
+    /// columns and indented under it — the latest visible, older ones having
+    /// scrolled off.
+    pub(crate) fn render(&self, title: &str, width: usize) -> String {
+        let mut out = String::from(title);
+        let mut shown = self.lines.clone();
+        if !self.cur.trim().is_empty() {
+            shown.push(self.cur.clone());
+        }
+        let start = shown.len().saturating_sub(THINKING_MAX_LINES);
+        for line in &shown[start..] {
+            for piece in wrap_line(line, width) {
+                out.push_str(&format!("\n{MARGIN}│ {piece}"));
+            }
+        }
+        out
     }
 }
 
@@ -547,6 +658,87 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::Arc;
+
+    /// The contract that replaced the hand-mirrored hint: every conflict state
+    /// resolves to the exact command a user runs, derived from the single
+    /// `RepoState` mapping (`finalize_invocation` for what aic runs,
+    /// `manual_finalize_command` for what the user runs on refused states).
+    #[test]
+    fn finalize_hint_covers_every_state_with_the_right_command() {
+        for (state, expected) in [
+            (RepoState::Clean, "git commit"),
+            (RepoState::Merge, "git commit --no-edit"),
+            (RepoState::CherryPick, "git cherry-pick --continue"),
+            (RepoState::CherryPickSequence, "git cherry-pick --continue"),
+            (RepoState::Revert, "git revert --continue"),
+            (RepoState::RevertSequence, "git revert --continue"),
+            (RepoState::Rebase, "git rebase --continue"),
+            (RepoState::RebaseInteractive, "git rebase --continue"),
+            (RepoState::RebaseMerge, "git rebase --continue"),
+            (RepoState::ApplyMailbox, "git am --continue"),
+            (RepoState::ApplyMailboxOrRebase, "git am --continue"),
+        ] {
+            assert_eq!(finalize_hint(state), expected, "state {state:?}");
+        }
+    }
+
+    #[test]
+    fn thinking_view_keeps_last_n_lines_and_drops_blanks() {
+        let mut v = ThinkingView::new();
+        for i in 1..=12 {
+            v.push(&format!("line {i}\n\n"));
+        }
+        // lines 1-2 scrolled off; lines 3-12 remain (blank lines dropped).
+        let mut expected = vec!["Analyzing changes".to_string()];
+        for i in 3..=12 {
+            expected.push(format!("  │ line {i}"));
+        }
+        let rendered = v.render("Analyzing changes", 80);
+        assert_eq!(rendered.lines().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn thinking_view_shows_partial_line_and_caps_at_max() {
+        let mut v = ThinkingView::new();
+        for i in 1..=THINKING_MAX_LINES {
+            v.push(&format!("line {i}\n"));
+        }
+        v.push("in progress"); // partial current line (no trailing newline)
+        let rendered = v.render("Analyzing changes", 80);
+        let visible: Vec<&str> = rendered.lines().collect();
+        // max complete + 1 partial → render caps at THINKING_MAX_LINES lines.
+        assert_eq!(visible.len(), 1 + THINKING_MAX_LINES);
+        assert_eq!(visible.last(), Some(&"  │ in progress"));
+        // "line 1" scrolled off; the partial takes the 10th slot.
+        assert!(!visible.iter().any(|l| l.ends_with("line 1")));
+    }
+
+    #[test]
+    fn thinking_view_assembles_split_chunks() {
+        let mut v = ThinkingView::new();
+        // one logical line delivered across several deltas
+        v.push("hel");
+        v.push("lo");
+        v.push(" world\n");
+        assert_eq!(
+            v.render("t", 80).lines().collect::<Vec<_>>(),
+            vec!["t", "  │ hello world"]
+        );
+    }
+
+    /// Long reasoning lines wrap under the `│ ` indent instead of being
+    /// ellipsized — the behavior that replaced hard truncation. Over-long
+    /// tokens follow `wrap_line`'s hard-break rule.
+    #[test]
+    fn thinking_view_wraps_long_lines() {
+        let mut v = ThinkingView::new();
+        v.push("one two three four five\n");
+        let rendered = v.render("t", 12); // content budget: 12 columns
+        assert_eq!(
+            rendered.lines().collect::<Vec<_>>(),
+            vec!["t", "  │ one two", "  │ three four", "  │ five"]
+        );
+    }
 
     // `console` reads the process-global `colors_enabled()` flag at format
     // time, so every test that flips it via `ColorGuard` races every other.

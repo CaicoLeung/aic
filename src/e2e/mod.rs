@@ -15,10 +15,11 @@
 //! real repository.
 
 #![cfg(test)]
-// Each e2e test holds `GIT_CWD_MUTEX` across its workflow `.await` by design:
-// the whole point is to pin the process CWD to the tempdir for the duration of
-// the real git operations the workflow drives. Tests serialize on this single
-// mutex and run on single-threaded runtimes, so the guard can't deadlock.
+// Each e2e test constructs its own `Git` handle at its tempdir (`Git::at`) and
+// passes it into the workflow under test. No process CWD is mutated, so tests
+// need no chdir guard and no global lock — they run in parallel on independent
+// tempdirs, and every real git operation the workflow drives is pinned to the
+// repo the handle discovered.
 #![allow(clippy::await_holding_lock)]
 
 mod commit;

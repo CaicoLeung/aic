@@ -16,6 +16,10 @@ _Avoid_: group, chunk, package
 The conventional-commit message (with optional body) the LLM produces for a Batch's diff.
 _Avoid_: suggestion, proposal, generated text
 
+**Batch staging**:
+The phase of a Run that maps a Batch's planned hunks onto the current index→workdir diff and stages them, tracking which original (plan-time) hunk indices have already landed. Staging re-reads the current diff rather than the plan-time snapshot, so a pre-commit hook that restages whole files (lint-staged/prettier) cannot desync later Batches of the same Run.
+_Avoid_: group staging, chunk staging, add -p
+
 **Provider**:
 A named LLM backend the user can route a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from env, then config, then default.
 _Avoid_: backend, engine

@@ -1,10 +1,12 @@
 pub mod cli;
 pub mod config;
+pub mod diff;
 pub mod display;
 pub mod generator;
 pub mod git;
 pub mod llm;
 pub mod prompt;
+pub mod staging;
 pub mod types;
 pub mod update;
 
@@ -17,8 +19,8 @@ use crate::git::Git;
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
 use indicatif::ProgressBar;
-use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -43,118 +45,22 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
-/// Shared indicatif spinner style: a braille tick and a prefix matching
-/// [`display::MARGIN`] so the spinner glyph sits at the same 2-column inset as
-/// the rest of the run's stderr block — not flush against the edge. One place
-/// to change the inset or tick animation for every spinner in the run; the
-/// prefix is sourced from `Display`'s margin constant instead of a literal
-/// that has to be kept in sync by hand.
-fn spinner_style() -> anyhow::Result<indicatif::ProgressStyle> {
-    Ok(indicatif::ProgressStyle::default_spinner()
-        .template(&format!("{}{{spinner}} {{msg}}", display::MARGIN))?
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"))
-}
-
-async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
-where
-    F: Future<Output = anyhow::Result<T>>,
-{
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(spinner_style()?);
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(80));
-
-    let result = fut.await;
-    pb.disable_steady_tick();
-    pb.finish_and_clear();
-    result
-}
-
-/// How many reasoning lines the "Analyzing changes" spinner keeps on screen.
-const THINKING_MAX_LINES: usize = 10;
-
-/// A rolling window over the model's streamed reasoning, kept to the last
-/// [`THINKING_MAX_LINES`] non-blank lines. Rendered in place under the spinner
-/// so it reads like a scrolling "thinking" feed.
-struct ThinkingView {
-    lines: Vec<String>,
-    cur: String,
-}
-
-impl ThinkingView {
-    fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            cur: String::new(),
-        }
-    }
-
-    /// Ingest a reasoning delta (may be a partial line, many lines, or empty).
-    /// Blank lines are dropped to keep the window information-dense.
-    fn push(&mut self, delta: &str) {
-        for ch in delta.chars() {
-            if ch == '\n' {
-                let line = std::mem::take(&mut self.cur);
-                if !line.trim().is_empty() {
-                    self.lines.push(line);
-                    if self.lines.len() > THINKING_MAX_LINES {
-                        self.lines.remove(0);
-                    }
-                }
-            } else {
-                self.cur.push(ch);
-            }
-        }
-    }
-
-    /// `title` (e.g. "Analyzing changes") on the first line, then up to
-    /// [`THINKING_MAX_LINES`] reasoning lines indented under it — the latest
-    /// visible, older ones having scrolled off.
-    fn render(&self, title: &str) -> String {
-        let width = terminal_width().saturating_sub(6).clamp(20, 200);
-        let mut out = String::from(title);
-        let mut shown = self.lines.clone();
-        if !self.cur.trim().is_empty() {
-            shown.push(self.cur.clone());
-        }
-        let start = shown.len().saturating_sub(THINKING_MAX_LINES);
-        for line in &shown[start..] {
-            out.push_str("\n  │ ");
-            out.push_str(&truncate(line, width));
-        }
-        out
-    }
-}
-
-fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&w: &usize| (20..=500).contains(&w))
-        .unwrap_or(100)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
-    t.push('…');
-    t
-}
-
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live, keeping the latest [`THINKING_MAX_LINES`] lines on screen.
+/// reasoning live, keeping the latest [`display::THINKING_MAX_LINES`] lines on
+/// screen.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     let pb = ProgressBar::new_spinner();
-    pb.set_style(spinner_style()?);
+    pb.set_style(display::spinner_style()?);
     pb.set_message("Analyzing changes");
     pb.enable_steady_tick(Duration::from_millis(80));
 
-    let mut view = ThinkingView::new();
+    let mut view = display::ThinkingView::new();
+    // The feed's content budget: the shared terminal width minus the "│ "
+    // decoration and one column of breathing room.
+    let feed_width = display::terminal_width().saturating_sub(6);
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
         view.push(delta);
-        pb.set_message(view.render("Analyzing changes"));
+        pb.set_message(view.render("Analyzing changes", feed_width));
     })
     .await;
 
@@ -163,7 +69,7 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     result
 }
 
-fn format_rust_files(paths: &[String], display: &Display) {
+fn format_rust_files(git: &Git, paths: &[String], display: &Display) {
     let rust_files: Vec<&str> = paths
         .iter()
         .filter(|p| p.ends_with(".rs"))
@@ -178,10 +84,13 @@ fn format_rust_files(paths: &[String], display: &Display) {
     // edition 2015 (no let-chains; different import ordering / construct
     // formatting), which diverges from CI's `cargo fmt --all -- --check` and
     // made commits fail CI. cargo fmt reads the edition from the manifest.
-    match std::process::Command::new("cargo")
-        .args(["fmt", "--all"])
-        .status()
-    {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["fmt", "--all"]);
+    // Run in the repo's workdir — never the process CWD.
+    if let Some(workdir) = git.workdir() {
+        cmd.current_dir(workdir);
+    }
+    match cmd.status() {
         Ok(s) if s.success() => {
             display.formatted_notice(rust_files.len());
         }
@@ -195,6 +104,7 @@ fn format_rust_files(paths: &[String], display: &Display) {
 }
 
 async fn generate_and_commit(
+    git: &Git,
     paths: &[String],
     display: &Display,
     prefix: &str,
@@ -203,146 +113,17 @@ async fn generate_and_commit(
     let files: Vec<serde_json::Value> = paths
         .iter()
         .map(|p| {
-            let diff = Git::diff(Some(p.as_str()))?;
-            let scoped = git::format_diff_scoped(&diff, p);
+            let diff = git.diff(Some(p.as_str()))?;
+            let scoped = diff::format_diff_scoped(&diff, p);
             Ok(serde_json::json!({ "path": p, "diff": scoped }))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
-    let result = with_spinner("Generating commit message", messenger(diff.to_string())).await?;
-    let hash = Git::commit(result.message.clone(), result.body.clone())?;
+    let result =
+        display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
+    let hash = git.commit(result.message.clone(), result.body.clone())?;
     display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
     Ok(())
-}
-
-/// One file's planned hunks for a batch, split into two views that must
-/// never be confused:
-///
-/// - `original`: 1-based indices in the file's **plan-time** diff — the
-///   numbering the model saw and the plan refers to. Recorded into `committed`
-///   so it stays stable for the rest of the Run.
-/// - `current`: matching 1-based positions in the file's **current**
-///   index→workdir diff — what `Git::stage_hunks` must index into, because an
-///   earlier batch (or a pre-commit hook) may have already landed some hunks
-///   and shrunk the diff.
-///
-/// Hunks already committed are dropped from both. Surviving hunks keep their
-/// original relative order, so an uncommitted original hunk `h` lands at
-/// current position `h - (#committed original indices < h)`. Splitting the two
-/// spaces into named fields (rather than returning one ambiguous `Vec`) is
-/// what stops callers from writing a remapped position back as an original
-/// index — the class of bug that aborted 3+-hunks-one-file Runs.
-struct HunkMapping {
-    original: Vec<usize>,
-    current: Vec<usize>,
-}
-
-/// Resolve a batch's planned hunks for one file against what's already
-/// committed.
-///
-/// `planned` is the plan's `hunks` array for the file (empty = every hunk of
-/// the file); `committed` is the set of **original** hunk indices already
-/// landed by earlier batches; `current_count` is how many hunks the current
-/// diff still has. When `planned` is empty the original count is reconstructed
-/// as `current_count + committed.len()` (each committed hunk removed one from
-/// the current diff).
-fn map_planned_hunks(
-    planned: &[usize],
-    committed: &HashSet<usize>,
-    current_count: usize,
-) -> HunkMapping {
-    // Empty `planned` means "the whole file"; rebuild the original hunk count
-    // from what the current diff still shows plus what's already gone.
-    let wanted: Vec<usize> = if planned.is_empty() {
-        (1..=(current_count + committed.len())).collect()
-    } else {
-        planned.to_vec()
-    };
-
-    let mut original = Vec::with_capacity(wanted.len());
-    let mut current = Vec::with_capacity(wanted.len());
-    for h in wanted {
-        if committed.contains(&h) {
-            continue;
-        }
-        // Every committed original hunk before `h` shifts it down by one slot
-        // in the current (shrunk) diff.
-        let shift = committed.iter().filter(|&&c| c < h).count();
-        original.push(h);
-        current.push(h - shift);
-    }
-    HunkMapping { original, current }
-}
-
-/// Stage one batch's hunks from the *current* index→workdir diff and return
-/// the paths actually staged — deduplicated by file, in first-seen order.
-///
-/// Staging from a fresh diff (rather than the plan-time snapshot) is what keeps
-/// a Run alive when a pre-commit hook commits more than the batch staged:
-/// lint-staged/prettier re-add whole files, so the first batch to touch a file
-/// can land *all* of its hunks, and the plan's later batches for that file have
-/// nothing left to stage. Replaying the stale snapshot then dies with `git
-/// apply`'s "patch does not apply". Files whose changes already landed are
-/// skipped (with a notice) and the run continues with the rest.
-///
-/// A file split across several `changes` entries of one batch (disjoint hunks)
-/// is merged into a single staging pass and a single entry of the returned
-/// list, so it produces one commit message — the contract the old
-/// `unique_batch_files` enforced. Grouping also stages all of a file's hunks
-/// in one `git apply` (cheaper than one call per entry) and keeps
-/// `committed_hunks` free of within-batch cross-entry remapping: each file's
-/// current-diff fetch happens once, before any of its hunks are staged.
-fn stage_batch_hunks(
-    batch: &generator::BatchPlanBatch,
-    committed_hunks: &mut HashMap<String, HashSet<usize>>,
-    display: &Display,
-) -> anyhow::Result<Vec<String>> {
-    // Gather each file's planned hunks across its (possibly several) `changes`
-    // entries, preserving first-seen file order. An empty `hunks` slice means
-    // "the whole file" for that entry; `validate_batch_plan` rejects mixing
-    // whole-file and per-hunk entries for the same file, so concatenating the
-    // slices yields the right `planned` for every reachable plan (a lone
-    // whole-file entry stays empty → `map_planned_hunks` expands it).
-    let mut files: Vec<String> = Vec::new();
-    let mut hunks_by_file: HashMap<String, Vec<usize>> = HashMap::new();
-    for change in &batch.changes {
-        if !hunks_by_file.contains_key(&change.file) {
-            files.push(change.file.clone());
-        }
-        hunks_by_file
-            .entry(change.file.clone())
-            .or_default()
-            .extend_from_slice(&change.hunks);
-    }
-
-    let mut staged_paths: Vec<String> = Vec::new();
-    for file in &files {
-        let planned = hunks_by_file
-            .get(file)
-            .expect("every file in `files` has an entry in `hunks_by_file`");
-        let current = Git::diff_workdir(Some(file.as_str()))?;
-        if current.trim().is_empty() {
-            display.warn(&format!(
-                "{}: all its changes were already committed (a pre-commit hook may have \
-                 staged the whole file) — nothing left in this batch",
-                file
-            ));
-            continue;
-        }
-        let patch = git::parse_file_patch(&current);
-        let committed = committed_hunks.entry(file.clone()).or_default();
-        let mapping = map_planned_hunks(planned, committed, patch.hunks.len());
-        if mapping.current.is_empty() {
-            continue;
-        }
-        Git::stage_hunks(&current, &mapping.current)
-            .with_context(|| format!("staging hunks for {}", file))?;
-        // Record ORIGINAL indices (not the remapped current positions) so the
-        // plan-time numbering the model saw stays stable for later batches.
-        committed.extend(mapping.original);
-        staged_paths.push(file.clone());
-    }
-    Ok(staged_paths)
 }
 
 /// Read a y/n answer from stdin. The label is written to stderr (Display is
@@ -389,11 +170,12 @@ fn unified_diff(old: &str, new: &str) -> String {
 /// stderr. Production callers use [`run_resolve_workflow`], which wires in
 /// `Generator::resolve_conflict`, stdin `prompt_yes_no`, and [`Display::new`].
 pub(crate) async fn run_resolve_workflow_impl(
+    git: &Git,
     resolve: Resolver,
     prompt: Prompt,
     display: Display,
 ) -> anyhow::Result<()> {
-    let state = Git::state()?;
+    let state = git.state()?;
 
     if !state.is_conflicted() {
         display.no_conflicts();
@@ -405,13 +187,13 @@ pub(crate) async fn run_resolve_workflow_impl(
         anyhow::bail!("aic cannot resolve a {} state in v1", state.label());
     }
 
-    let files = Git::conflicted_files()?;
+    let files = git.conflicted_files()?;
     if files.is_empty() {
         // Conflicted state but no unmerged index entries — the user resolved
         // every file by hand and only the finalize step remains.
         display.all_resolved_offer_finalize(state);
         if prompt("finalize now?")? {
-            Git::finalize(state)?;
+            git.finalize(state)?;
             display.finalize_done(state);
         }
         return Ok(());
@@ -435,23 +217,29 @@ pub(crate) async fn run_resolve_workflow_impl(
             skipped_unresolvable += 1;
             continue;
         }
-        let original_bytes = Git::read_worktree(&f.path)?;
+        let original_bytes = git.read_worktree(&f.path)?;
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
 
-        let resolved =
-            match with_spinner(&format!("Resolving {}", f.path), resolve(original.clone())).await {
-                Ok(r) => r,
-                Err(e) => {
-                    display.skipped(&f.path, &format!("LLM error: {e:#}"));
-                    skipped_failed += 1;
-                    continue;
-                }
-            };
+        let resolved = match display::with_spinner(
+            &format!("Resolving {}", f.path),
+            resolve(original.clone()),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                display.skipped(&f.path, &format!("LLM error: {e:#}"));
+                skipped_failed += 1;
+                continue;
+            }
+        };
 
         // Marker validation — auto-retry once (ADR 0005).
         let resolved = if git::has_conflict_markers(&resolved) {
-            match with_spinner(&format!("Retrying {}", f.path), resolve(original.clone())).await {
+            match display::with_spinner(&format!("Retrying {}", f.path), resolve(original.clone()))
+                .await
+            {
                 Ok(retry) if !git::has_conflict_markers(&retry) => retry,
                 _ => {
                     display.skipped(&f.path, "markers remain after retry");
@@ -488,8 +276,8 @@ pub(crate) async fn run_resolve_workflow_impl(
     let mut rejected = 0usize;
     for (path, _original, resolved) in &plans {
         if prompt(&format!("apply {path}?"))? {
-            Git::write_worktree(path, resolved)?;
-            Git::add(&[path.as_str()])?;
+            git.write_worktree(path, resolved)?;
+            git.add(&[path.as_str()])?;
             display.resolved(path);
             approved += 1;
         } else {
@@ -509,7 +297,7 @@ pub(crate) async fn run_resolve_workflow_impl(
     // lands in exactly one of: skipped_unresolvable, skipped_failed, plans).
     let needs_manual = rejected + skipped_failed + skipped_unresolvable;
     if needs_manual == 0 {
-        Git::finalize(state)?;
+        git.finalize(state)?;
         display.finalize_done(state);
     } else {
         display.handoff(
@@ -531,13 +319,15 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
     let prompt: Prompt = Box::new(prompt_yes_no);
-    run_resolve_workflow_impl(resolver, prompt, Display::new()).await
+    let git = Git::at(Path::new("."))?;
+    run_resolve_workflow_impl(&git, resolver, prompt, Display::new()).await
 }
 
 /// Default `aic` run. `resolve`/`prompt`/`display` are seams mirroring
 /// [`run_resolve_workflow_impl`]; they only matter on the conflicted-repo
 /// auto-detect branch, which hands off to the resolve workflow.
 pub(crate) async fn run_commit_workflow_impl(
+    git: &Git,
     resolve: Resolver,
     prompt: Prompt,
     display: Display,
@@ -547,11 +337,11 @@ pub(crate) async fn run_commit_workflow_impl(
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
     // deeper net; this prompt is the friendly front door.
-    let state = Git::state()?;
+    let state = git.state()?;
     if state.is_conflicted() {
         display.resolve_prompt(state);
         if prompt("resolve now?")? {
-            return run_resolve_workflow_impl(resolve, prompt, display).await;
+            return run_resolve_workflow_impl(git, resolve, prompt, display).await;
         }
         anyhow::bail!(
             "aborted: repo is mid-{}; resolve conflicts first",
@@ -559,7 +349,7 @@ pub(crate) async fn run_commit_workflow_impl(
         );
     }
 
-    let status = Git::status()?;
+    let status = git.status()?;
     let staged_files: Vec<_> = status.iter().filter(|f| f.staged).collect();
 
     if staged_files.is_empty() {
@@ -575,23 +365,23 @@ pub(crate) async fn run_commit_workflow_impl(
         // numbering we stage by — reflects the final formatted source. Doing it
         // after capturing the diff (as before) would let `cargo fmt` shift
         // hunks out from under the indices the model returned.
-        format_rust_files(&all_unstaged, &display);
+        format_rust_files(git, &all_unstaged, &display);
 
         // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
         // feeds the two consumers that must agree on hunk numbering: the
         // numbered view sent to the model, and `file_hunk_counts` for
-        // `validate_batch_plan`. Staging does NOT read from it —
-        // `stage_batch_hunks` re-reads a fresh diff per batch (so the Run
-        // survives pre-commit hooks that re-stage whole files) and remaps the
-        // plan-time indices onto the current diff via `committed_hunks`.
+        // `validate_batch_plan`. Staging does NOT read from it — the `staging`
+        // module re-reads a fresh diff per batch (so the Run survives
+        // pre-commit hooks that re-stage whole files) and remaps the plan-time
+        // indices onto the current diff via its internal `committed_hunks`.
         let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
             .map(|f| {
-                let diff = Git::diff_workdir(Some(f.path.as_str()))?;
-                let hunk_count = git::parse_file_patch(&diff).hunks.len();
+                let diff = git.diff_workdir(Some(f.path.as_str()))?;
+                let hunk_count = diff::parse_file_patch(&diff).hunk_count();
                 file_hunk_counts.push((f.path.clone(), hunk_count));
-                let scoped = git::format_diff_scoped(&diff, &f.path);
+                let scoped = diff::format_diff_scoped(&diff, &f.path);
                 Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -602,7 +392,7 @@ pub(crate) async fn run_commit_workflow_impl(
             .context("batch plan validation failed")?;
 
         let count = result.batches.len();
-        let mut committed_hunks: HashMap<String, HashSet<usize>> = HashMap::new();
+        let mut staging = staging::Staging::new();
         for (i, batch) in result.batches.iter().enumerate() {
             let prefix = format!("[{}/{count}]", i + 1);
             // Stage this batch's hunks, then generate + commit. Either step
@@ -610,13 +400,13 @@ pub(crate) async fn run_commit_workflow_impl(
             // partially committed, so both share one abort message naming how
             // far we got and that the rest is recoverable by re-running `aic`.
             let outcome = async {
-                let paths = stage_batch_hunks(batch, &mut committed_hunks, &display)?;
+                let paths = staging.stage_batch(git, batch, &display)?;
                 if paths.is_empty() {
                     // Every file in this batch already landed via an earlier
                     // batch or a pre-commit hook — nothing to commit.
                     return Ok(());
                 }
-                generate_and_commit(&paths, &display, &prefix, &messenger).await
+                generate_and_commit(git, &paths, &display, &prefix, &messenger).await
             };
             if let Err(e) = outcome.await {
                 anyhow::bail!(
@@ -631,10 +421,10 @@ pub(crate) async fn run_commit_workflow_impl(
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        format_rust_files(&paths, &display);
+        format_rust_files(git, &paths, &display);
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
-        Git::add(&refs)?;
-        generate_and_commit(&paths, &display, "", &messenger).await?;
+        git.add(&refs)?;
+        generate_and_commit(git, &paths, &display, "", &messenger).await?;
     }
 
     Ok(())
@@ -657,7 +447,8 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
-    run_commit_workflow_impl(resolver, prompt, Display::new(), planner, messenger).await
+    let git = Git::at(Path::new("."))?;
+    run_commit_workflow_impl(&git, resolver, prompt, Display::new(), planner, messenger).await
 }
 
 /// Writes the completion script for `shell` to `out`.
@@ -730,94 +521,5 @@ mod tests {
                 "{shell:?}: completion script did not reference the `aic` binary"
             );
         }
-    }
-
-    #[test]
-    fn thinking_view_keeps_last_n_lines_and_drops_blanks() {
-        let mut v = ThinkingView::new();
-        for i in 1..=12 {
-            v.push(&format!("line {i}\n\n"));
-        }
-        // lines 1-2 scrolled off; lines 3-12 remain (blank lines dropped).
-        let mut expected = vec!["Analyzing changes".to_string()];
-        for i in 3..=12 {
-            expected.push(format!("  │ line {i}"));
-        }
-        let rendered = v.render("Analyzing changes");
-        assert_eq!(rendered.lines().collect::<Vec<_>>(), expected);
-    }
-
-    #[test]
-    fn thinking_view_shows_partial_line_and_caps_at_max() {
-        let mut v = ThinkingView::new();
-        for i in 1..=THINKING_MAX_LINES {
-            v.push(&format!("line {i}\n"));
-        }
-        v.push("in progress"); // partial current line (no trailing newline)
-        let rendered = v.render("Analyzing changes");
-        let visible: Vec<&str> = rendered.lines().collect();
-        // max complete + 1 partial → render caps at THINKING_MAX_LINES lines.
-        assert_eq!(visible.len(), 1 + THINKING_MAX_LINES);
-        assert_eq!(visible.last(), Some(&"  │ in progress"));
-        // "line 1" scrolled off; the partial takes the 10th slot.
-        assert!(!visible.iter().any(|l| l.ends_with("line 1")));
-    }
-
-    #[test]
-    fn thinking_view_assembles_split_chunks() {
-        let mut v = ThinkingView::new();
-        // one logical line delivered across several deltas
-        v.push("hel");
-        v.push("lo");
-        v.push(" world\n");
-        assert_eq!(
-            v.render("t").lines().collect::<Vec<_>>(),
-            vec!["t", "  │ hello world"]
-        );
-    }
-
-    #[test]
-    fn map_planned_hunks_splits_original_and_current_indices() {
-        // Hunks 1-2 already committed → plan's 3-7 survive as original 3-7 and
-        // map onto the current diff's 1-5. The two views differ precisely when
-        // something is committed; conflating them is the bug this struct exists
-        // to prevent, so assert both.
-        let committed: HashSet<usize> = [1usize, 2].into_iter().collect();
-        let m = map_planned_hunks(&[3, 4, 5, 6, 7], &committed, 5);
-        assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
-        assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
-
-        // Empty planned hunks = every hunk of the file; the original count is
-        // reconstructed as current + already-committed.
-        let m = map_planned_hunks(&[], &committed, 5);
-        assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
-        assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
-
-        // Nothing committed yet → both views pass through unchanged.
-        let m = map_planned_hunks(&[1, 2], &HashSet::new(), 2);
-        assert_eq!(m.original, vec![1, 2]);
-        assert_eq!(m.current, vec![1, 2]);
-
-        // Interleaved committed hunks are dropped and current positions
-        // recomputed.
-        let committed: HashSet<usize> = [1usize, 3, 5].into_iter().collect();
-        let m = map_planned_hunks(&[2, 4, 6], &committed, 3);
-        assert_eq!(m.original, vec![2, 4, 6]);
-        assert_eq!(m.current, vec![1, 2, 3]);
-
-        // The regression: three hunks of one file, split across three batches
-        // with NO hook. After batch 1 commits original hunk 1, batch 2's hunk
-        // 2 must map to current position 1; after batch 2, hunk 3 must map to
-        // current position 1 of a 1-hunk diff. Storing the remapped position
-        // (1) instead of the original (2 / 3) here used to corrupt `committed`
-        // and make batch 3 address a non-existent hunk 2.
-        let mut committed: HashSet<usize> = [1usize].into_iter().collect();
-        let m = map_planned_hunks(&[2], &committed, 2);
-        assert_eq!(m.original, vec![2]);
-        assert_eq!(m.current, vec![1]);
-        committed.extend(m.original);
-        let m = map_planned_hunks(&[3], &committed, 1);
-        assert_eq!(m.original, vec![3]);
-        assert_eq!(m.current, vec![1]);
     }
 }

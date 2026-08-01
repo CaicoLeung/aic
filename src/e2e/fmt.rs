@@ -18,7 +18,6 @@ use super::common::*;
 /// shifted one.
 #[tokio::test]
 async fn commit_run_formats_rust_before_capturing_diff() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     init_cargo_repo(dir.path());
 
@@ -52,10 +51,11 @@ async fn commit_run_formats_rust_before_capturing_diff() {
         ],
     };
     let (planner, seen) = planner_recording(plan);
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let before = commit_count(dir.path());
 
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
