@@ -5,9 +5,10 @@
 pub(super) use crate::display::{Display, DisplayWrite};
 pub(super) use crate::git;
 pub(super) use crate::git::tests as gh;
+pub(super) use crate::runstate;
 pub(super) use crate::{
     BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver, generator,
-    run_commit_workflow_impl, run_resolve_workflow_impl,
+    run_commit_workflow_impl, run_resolve_workflow_impl, run_resume_workflow_impl,
 };
 pub(super) use git2::Repository;
 pub(super) use parking_lot::Mutex;
