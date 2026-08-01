@@ -605,3 +605,94 @@ async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
         "the change must remain unstaged (not staged/committed), got: {status:?}"
     );
 }
+
+/// A pre-commit hook that re-stages whole files (the lint-staged/prettier
+/// pattern used by the maintainer's own aic-web repo: `prettier --write` then
+/// `git add`) silently broadens a batch commit: staging hunk 1 and committing
+/// lands the *entire* file, because the hook `git add`s the full worktree
+/// content back into the index. The plan's later batch for that file then has
+/// nothing left to stage, and replaying the plan-time snapshot used to die with
+/// `git apply`'s "patch does not apply". The workflow must skip the swallowed
+/// batch and finish the Run instead of aborting.
+#[tokio::test]
+async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // A base with two change sites far enough apart that git emits two
+    // separate hunks (>= ~6 unchanged lines between them).
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}c0\n");
+    let changed = format!("a1\n{pad}c1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    // Simulate lint-staged: the pre-commit hook re-stages the full file, so a
+    // commit of hunk 1 actually lands both hunks.
+    let hooks = dir.path().join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\ngit add tracked.txt\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let plan = generator::BatchPlanOutput {
+        batches: vec![
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![1],
+                }],
+                reason: Some("change a".into()),
+            },
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![2],
+                }],
+                reason: Some("change c".into()),
+            },
+        ],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("feat: hook swallows the rest"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "the Run must complete, not abort, when a hook commits more than the batch: {:?}",
+        result
+    );
+
+    // Only batch 1 lands (it carries the whole file); the swallowed batch 2 is
+    // skipped rather than failing on a stale snapshot.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "exactly one commit must land — the second batch has nothing left to stage"
+    );
+    // The hook's re-stage means both hunks are in that one commit.
+    let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(head.contains("a1"), "hunk 1 must be committed");
+    assert!(
+        head.contains("c1"),
+        "hunk 2 must be committed too (hook re-staged it)"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean after the Run"
+    );
+}
