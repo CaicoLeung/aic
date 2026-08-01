@@ -151,6 +151,13 @@ impl Display {
     ///
     /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
     /// pass `""` for single-commit or staged workflows.
+    ///
+    /// Layout (ADR: commit-line readability): the whole block is inset by
+    /// [`LEFT_MARGIN`] so it isn't flush with the terminal edge. The subject
+    /// is a single title line and is **never wrapped** (overflow preferable to
+    /// truncation/re-flow). The body is greedy word-wrapped to
+    /// [`Display::text_width`] with continuation lines aligned under the first
+    /// body char; no hanging indent. Blank body lines stay blank.
     pub fn commit_line(&self, hash: &str, message: &str, body: Option<&str>, prefix: &str) {
         let gray = Style::new().true_color(138, 143, 159);
 
@@ -179,14 +186,26 @@ impl Display {
         } else {
             format!("{} ", self.styled(prefix, gray.clone()))
         };
-        self.writeln(&format!("{pre}{check} {hash_styled} {msg_styled}"));
+        // Subject: margin only, never wrapped (title line).
+        let margin = " ".repeat(LEFT_MARGIN);
+        self.writeln(&format!("{margin}{pre}{check} {hash_styled} {msg_styled}"));
 
-        // Optional body — indented, gray
+        // Optional body — margin + greedy word-wrap to text_width, gray.
+        // The body's old ad-hoc `  ` indent is subsumed by the shared margin so
+        // the whole block sits at one uniform inset.
         if let Some(b) = body {
             let trimmed = b.trim();
             if !trimmed.is_empty() {
-                for bline in trimmed.lines() {
-                    self.writeln(&format!("  {}", self.styled(bline, gray.clone())));
+                let width = self.text_width();
+                for src_line in trimmed.lines() {
+                    if src_line.is_empty() {
+                        // Blank line: emit empty (no trailing-whitespace margin).
+                        self.writeln("");
+                        continue;
+                    }
+                    for piece in wrap_line(src_line, width) {
+                        self.writeln(&format!("{margin}{}", self.styled(&piece, gray.clone())));
+                    }
                 }
             }
         }
@@ -552,8 +571,10 @@ mod tests {
         d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
         let got = lines.lock().clone();
         // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
-        // Type prefix "feat" is present, followed by ": add thing"
-        assert_eq!(got[0], "[1/3] \u{2713} abc1234 feat: add thing");
+        // Type prefix "feat" is present, followed by ": add thing". Subject now
+        // carries a 2-col left margin; body line sits at the same margin (its
+        // old ad-hoc indent was subsumed by the shared margin).
+        assert_eq!(got[0], "  [1/3] \u{2713} abc1234 feat: add thing");
         assert_eq!(got[1], "  body line");
     }
 
@@ -632,7 +653,8 @@ mod tests {
         d.commit_line("def5678", "fix(auth): correct token check", None, "");
         let got = lines.lock().clone();
         // Exact visible text — catches the dropped-paren regression directly.
-        assert_eq!(got[0], "\u{2713} def5678 fix(auth): correct token check");
+        // Subject carries a 2-col left margin.
+        assert_eq!(got[0], "  \u{2713} def5678 fix(auth): correct token check");
     }
 
     #[test]
@@ -697,5 +719,126 @@ mod tests {
             joined.contains("156;163;175"),
             "no-colon message should be gray: {joined:?}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Margin + width-wrap (commit-line readability)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn body_wraps_at_text_width() {
+        // cols=80 → text_width = min(80,100) - 4 = 76.
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            80,
+        );
+        let long = "word ".repeat(40); // 40 tokens, well over 76 cols
+        d.commit_line("h000001", "feat: x", Some(&long), "");
+        let got = lines.lock().clone();
+        // First line is the subject (margin + ✓ + hash + msg).
+        assert!(got[0].contains("feat: x"), "subject missing: {:?}", got[0]);
+        // Every body line's *content* fits within the text_width budget.
+        // (The 2-col left margin is added on emit; right breathing room comes
+        // from wrapping shorter, so the whole emitted line is content+margin.)
+        for (i, line) in got[1..].iter().enumerate() {
+            let content = line.trim_start();
+            assert!(
+                content.chars().count() <= 76,
+                "body line {i} content exceeds 76 cols: {:?}",
+                line
+            );
+        }
+        // No content lost: all 40 `word` tokens survive the wrap.
+        let joined = got[1..].join(" ");
+        assert_eq!(joined.matches("word").count(), 40);
+    }
+
+    #[test]
+    fn subject_not_wrapped() {
+        // Tiny terminal: subject must still be exactly one line, overflow ok.
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            40,
+        );
+        let long_subject = "feat: a very long subject that definitely overflows the tiny width";
+        d.commit_line("h000002", long_subject, None, "");
+        let got = lines.lock().clone();
+        assert_eq!(got.len(), 1, "subject must be exactly one line: {got:?}");
+        assert!(got[0].ends_with(long_subject));
+    }
+
+    #[test]
+    fn left_margin_present() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            80,
+        );
+        d.commit_line("h000003", "feat: x", Some("body text here"), "");
+        let got = lines.lock().clone();
+        assert!(!got.is_empty(), "expected output");
+        for (i, line) in got.iter().enumerate() {
+            assert!(
+                line.starts_with("  "),
+                "line {i} missing 2-col left margin: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn non_tty_fallback_width() {
+        // cols=0 simulates unknown / non-TTY: text_width must fall back to
+        // FALLBACK_COLS (80) → wrap budget 76, not the MIN_TEXT_WIDTH floor.
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            0,
+        );
+        let long = "w ".repeat(50); // 50 tokens, well over 76 cols
+        d.commit_line("h000004", "feat: x", Some(&long), "");
+        let got = lines.lock().clone();
+        for (i, line) in got[1..].iter().enumerate() {
+            let content = line.trim_start();
+            assert!(
+                content.chars().count() <= 76,
+                "fallback body line {i} content exceeded 76: {:?}",
+                line
+            );
+        }
+        assert_eq!(got[1..].join(" ").matches('w').count(), 50);
+    }
+
+    #[test]
+    fn wrap_line_hard_breaks_long_token() {
+        // A single token longer than the width is hard-broken at the boundary.
+        let pieces = wrap_line("abcdefghij", 4);
+        assert_eq!(pieces, vec!["abcd", "efgh", "ij"]);
+        // "short" (5 chars) > width 4 → also hard-broken.
+        assert_eq!(wrap_line("short", 4), vec!["shor", "t"]);
+        // Empty input yields one empty piece (blank line round-trips).
+        assert_eq!(wrap_line("", 4), vec![""]);
+    }
+
+    #[test]
+    fn wrap_line_handles_cjk_by_char_count() {
+        // 6 CJK chars at width 4 → two lines of 4 and 2 (not byte-based wrap,
+        // which would wrap every ~1.3 chars and corrupt output).
+        let pieces = wrap_line("你好世界测试", 4);
+        assert_eq!(pieces, vec!["你好世界", "测试"]);
     }
 }
