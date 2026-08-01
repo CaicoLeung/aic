@@ -1,6 +1,7 @@
 use console::{Style, Term};
 
 use crate::git::{ConflictedFile, RepoState};
+use crate::types::CommitType;
 
 /// Line-based write seam behind [`Display`].
 ///
@@ -123,7 +124,23 @@ impl Display {
         // Main line: [prefix] ✓ <hash> <message>
         let check = self.styled("\u{2713}", Style::new().green().bold());
         let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
-        let msg_styled = self.styled(message, Style::new().true_color(255, 255, 255).bold());
+
+        // Decompose the subject once on CommitType, then style the parts.
+        let parsed = CommitType::parse_message(message);
+        let msg_styled = match parsed.description {
+            Some(desc) => {
+                let colored_type = self.styled(parsed.type_name, parsed.commit_type.color());
+                let scope = match parsed.scope {
+                    Some(s) => self.styled(&format!("({s})"), gray.clone()),
+                    None => String::new(),
+                };
+                let bold_desc = self.styled(desc, Style::new().bold());
+                format!("{}{}: {}", colored_type, scope, bold_desc)
+            }
+            // No colon — unknown type; color the whole message via the type palette.
+            None => self.styled(message, parsed.commit_type.color()),
+        };
+
         let pre = if prefix.is_empty() {
             String::new()
         } else {
@@ -385,6 +402,12 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
 
+    // `console` reads the process-global `colors_enabled()` flag at format
+    // time, so every test that flips it via `ColorGuard` races every other.
+    // Lock here for the whole test body to serialize the color-env tests and
+    // keep the suite safe to run multi-threaded.
+    static COLOR_ENV: Mutex<()> = Mutex::new(());
+
     /// Forces `console` to emit ANSI escapes for the guard's lifetime,
     /// restoring the prior state on drop. `console::Style` only renders
     /// escapes when the global `colors_enabled()` is true; in the test runner
@@ -434,12 +457,14 @@ mod tests {
         d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
         let got = lines.lock().clone();
         // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
+        // Type prefix "feat" is present, followed by ": add thing"
         assert_eq!(got[0], "[1/3] \u{2713} abc1234 feat: add thing");
         assert_eq!(got[1], "  body line");
     }
 
     #[test]
     fn truecolor_when_colors_enabled() {
+        let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with(Buf {
@@ -448,14 +473,23 @@ mod tests {
         });
         d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
         let joined = lines.lock().join("\n");
-        // hash #f3b340, subject #ffffff, body + prefix gray #8a8f9f.
+        // hash #f3b340, feat type green #4ade80, description bold default fg,
+        // body + prefix gray #8a8f9f.
         assert!(
             joined.contains("243;179;64"),
             "hash color missing: {joined:?}"
         );
         assert!(
-            joined.contains("255;255;255"),
-            "subject color missing: {joined:?}"
+            joined.contains("74;222;128"),
+            "feat type green color missing: {joined:?}"
+        );
+        assert!(
+            joined.contains("\u{1b}[1madd thing"),
+            "description must be bold with theme default fg: {joined:?}"
+        );
+        assert!(
+            !joined.contains("255;255;255"),
+            "subject must not use hardcoded white: {joined:?}"
         );
         assert!(
             joined.contains("138;143;159"),
@@ -463,5 +497,110 @@ mod tests {
         );
         // [n/m] prefix text survives styling (format kept, not "n.").
         assert!(joined.contains("[1/3]"), "prefix text missing: {joined:?}");
+    }
+
+    #[test]
+    fn fix_type_gets_yellow_orange_color() {
+        let _env = COLOR_ENV.lock();
+        let _guard = ColorGuard::force();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: true,
+            lines: lines.clone(),
+        });
+        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        let joined = lines.lock().join("\n");
+        // fix type should be yellow/orange #fbbf24
+        assert!(
+            joined.contains("251;191;36"),
+            "fix type yellow/orange color missing: {joined:?}"
+        );
+        // Scope parens must survive rendering (regression guard).
+        assert!(
+            joined.contains("(auth)"),
+            "scope parens dropped: {joined:?}"
+        );
+        // Description should be bold
+        assert!(
+            joined.contains("\u{1b}[1mcorrect token check"),
+            "description must be bold: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_commit_preserves_parens_plain() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        let got = lines.lock().clone();
+        // Exact visible text — catches the dropped-paren regression directly.
+        assert_eq!(got[0], "\u{2713} def5678 fix(auth): correct token check");
+    }
+
+    #[test]
+    fn each_type_renders_its_color() {
+        let _env = COLOR_ENV.lock();
+        let _guard = ColorGuard::force();
+        for (type_str, rgb) in [
+            ("feat", "74;222;128"),
+            ("fix", "251;191;36"),
+            ("chore", "156;163;175"),
+            ("docs", "96;165;250"),
+            ("style", "167;139;250"),
+            ("refactor", "34;211;238"),
+            ("perf", "248;113;113"),
+            ("test", "244;114;182"),
+        ] {
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            let d = Display::with(Buf {
+                colors: true,
+                lines: lines.clone(),
+            });
+            d.commit_line("hash000", &format!("{type_str}: msg"), None, "");
+            let joined = lines.lock().join("\n");
+            assert!(
+                joined.contains(rgb),
+                "{type_str} should render color {rgb}: {joined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_type_gets_gray_color() {
+        let _env = COLOR_ENV.lock();
+        let _guard = ColorGuard::force();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: true,
+            lines: lines.clone(),
+        });
+        d.commit_line("ghi9012", "wip: thing in progress", None, "");
+        let joined = lines.lock().join("\n");
+        // Unknown type should be gray #9ca3af
+        assert!(
+            joined.contains("156;163;175"),
+            "unknown type gray color missing: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn no_colon_message_gets_gray_unknown_type() {
+        let _env = COLOR_ENV.lock();
+        let _guard = ColorGuard::force();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: true,
+            lines: lines.clone(),
+        });
+        d.commit_line("jkl3456", "no colon message", None, "");
+        let joined = lines.lock().join("\n");
+        // Messages without colon should be gray (unknown type fallback)
+        assert!(
+            joined.contains("156;163;175"),
+            "no-colon message should be gray: {joined:?}"
+        );
     }
 }
