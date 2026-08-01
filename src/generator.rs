@@ -122,20 +122,19 @@ impl Generator {
     }
 
     /// Split the workdir diff into logical commit batches, streaming the
-    /// model's reasoning to `on_reasoning` as it thinks. We stream the raw
-    /// completion (rather than `prompt_typed`) so reasoning tokens are
-    /// surfaced live; the system prompt already demands strict JSON, so we
-    /// parse the accumulated text ourselves.
+    /// model's reasoning to `on_reasoning` as it thinks. The LLMAgent seam
+    /// owns streaming + tolerant parsing + retry (a budget-starved model's
+    /// truncated JSON is retried with reasoning re-streamed), so this is a
+    /// single typed call.
     pub async fn split_patch_streaming(
         diff: &str,
         on_reasoning: impl FnMut(&str),
     ) -> anyhow::Result<BatchPlanOutput> {
         let p = PromptConfig::default().batch_plan_prompt;
-        let raw = LLM::from_env()?
+        LLM::from_env()?
             .agent(&p)
-            .stream_with_reasoning(diff, on_reasoning)
-            .await?;
-        parse_json_response::<BatchPlanOutput>(&raw)
+            .stream_typed_with_reasoning::<BatchPlanOutput>(diff, on_reasoning)
+            .await
     }
 
     /// Resolve one conflicted file. The LLM returns the full marker-free file
@@ -145,76 +144,13 @@ impl Generator {
     pub async fn resolve_conflict(file_content: &str) -> anyhow::Result<String> {
         let p = PromptConfig::default().resolve_prompt;
         let raw = LLM::from_env()?.agent(&p).call(file_content).await?;
-        Ok(strip_code_fence(&raw).to_string())
-    }
-}
-
-/// Strip a surrounding ```…``` code fence if the model ignored the "no fences"
-/// instruction. Only touches a fence that wraps the entire output; partial
-/// fences (e.g. a fenced block legitimately inside the file) are left alone.
-fn strip_code_fence(mut s: &str) -> &str {
-    s = s.strip_suffix('\n').unwrap_or(s).trim();
-    if !s.starts_with("```") {
-        return s;
-    }
-    // Drop the opening fence line (``` or ```lang).
-    let Some(nl) = s.find('\n') else {
-        return s;
-    };
-    s = &s[nl + 1..];
-    // Drop a trailing closing fence.
-    let trimmed_end = s.trim_end();
-    if let Some(idx) = trimmed_end.rfind("```")
-        && trimmed_end[idx..].trim() == "```"
-    {
-        return trimmed_end[..idx].trim();
-    }
-    s.trim()
-}
-
-/// Parse a JSON-structured LLM response, tolerating the stray prose or code
-/// fence models occasionally emit around the payload. Strips a wrapping
-/// ```` ``` ````-fence, jumps to the first value start (skipping any leading
-/// prose), and lets serde_json's streaming deserializer parse exactly one value
-/// — so trailing commentary is ignored without us hand-rolling brace matching.
-fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> anyhow::Result<T> {
-    let body = strip_code_fence(raw);
-    let start = body.find(['{', '[']).unwrap_or(0);
-    let mut stream =
-        serde_json::Deserializer::from_str(body[start..].trim_start()).into_iter::<T>();
-    match stream.next() {
-        Some(Ok(value)) => Ok(value),
-        Some(Err(e)) => anyhow::bail!("failed to parse LLM JSON response: {e}\n--- raw ---\n{raw}"),
-        None => anyhow::bail!("LLM response contained no JSON value"),
+        Ok(crate::llm::strip_code_fence(&raw).to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_json_response_ignores_leading_prose_and_trailing_junk() {
-        // Fence sits inside leading prose (so strip_code_fence can't help);
-        // jump-to-`{` + serde_json's streaming parser handle both ends.
-        let raw = "Here is the plan:\n```json\n{\"batches\": []}\n```\ndone";
-        let out: BatchPlanOutput = parse_json_response(raw).unwrap();
-        assert!(out.batches.is_empty());
-    }
-
-    #[test]
-    fn parse_json_response_handles_escaped_quotes() {
-        let raw =
-            r#"{"batches": [{"changes": [{"file": "a\"b.rs", "hunks": []}], "reason": "x"}]}"#;
-        let out: BatchPlanOutput = parse_json_response(raw).unwrap();
-        assert_eq!(out.batches[0].changes[0].file, "a\"b.rs");
-    }
-
-    #[test]
-    fn parse_json_response_returns_err_when_no_json() {
-        let res: anyhow::Result<BatchPlanOutput> = parse_json_response("no json here at all");
-        assert!(res.is_err());
-    }
 
     fn change(file: &str, hunks: &[usize]) -> BatchChange {
         BatchChange {
@@ -365,28 +301,5 @@ mod tests {
         let plan: BatchPlanOutput = serde_json::from_str(json).unwrap();
         assert!(plan.batches[0].reason.is_none());
         assert!(plan.batches[0].changes[0].hunks.is_empty());
-    }
-
-    #[test]
-    fn strip_fence_removes_wrapping_fence() {
-        assert_eq!(strip_code_fence("```\nfn main() {}\n```"), "fn main() {}");
-    }
-
-    #[test]
-    fn strip_fence_removes_language_tag() {
-        assert_eq!(strip_code_fence("```rust\nlet x = 1;\n```"), "let x = 1;");
-    }
-
-    #[test]
-    fn strip_fence_leaves_plain_content_alone() {
-        assert_eq!(strip_code_fence("fn main() {}"), "fn main() {}");
-    }
-
-    #[test]
-    fn strip_fence_leaves_inner_fences_alone() {
-        // A fenced block that is legitimately part of the file is not stripped —
-        // only a fence wrapping the *entire* output is.
-        let inner = "text before\n\n```rs\ncode\n```\n\ntext after";
-        assert_eq!(strip_code_fence(inner), inner);
     }
 }

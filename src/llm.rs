@@ -4,7 +4,6 @@ use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::CompletionClient;
 use rig::completion::{Prompt, StructuredOutputError, TypedPrompt};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
-use std::io::Write;
 use std::time::Duration;
 
 pub const DEFAULT_PROVIDER: &str = "openai";
@@ -67,6 +66,65 @@ where
             }
             Err(err) => return Err(err),
         }
+    }
+}
+
+/// Strip a surrounding ```…``` code fence if the model ignored the "no fences"
+/// instruction. Only touches a fence that wraps the entire output; partial
+/// fences (e.g. a fenced block legitimately inside the file) are left alone.
+pub(crate) fn strip_code_fence(mut s: &str) -> &str {
+    s = s.strip_suffix('\n').unwrap_or(s).trim();
+    if !s.starts_with("```") {
+        return s;
+    }
+    // Drop the opening fence line (``` or ```lang).
+    let Some(nl) = s.find('\n') else {
+        return s;
+    };
+    s = &s[nl + 1..];
+    // Drop a trailing closing fence.
+    let trimmed_end = s.trim_end();
+    if let Some(idx) = trimmed_end.rfind("```")
+        && trimmed_end[idx..].trim() == "```"
+    {
+        return trimmed_end[..idx].trim();
+    }
+    s.trim()
+}
+
+/// Parse a JSON-structured LLM response, tolerating the stray prose or code
+/// fence models occasionally emit around the payload. Strips a wrapping
+/// ```` ``` ````-fence, jumps to the first value start (skipping any leading
+/// prose), and lets serde_json's streaming deserializer parse exactly one value
+/// — so trailing commentary is ignored without us hand-rolling brace matching.
+///
+/// A parse failure is reported as
+/// [`StructuredOutputError::DeserializationError`] — the same classification
+/// rig uses for a truncated `prompt_typed` response — so the shared retry
+/// policy ([`is_retryable`]) treats tolerant-parse failures exactly like
+/// typed-path truncation. The raw text rides in an anyhow context (the
+/// downcast in `is_retryable` still finds the underlying error).
+fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
+    let body = strip_code_fence(raw);
+    let start = body.find(['{', '[']).unwrap_or(0);
+    let mut stream =
+        serde_json::Deserializer::from_str(body[start..].trim_start()).into_iter::<T>();
+    match stream.next() {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(e)) => Err(
+            anyhow::Error::new(StructuredOutputError::DeserializationError(e)).context(format!(
+                "failed to parse LLM JSON response\n--- raw ---\n{raw}"
+            )),
+        ),
+        None => Err(
+            anyhow::Error::new(StructuredOutputError::DeserializationError(
+                serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "LLM response contained no JSON value",
+                )),
+            ))
+            .context(format!("--- raw ---\n{raw}")),
+        ),
     }
 }
 
@@ -459,103 +517,112 @@ macro_rules! with_agent {
 }
 
 impl LLMAgent {
+    /// Untyped completion, routed through [`retry_model_call`]: rig's `prompt`
+    /// returns the raw assistant text, so an empty completion would surface
+    /// as `Ok("")` rather than an error. Without this guard that would
+    /// silently propagate (e.g. an empty file written as a conflict
+    /// resolution). Empty output is classified as
+    /// [`StructuredOutputError::EmptyResponse`] so the shared retry policy
+    /// treats it like any other budget-starved response.
     pub async fn call(&self, prompt: &str) -> Result<String> {
-        // Like `schema` for the untyped path: rig's `prompt` returns the raw
-        // assistant text, so an empty completion surfaces as `Ok("")` rather
-        // than an error. Without this guard that would silently propagate
-        // (e.g. an empty file written as a conflict resolution — see
-        // `Generator::resolve_conflict`). Retry empty output, then error.
-        let mut attempts = 0usize;
-        loop {
-            match with_agent!(self, agent, Ok(agent.prompt(prompt).await?)) {
-                Ok(text) if !text.trim().is_empty() => return Ok(text),
-                Ok(_) if attempts < RETRY_BUDGET => {
-                    attempts += 1;
-                    tokio::time::sleep(retry_backoff(attempts)).await;
+        let this = self.clone();
+        let prompt = prompt.to_string();
+        retry_model_call(move || {
+            let this = this.clone();
+            let prompt = prompt.clone();
+            async move {
+                match with_agent!(this, agent, Ok(agent.prompt(&prompt).await?)) {
+                    Ok(text) if !text.trim().is_empty() => Ok(text),
+                    Ok(_) => Err(anyhow::Error::new(StructuredOutputError::EmptyResponse)),
+                    Err(err) => Err(err),
                 }
-                Ok(_) => return Err(anyhow::Error::new(StructuredOutputError::EmptyResponse)),
-                Err(err) => return Err(err),
             }
-        }
+        })
+        .await
     }
 
-    pub async fn stream(&self, prompt: &str) -> Result<String> {
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
+    /// One streaming attempt: routes the model's "thinking"/reasoning deltas
+    /// to `on_reasoning` and returns the accumulated assistant text (possibly
+    /// empty). No retry here — retries live in
+    /// [`Self::stream_typed_with_reasoning`], which reborrows `on_reasoning`
+    /// across attempts. Providers that emit no reasoning (e.g. plain
+    /// completions, Ollama) simply produce text and never call `on_reasoning`.
+    async fn stream_once_with_reasoning(
+        &self,
+        prompt: &str,
+        on_reasoning: &mut impl FnMut(&str),
+    ) -> Result<String> {
         let mut output = String::new();
-
         with_agent!(self, agent, {
             let mut stream = agent.stream_prompt(prompt).await;
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::Text(Text { text }),
+                    )) => output.push_str(&text),
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                    )) => on_reasoning(&reasoning),
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::Reasoning(r),
                     )) => {
-                        write!(lock, "{text}")?;
-                        output.push_str(&text);
+                        let text = r.display_text();
+                        if !text.is_empty() {
+                            on_reasoning(&text);
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => anyhow::bail!("Stream error: {e}"),
                 }
             }
         });
-
-        writeln!(lock)?;
-        lock.flush()?;
         Ok(output)
     }
 
-    /// Like [`Self::stream`], but routes the model's "thinking"/reasoning
-    /// deltas to `on_reasoning` instead of printing them, and returns only the
-    /// accumulated assistant text. Providers that emit no reasoning (e.g. plain
-    /// completions, Ollama) simply produce text and never call `on_reasoning`.
+    /// Stream a typed completion with live reasoning — the batch-plan path's
+    /// analogue of [`Self::schema`].
     ///
-    /// A stream that produces only reasoning and no text (a reasoning model
-    /// blowing its output budget) is treated like an empty response and
-    /// retried — the same policy as [`Self::schema`].
-    pub async fn stream_with_reasoning(
+    /// We stream the raw completion (rather than `prompt_typed`) so reasoning
+    /// tokens are surfaced live, then tolerant-parse the accumulated text
+    /// ourselves. A budget-starved model can still produce truncated JSON —
+    /// the streaming analogue of rig's
+    /// [`StructuredOutputError::DeserializationError`] — so the parse runs
+    /// INSIDE the retry loop: empty output and parse failure both count as
+    /// "no usable content" and get the same budget and backoff as
+    /// [`Self::schema`] (see [`is_retryable`]). A real stream error (auth,
+    /// rate limit, network) propagates immediately, never retried.
+    ///
+    /// The loop is inline rather than [`retry_model_call`]: the reasoning
+    /// callback is a borrowed `FnMut`, which an escaping async closure could
+    /// not reborrow across attempts — the same constraint the old
+    /// `stream_with_reasoning` documented. The policy (budget, backoff,
+    /// classification) is still the shared one.
+    pub async fn stream_typed_with_reasoning<T>(
         &self,
         prompt: &str,
         mut on_reasoning: impl FnMut(&str),
-    ) -> Result<String> {
-        // Inline loop rather than [`retry_model_call`]: the reasoning callback
-        // is a borrowed `FnMut`, which an escaping async closure could not
-        // reborrow across attempts. Empty output is the streaming analogue of
-        // [`StructuredOutputError::EmptyResponse`].
+    ) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let mut attempts = 0usize;
         loop {
-            let mut output = String::new();
-            with_agent!(self, agent, {
-                let mut stream = agent.stream_prompt(prompt).await;
-                while let Some(item) = stream.next().await {
-                    match item {
-                        Ok(MultiTurnStreamItem::StreamAssistantItem(
-                            StreamedAssistantContent::Text(Text { text }),
-                        )) => output.push_str(&text),
-                        Ok(MultiTurnStreamItem::StreamAssistantItem(
-                            StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                        )) => on_reasoning(&reasoning),
-                        Ok(MultiTurnStreamItem::StreamAssistantItem(
-                            StreamedAssistantContent::Reasoning(r),
-                        )) => {
-                            let text = r.display_text();
-                            if !text.is_empty() {
-                                on_reasoning(&text);
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => anyhow::bail!("Stream error: {e}"),
-                    }
+            let raw = self
+                .stream_once_with_reasoning(prompt, &mut on_reasoning)
+                .await?;
+            let parsed = if raw.trim().is_empty() {
+                Err(anyhow::Error::new(StructuredOutputError::EmptyResponse))
+            } else {
+                parse_json_response::<T>(&raw)
+            };
+            match parsed {
+                Ok(value) => return Ok(value),
+                Err(err) if is_retryable(&err) && attempts < RETRY_BUDGET => {
+                    attempts += 1;
+                    tokio::time::sleep(retry_backoff(attempts)).await;
                 }
-            });
-            if !output.trim().is_empty() {
-                return Ok(output);
+                Err(err) => return Err(err),
             }
-            if attempts >= RETRY_BUDGET {
-                return Err(anyhow::Error::new(StructuredOutputError::EmptyResponse));
-            }
-            attempts += 1;
-            tokio::time::sleep(retry_backoff(attempts)).await;
         }
     }
 
@@ -794,5 +861,73 @@ mod tests {
             !is_retryable(&anyhow::anyhow!("network / auth / etc.")),
             "non-content errors must not be retried"
         );
+    }
+
+    // --- Tolerant output parsing (moved from generator.rs with the seam) ---
+
+    #[test]
+    fn parse_json_response_ignores_leading_prose_and_trailing_junk() {
+        // Fence sits inside leading prose (so strip_code_fence can't help);
+        // jump-to-`{` + serde_json's streaming parser handle both ends.
+        let raw = "Here is the plan:\n```json\n{\"batches\": []}\n```\ndone";
+        let out: crate::generator::BatchPlanOutput = parse_json_response(raw).unwrap();
+        assert!(out.batches.is_empty());
+    }
+
+    #[test]
+    fn parse_json_response_handles_escaped_quotes() {
+        let raw =
+            r#"{"batches": [{"changes": [{"file": "a\"b.rs", "hunks": []}], "reason": "x"}]}"#;
+        let out: crate::generator::BatchPlanOutput = parse_json_response(raw).unwrap();
+        assert_eq!(out.batches[0].changes[0].file, "a\"b.rs");
+    }
+
+    #[test]
+    fn parse_json_response_returns_err_when_no_json() {
+        let res: anyhow::Result<crate::generator::BatchPlanOutput> =
+            parse_json_response("no json here at all");
+        assert!(res.is_err());
+    }
+
+    /// The contract that makes batch-plan truncation retryable: a
+    /// tolerant-parse failure must surface as
+    /// [`StructuredOutputError::DeserializationError`], the same class rig's
+    /// `prompt_typed` produces for truncated content — so `is_retryable`
+    /// retries it with the same policy as the typed path.
+    #[test]
+    fn parse_failure_is_classified_as_deserialization_error() {
+        let err = parse_json_response::<crate::generator::BatchPlanOutput>("no json here")
+            .expect_err("must fail");
+        assert!(
+            is_retryable(&err),
+            "parse failures must be retried like typed-path truncation"
+        );
+        assert!(matches!(
+            err.downcast_ref::<StructuredOutputError>(),
+            Some(StructuredOutputError::DeserializationError(_))
+        ));
+    }
+
+    #[test]
+    fn strip_fence_removes_wrapping_fence() {
+        assert_eq!(strip_code_fence("```\nfn main() {}\n```"), "fn main() {}");
+    }
+
+    #[test]
+    fn strip_fence_removes_language_tag() {
+        assert_eq!(strip_code_fence("```rust\nlet x = 1;\n```"), "let x = 1;");
+    }
+
+    #[test]
+    fn strip_fence_leaves_plain_content_alone() {
+        assert_eq!(strip_code_fence("fn main() {}"), "fn main() {}");
+    }
+
+    #[test]
+    fn strip_fence_leaves_inner_fences_alone() {
+        // A fenced block that is legitimately part of the file is not stripped —
+        // only a fence wrapping the *entire* output is.
+        let inner = "text before\n\n```rs\ncode\n```\n\ntext after";
+        assert_eq!(strip_code_fence(inner), inner);
     }
 }

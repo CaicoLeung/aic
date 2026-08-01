@@ -1,5 +1,3 @@
-use std::env;
-
 #[derive(Debug)]
 pub struct PromptConfig {
     pub git_message: String,
@@ -142,17 +140,6 @@ impl Default for PromptConfig {
             git_message: SYSTEM_PROMPT_GIT_MESSAGE.trim().to_string(),
             batch_plan_prompt: SYSTEM_PROMPT_BATCH_PLAN.trim().to_string(),
             resolve_prompt: SYSTEM_PROMPT_RESOLVE_CONFLICT.trim().to_string(),
-        }
-    }
-}
-
-impl PromptConfig {
-    pub fn from_env() -> Self {
-        let default = Self::default();
-        Self {
-            git_message: env::var("AIC_SYSTEM_PROMPT").unwrap_or(default.git_message),
-            batch_plan_prompt: default.batch_plan_prompt,
-            resolve_prompt: default.resolve_prompt,
         }
     }
 }
