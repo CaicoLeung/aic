@@ -525,10 +525,20 @@ impl Git {
     /// `git apply --cached`, which relocates each hunk by its context lines —
     /// so it still lands correctly after an earlier batch's commit shifted line
     /// numbers.
+    ///
+    /// `hunk_indices` is sorted into file order before the patch is built: git
+    /// expects a patch's hunks to appear in ascending file position, and the
+    /// model's batch plan does not guarantee a sorted `hunks` array (it
+    /// commonly returns them in reverse or shuffled order). An unsorted patch
+    /// makes `git apply` fail with "patch does not apply" even though every
+    /// selected hunk is valid.
     pub fn stage_hunks(raw_diff: &str, hunk_indices: &[usize]) -> anyhow::Result<()> {
+        let mut hunk_indices = hunk_indices.to_vec();
+        hunk_indices.sort_unstable();
+
         let patch = parse_file_patch(raw_diff);
         let mut body = patch.header;
-        for &idx in hunk_indices {
+        for &idx in &hunk_indices {
             let i = idx
                 .checked_sub(1)
                 .context("hunk indices are 1-based and must be >= 1")?;
@@ -1076,6 +1086,43 @@ index 1..2 100644\n\
         Git::stage_hunks(&raw, &[2]).unwrap();
         let staged = Git::diff(Some("tracked.txt")).unwrap();
         assert!(staged.contains("a1") && staged.contains("c1"));
+    }
+
+    /// The model's batch plan does not promise a sorted `hunks` array, and an
+    /// unsorted patch makes `git apply` fail with "patch does not apply" (issue
+    /// report: "aborted on batch 5 ... staging hunks for src/i18n/messages/en.ts
+    /// ... patch does not apply"). Staging must therefore sort the selected
+    /// hunks into file order before building the patch — here the same two
+    /// hunks staged in reverse order must land exactly like the sorted case.
+    #[test]
+    fn stage_hunks_sorts_out_of_order_indices() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+        let base = format!("a0\n{pad}c0\n");
+        let changed = format!("a1\n{pad}c1\n");
+        std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+        {
+            let _g = CwdGuard::new(dir.path());
+            Git::add(&["tracked.txt"]).unwrap();
+            Git::commit("base".into(), None).unwrap();
+        }
+        std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+        let _g = CwdGuard::new(dir.path());
+        let raw = Git::diff_workdir(Some("tracked.txt")).unwrap();
+        let patch = parse_file_patch(&raw);
+        assert_eq!(patch.hunks.len(), 2, "expected two separate hunks");
+
+        // Reverse order — would produce a malformed patch without the sort.
+        Git::stage_hunks(&raw, &[2, 1]).unwrap();
+        let staged = Git::diff(Some("tracked.txt")).unwrap();
+        assert!(
+            staged.contains("a1") && staged.contains("c1"),
+            "both hunks must be staged despite the reversed input order"
+        );
     }
 
     #[test]
