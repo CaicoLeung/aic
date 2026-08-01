@@ -6,15 +6,15 @@ use super::common::*;
 /// nothing-to-commit notice and returns without calling the LLM or prompting.
 #[tokio::test]
 async fn commit_clean_repo_is_a_noop() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
     let (resolver, seen) = resolver_recording();
     let prompt = prompt_queue(vec![]); // empty — must not be asked
-    let _guard = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let result = run_commit_workflow_impl(
+        &git,
         resolver,
         prompt,
         sink(),
@@ -35,14 +35,14 @@ async fn commit_clean_repo_is_a_noop() {
 /// or the normal commit flow.
 #[tokio::test]
 async fn commit_run_auto_detect_aborts_when_user_declines() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
     let (resolver, seen) = resolver_recording();
-    let _guard = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let err = run_commit_workflow_impl(
+        &git,
         resolver,
         prompt_queue(vec![false]),
         sink(),
@@ -65,15 +65,15 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
 /// through the commit-workflow entry point.
 #[tokio::test]
 async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
     let resolver = resolver_returning("merged\n");
     // [0] = "resolve now?" yes, [1] = "apply tracked.txt?" yes
-    let _guard = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let result = run_commit_workflow_impl(
+        &git,
         resolver,
         prompt_queue(vec![true, true]),
         sink(),
@@ -108,18 +108,18 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
 /// reports zero approved plus one rejected.
 #[tokio::test]
 async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     merge_conflict(dir.path());
 
     let resolver = resolver_returning("merged\n");
     // [0] = "resolve now?" yes (route into the resolve workflow),
     // [1] = "apply tracked.txt?" no (reject the only proposed resolution).
-    let _guard = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
     let result = run_commit_workflow_impl(
+        &git,
         resolver,
         prompt_queue(vec![true, false]),
         display,
@@ -165,7 +165,6 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
 /// real repo with a stub plan and stub commit messages, so no LLM is contacted.
 #[tokio::test]
 async fn commit_splits_one_file_across_two_batches() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -198,8 +197,9 @@ async fn commit_splits_one_file_across_two_batches() {
         ],
     };
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -247,7 +247,6 @@ async fn commit_splits_one_file_across_two_batches() {
 /// 1's commit and trip the HEAD~1 assertions.
 #[tokio::test]
 async fn commit_splits_two_files_across_two_batches() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     two_file_unstaged_repo(dir.path());
 
@@ -271,8 +270,9 @@ async fn commit_splits_two_files_across_two_batches() {
         ],
     };
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -334,7 +334,6 @@ async fn commit_splits_two_files_across_two_batches() {
 /// trip the tree assertion.
 #[tokio::test]
 async fn commit_batches_two_files_into_one_commit() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     two_file_unstaged_repo(dir.path());
 
@@ -355,8 +354,9 @@ async fn commit_batches_two_files_into_one_commit() {
         }],
     };
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -407,7 +407,6 @@ async fn commit_batches_two_files_into_one_commit() {
 /// work into the planner would fail loudly instead of shipping green.
 #[tokio::test]
 async fn commit_staged_files_in_one_commit() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -418,9 +417,10 @@ async fn commit_staged_files_in_one_commit() {
     git_in(dir.path(), &["add", "tracked.txt"]);
 
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let result = run_commit_workflow_impl(
+        &git,
         unreachable_resolver(), // non-conflicted path must NOT resolve
         prompt_queue(vec![]),
         sink(),
@@ -470,7 +470,6 @@ async fn commit_staged_files_in_one_commit() {
 /// Guards the [important] partial-failure UX contract.
 #[tokio::test]
 async fn commit_batch_loop_aborts_after_partial_commit() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -501,8 +500,9 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
         ],
     };
     let (messenger, calls) = messenger_then_error(1); // batch 1 ok, batch 2 fails
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let err = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -541,7 +541,6 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
 /// never reached (the loop body never executes for zero batches).
 #[tokio::test]
 async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -550,9 +549,10 @@ async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
     std::fs::write(dir.path().join("tracked.txt"), "unstaged change\n").unwrap();
 
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let err = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -616,7 +616,6 @@ async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
 /// batch and finish the Run instead of aborting.
 #[tokio::test]
 async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -661,9 +660,10 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
         ],
     };
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -708,7 +708,6 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
 /// bookkeeping end-to-end.
 #[tokio::test]
 async fn commit_splits_one_file_across_three_batches() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -734,9 +733,10 @@ async fn commit_splits_one_file_across_three_batches() {
         batches: vec![mk(1), mk(2), mk(3)],
     };
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -790,7 +790,6 @@ async fn commit_splits_one_file_across_three_batches() {
 /// before staging.
 #[tokio::test]
 async fn commit_batch_merges_same_file_changes_into_one_commit() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -821,9 +820,10 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
         }],
     };
     let before = commit_count(dir.path());
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
 
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),

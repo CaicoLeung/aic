@@ -19,6 +19,7 @@ use anyhow::Context;
 use clap::{CommandFactory, Parser};
 use indicatif::ProgressBar;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -163,7 +164,7 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     result
 }
 
-fn format_rust_files(paths: &[String], display: &Display) {
+fn format_rust_files(git: &Git, paths: &[String], display: &Display) {
     let rust_files: Vec<&str> = paths
         .iter()
         .filter(|p| p.ends_with(".rs"))
@@ -178,10 +179,13 @@ fn format_rust_files(paths: &[String], display: &Display) {
     // edition 2015 (no let-chains; different import ordering / construct
     // formatting), which diverges from CI's `cargo fmt --all -- --check` and
     // made commits fail CI. cargo fmt reads the edition from the manifest.
-    match std::process::Command::new("cargo")
-        .args(["fmt", "--all"])
-        .status()
-    {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(["fmt", "--all"]);
+    // Run in the repo's workdir — never the process CWD.
+    if let Some(workdir) = git.workdir() {
+        cmd.current_dir(workdir);
+    }
+    match cmd.status() {
         Ok(s) if s.success() => {
             display.formatted_notice(rust_files.len());
         }
@@ -195,6 +199,7 @@ fn format_rust_files(paths: &[String], display: &Display) {
 }
 
 async fn generate_and_commit(
+    git: &Git,
     paths: &[String],
     display: &Display,
     prefix: &str,
@@ -203,14 +208,14 @@ async fn generate_and_commit(
     let files: Vec<serde_json::Value> = paths
         .iter()
         .map(|p| {
-            let diff = Git::diff(Some(p.as_str()))?;
+            let diff = git.diff(Some(p.as_str()))?;
             let scoped = git::format_diff_scoped(&diff, p);
             Ok(serde_json::json!({ "path": p, "diff": scoped }))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
     let result = with_spinner("Generating commit message", messenger(diff.to_string())).await?;
-    let hash = Git::commit(result.message.clone(), result.body.clone())?;
+    let hash = git.commit(result.message.clone(), result.body.clone())?;
     display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
     Ok(())
 }
@@ -259,11 +264,12 @@ fn unified_diff(old: &str, new: &str) -> String {
 /// stderr. Production callers use [`run_resolve_workflow`], which wires in
 /// `Generator::resolve_conflict`, stdin `prompt_yes_no`, and [`Display::new`].
 pub(crate) async fn run_resolve_workflow_impl(
+    git: &Git,
     resolve: Resolver,
     prompt: Prompt,
     display: Display,
 ) -> anyhow::Result<()> {
-    let state = Git::state()?;
+    let state = git.state()?;
 
     if !state.is_conflicted() {
         display.no_conflicts();
@@ -275,13 +281,13 @@ pub(crate) async fn run_resolve_workflow_impl(
         anyhow::bail!("aic cannot resolve a {} state in v1", state.label());
     }
 
-    let files = Git::conflicted_files()?;
+    let files = git.conflicted_files()?;
     if files.is_empty() {
         // Conflicted state but no unmerged index entries — the user resolved
         // every file by hand and only the finalize step remains.
         display.all_resolved_offer_finalize(state);
         if prompt("finalize now?")? {
-            Git::finalize(state)?;
+            git.finalize(state)?;
             display.finalize_done(state);
         }
         return Ok(());
@@ -305,7 +311,7 @@ pub(crate) async fn run_resolve_workflow_impl(
             skipped_unresolvable += 1;
             continue;
         }
-        let original_bytes = Git::read_worktree(&f.path)?;
+        let original_bytes = git.read_worktree(&f.path)?;
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
 
@@ -358,8 +364,8 @@ pub(crate) async fn run_resolve_workflow_impl(
     let mut rejected = 0usize;
     for (path, _original, resolved) in &plans {
         if prompt(&format!("apply {path}?"))? {
-            Git::write_worktree(path, resolved)?;
-            Git::add(&[path.as_str()])?;
+            git.write_worktree(path, resolved)?;
+            git.add(&[path.as_str()])?;
             display.resolved(path);
             approved += 1;
         } else {
@@ -379,7 +385,7 @@ pub(crate) async fn run_resolve_workflow_impl(
     // lands in exactly one of: skipped_unresolvable, skipped_failed, plans).
     let needs_manual = rejected + skipped_failed + skipped_unresolvable;
     if needs_manual == 0 {
-        Git::finalize(state)?;
+        git.finalize(state)?;
         display.finalize_done(state);
     } else {
         display.handoff(
@@ -401,13 +407,15 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
     let prompt: Prompt = Box::new(prompt_yes_no);
-    run_resolve_workflow_impl(resolver, prompt, Display::new()).await
+    let git = Git::at(Path::new("."))?;
+    run_resolve_workflow_impl(&git, resolver, prompt, Display::new()).await
 }
 
 /// Default `aic` run. `resolve`/`prompt`/`display` are seams mirroring
 /// [`run_resolve_workflow_impl`]; they only matter on the conflicted-repo
 /// auto-detect branch, which hands off to the resolve workflow.
 pub(crate) async fn run_commit_workflow_impl(
+    git: &Git,
     resolve: Resolver,
     prompt: Prompt,
     display: Display,
@@ -417,11 +425,11 @@ pub(crate) async fn run_commit_workflow_impl(
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
     // deeper net; this prompt is the friendly front door.
-    let state = Git::state()?;
+    let state = git.state()?;
     if state.is_conflicted() {
         display.resolve_prompt(state);
         if prompt("resolve now?")? {
-            return run_resolve_workflow_impl(resolve, prompt, display).await;
+            return run_resolve_workflow_impl(git, resolve, prompt, display).await;
         }
         anyhow::bail!(
             "aborted: repo is mid-{}; resolve conflicts first",
@@ -429,7 +437,7 @@ pub(crate) async fn run_commit_workflow_impl(
         );
     }
 
-    let status = Git::status()?;
+    let status = git.status()?;
     let staged_files: Vec<_> = status.iter().filter(|f| f.staged).collect();
 
     if staged_files.is_empty() {
@@ -445,7 +453,7 @@ pub(crate) async fn run_commit_workflow_impl(
         // numbering we stage by — reflects the final formatted source. Doing it
         // after capturing the diff (as before) would let `cargo fmt` shift
         // hunks out from under the indices the model returned.
-        format_rust_files(&all_unstaged, &display);
+        format_rust_files(git, &all_unstaged, &display);
 
         // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
         // feeds the two consumers that must agree on hunk numbering: the
@@ -458,7 +466,7 @@ pub(crate) async fn run_commit_workflow_impl(
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
             .map(|f| {
-                let diff = Git::diff_workdir(Some(f.path.as_str()))?;
+                let diff = git.diff_workdir(Some(f.path.as_str()))?;
                 let hunk_count = git::parse_file_patch(&diff).hunks.len();
                 file_hunk_counts.push((f.path.clone(), hunk_count));
                 let scoped = git::format_diff_scoped(&diff, &f.path);
@@ -480,13 +488,13 @@ pub(crate) async fn run_commit_workflow_impl(
             // partially committed, so both share one abort message naming how
             // far we got and that the rest is recoverable by re-running `aic`.
             let outcome = async {
-                let paths = staging.stage_batch(batch, &display)?;
+                let paths = staging.stage_batch(git, batch, &display)?;
                 if paths.is_empty() {
                     // Every file in this batch already landed via an earlier
                     // batch or a pre-commit hook — nothing to commit.
                     return Ok(());
                 }
-                generate_and_commit(&paths, &display, &prefix, &messenger).await
+                generate_and_commit(git, &paths, &display, &prefix, &messenger).await
             };
             if let Err(e) = outcome.await {
                 anyhow::bail!(
@@ -501,10 +509,10 @@ pub(crate) async fn run_commit_workflow_impl(
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        format_rust_files(&paths, &display);
+        format_rust_files(git, &paths, &display);
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
-        Git::add(&refs)?;
-        generate_and_commit(&paths, &display, "", &messenger).await?;
+        git.add(&refs)?;
+        generate_and_commit(git, &paths, &display, "", &messenger).await?;
     }
 
     Ok(())
@@ -527,7 +535,8 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
-    run_commit_workflow_impl(resolver, prompt, Display::new(), planner, messenger).await
+    let git = Git::at(Path::new("."))?;
+    run_commit_workflow_impl(&git, resolver, prompt, Display::new(), planner, messenger).await
 }
 
 /// Writes the completion script for `shell` to `out`.

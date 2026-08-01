@@ -9,9 +9,10 @@
 //! aborted 3+-hunks-one-file Runs when a remapped position was written back
 //! as an original index.
 //!
-//! Staging reaches into the git adapter (`Git::diff_workdir`, `Git::stage_hunks`)
-//! and the pure diff parser (`parse_file_patch`) directly; its behavior is
-//! exercised end-to-end by the e2e suite against real repos, including the
+//! Staging reaches into the git adapter through the `&Git` handle the
+//! workflow passes in (`diff_workdir`, `stage_hunks`) and the pure diff
+//! parser (`parse_file_patch`) directly; its behavior is exercised
+//! end-to-end by the e2e suite against real repos, including the
 //! pre-commit-hook restaging path that makes the fresh-diff strategy
 //! load-bearing.
 
@@ -61,6 +62,7 @@ impl Staging {
     /// staged.
     pub fn stage_batch(
         &mut self,
+        git: &Git,
         batch: &BatchPlanBatch,
         display: &Display,
     ) -> Result<Vec<String>> {
@@ -88,7 +90,7 @@ impl Staging {
             let planned = hunks_by_file
                 .get(file)
                 .expect("every file in `files` has an entry in `hunks_by_file`");
-            let current = Git::diff_workdir(Some(file.as_str()))?;
+            let current = git.diff_workdir(Some(file.as_str()))?;
             if current.trim().is_empty() {
                 display.warn(&format!(
                     "{}: all its changes were already committed (a pre-commit hook may have \
@@ -103,7 +105,7 @@ impl Staging {
             if mapping.current.is_empty() {
                 continue;
             }
-            Git::stage_hunks(&current, &mapping.current)
+            git.stage_hunks(&current, &mapping.current)
                 .with_context(|| format!("staging hunks for {}", file))?;
             // Record ORIGINAL indices (not the remapped current positions) so
             // the plan-time numbering the model saw stays stable for later

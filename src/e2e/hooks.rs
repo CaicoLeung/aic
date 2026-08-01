@@ -10,7 +10,6 @@ use super::common::*;
 /// in the repo's `.git/hooks`.
 #[tokio::test]
 async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -30,8 +29,9 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
     std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
     let plan = plan_single_batch("tracked.txt", "hook test");
 
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let result = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -76,7 +76,6 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
 /// regression back to libgit2, which would commit past the veto silently.
 #[tokio::test]
 async fn commit_run_hook_veto_aborts_with_index_intact() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -89,10 +88,11 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
     std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
     let plan = plan_single_batch("tracked.txt", "hook veto");
 
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let before = commit_count(dir.path());
 
     let err = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -118,7 +118,7 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
         "a vetoed Run must not create a commit"
     );
     // The staged index is intact: the batch's hunks are still staged.
-    let staged = git::Git::diff(Some("tracked.txt")).unwrap();
+    let staged = git.diff(Some("tracked.txt")).unwrap();
     assert!(
         staged.contains("changed by hook test"),
         "staged hunks must survive the veto; staged diff:\n{staged}"
@@ -140,7 +140,6 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
 /// would change the surfaced text and fail loudly, not ship green.
 #[tokio::test]
 async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
-    let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -153,10 +152,11 @@ async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
     std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
     let plan = plan_single_batch("tracked.txt", "hook veto");
 
-    let _g = gh::CwdGuard::new(dir.path());
+    let git = Git::at(dir.path()).unwrap();
     let before = commit_count(dir.path());
 
     let err = run_commit_workflow_impl(
+        &git,
         resolver_returning(""),
         prompt_queue(vec![]),
         sink(),
@@ -183,7 +183,7 @@ async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
     );
     // The staged index is intact: the batch's hunks are still staged, ready
     // for a re-run once the offending hook is fixed.
-    let staged = git::Git::diff(Some("tracked.txt")).unwrap();
+    let staged = git.diff(Some("tracked.txt")).unwrap();
     assert!(
         staged.contains("changed by hook test"),
         "staged hunks must survive the commit-msg veto; staged diff:\n{staged}"

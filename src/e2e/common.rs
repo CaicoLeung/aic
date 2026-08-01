@@ -4,6 +4,7 @@
 
 pub(super) use crate::display::{Display, DisplayWrite};
 pub(super) use crate::git;
+pub(super) use crate::git::Git;
 pub(super) use crate::git::tests as gh;
 pub(super) use crate::{
     BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver, generator,
@@ -342,10 +343,10 @@ pub fn merge_conflict(dir: &Path) {
 
 /// Minimal cargo project on top of [`gh::init_test_repo`]: a dependency-free
 /// `Cargo.toml`, a formatted `src/main.rs`, and a `/target` `.gitignore`, all
-/// committed. `format_rust_files` runs `cargo fmt --all` from the workflow's
-/// [`gh::CwdGuard`], which needs a manifest to operate on — impossible in a
-/// plain `init_test_repo` git repo. Used by the fmt-before-diff e2e test
-/// (issue #27).
+/// committed. `format_rust_files` runs `cargo fmt --all` in the repo's
+/// workdir (the `Git` handle pins it), which needs a manifest to operate on —
+/// impossible in a plain `init_test_repo` git repo. Used by the fmt-before-diff
+/// e2e test (issue #27).
 ///
 /// The base `main.rs` has its two edit sites (lines 3 and 12) ≥8 lines apart,
 /// so the formatted diff splits into two hunks under git's default three-line

@@ -153,7 +153,7 @@ pub enum RepoState {
 }
 
 impl RepoState {
-    pub fn from_git2(state: git2::RepositoryState) -> Self {
+    fn from_git2(state: git2::RepositoryState) -> Self {
         use git2::RepositoryState as G;
         match state {
             G::Clean => Self::Clean,
@@ -265,80 +265,6 @@ pub fn has_conflict_markers(content: &str) -> bool {
         .any(|line| line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>"))
 }
 
-/// Run the real `git` CLI inside the repo: spawns `git` with `args`, writes
-/// `stdin` to its stdin when `Some`, applies `envs` when non-empty, and returns
-/// captured **stdout**.
-///
-/// stderr is captured too, but only to surface git's own diagnostic on a
-/// non-zero exit — the real reason (a hook veto, a missing merge message, a
-/// refused patch), never a bare exit code. Some refusals (`git commit`'s
-/// "nothing to commit") write to stdout instead, so stdout is the fallback
-/// detail when stderr is empty. No success-path caller needs stderr, so it
-/// stays out of the return type; the authored-commit migration consumes
-/// the returned stdout.
-///
-/// The command line appears in the error exactly once (here). Callers
-/// propagate with a bare `?`, except where they name the user-facing operation
-/// (hunk staging) or correct the state the failure implies (a commit that
-/// landed) — a context layer must never mislabel a clean non-zero exit as a
-/// spawn failure. If git exits before consuming stdin, the broken pipe is
-/// discarded in favor of git's own stderr: the refusal that closed the pipe is
-/// the reason the caller needs.
-fn run_git(args: &[&str], stdin: Option<&str>, envs: &[(&str, &str)]) -> anyhow::Result<String> {
-    let command_line = format!("git {}", args.join(" "));
-    let mut cmd = Command::new("git");
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if stdin.is_some() {
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-    for (key, value) in envs {
-        cmd.env(key, value);
-    }
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn {command_line}"))?;
-    if let Some(body) = stdin {
-        use std::io::Write as _;
-        let mut child_stdin = child.stdin.take().context("failed to open stdin for git")?;
-        if let Err(write_err) = child_stdin.write_all(body.as_bytes()) {
-            // git exited before consuming stdin (e.g. it already knew it would
-            // refuse). Drop the handle so git sees EOF, wait for its verdict,
-            // and surface its stderr — the write error is just the symptom.
-            drop(child_stdin);
-            let output = child
-                .wait_with_output()
-                .with_context(|| format!("failed to wait on {command_line}"))?;
-            if !output.status.success() {
-                return Err(nonzero_exit(
-                    &command_line,
-                    output.status,
-                    &output.stderr,
-                    &output.stdout,
-                ));
-            }
-            // Bizarre: git exited 0 without reading stdin. The write error is
-            // the only explanation left.
-            return Err(write_err)
-                .with_context(|| format!("failed to write stdin to {command_line}"));
-        }
-        // child_stdin drops here → git sees EOF and processes the input.
-    }
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to wait on {command_line}"))?;
-    if !output.status.success() {
-        return Err(nonzero_exit(
-            &command_line,
-            output.status,
-            &output.stderr,
-            &output.stdout,
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// The canonical non-zero-exit diagnostic: the command line (once), the exit
 /// status, and git's own diagnostic when it has one — the real reason (a hook
 /// veto, a missing merge message, a refused patch), never a bare exit code.
@@ -367,15 +293,112 @@ fn nonzero_exit(
     anyhow::anyhow!("{command_line}: {detail}")
 }
 
-pub struct Git;
+pub struct Git {
+    repo: Repository,
+}
 
 impl Git {
-    fn repo() -> anyhow::Result<Repository> {
-        Repository::discover(".").with_context(|| "failed to discover git repository")
+    /// Run the real `git` CLI inside the repo: spawns `git` with `args`, writes
+    /// `stdin` to its stdin when `Some`, applies `envs` when non-empty, and returns
+    /// captured **stdout**.
+    ///
+    /// stderr is captured too, but only to surface git's own diagnostic on a
+    /// non-zero exit — the real reason (a hook veto, a missing merge message, a
+    /// refused patch), never a bare exit code. Some refusals (`git commit`'s
+    /// "nothing to commit") write to stdout instead, so stdout is the fallback
+    /// detail when stderr is empty. No success-path caller needs stderr, so it
+    /// stays out of the return type; the authored-commit migration consumes
+    /// the returned stdout.
+    ///
+    /// The command line appears in the error exactly once (here). Callers
+    /// propagate with a bare `?`, except where they name the user-facing operation
+    /// (hunk staging) or correct the state the failure implies (a commit that
+    /// landed) — a context layer must never mislabel a clean non-zero exit as a
+    /// spawn failure. If git exits before consuming stdin, the broken pipe is
+    /// discarded in favor of git's own stderr: the refusal that closed the pipe is
+    /// the reason the caller needs.
+    fn run_git(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        envs: &[(&str, &str)],
+    ) -> anyhow::Result<String> {
+        let command_line = format!("git {}", args.join(" "));
+        let mut cmd = Command::new("git");
+        // Operate on the repo this handle discovered — never the process CWD.
+        if let Some(workdir) = self.repo.workdir() {
+            cmd.current_dir(workdir);
+        }
+        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if stdin.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn {command_line}"))?;
+        if let Some(body) = stdin {
+            use std::io::Write as _;
+            let mut child_stdin = child.stdin.take().context("failed to open stdin for git")?;
+            if let Err(write_err) = child_stdin.write_all(body.as_bytes()) {
+                // git exited before consuming stdin (e.g. it already knew it would
+                // refuse). Drop the handle so git sees EOF, wait for its verdict,
+                // and surface its stderr — the write error is just the symptom.
+                drop(child_stdin);
+                let output = child
+                    .wait_with_output()
+                    .with_context(|| format!("failed to wait on {command_line}"))?;
+                if !output.status.success() {
+                    return Err(nonzero_exit(
+                        &command_line,
+                        output.status,
+                        &output.stderr,
+                        &output.stdout,
+                    ));
+                }
+                // Bizarre: git exited 0 without reading stdin. The write error is
+                // the only explanation left.
+                return Err(write_err)
+                    .with_context(|| format!("failed to write stdin to {command_line}"));
+            }
+            // child_stdin drops here → git sees EOF and processes the input.
+        }
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("failed to wait on {command_line}"))?;
+        if !output.status.success() {
+            return Err(nonzero_exit(
+                &command_line,
+                output.status,
+                &output.stderr,
+                &output.stdout,
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    pub fn status() -> anyhow::Result<Vec<FileStatus>> {
-        let repo = Self::repo()?;
+    /// Discover the repository containing `path` once; every method operates
+    /// on this handle, so repo identity never depends on the process CWD
+    /// (which used to force tests to chdir and serialize on a global lock).
+    pub fn at(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            repo: Repository::discover(path).with_context(|| {
+                format!("failed to discover git repository at {}", path.display())
+            })?,
+        })
+    }
+
+    /// The working tree this handle operates on (`None` for bare repos).
+    pub fn workdir(&self) -> Option<&Path> {
+        self.repo.workdir()
+    }
+
+    pub fn status(&self) -> anyhow::Result<Vec<FileStatus>> {
+        let repo = &self.repo;
         let statuses = repo
             .statuses(None)
             .context("failed to get repository status")?;
@@ -416,8 +439,28 @@ impl Git {
         Ok(result)
     }
 
-    pub fn diff(path: Option<&str>) -> anyhow::Result<String> {
-        let repo = Self::repo()?;
+    /// The repo's index, force-refreshed from disk.
+    ///
+    /// The git CLI (`git apply --cached`, `git add`, hook re-staging) rewrites
+    /// the index file behind libgit2's back, and libgit2 caches the index on
+    /// the `Repository` handle — so without a forced re-read, the second half
+    /// of a Run would diff against a stale index and `git apply --cached`
+    /// would reject the remapped hunks ("patch does not apply"). The old
+    /// per-call `discover(".")` got a fresh index every time; the shared
+    /// handle needs this instead.
+    fn index(&self) -> anyhow::Result<git2::Index> {
+        let mut index = self
+            .repo
+            .index()
+            .context("failed to get repository index")?;
+        index
+            .read(true)
+            .context("failed to refresh repository index")?;
+        Ok(index)
+    }
+
+    pub fn diff(&self, path: Option<&str>) -> anyhow::Result<String> {
+        let repo = &self.repo;
         let head_tree = match repo.head() {
             Ok(r) => Some(r.peel_to_tree().context("failed to peel HEAD to tree")?),
             Err(_) => None,
@@ -429,8 +472,9 @@ impl Git {
             opts.pathspec(p);
         }
 
+        let mut index = self.index()?;
         let diff = repo
-            .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
+            .diff_tree_to_index(head_tree.as_ref(), Some(&mut index), Some(&mut opts))
             .context("failed to compute diff")?;
 
         format_diff(&diff)
@@ -454,9 +498,9 @@ impl Git {
     /// an empty string. `stage_hunks` then feeds `git apply --cached` an empty
     /// patch and the batch dies with "No valid patches in input". This is the
     /// splitting-a-file-into-a-module case (e.g. `src/e2e.rs` → `src/e2e/`).
-    pub fn diff_workdir(path: Option<&str>) -> anyhow::Result<String> {
-        let repo = Self::repo()?;
-        let index = repo.index().context("failed to get repository index")?;
+    pub fn diff_workdir(&self, path: Option<&str>) -> anyhow::Result<String> {
+        let repo = &self.repo;
+        let index = self.index()?;
 
         let mut opts = git2::DiffOptions::new();
         opts.include_untracked(true);
@@ -475,9 +519,9 @@ impl Git {
         }
     }
 
-    pub fn add(paths: &[&str]) -> anyhow::Result<()> {
-        let repo = Self::repo()?;
-        let mut index = repo.index().context("failed to get repository index")?;
+    pub fn add(&self, paths: &[&str]) -> anyhow::Result<()> {
+        let repo = &self.repo;
+        let mut index = self.index()?;
 
         if paths.is_empty() {
             index
@@ -525,7 +569,7 @@ impl Git {
     /// `git apply --cached`, which relocates each hunk by its context lines —
     /// so it still lands correctly after an earlier batch's commit shifted line
     /// numbers.
-    pub fn stage_hunks(raw_diff: &str, hunk_indices: &[usize]) -> anyhow::Result<()> {
+    pub fn stage_hunks(&self, raw_diff: &str, hunk_indices: &[usize]) -> anyhow::Result<()> {
         let patch = parse_file_patch(raw_diff);
         let mut body = patch.header;
         for &idx in hunk_indices {
@@ -543,7 +587,7 @@ impl Git {
 
         // Name the aic operation the user can act on; the helper's cause layer
         // carries the command and git's own stderr.
-        run_git(&["apply", "--cached", "-"], Some(&body), &[])
+        self.run_git(&["apply", "--cached", "-"], Some(&body), &[])
             .with_context(|| "git apply --cached rejected the selected hunks")?;
         Ok(())
     }
@@ -587,20 +631,21 @@ impl Git {
     /// itself commits could move HEAD further — and then the displayed hash is
     /// the state the user actually sees). If resolving HEAD fails after the
     /// commit landed, the error says so instead of implying the commit failed.
-    pub fn commit(message: String, body: Option<String>) -> anyhow::Result<String> {
-        Self::assert_commit_safe()?;
+    pub fn commit(&self, message: String, body: Option<String>) -> anyhow::Result<String> {
+        self.assert_commit_safe()?;
         let full_message = match body {
             Some(b) => format!("{message}\n\n{b}"),
             None => message,
         };
-        run_git(
+        self.run_git(
             &["commit", "-F", "-", "--cleanup=verbatim"],
             Some(&full_message),
             &[],
         )?;
         // First 7 hex chars of the new HEAD — the same format the libgit2 path
         // returned (`oid.to_string()[..7]`), the conventional short hash.
-        let head = run_git(&["rev-parse", "HEAD"], None, &[])
+        let head = self
+            .run_git(&["rev-parse", "HEAD"], None, &[])
             .with_context(|| "commit landed, but the new HEAD could not be resolved")?;
         let short = head
             .trim()
@@ -610,7 +655,7 @@ impl Git {
         // *before* hooks ran; a hook that re-staged content is not in that
         // scan. Check the landed tree so marker-bearing hook output surfaces
         // instead of silently shipping.
-        Self::verify_commit_clean()?;
+        self.verify_commit_clean()?;
         Ok(short.to_string())
     }
 
@@ -623,12 +668,12 @@ impl Git {
     /// not. This scans the tree the commit actually landed and reports any
     /// marker-bearing blob — as the landed commit it is, naming the file and
     /// the recovery path, never as a "commit failed" lie.
-    fn verify_commit_clean() -> anyhow::Result<()> {
-        let repo = Self::repo()?;
+    fn verify_commit_clean(&self) -> anyhow::Result<()> {
+        let repo = &self.repo;
         let head = repo.head().context("failed to resolve HEAD after commit")?;
         let tree = head.peel_to_tree().context("failed to read HEAD tree")?;
         let mut marked = Vec::new();
-        Self::collect_marked_paths(&repo, &tree, "", &mut marked)?;
+        self.collect_marked_paths(&tree, "", &mut marked)?;
         if let Some(first) = marked.first() {
             let list = if marked.len() == 1 {
                 first.clone()
@@ -649,7 +694,7 @@ impl Git {
     /// over the tree git actually committed. Submodules (commits) and any
     /// other non-blob entries cannot hold marker text and are skipped.
     fn collect_marked_paths(
-        repo: &Repository,
+        &self,
         tree: &Tree,
         prefix: &str,
         out: &mut Vec<String>,
@@ -659,15 +704,15 @@ impl Git {
             match entry.kind() {
                 Some(ObjectType::Tree) => {
                     let sub = entry
-                        .to_object(repo)
+                        .to_object(&self.repo)
                         .with_context(|| format!("failed to read subtree {path}"))?
                         .peel_to_tree()
                         .context("failed to peel subtree to tree")?;
-                    Self::collect_marked_paths(repo, &sub, &format!("{path}/"), out)?;
+                    self.collect_marked_paths(&sub, &format!("{path}/"), out)?;
                 }
                 Some(ObjectType::Blob) => {
                     let blob = entry
-                        .to_object(repo)
+                        .to_object(&self.repo)
                         .with_context(|| format!("failed to read blob {path}"))?
                         .peel_to_blob()
                         .context("failed to peel blob object")?;
@@ -686,16 +731,16 @@ impl Git {
     // Conflict resolution surface (ADR 0005)
     // ------------------------------------------------------------------
 
-    pub fn state() -> anyhow::Result<RepoState> {
-        let repo = Self::repo()?;
+    pub fn state(&self) -> anyhow::Result<RepoState> {
+        let repo = &self.repo;
         Ok(RepoState::from_git2(repo.state()))
     }
 
     /// Every unmerged path in the index, classified by whether the LLM can
     /// resolve it. Driven by `Index::conflicts()` (ancestor/our/their stages).
-    pub fn conflicted_files() -> anyhow::Result<Vec<ConflictedFile>> {
-        let repo = Self::repo()?;
-        let index = repo.index().context("failed to get repository index")?;
+    pub fn conflicted_files(&self) -> anyhow::Result<Vec<ConflictedFile>> {
+        let repo = &self.repo;
+        let index = self.index()?;
         let mut out = Vec::new();
         for conflict in index.conflicts()? {
             let c = conflict.context("failed to read index conflict")?;
@@ -711,8 +756,8 @@ impl Git {
 
     /// Read the current working-tree bytes for a path (the file git wrote
     /// conflict markers into).
-    pub fn read_worktree(path: &str) -> anyhow::Result<Vec<u8>> {
-        let repo = Self::repo()?;
+    pub fn read_worktree(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+        let repo = &self.repo;
         let workdir = repo
             .workdir()
             .context("repository has no working directory")?;
@@ -721,8 +766,8 @@ impl Git {
 
     /// Overwrite a working-tree file with resolved content (called only after
     /// the user approves the resolution).
-    pub fn write_worktree(path: &str, content: &str) -> anyhow::Result<()> {
-        let repo = Self::repo()?;
+    pub fn write_worktree(&self, path: &str, content: &str) -> anyhow::Result<()> {
+        let repo = &self.repo;
         let workdir = repo
             .workdir()
             .context("repository has no working directory")?;
@@ -734,7 +779,7 @@ impl Git {
     /// Finalize a resolved conflict state by shelling out to git. `GIT_EDITOR`
     /// is set to `true` so `--continue` / `commit --no-edit` never block on an
     /// editor and git's default message is kept verbatim (ADR 0005).
-    pub fn finalize(state: RepoState) -> anyhow::Result<()> {
+    pub fn finalize(&self, state: RepoState) -> anyhow::Result<()> {
         // A bare `?` lets the helper's message stand — no "failed to run ..."
         // wrapper that would mislabel a clean non-zero exit (git ran fine, it
         // just refused).
@@ -745,7 +790,7 @@ impl Git {
                 state.label()
             )
         })?;
-        run_git(args, None, &[("GIT_EDITOR", "true")])?;
+        self.run_git(args, None, &[("GIT_EDITOR", "true")])?;
         Ok(())
     }
 
@@ -757,8 +802,8 @@ impl Git {
     /// (that is the point of #19) and can re-stage files the scan never saw —
     /// `Git::commit` re-verifies the landed tree (`verify_commit_clean`) to
     /// close that window.
-    pub fn assert_commit_safe() -> anyhow::Result<()> {
-        let repo = Self::repo()?;
+    pub fn assert_commit_safe(&self) -> anyhow::Result<()> {
+        let repo = &self.repo;
         let state = RepoState::from_git2(repo.state());
         if state.is_conflicted() {
             anyhow::bail!(
@@ -774,7 +819,7 @@ impl Git {
         // re-staging. Reading the blob matches the real commit payload and the
         // documented contract
         // ("scans staged file contents for markers").
-        let index = repo.index().context("failed to get repository index")?;
+        let index = self.index()?;
         let statuses = repo
             .statuses(None)
             .context("failed to get repository status")?;
@@ -959,26 +1004,6 @@ fn classify_worktree(repo: &Repository, path: &str) -> ConflictKind {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use parking_lot::Mutex;
-    use std::path::PathBuf;
-
-    pub(crate) struct CwdGuard {
-        original: PathBuf,
-    }
-
-    impl CwdGuard {
-        pub(crate) fn new(dir: &Path) -> Self {
-            let original = std::env::current_dir().unwrap();
-            std::env::set_current_dir(dir).unwrap();
-            Self { original }
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original);
-        }
-    }
 
     pub(crate) fn init_test_repo(dir: &Path) {
         let repo = Repository::init(dir).unwrap();
@@ -1003,10 +1028,6 @@ pub(crate) mod tests {
             .unwrap();
     }
 
-    /// Serializes tests that mutate the process working directory via `CwdGuard`.
-    /// Parallel CwdGuard tests race on the global CWD and intermittently resolve
-    /// the wrong repository, so any test that chdir()s must hold this lock.
-    pub(crate) static GIT_CWD_MUTEX: Mutex<()> = Mutex::new(());
     #[test]
     fn parse_file_patch_splits_header_and_hunks() {
         let raw = "diff --git a/f.rs b/f.rs\n\
@@ -1038,7 +1059,6 @@ index 1..2 100644\n\
     /// `git apply --cached`, then confirm the index holds exactly those hunks.
     #[test]
     fn stage_hunks_stages_only_selected_hunk() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1049,20 +1069,20 @@ index 1..2 100644\n\
         let changed = format!("a1\n{pad}c1\n");
         std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
         {
-            let _g = CwdGuard::new(dir.path());
-            Git::add(&["tracked.txt"]).unwrap();
-            Git::commit("base".into(), None).unwrap();
+            let git = Git::at(dir.path()).unwrap();
+            git.add(&["tracked.txt"]).unwrap();
+            git.commit("base".into(), None).unwrap();
         }
         std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
-        let _g = CwdGuard::new(dir.path());
-        let raw = Git::diff_workdir(Some("tracked.txt")).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        let raw = git.diff_workdir(Some("tracked.txt")).unwrap();
         let patch = parse_file_patch(&raw);
         assert_eq!(patch.hunks.len(), 2, "expected two separate hunks");
 
         // Stage ONLY hunk 1; hunk 2 must stay unstaged.
-        Git::stage_hunks(&raw, &[1]).unwrap();
-        let staged = Git::diff(Some("tracked.txt")).unwrap();
+        git.stage_hunks(&raw, &[1]).unwrap();
+        let staged = git.diff(Some("tracked.txt")).unwrap();
         assert!(
             staged.contains("a1"),
             "staged index must include hunk 1 (a1)"
@@ -1073,49 +1093,49 @@ index 1..2 100644\n\
         );
 
         // Now stage hunk 2 as well and confirm both are present.
-        Git::stage_hunks(&raw, &[2]).unwrap();
-        let staged = Git::diff(Some("tracked.txt")).unwrap();
+        git.stage_hunks(&raw, &[2]).unwrap();
+        let staged = git.diff(Some("tracked.txt")).unwrap();
         assert!(staged.contains("a1") && staged.contains("c1"));
     }
 
     #[test]
     fn run_git_delivers_stdin_and_captures_stdout() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
-        let _guard = CwdGuard::new(dir.path());
+        let git = Git::at(dir.path()).unwrap();
 
         // `git hash-object --stdin` hashes stdin and prints the object id to
         // stdout — proves stdin delivery and stdout capture in one shot. The
         // expected value is the independent blob hash of `hello\n`.
-        let out = run_git(&["hash-object", "--stdin"], Some("hello\n"), &[]).unwrap();
+        let out = git
+            .run_git(&["hash-object", "--stdin"], Some("hello\n"), &[])
+            .unwrap();
         assert_eq!(out.trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
     }
 
     #[test]
     fn run_git_applies_env() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
-        let _guard = CwdGuard::new(dir.path());
+        let git = Git::at(dir.path()).unwrap();
 
         // `git var GIT_AUTHOR_IDENT` honors GIT_AUTHOR_NAME from the
         // environment, proving the env passthrough reaches the child.
-        let out = run_git(
-            &["var", "GIT_AUTHOR_IDENT"],
-            None,
-            &[("GIT_AUTHOR_NAME", "Ada")],
-        )
-        .unwrap();
+        let out = git
+            .run_git(
+                &["var", "GIT_AUTHOR_IDENT"],
+                None,
+                &[("GIT_AUTHOR_NAME", "Ada")],
+            )
+            .unwrap();
         assert!(out.starts_with("Ada <"), "got: {}", out);
     }
 
     #[test]
     fn run_git_surfaces_git_stderr_on_failure() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
-        let _guard = CwdGuard::new(dir.path());
+        let git = Git::at(dir.path()).unwrap();
 
         // A well-formed patch for a file the index doesn't have: git refuses
         // with its own diagnostic. The error must carry that stderr plus the
@@ -1126,7 +1146,8 @@ index 1..2 100644\n\
                      +++ b/nope.txt\n\
                      @@ -0,0 +1 @@\n\
                      +hello\n";
-        let err = run_git(&["apply", "--cached", "-"], Some(patch), &[])
+        let err = git
+            .run_git(&["apply", "--cached", "-"], Some(patch), &[])
             .expect_err("git apply must reject a patch for a missing file");
         let msg = format!("{err:#}");
         assert!(
@@ -1145,14 +1166,13 @@ index 1..2 100644\n\
 
     #[test]
     fn diff_workdir_returns_untracked_content() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
         std::fs::write(dir.path().join("new_file.txt"), "new content\n").unwrap();
 
-        let _guard = CwdGuard::new(dir.path());
-        let result = Git::diff_workdir(Some("new_file.txt")).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        let result = git.diff_workdir(Some("new_file.txt")).unwrap();
         assert!(
             !result.is_empty(),
             "should have diff content for untracked file"
@@ -1161,14 +1181,13 @@ index 1..2 100644\n\
 
     #[test]
     fn diff_workdir_returns_modified_content() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
         std::fs::write(dir.path().join("tracked.txt"), "modified\n").unwrap();
 
-        let _guard = CwdGuard::new(dir.path());
-        let result = Git::diff_workdir(Some("tracked.txt")).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        let result = git.diff_workdir(Some("tracked.txt")).unwrap();
         assert!(
             !result.is_empty(),
             "should have diff content for modified file"
@@ -1177,14 +1196,13 @@ index 1..2 100644\n\
 
     #[test]
     fn diff_workdir_returns_deleted_content() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
         std::fs::remove_file(dir.path().join("tracked.txt")).unwrap();
 
-        let _guard = CwdGuard::new(dir.path());
-        let result = Git::diff_workdir(Some("tracked.txt")).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        let result = git.diff_workdir(Some("tracked.txt")).unwrap();
         assert!(
             !result.is_empty(),
             "should have diff content for deleted file"
@@ -1196,14 +1214,14 @@ index 1..2 100644\n\
     /// NotFound for deleted files — breaking the whole unstaged-deletion flow.
     #[test]
     fn add_stages_working_tree_deletion() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
         std::fs::remove_file(dir.path().join("tracked.txt")).unwrap();
 
-        let _guard = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).expect("add should stage a deleted file");
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"])
+            .expect("add should stage a deleted file");
 
         let repo = Repository::open(dir.path()).unwrap();
         let statuses = repo.statuses(None).unwrap();
@@ -1223,12 +1241,12 @@ index 1..2 100644\n\
     /// and the commit would report success while missing a file.
     #[test]
     fn add_rejects_untracked_absent_path() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
-        let _guard = CwdGuard::new(dir.path());
-        let err = Git::add(&["does-not-exist.txt"])
+        let git = Git::at(dir.path()).unwrap();
+        let err = git
+            .add(&["does-not-exist.txt"])
             .expect_err("add should reject an absent, untracked path");
         assert!(
             format!("{err:#}").contains("did not match any tracked or working-tree file"),
@@ -1242,7 +1260,6 @@ index 1..2 100644\n\
     /// `Git::diff` after staging a removal.
     #[test]
     fn diff_returns_content_for_staged_deletion() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1253,8 +1270,8 @@ index 1..2 100644\n\
             index.write().unwrap();
         }
 
-        let _guard = CwdGuard::new(dir.path());
-        let result = Git::diff(Some("tracked.txt")).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        let result = git.diff(Some("tracked.txt")).unwrap();
         assert!(
             !result.is_empty(),
             "should have diff content for a staged deletion"
@@ -1356,15 +1373,14 @@ index 1..2 100644\n\
 
     #[test]
     fn conflicted_files_classifies_content_conflict() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
         make_content_conflict(dir.path());
 
-        let _guard = CwdGuard::new(dir.path());
-        assert_eq!(Git::state().unwrap(), RepoState::Merge);
+        let git = Git::at(dir.path()).unwrap();
+        assert_eq!(git.state().unwrap(), RepoState::Merge);
 
-        let files = Git::conflicted_files().unwrap();
+        let files = git.conflicted_files().unwrap();
         assert_eq!(files.len(), 1, "exactly one conflicted file");
         assert_eq!(files[0].path, "tracked.txt");
         assert_eq!(files[0].kind, ConflictKind::Content);
@@ -1372,13 +1388,12 @@ index 1..2 100644\n\
 
     #[test]
     fn assert_commit_safe_blocks_mid_merge() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
         make_content_conflict(dir.path());
 
-        let _guard = CwdGuard::new(dir.path());
-        let err = Git::assert_commit_safe().expect_err("must abort mid-merge");
+        let git = Git::at(dir.path()).unwrap();
+        let err = git.assert_commit_safe().expect_err("must abort mid-merge");
         assert!(
             format!("{err:#}").contains("mid-merge"),
             "expected mid-merge message, got: {err:#}"
@@ -1387,7 +1402,6 @@ index 1..2 100644\n\
 
     #[test]
     fn assert_commit_safe_blocks_staged_markers() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1398,10 +1412,12 @@ index 1..2 100644\n\
         )
         .unwrap();
 
-        let _guard = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
 
-        let err = Git::assert_commit_safe().expect_err("must abort on staged markers");
+        let err = git
+            .assert_commit_safe()
+            .expect_err("must abort on staged markers");
         assert!(
             format!("{err:#}").contains("conflict markers"),
             "expected marker message, got: {err:#}"
@@ -1415,7 +1431,6 @@ index 1..2 100644\n\
     /// marker-laden blob ship; reading the index blob catches it.
     #[test]
     fn assert_commit_safe_scans_index_blob_not_worktree() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1426,13 +1441,14 @@ index 1..2 100644\n\
         )
         .unwrap();
 
-        let _guard = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
 
         // Clean the worktree WITHOUT re-staging: index still holds the markers.
         std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
 
-        let err = Git::assert_commit_safe()
+        let err = git
+            .assert_commit_safe()
             .expect_err("guard must read the staged blob, not the worktree");
         assert!(
             format!("{err:#}").contains("conflict markers"),
@@ -1472,7 +1488,6 @@ index 1..2 100644\n\
     /// `Git::commit` shells out.
     #[test]
     fn commit_runs_pre_commit_and_commit_msg_hooks() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1495,10 +1510,10 @@ index 1..2 100644\n\
         );
 
         std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        let _g = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
 
-        let hash = Git::commit("chore: hook test".into(), None).unwrap();
+        let hash = git.commit("chore: hook test".into(), None).unwrap();
 
         // pre-commit ran → sentinel exists.
         assert!(
@@ -1511,7 +1526,9 @@ index 1..2 100644\n\
             "prepare-commit-msg hook must run during Git::commit"
         );
         // commit-msg ran → its trailer is in the committed message.
-        let msg = run_git(&["log", "-1", "--pretty=%B"], None, &[]).unwrap();
+        let msg = git
+            .run_git(&["log", "-1", "--pretty=%B"], None, &[])
+            .unwrap();
         assert!(
             msg.contains("Signed-off-by: aic-test"),
             "commit-msg hook must run during Git::commit; got message:\n{msg}"
@@ -1526,17 +1543,16 @@ index 1..2 100644\n\
     /// HEAD — the format the libgit2 path returned (`oid.to_string()[..7]`).
     #[test]
     fn commit_returns_seven_char_head_prefix() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
         std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        let _g = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
 
-        let hash = Git::commit("chore: hash format".into(), None).unwrap();
+        let hash = git.commit("chore: hash format".into(), None).unwrap();
 
-        let full = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        let full = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
         assert_eq!(hash, &full.trim()[..7]);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -1548,15 +1564,14 @@ index 1..2 100644\n\
     /// as commentary in interactive messages.
     #[test]
     fn commit_preserves_authored_body() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
         std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        let _g = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
 
-        let hash = Git::commit(
+        let hash = git.commit(
             "fix: subject".into(),
             Some(
                 "explanation line\n\n\nsecond paragraph\n\n# a comment-looking line\nline with trailing spaces  "
@@ -1566,7 +1581,9 @@ index 1..2 100644\n\
         .unwrap();
         assert_eq!(hash.len(), 7);
 
-        let msg = run_git(&["log", "-1", "--pretty=%B"], None, &[]).unwrap();
+        let msg = git
+            .run_git(&["log", "-1", "--pretty=%B"], None, &[])
+            .unwrap();
         // Byte-for-byte: the blank run, the `#` line, and the trailing
         // whitespace all survive; git appends the closing newline.
         assert_eq!(
@@ -1581,7 +1598,6 @@ index 1..2 100644\n\
     /// refusal is reported, not swallowed.)
     #[test]
     fn commit_vetoed_by_hook_surfaces_stderr_and_lands_nothing() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1592,11 +1608,12 @@ index 1..2 100644\n\
         );
 
         std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        let _g = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
-        let before = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
+        let before = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
 
-        let err = Git::commit("chore: vetoed".into(), None)
+        let err = git
+            .commit("chore: vetoed".into(), None)
             .expect_err("a vetoing pre-commit hook must abort Git::commit");
         let msg = format!("{err:#}");
         assert!(
@@ -1604,7 +1621,7 @@ index 1..2 100644\n\
             "the hook's stderr must surface, got: {msg}"
         );
 
-        let after = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        let after = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
         assert_eq!(before, after, "a vetoed commit must not move HEAD");
     }
 
@@ -1614,19 +1631,21 @@ index 1..2 100644\n\
     /// and the refusal carries git's own message.
     #[test]
     fn commit_refuses_when_nothing_staged() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
-        let _g = CwdGuard::new(dir.path());
+        let git = Git::at(dir.path()).unwrap();
 
-        let err = Git::commit("chore: nothing".into(), None)
+        let err = git
+            .commit("chore: nothing".into(), None)
             .expect_err("git must refuse a commit with nothing staged");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("nothing to commit"),
             "git's refusal must surface, got: {msg}"
         );
-        let count = run_git(&["rev-list", "--count", "HEAD"], None, &[]).unwrap();
+        let count = git
+            .run_git(&["rev-list", "--count", "HEAD"], None, &[])
+            .unwrap();
         assert_eq!(count.trim(), "1", "no commit may land");
     }
 
@@ -1636,7 +1655,6 @@ index 1..2 100644\n\
     /// hook-staged content *ships*.)
     #[test]
     fn commit_includes_hook_staged_changes() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1648,13 +1666,15 @@ index 1..2 100644\n\
         );
 
         std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        let _g = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
 
-        let hash = Git::commit("chore: hook staged".into(), None).unwrap();
+        let hash = git.commit("chore: hook staged".into(), None).unwrap();
         assert_eq!(hash.len(), 7);
 
-        let content = run_git(&["show", "HEAD:hook-fixed.txt"], None, &[]).unwrap();
+        let content = git
+            .run_git(&["show", "HEAD:hook-fixed.txt"], None, &[])
+            .unwrap();
         assert_eq!(content.trim(), "auto-fixed by hook");
     }
 
@@ -1665,7 +1685,6 @@ index 1..2 100644\n\
     /// file, and offers the recovery path instead of shipping silently.
     #[test]
     fn commit_reports_markers_staged_by_hook() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1676,11 +1695,12 @@ index 1..2 100644\n\
         );
 
         std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        let _g = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
-        let before = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
+        let before = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
 
-        let err = Git::commit("chore: sneaky".into(), None)
+        let err = git
+            .commit("chore: sneaky".into(), None)
             .expect_err("hook-staged conflict markers must be reported");
         let msg = format!("{err:#}");
         assert!(
@@ -1696,7 +1716,7 @@ index 1..2 100644\n\
             "the error must offer the recovery path, got: {msg}"
         );
 
-        let after = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        let after = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
         assert_ne!(before, after, "the commit landed despite the markers");
     }
 
@@ -1706,24 +1726,24 @@ index 1..2 100644\n\
     /// empty string is a realistic input.
     #[test]
     fn commit_refuses_empty_message() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
         std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        let _g = CwdGuard::new(dir.path());
-        Git::add(&["tracked.txt"]).unwrap();
-        let before = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        git.add(&["tracked.txt"]).unwrap();
+        let before = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
 
-        let err =
-            Git::commit(String::new(), None).expect_err("an empty message must abort the commit");
+        let err = git
+            .commit(String::new(), None)
+            .expect_err("an empty message must abort the commit");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("empty commit message"),
             "git's refusal must surface, got: {msg}"
         );
 
-        let after = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
+        let after = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
         assert_eq!(before, after, "no commit may land with an empty message");
     }
 
@@ -1737,7 +1757,6 @@ index 1..2 100644\n\
     /// whole batch aborts. This is the splitting-a-file-into-a-module case.
     #[test]
     fn diff_workdir_returns_content_for_file_in_untracked_dir() {
-        let _lock = GIT_CWD_MUTEX.lock();
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1751,8 +1770,8 @@ index 1..2 100644\n\
         )
         .unwrap();
 
-        let _guard = CwdGuard::new(dir.path());
-        let result = Git::diff_workdir(Some("mymod/mod.rs")).unwrap();
+        let git = Git::at(dir.path()).unwrap();
+        let result = git.diff_workdir(Some("mymod/mod.rs")).unwrap();
         assert!(
             !result.is_empty(),
             "must produce a patch for a file in an untracked dir"
@@ -1764,7 +1783,7 @@ index 1..2 100644\n\
         // The rebuilt patch must actually apply to the index.
         let patch = parse_file_patch(&result);
         assert!(!patch.hunks.is_empty(), "must have at least one hunk");
-        run_git(&["apply", "--cached", "-"], Some(&result), &[])
+        git.run_git(&["apply", "--cached", "-"], Some(&result), &[])
             .expect("rebuilt new-file patch must apply to the index");
     }
 }
