@@ -371,6 +371,23 @@ fn init_cargo_repo(dir: &Path) {
     git_in(dir, &["commit", "-m", "formatted base"]);
 }
 
+/// `init_test_repo` + two tracked files (`alpha.txt`, `beta.txt`) committed at
+/// a base value, then each rewritten to a new value and left unstaged — the
+/// shared starting point for the inter-file Batch e2e tests (issue #31).
+/// After this returns, `alpha.txt == "a1\n"` and `beta.txt == "b1\n"` are
+/// unstaged changes over the committed `"a0\n"` / `"b0\n"` base, so a plan
+/// can assign each file to its own batch or both to one. Each file holds
+/// exactly one one-line change, so git emits a single hunk per file (index 1).
+fn two_file_unstaged_repo(dir: &Path) {
+    gh::init_test_repo(dir);
+    std::fs::write(dir.join("alpha.txt"), "a0\n").unwrap();
+    std::fs::write(dir.join("beta.txt"), "b0\n").unwrap();
+    git_in(dir, &["add", "alpha.txt", "beta.txt"]);
+    git_in(dir, &["commit", "-m", "base"]);
+    std::fs::write(dir.join("alpha.txt"), "a1\n").unwrap();
+    std::fs::write(dir.join("beta.txt"), "b1\n").unwrap();
+}
+
 /// Two content conflicts (`tracked.txt` modify/modify, `second.txt` add/add)
 /// in one merge. Repo ends in the Merge state.
 fn merge_two_conflicts(dir: &Path) {
@@ -857,6 +874,7 @@ async fn commit_splits_one_file_across_two_batches() {
             },
         ],
     };
+    let before = commit_count(dir.path());
     let _g = gh::CwdGuard::new(dir.path());
     let result = run_commit_workflow_impl(
         resolver_returning(""),
@@ -872,8 +890,12 @@ async fn commit_splits_one_file_across_two_batches() {
         result
     );
 
-    // initial + base + 2 batch commits.
-    assert_eq!(commit_count(dir.path()), 4);
+    // One commit per batch — two new commits over the base.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 2,
+        "two batches must land two commits, one per batch"
+    );
     // Batch 1 (HEAD~1): only hunk 1 (a1) applied; hunk 2 (c1) still absent.
     let after_batch1 = file_at_ref(dir.path(), "HEAD~1", "tracked.txt");
     assert!(after_batch1.contains("a1"), "batch 1 must include hunk 1");
@@ -887,6 +909,168 @@ async fn commit_splits_one_file_across_two_batches() {
     assert!(
         is_clean(dir.path()),
         "working tree must be clean at the end"
+    );
+}
+
+/// Inter-file batching, two-batch shape (issue #31): the marquee split test
+/// [`commit_splits_one_file_across_two_batches`] proves aic can split *one*
+/// file's hunks across commits; this pins the other axis — a plan that
+/// assigns *different files* to different batches. Batch 1 stages and commits
+/// only `alpha.txt`; batch 2 stages and commits only `beta.txt`. The
+/// per-batch staging must not leak the other file's unstaged change into the
+/// wrong commit, so each commit's tree carries only its assigned file's
+/// change. A regression that staged every file up front (or dropped the
+/// per-file scoping in `stage_batch_hunks`) would land both changes in batch
+/// 1's commit and trip the HEAD~1 assertions.
+#[tokio::test]
+async fn commit_splits_two_files_across_two_batches() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    two_file_unstaged_repo(dir.path());
+
+    // Stub plan: one file per batch — batch 1 = alpha, batch 2 = beta.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "alpha.txt".to_string(),
+                    hunks: vec![1],
+                }],
+                reason: Some("change alpha".into()),
+            },
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "beta.txt".to_string(),
+                    hunks: vec![1],
+                }],
+                reason: Some("change beta".into()),
+            },
+        ],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: stub"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "two-file two-batch split should succeed: {:?}",
+        result
+    );
+
+    // One commit per batch — two new commits, neither file leaked into the other's.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 2,
+        "two batches must land two commits, one per batch"
+    );
+    // Batch 1 (HEAD~1): only alpha changed; beta still at its base value.
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD~1", "alpha.txt"),
+        "a1\n",
+        "batch 1 must commit alpha's change"
+    );
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD~1", "beta.txt"),
+        "b0\n",
+        "batch 1 must NOT leak beta's unstaged change into its commit"
+    );
+    // Batch 2 (HEAD): both files changed, working tree clean.
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "alpha.txt"),
+        "a1\n",
+        "alpha's change must persist into batch 2's commit"
+    );
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "beta.txt"),
+        "b1\n",
+        "batch 2 must commit beta's change"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean at the end"
+    );
+    assert!(
+        worktree_is_empty(dir.path()),
+        "nothing must be left staged or unstaged"
+    );
+}
+
+/// Inter-file batching, single-commit shape (issue #31): the optional
+/// counterpart to [`commit_splits_two_files_across_two_batches`]. A plan that
+/// assigns two distinct files to one batch must stage both and commit them
+/// together as a single commit — exercising `unique_batch_files` collecting
+/// two paths and the messenger drafting one message for the pair. A
+/// regression that committed each file separately would land two commits
+/// instead of one and trip the count assertion; one that dropped a file would
+/// trip the tree assertion.
+#[tokio::test]
+async fn commit_batches_two_files_into_one_commit() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    two_file_unstaged_repo(dir.path());
+
+    // Stub plan: one batch carrying both files — one commit for the pair.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![
+                generator::BatchChange {
+                    file: "alpha.txt".to_string(),
+                    hunks: vec![1],
+                },
+                generator::BatchChange {
+                    file: "beta.txt".to_string(),
+                    hunks: vec![1],
+                },
+            ],
+            reason: Some("change both".into()),
+        }],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: both files"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "two-file single-batch Run should succeed: {:?}",
+        result
+    );
+
+    // Exactly one new commit — not one per file.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "a batch carrying two files must land a single commit, not two"
+    );
+    // That one commit's tree carries both files' changes.
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "alpha.txt"),
+        "a1\n",
+        "the single commit must contain alpha's change"
+    );
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "beta.txt"),
+        "b1\n",
+        "the single commit must contain beta's change"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean at the end"
+    );
+    assert!(
+        worktree_is_empty(dir.path()),
+        "nothing must be left staged or unstaged"
     );
 }
 
