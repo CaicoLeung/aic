@@ -125,17 +125,20 @@ impl Display {
         let check = self.styled("\u{2713}", Style::new().green().bold());
         let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
 
-        // Extract commit type and color it; keep description bold
-        let commit_type = CommitType::from_message(message);
-        let msg_styled = if let Some((type_part, rest)) = message.split_once(':') {
-            // Split type_part into type and scope: "fix(auth)" -> ("fix", "(auth)")
-            let (type_name, scope) = type_part.split_once('(').unwrap_or((type_part, ""));
-            let colored_type = self.styled(type_name, commit_type.color());
-            let bold_desc = self.styled(rest.trim_start(), Style::new().bold());
-            format!("{}{}: {}", colored_type, scope, bold_desc)
-        } else {
-            // No colon — color entire message gray (unknown type)
-            self.styled(message, Style::new().true_color(156, 163, 175))
+        // Decompose the subject once on CommitType, then style the parts.
+        let parsed = CommitType::parse_message(message);
+        let msg_styled = match parsed.description {
+            Some(desc) => {
+                let colored_type = self.styled(parsed.type_name, parsed.commit_type.color());
+                let scope = match parsed.scope {
+                    Some(s) => self.styled(&format!("({s})"), gray.clone()),
+                    None => String::new(),
+                };
+                let bold_desc = self.styled(desc, Style::new().bold());
+                format!("{}{}: {}", colored_type, scope, bold_desc)
+            }
+            // No colon — unknown type; color the whole message via the type palette.
+            None => self.styled(message, parsed.commit_type.color()),
         };
 
         let pre = if prefix.is_empty() {
@@ -512,6 +515,11 @@ mod tests {
             joined.contains("251;191;36"),
             "fix type yellow/orange color missing: {joined:?}"
         );
+        // Scope parens must survive rendering (regression guard).
+        assert!(
+            joined.contains("(auth)"),
+            "scope parens dropped: {joined:?}"
+        );
         // Description should be bold
         assert!(
             joined.contains("\u{1b}[1mcorrect token check"),
@@ -520,7 +528,49 @@ mod tests {
     }
 
     #[test]
+    fn scoped_commit_preserves_parens_plain() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        let got = lines.lock().clone();
+        // Exact visible text — catches the dropped-paren regression directly.
+        assert_eq!(got[0], "\u{2713} def5678 fix(auth): correct token check");
+    }
+
+    #[test]
+    fn each_type_renders_its_color() {
+        let _env = COLOR_ENV.lock();
+        let _guard = ColorGuard::force();
+        for (type_str, rgb) in [
+            ("feat", "74;222;128"),
+            ("fix", "251;191;36"),
+            ("chore", "156;163;175"),
+            ("docs", "96;165;250"),
+            ("style", "167;139;250"),
+            ("refactor", "34;211;238"),
+            ("perf", "248;113;113"),
+            ("test", "244;114;182"),
+        ] {
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            let d = Display::with(Buf {
+                colors: true,
+                lines: lines.clone(),
+            });
+            d.commit_line("hash000", &format!("{type_str}: msg"), None, "");
+            let joined = lines.lock().join("\n");
+            assert!(
+                joined.contains(rgb),
+                "{type_str} should render color {rgb}: {joined:?}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_type_gets_gray_color() {
+        let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with(Buf {
