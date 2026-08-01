@@ -5,6 +5,7 @@ pub mod generator;
 pub mod git;
 pub mod llm;
 pub mod prompt;
+pub mod types;
 pub mod update;
 
 #[cfg(test)]

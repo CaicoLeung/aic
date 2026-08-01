@@ -1,6 +1,7 @@
 use console::{Style, Term};
 
 use crate::git::{ConflictedFile, RepoState};
+use crate::types::CommitType;
 
 /// Line-based write seam behind [`Display`].
 ///
@@ -123,10 +124,20 @@ impl Display {
         // Main line: [prefix] ✓ <hash> <message>
         let check = self.styled("\u{2713}", Style::new().green().bold());
         let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
-        // Theme-adaptive: no hardcoded color — the terminal's default
-        // foreground is dark on light themes and light on dark themes, so
-        // the subject stays readable on both. Bold keeps it prominent.
-        let msg_styled = self.styled(message, Style::new().bold());
+
+        // Extract commit type and color it; keep description bold
+        let commit_type = CommitType::from_message(message);
+        let msg_styled = if let Some((type_part, rest)) = message.split_once(':') {
+            // Split type_part into type and scope: "fix(auth)" -> ("fix", "(auth)")
+            let (type_name, scope) = type_part.split_once('(').unwrap_or((type_part, ""));
+            let colored_type = self.styled(type_name, commit_type.color());
+            let bold_desc = self.styled(rest.trim_start(), Style::new().bold());
+            format!("{}{}: {}", colored_type, scope, bold_desc)
+        } else {
+            // No colon — color entire message gray (unknown type)
+            self.styled(message, Style::new().true_color(156, 163, 175))
+        };
+
         let pre = if prefix.is_empty() {
             String::new()
         } else {
@@ -437,6 +448,7 @@ mod tests {
         d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
         let got = lines.lock().clone();
         // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
+        // Type prefix "feat" is present, followed by ": add thing"
         assert_eq!(got[0], "[1/3] \u{2713} abc1234 feat: add thing");
         assert_eq!(got[1], "  body line");
     }
@@ -451,16 +463,19 @@ mod tests {
         });
         d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
         let joined = lines.lock().join("\n");
-        // hash #f3b340, subject bold default foreground (theme-adaptive:
-        // readable on both light and dark backgrounds), body + prefix gray
-        // #8a8f9f.
+        // hash #f3b340, feat type green #4ade80, description bold default fg,
+        // body + prefix gray #8a8f9f.
         assert!(
             joined.contains("243;179;64"),
             "hash color missing: {joined:?}"
         );
         assert!(
-            joined.contains("\u{1b}[1mfeat: add thing"),
-            "subject must be bold with theme default fg: {joined:?}"
+            joined.contains("74;222;128"),
+            "feat type green color missing: {joined:?}"
+        );
+        assert!(
+            joined.contains("\u{1b}[1madd thing"),
+            "description must be bold with theme default fg: {joined:?}"
         );
         assert!(
             !joined.contains("255;255;255"),
@@ -472,5 +487,61 @@ mod tests {
         );
         // [n/m] prefix text survives styling (format kept, not "n.").
         assert!(joined.contains("[1/3]"), "prefix text missing: {joined:?}");
+    }
+
+    #[test]
+    fn fix_type_gets_yellow_orange_color() {
+        let _guard = ColorGuard::force();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: true,
+            lines: lines.clone(),
+        });
+        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        let joined = lines.lock().join("\n");
+        // fix type should be yellow/orange #fbbf24
+        assert!(
+            joined.contains("251;191;36"),
+            "fix type yellow/orange color missing: {joined:?}"
+        );
+        // Description should be bold
+        assert!(
+            joined.contains("\u{1b}[1mcorrect token check"),
+            "description must be bold: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_type_gets_gray_color() {
+        let _guard = ColorGuard::force();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: true,
+            lines: lines.clone(),
+        });
+        d.commit_line("ghi9012", "wip: thing in progress", None, "");
+        let joined = lines.lock().join("\n");
+        // Unknown type should be gray #9ca3af
+        assert!(
+            joined.contains("156;163;175"),
+            "unknown type gray color missing: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn no_colon_message_gets_gray_unknown_type() {
+        let _guard = ColorGuard::force();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: true,
+            lines: lines.clone(),
+        });
+        d.commit_line("jkl3456", "no colon message", None, "");
+        let joined = lines.lock().join("\n");
+        // Messages without colon should be gray (unknown type fallback)
+        assert!(
+            joined.contains("156;163;175"),
+            "no-colon message should be gray: {joined:?}"
+        );
     }
 }
