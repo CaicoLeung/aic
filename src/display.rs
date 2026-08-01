@@ -462,8 +462,9 @@ const LEFT_MARGIN: usize = 2;
 
 /// The actual prefix string corresponding to [`LEFT_MARGIN`] (two spaces),
 /// kept as a `&str` so [`Display::emit`] can prepend it without allocating on
-/// every line.
-const MARGIN: &str = "  ";
+/// every line. Re-exported crate-wide so the spinner templates in `main` share
+/// this single source of truth instead of re-hardcoding the literal.
+pub(crate) const MARGIN: &str = "  ";
 
 /// Right inset (columns) of breathing room, achieved by wrapping shorter — no
 /// trailing spaces are ever printed (they break copy-paste and some terminals

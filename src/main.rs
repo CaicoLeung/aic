@@ -43,18 +43,24 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
+/// Shared indicatif spinner style: a braille tick and a prefix matching
+/// [`display::MARGIN`] so the spinner glyph sits at the same 2-column inset as
+/// the rest of the run's stderr block — not flush against the edge. One place
+/// to change the inset or tick animation for every spinner in the run; the
+/// prefix is sourced from `Display`'s margin constant instead of a literal
+/// that has to be kept in sync by hand.
+fn spinner_style() -> anyhow::Result<indicatif::ProgressStyle> {
+    Ok(indicatif::ProgressStyle::default_spinner()
+        .template(&format!("{}{{spinner}} {{msg}}", display::MARGIN))?
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"))
+}
+
 async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
 where
     F: Future<Output = anyhow::Result<T>>,
 {
     let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        indicatif::ProgressStyle::default_spinner()
-            // Two-space prefix matches `Display`'s LEFT_MARGIN so the spinner
-            // sits at the same inset as the rest of the run's output.
-            .template("  {spinner} {msg}")?
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-    );
+    pb.set_style(spinner_style()?);
     pb.set_message(msg.to_string());
     pb.enable_steady_tick(Duration::from_millis(80));
 
@@ -141,12 +147,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// reasoning live, keeping the latest [`THINKING_MAX_LINES`] lines on screen.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        indicatif::ProgressStyle::default_spinner()
-            // Two-space prefix matches `Display`'s LEFT_MARGIN.
-            .template("  {spinner} {msg}")?
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
-    );
+    pb.set_style(spinner_style()?);
     pb.set_message("Analyzing changes");
     pb.enable_steady_tick(Duration::from_millis(80));
 
