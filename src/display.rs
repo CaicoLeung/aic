@@ -40,6 +40,11 @@ pub trait DisplayWrite: Send + Sync {
 pub struct Display {
     out: Box<dyn DisplayWrite>,
     colors: bool,
+    /// Terminal width in columns. Read once from the sink's terminal in
+    /// [`Display::new`]; injected by tests via [`Display::with_cols`]. A value
+    /// of `0` means "unknown" and [`Display::text_width`] falls back to
+    /// [`FALLBACK_COLS`] so piped / non-TTY output still wraps sanely.
+    cols: usize,
 }
 
 /// Prod sink: stderr via `console::Term`. Write errors are dropped to keep the
@@ -65,7 +70,11 @@ impl Display {
     /// contract cares about — same sink (stderr via `console::Term`), same
     /// color probe (`colors_enabled_stderr()`), write errors still ignored.
     pub fn new() -> Self {
-        Self::with(TermWrite(Term::stderr()))
+        // `.1` is columns (console returns (rows, cols)); console already
+        // substitutes a ~80-col default when the size is unknown, so this is
+        // non-zero in practice. We still treat 0 as "unknown" downstream.
+        let cols = Term::stderr().size().1 as usize;
+        Self::with_cols(TermWrite(Term::stderr()), cols)
     }
 
     /// Injectable constructor: route every emitted line through `out`. Color
@@ -74,10 +83,19 @@ impl Display {
     /// the real stderr. Used by tests to capture wording; prod keeps
     /// [`Display::new`].
     pub fn with(out: impl DisplayWrite + 'static) -> Self {
+        Self::with_cols(out, FALLBACK_COLS)
+    }
+
+    /// Injectable constructor with an explicit terminal column count. Used by
+    /// tests to drive wrap behavior deterministically without probing the real
+    /// terminal; prod keeps [`Display::new`]. `cols == 0` is treated as
+    /// "unknown" and resolved to [`FALLBACK_COLS`] inside [`Display::text_width`].
+    pub fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
         let colors = out.colors_enabled();
         Self {
             out: Box::new(out),
             colors,
+            cols,
         }
     }
 
@@ -98,6 +116,21 @@ impl Display {
     /// Write a line through the seam, ignoring errors.
     fn writeln(&self, line: &str) {
         self.out.write_line(line);
+    }
+
+    /// Effective text width for wrapped output: the terminal width clamped to
+    /// [`HARD_CAP`], minus both margins, floored at [`MIN_TEXT_WIDTH`] so a
+    /// tiny (or zero) reported width can't underflow into nonsense. `cols == 0`
+    /// (non-TTY / piped) resolves to [`FALLBACK_COLS`].
+    fn text_width(&self) -> usize {
+        let cols = if self.cols == 0 {
+            FALLBACK_COLS
+        } else {
+            self.cols
+        };
+        cols.min(HARD_CAP)
+            .saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
+            .max(MIN_TEXT_WIDTH)
     }
 
     // ------------------------------------------------------------------
@@ -379,6 +412,68 @@ impl Default for Display {
 // ------------------------------------------------------------------
 // Internal formatting helpers
 // ------------------------------------------------------------------
+
+/// Left inset (columns) for the commit-line block. Replaces the body's old
+/// ad-hoc `  ` indent so subject and body share one uniform margin.
+const LEFT_MARGIN: usize = 2;
+
+/// Right inset (columns) of breathing room, achieved by wrapping shorter — no
+/// trailing spaces are ever printed (they break copy-paste and some terminals
+/// strip them).
+const RIGHT_MARGIN: usize = 2;
+
+/// Hard ceiling on total line width regardless of how wide the terminal is, so
+/// body prose doesn't sprawl into 300-col spaghetti on ultrawide screens.
+const HARD_CAP: usize = 100;
+
+/// Floor for [`Display::text_width`] so a tiny / zero reported column count
+/// can't underflow the wrap budget into nonsense.
+const MIN_TEXT_WIDTH: usize = 20;
+
+/// Terminal width assumed when the real width is unknown (`cols == 0`, i.e.
+/// piped / non-TTY output). Matches console's own unix default.
+const FALLBACK_COLS: usize = 80;
+
+/// Greedy word-wrap of a single line (no embedded newlines) to `width` display
+/// columns, counted in `char`s (not bytes) so CJK commit bodies wrap correctly.
+///
+/// The author's structure is preserved: this only breaks a line *further* —
+/// callers feed it one source line at a time so existing newlines stay as hard
+/// breaks. A single token longer than `width` (e.g. a long URL) is hard-broken
+/// at the boundary; one ugly wrap beats a horizontal overflow.
+///
+/// Returns at least one piece; an empty input yields `vec![""]` so blank
+/// source lines round-trip as a single empty piece.
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![line.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur: Vec<char> = Vec::with_capacity(width);
+    for word in line.split_whitespace() {
+        let w: Vec<char> = word.chars().collect();
+        // If the running line can't accept " <word>", flush it first.
+        if !cur.is_empty() && cur.len() + 1 + w.len() > width {
+            out.push(cur.iter().collect());
+            cur.clear();
+        }
+        if cur.is_empty() {
+            // Word starts a new line — hard-break it if it alone exceeds width.
+            let mut idx = 0;
+            while w.len() - idx > width {
+                let chunk: String = w[idx..idx + width].iter().collect();
+                out.push(chunk);
+                idx += width;
+            }
+            cur.extend(&w[idx..]);
+        } else {
+            cur.push(' ');
+            cur.extend(&w);
+        }
+    }
+    out.push(cur.iter().collect());
+    out
+}
 
 /// The git command a user runs to finalize a state by hand, for hand-off /
 /// refuse messages. Mirrors `RepoState::finalize_invocation` but as a single
