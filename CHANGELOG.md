@@ -4,15 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+> 🎉 **Unreleased** — 4 changes · 1 contributor
+
 ### Features
 
 - Resolve contributor @handles via GitHub API (#54)
 - Contributor avatars in release notes (#55)
 - Contributor table — avatar + @handle below (#56)
+- Drop internal churn (test/refactor/ci/style/chore)
+
 
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.4.0] - 2026-08-01
+
+> 🎉 **0.4.0** — 7 changes · 2 contributors
 
 ### Features
 
@@ -30,9 +37,13 @@ All notable changes to this project will be documented in this file.
 
 - Add bilingual CONTRIBUTING guide (#36)
 
+
 ### Contributors
+🎉 Thanks to the 2 contributors below!
 <table><tr><td align="center"><a href="https://github.com/Paul-16098"><img src="https://github.com/Paul-16098.png?size=96" width="64" height="64"><br><sub><b>@Paul-16098</b></sub></a></td><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.7] - 2026-07-31
+
+> 🎉 **0.3.7** — 3 changes · 1 contributor
 
 ### Bug Fixes
 
@@ -43,17 +54,25 @@ All notable changes to this project will be documented in this file.
 - Document hunk-level atomic commit splitting
 - Add Simplified Chinese translation (#14)
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.6] - 2026-07-30
+
+> 🎉 **0.3.6** — 1 change · 1 contributor
 
 ### Features
 
 - Streaming multi-batch commit splitting with testable orchestration (#13)
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.5] - 2026-07-30
+
+> 🎉 **0.3.5** — 2 changes · 1 contributor
 
 ### Features
 
@@ -63,9 +82,13 @@ All notable changes to this project will be documented in this file.
 
 - Document aic resolve for v0.3.0 (#11)
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.3.0] - 2026-07-29
+
+> 🎉 **0.3.0** — 4 changes · 1 contributor
 
 ### Features
 
@@ -74,17 +97,25 @@ All notable changes to this project will be documented in this file.
 - Add e2e test infrastructure for resolve workflow
 - Expand e2e coverage to cherry-pick/revert finalize + conflict-kind skips
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.3] - 2026-07-26
+
+> 🎉 **0.2.3** — 1 change · 1 contributor
 
 ### Bug Fixes
 
 - Make gh release create idempotent on re-runs
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.2] - 2026-07-26
+
+> 🎉 **0.2.2** — 5 changes · 1 contributor
 
 ### Features
 
@@ -97,25 +128,37 @@ All notable changes to this project will be documented in this file.
 - Handle working-tree deletions in add method
 - Reject untracked absent paths in add
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.1] - 2026-07-25
+
+> 🎉 **0.2.1** — 1 change · 1 contributor
 
 ### Features
 
 - Update default model to deepseek-v4-flash
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.0] - 2026-07-09
+
+> 🎉 **0.2.0** — 1 change · 1 contributor
 
 ### Features
 
 - Expand to 12 providers, refresh default models, add base URL
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.7] - 2026-07-08
+
+> 🎉 **0.1.7** — 3 changes · 1 contributor
 
 ### Documentation
 
@@ -123,9 +166,13 @@ All notable changes to this project will be documented in this file.
 - Add website link
 - Add CONTEXT.md with project terminology and concepts
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.6] - 2026-07-04
+
+> 🎉 **0.1.6** — 14 changes · 1 contributor
 
 ### Features
 
@@ -150,9 +197,13 @@ All notable changes to this project will be documented in this file.
 - Add ADRs for self-update guard and signed updates, plus agent docs
 - Add release procedure documentation
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.4] - 2026-05-20
+
+> 🎉 **0.1.4** — 6 changes · 1 contributor
 
 ### Features
 
@@ -169,18 +220,26 @@ All notable changes to this project will be documented in this file.
 
 - Add v0.1.1 entry with feature and refactor highlights
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.2] - 2026-05-20
+
+> 🎉 **0.1.2** — 2 changes · 1 contributor
 
 ### Features
 
 - Add self-update command for aic
 - Add update command for self-update via GitHub Releases
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.1] - 2026-05-18
+
+> 🎉 **0.1.1** — 7 changes · 1 contributor
 
 ### Features
 
@@ -195,9 +254,13 @@ All notable changes to this project will be documented in this file.
 - Add -L flag to curl command in install instructions
 - Add changelog badge and contributing guidelines
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.0] - 2026-05-17
+
+> 🎉 **0.1.0** — 15 changes · 1 contributor
 
 ### Features
 
@@ -217,6 +280,8 @@ All notable changes to this project will be documented in this file.
 - Add automatic changelog generation with git-cliff
 - Allow dirty CI workflows for git-cliff
 
+
 ### Contributors
+🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 
