@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Resolve contributor @handles via GitHub API (#54)
 - Contributor avatars in release notes (#55)
+- Contributor table — avatar + @handle below (#56)
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -25,35 +26,9 @@ All notable changes to this project will be documented in this file.
 - Include error chain in abort message
 - Make git test suite cross-platform for windows CI
 
-### Refactoring
-
-- Split monolithic e2e test into feature modules
-
-### Testing
-
-- Pin staged-files single-commit Run (#26) (#35)
-- Harden staged-files single-commit Run assertions (#37)
-- Pin cargo fmt before diff capture with hunk alignment (#27) (#38)
-- Pin declining finalize when all files resolved by hand (#28) (#44)
-- Pin sequence Finalize states (CherryPickSequence/RevertSequence) (#29) (#40)
-- Pin multi-file cross-file Batch plans (#31) (#41)
-- Pin auto-detect accept-then-reject-all hand-off (#32) (#42)
-- Reject empty Batch plan before the loop (#34) (#43)
-- Pin am / ApplyMailbox refusal path (#33) (#45)
-- Dedupe finalize-state tests via shared helper (#49)
-- Pin commit-msg hook veto aborts the Run (#30) (#47)
-
 ### Documentation
 
 - Add bilingual CONTRIBUTING guide (#36)
-
-### Continuous Integration
-
-- Matrix cargo test across ubuntu and windows
-
-### Miscellaneous
-
-- Enforce LF via .gitattributes
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/Paul-16098"><img src="https://github.com/Paul-16098.png?size=96" width="64" height="64"><br><sub><b>@Paul-16098</b></sub></a></td><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -63,22 +38,10 @@ All notable changes to this project will be documented in this file.
 
 - Commit authored messages via the git CLI (#19) (#22)
 
-### Refactoring
-
-- Extract shared git-CLI runner (#18) (#21)
-
-### Testing
-
-- Prove git hooks run and can veto during a Run (#20) (#23)
-
 ### Documentation
 
 - Document hunk-level atomic commit splitting
 - Add Simplified Chinese translation (#14)
-
-### Miscellaneous
-
-- Add pull request template (#17)
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -111,10 +74,6 @@ All notable changes to this project will be documented in this file.
 - Add e2e test infrastructure for resolve workflow
 - Expand e2e coverage to cherry-pick/revert finalize + conflict-kind skips
 
-### Refactoring
-
-- Make writer injectable so hand-off wording can be tested (#10)
-
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.2.3] - 2026-07-26
@@ -122,10 +81,6 @@ All notable changes to this project will be documented in this file.
 ### Bug Fixes
 
 - Make gh release create idempotent on re-runs
-
-### Refactoring
-
-- Replace panel UI with line-based output (#5)
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -168,14 +123,6 @@ All notable changes to this project will be documented in this file.
 - Add website link
 - Add CONTEXT.md with project terminology and concepts
 
-### Styling
-
-- Apply cargo fmt to unblock 0.1.6 release
-
-### Miscellaneous
-
-- Remove banner display
-
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.1.6] - 2026-07-04
@@ -198,30 +145,10 @@ All notable changes to this project will be documented in this file.
 - Use cargo fmt --all instead of bare rustfmt
 - Update binary search path for dist profile builds
 
-### Refactoring
-
-- Simplify HOMEBREW_PREFIX check with iterator chain
-
 ### Documentation
 
 - Add ADRs for self-update guard and signed updates, plus agent docs
 - Add release procedure documentation
-
-### Continuous Integration
-
-- Add retry logic for CHANGELOG commit
-- Remove announce job
-- Add --allow-dirty flag to dist commands
-
-### Miscellaneous
-
-- Skip changelog-update and version-bump commits
-- Add docs ignore patterns and homepage
-- Update dependencies and bump rust-version
-- Skip release commits in changelog
-- No staged changes
-- Skip empty diff
-- No changes to commit
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -238,23 +165,9 @@ All notable changes to this project will be documented in this file.
 
 - Specify tag for git-cliff changelog generation
 
-### Refactoring
-
-- Update system prompt to emphasize splitting changes
-
 ### Documentation
 
 - Add v0.1.1 entry with feature and refactor highlights
-
-### Continuous Integration
-
-- Remove redundant --tag flag from git-cliff
-- Add full git fetch depth in release workflow
-
-### Styling
-
-- Condense batch vector literals in tests
-- Format method chain across multiple lines
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -264,14 +177,6 @@ All notable changes to this project will be documented in this file.
 
 - Add self-update command for aic
 - Add update command for self-update via GitHub Releases
-
-### Continuous Integration
-
-- Automate changelog update on release
-
-### Miscellaneous
-
-- Shorten banner text
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -284,28 +189,11 @@ All notable changes to this project will be documented in this file.
 - Add animated startup banner
 - Add scoped diff parsing for function-level grouping
 
-### Refactoring
-
-- Extract banner function and improve output
-
 ### Documentation
 
 - Add initial README
 - Add -L flag to curl command in install instructions
 - Add changelog badge and contributing guidelines
-
-### Continuous Integration
-
-- Remove duplicate release step from host command
-
-### Styling
-
-- Format clap command attribute
-
-### Miscellaneous
-
-- Add CLAUDE.md to .gitignore
-- Update Cargo.toml with dist optimizations and metadata
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
@@ -328,21 +216,6 @@ All notable changes to this project will be documented in this file.
 - Add CI and release automation
 - Add automatic changelog generation with git-cliff
 - Allow dirty CI workflows for git-cliff
-
-### Refactoring
-
-- Rename system_prompt to git_message and update prompts
-- Replace env var parsing with centralized config
-
-### Testing
-
-- Rewrite tests to use temporary repositories
-
-### Miscellaneous
-
-- Add .gitignore to exclude build artifacts
-- Add .DS_Store to .gitignore
-- Add Rust toolchain configuration
 
 ### Contributors
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>

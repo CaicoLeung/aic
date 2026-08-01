@@ -31,17 +31,17 @@ split_commits = false
 commit_parsers = [
     { message = "^feat", group = "<!-- 0 -->Features" },
     { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
-    { message = "^refactor", group = "<!-- 2 -->Refactoring" },
+    { message = "^refactor", skip = true },
     { message = "^perf", group = "<!-- 3 -->Performance" },
-    { message = "^test", group = "<!-- 4 -->Testing" },
+    { message = "^test", skip = true },
     { message = "^doc", group = "<!-- 5 -->Documentation" },
-    { message = "^ci", group = "<!-- 7 -->Continuous Integration" },
+    { message = "^ci", skip = true },
     { message = "^chore\\(deps\\)", skip = true },
     { message = "^chore: update CHANGELOG", skip = true },
     { message = "^chore: bump version", skip = true },
     { message = "^chore\\(release\\)", skip = true },
-    { message = "^style", group = "<!-- 8 -->Styling" },
-    { message = "^chore", group = "<!-- 9 -->Miscellaneous" },
+    { message = "^style", skip = true },
+    { message = "^chore", skip = true },
 ]
 protect_breaking_commits = false
 filter_commits = false
