@@ -14,6 +14,23 @@ pub enum CommitType {
     Unknown,
 }
 
+/// Decomposed parts of a conventional-commit subject line.
+///
+/// Produced by [`CommitType::parse_message`]; the single source of truth for
+/// type/scope/description so renderers never re-parse the raw message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedMessage<'a> {
+    pub commit_type: CommitType,
+    /// Type token as it appeared in the message (original case preserved).
+    pub type_name: &'a str,
+    /// Scope content without parentheses, e.g. `"auth"` in `fix(auth):`.
+    /// `None` when no scope is present.
+    pub scope: Option<&'a str>,
+    /// Description after the first colon, leading whitespace trimmed.
+    /// `None` when the message has no colon.
+    pub description: Option<&'a str>,
+}
+
 impl CommitType {
     /// Parse a commit type string (case-insensitive).
     ///
@@ -57,11 +74,61 @@ impl CommitType {
         }
     }
 
-    /// Extract the commit type from a conventional commit message.
+    /// Decompose a conventional-commit subject into typed parts.
     ///
-    /// Parses the text before the first colon as the type. Handles conventional
-    /// commit scopes like "fix(auth):" by extracting just the type before any
-    /// parentheses. If no colon is present, returns `Unknown`.
+    /// The text before the first colon is the type (with an optional scope in
+    /// parentheses); the remainder is the description. Messages without a colon
+    /// map to [`CommitType::Unknown`] with `description: None`.
+    ///
+    /// This is the single parser for the codebase — renderers should consume
+    /// the returned [`ParsedMessage`] instead of re-splitting the message.
+    ///
+    /// # Examples
+    /// ```
+    /// use aic::types::{CommitType, ParsedMessage};
+    ///
+    /// let p = CommitType::parse_message("fix(auth): correct token check");
+    /// assert_eq!(p.commit_type, CommitType::Fix);
+    /// assert_eq!(p.type_name, "fix");
+    /// assert_eq!(p.scope, Some("auth"));
+    /// assert_eq!(p.description, Some("correct token check"));
+    ///
+    /// let p = CommitType::parse_message("no colon message");
+    /// assert_eq!(p.commit_type, CommitType::Unknown);
+    /// assert_eq!(p.description, None);
+    /// ```
+    pub fn parse_message(message: &str) -> ParsedMessage<'_> {
+        match message.split_once(':') {
+            Some((type_part, desc)) => {
+                let (type_name, scope) = match type_part.split_once('(') {
+                    Some((name, rest)) => {
+                        // Drop a trailing ')' so callers render the scope without
+                        // having to know the original delimiter.
+                        let scope = rest.trim_end_matches(')');
+                        (name, (!scope.is_empty()).then_some(scope))
+                    }
+                    None => (type_part, None),
+                };
+                ParsedMessage {
+                    commit_type: CommitType::parse(type_name),
+                    type_name,
+                    scope,
+                    description: Some(desc.trim_start()),
+                }
+            }
+            None => ParsedMessage {
+                commit_type: CommitType::Unknown,
+                type_name: "",
+                scope: None,
+                description: None,
+            },
+        }
+    }
+
+    /// Extract just the [`CommitType`] from a conventional-commit message.
+    ///
+    /// Thin convenience wrapper over [`CommitType::parse_message`] for callers
+    /// that don't need the scope or description.
     ///
     /// # Examples
     /// ```
@@ -74,14 +141,7 @@ impl CommitType {
     /// assert_eq!(CommitType::from_message("no colon message"), CommitType::Unknown);
     /// ```
     pub fn from_message(message: &str) -> Self {
-        message
-            .split_once(':')
-            .map(|(type_part, _)| {
-                // Strip scope if present: "fix(auth)" -> "fix"
-                let type_only = type_part.split('(').next().unwrap_or(type_part);
-                CommitType::parse(type_only)
-            })
-            .unwrap_or(CommitType::Unknown)
+        CommitType::parse_message(message).commit_type
     }
 }
 
@@ -175,5 +235,47 @@ mod tests {
             CommitType::from_message("feat: thing: with: colons"),
             CommitType::Feat
         );
+    }
+
+    #[test]
+    fn parse_message_extracts_scope_and_type() {
+        let p = CommitType::parse_message("fix(auth): correct token check");
+        assert_eq!(p.commit_type, CommitType::Fix);
+        assert_eq!(p.type_name, "fix");
+        assert_eq!(p.scope, Some("auth"));
+        assert_eq!(p.description, Some("correct token check"));
+    }
+
+    #[test]
+    fn parse_message_preserves_type_case() {
+        let p = CommitType::parse_message("FEAT(api): add endpoint");
+        assert_eq!(p.commit_type, CommitType::Feat);
+        assert_eq!(p.type_name, "FEAT");
+        assert_eq!(p.scope, Some("api"));
+    }
+
+    #[test]
+    fn parse_message_without_scope() {
+        let p = CommitType::parse_message("feat: add thing");
+        assert_eq!(p.commit_type, CommitType::Feat);
+        assert_eq!(p.scope, None);
+        assert_eq!(p.description, Some("add thing"));
+    }
+
+    #[test]
+    fn parse_message_empty_scope_is_none() {
+        let p = CommitType::parse_message("refactor(): noop");
+        assert_eq!(p.commit_type, CommitType::Refactor);
+        assert_eq!(p.scope, None);
+        assert_eq!(p.description, Some("noop"));
+    }
+
+    #[test]
+    fn parse_message_no_colon_is_unknown() {
+        let p = CommitType::parse_message("no colon message");
+        assert_eq!(p.commit_type, CommitType::Unknown);
+        assert_eq!(p.type_name, "");
+        assert_eq!(p.scope, None);
+        assert_eq!(p.description, None);
     }
 }
