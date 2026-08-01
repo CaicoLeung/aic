@@ -90,7 +90,9 @@ impl Display {
     /// tests to drive wrap behavior deterministically without probing the real
     /// terminal; prod keeps [`Display::new`]. `cols == 0` is treated as
     /// "unknown" and resolved to [`FALLBACK_COLS`] inside [`Display::text_width`].
-    pub fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
+    /// Private: only the two prod constructors above and the inline test module
+    /// call it, and both reach private items — no reason to widen the API.
+    fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
         let colors = out.colors_enabled();
         Self {
             out: Box::new(out),
