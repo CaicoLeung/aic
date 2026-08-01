@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod diff;
 pub mod display;
 pub mod generator;
 pub mod git;
@@ -113,7 +114,7 @@ async fn generate_and_commit(
         .iter()
         .map(|p| {
             let diff = git.diff(Some(p.as_str()))?;
-            let scoped = git::format_diff_scoped(&diff, p);
+            let scoped = diff::format_diff_scoped(&diff, p);
             Ok(serde_json::json!({ "path": p, "diff": scoped }))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -378,9 +379,9 @@ pub(crate) async fn run_commit_workflow_impl(
             .iter()
             .map(|f| {
                 let diff = git.diff_workdir(Some(f.path.as_str()))?;
-                let hunk_count = git::parse_file_patch(&diff).hunks.len();
+                let hunk_count = diff::parse_file_patch(&diff).hunk_count();
                 file_hunk_counts.push((f.path.clone(), hunk_count));
-                let scoped = git::format_diff_scoped(&diff, &f.path);
+                let scoped = diff::format_diff_scoped(&diff, &f.path);
                 Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

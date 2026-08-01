@@ -19,9 +19,10 @@
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 
+use crate::diff::parse_file_patch;
 use crate::display::Display;
 use crate::generator::BatchPlanBatch;
-use crate::git::{Git, parse_file_patch};
+use crate::git::Git;
 
 /// Stages one Batch at a time, tracking per-file which original hunk indices
 /// have already landed in earlier batches of the same Run.
@@ -101,7 +102,7 @@ impl Staging {
             }
             let patch = parse_file_patch(&current);
             let committed = self.committed_hunks.entry(file.clone()).or_default();
-            let mapping = map_planned_hunks(planned, committed, patch.hunks.len());
+            let mapping = map_planned_hunks(planned, committed, patch.hunk_count());
             if mapping.current.is_empty() {
                 continue;
             }

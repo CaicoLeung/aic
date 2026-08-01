@@ -1,114 +1,9 @@
+use crate::diff::parse_file_patch;
 use anyhow::Context;
 use git2::{DiffFormat, DiffLineType, ObjectType, Repository, Status, Tree};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
-
-#[derive(Debug, serde::Serialize)]
-pub struct DiffBlock {
-    pub header: String,
-    pub old_start: u32,
-    pub new_start: u32,
-    pub new_count: u32,
-    pub lines: Vec<String>,
-}
-
-fn parse_hunk_header(header: &str) -> Option<(u32, u32, u32, u32, Option<&str>)> {
-    // Parse: @@ -old_start,old_count +new_start,new_count @@ optional_context
-    let rest = header.strip_prefix("@@ ")?;
-    let closing = rest.find("@@")?;
-    let range_part = &rest[..closing];
-    let context = rest
-        .get(closing + 2..)
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-
-    let mut parts = range_part.split(' ');
-    let old = parts.next()?.strip_prefix('-')?;
-    let new = parts.next()?.strip_prefix('+')?;
-
-    let (old_start, old_count) = parse_range(old)?;
-    let (new_start, new_count) = parse_range(new)?;
-
-    Some((old_start, old_count, new_start, new_count, context))
-}
-
-fn parse_range(range: &str) -> Option<(u32, u32)> {
-    match range.split_once(',') {
-        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
-        None => Some((range.parse().ok()?, 1)),
-    }
-}
-
-pub fn parse_diff_blocks(diff: &str) -> Vec<DiffBlock> {
-    let mut blocks: Vec<DiffBlock> = Vec::new();
-
-    for line in diff.lines() {
-        if let Some((old_start, _old_count, new_start, new_count, context)) =
-            parse_hunk_header(line)
-        {
-            let header = context.unwrap_or("(top-level)").to_string();
-            blocks.push(DiffBlock {
-                header,
-                old_start,
-                new_start,
-                new_count,
-                lines: Vec::new(),
-            });
-        } else if let Some(block) = blocks.last_mut() {
-            block.lines.push(line.to_string());
-        }
-    }
-
-    blocks
-}
-
-/// A single-file unified diff split into its stable header and raw `@@` hunks.
-///
-/// Preserves enough of the original patch text to reconstruct a partial patch
-/// (a subset of hunks) for `git apply --cached` — the non-interactive analogue
-/// of `git add -p`. Hunk order matches the diff, so a 1-based index into
-/// `hunks` is a stable handle the LLM can reference.
-#[derive(Debug, Clone)]
-pub struct FilePatch {
-    /// Lines before the first `@@` hunk header: `diff --git`, `index`,
-    /// `---`, `+++` (and any leading noise).
-    pub header: String,
-    /// Each hunk's full text, starting at its `@@ … @@` line and including
-    /// every body line, in file order.
-    pub hunks: Vec<String>,
-}
-
-/// Parse a single-file unified diff into its header and raw hunks.
-pub fn parse_file_patch(raw: &str) -> FilePatch {
-    let mut header = String::new();
-    let mut hunks: Vec<String> = Vec::new();
-    let mut current: Option<String> = None;
-
-    for line in raw.lines() {
-        if line.starts_with("@@") {
-            if let Some(prev) = current.take() {
-                hunks.push(prev);
-            }
-            current = Some(String::new());
-        }
-        match &mut current {
-            Some(hunk) => {
-                hunk.push_str(line);
-                hunk.push('\n');
-            }
-            None => {
-                header.push_str(line);
-                header.push('\n');
-            }
-        }
-    }
-    if let Some(prev) = current {
-        hunks.push(prev);
-    }
-
-    FilePatch { header, hunks }
-}
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct FileStatus {
@@ -598,19 +493,7 @@ impl Git {
     /// numbers.
     pub fn stage_hunks(&self, raw_diff: &str, hunk_indices: &[usize]) -> anyhow::Result<()> {
         let patch = parse_file_patch(raw_diff);
-        let mut body = patch.header;
-        for &idx in hunk_indices {
-            let i = idx
-                .checked_sub(1)
-                .context("hunk indices are 1-based and must be >= 1")?;
-            let hunk = patch.hunks.get(i).with_context(|| {
-                format!(
-                    "hunk {idx} is out of range (file has {} hunk(s))",
-                    patch.hunks.len()
-                )
-            })?;
-            body.push_str(hunk);
-        }
+        let body = patch.slice(hunk_indices)?;
 
         // Name the aic operation the user can act on; the helper's cause layer
         // carries the command and git's own stderr.
@@ -913,38 +796,6 @@ fn format_line(line: &git2::DiffLine, output: &mut String) {
     }
 }
 
-pub fn format_diff_scoped(diff: &str, file_path: &str) -> String {
-    let blocks = parse_diff_blocks(diff);
-    if blocks.is_empty() {
-        return String::new();
-    }
-
-    let mut out = format!("--- {file_path} ---\n");
-    let mut i = 0;
-    while i < blocks.len() {
-        let block = &blocks[i];
-        let end = new_end(block.new_start, block.new_count);
-        out.push_str(&format!(
-            "[{}] hunk {}, lines {}-{}\n",
-            block.header,
-            i + 1,
-            block.new_start,
-            end
-        ));
-        for line in &block.lines {
-            out.push_str(line);
-            out.push('\n');
-        }
-        out.push('\n');
-        i += 1;
-    }
-    out
-}
-
-fn new_end(start: u32, count: u32) -> u32 {
-    if count == 0 { start } else { start + count - 1 }
-}
-
 fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {
     if diff.deltas().len() == 0 {
         return Ok(String::new());
@@ -1058,33 +909,6 @@ pub(crate) mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn parse_file_patch_splits_header_and_hunks() {
-        let raw = "diff --git a/f.rs b/f.rs\n\
-index 1..2 100644\n\
---- a/f.rs\n\
-+++ b/f.rs\n\
-@@ -1,3 +1,3 @@\n\
- ctx\n\
--old\n\
-+new\n\
- ctx\n\
-@@ -10,3 +10,3 @@ fn b\n\
- ctx\n\
--old2\n\
-+new2\n\
- ctx\n";
-        let patch = parse_file_patch(raw);
-        assert!(patch.header.starts_with("diff --git"));
-        assert!(
-            !patch.header.contains("@@"),
-            "header must not include hunks"
-        );
-        assert_eq!(patch.hunks.len(), 2);
-        assert!(patch.hunks[0].starts_with("@@ -1,3 +1,3 @@"));
-        assert!(patch.hunks[1].starts_with("@@ -10,3 +10,3 @@ fn b"));
-    }
-
     /// Core of the hunk-split feature: stage only some of a file's hunks via
     /// `git apply --cached`, then confirm the index holds exactly those hunks.
     #[test]
@@ -1108,7 +932,7 @@ index 1..2 100644\n\
         let git = Git::at(dir.path()).unwrap();
         let raw = git.diff_workdir(Some("tracked.txt")).unwrap();
         let patch = parse_file_patch(&raw);
-        assert_eq!(patch.hunks.len(), 2, "expected two separate hunks");
+        assert_eq!(patch.hunk_count(), 2, "expected two separate hunks");
 
         // Stage ONLY hunk 1; hunk 2 must stay unstaged.
         git.stage_hunks(&raw, &[1]).unwrap();
@@ -1812,7 +1636,7 @@ index 1..2 100644\n\
         );
         // The rebuilt patch must actually apply to the index.
         let patch = parse_file_patch(&result);
-        assert!(!patch.hunks.is_empty(), "must have at least one hunk");
+        assert!(patch.hunk_count() > 0, "must have at least one hunk");
         git.run_git(&["apply", "--cached", "-"], Some(&result), &[])
             .expect("rebuilt new-file patch must apply to the index");
     }
