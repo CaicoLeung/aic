@@ -50,7 +50,9 @@ where
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         indicatif::ProgressStyle::default_spinner()
-            .template("{spinner} {msg}")?
+            // Two-space prefix matches `Display`'s LEFT_MARGIN so the spinner
+            // sits at the same inset as the rest of the run's output.
+            .template("  {spinner} {msg}")?
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
     );
     pb.set_message(msg.to_string());
@@ -141,7 +143,8 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         indicatif::ProgressStyle::default_spinner()
-            .template("{spinner} {msg}")?
+            // Two-space prefix matches `Display`'s LEFT_MARGIN.
+            .template("  {spinner} {msg}")?
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
     );
     pb.set_message("Analyzing changes");
