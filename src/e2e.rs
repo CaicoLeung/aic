@@ -461,6 +461,69 @@ fn revert_conflict(dir: &Path) {
     git_in(dir, &["revert", "HEAD~1"]);
 }
 
+/// Cherry-pick *sequence* conflict: `git cherry-pick A B` where A applies
+/// cleanly and B conflicts, so the repo ends mid-sequence with the sequencer
+/// dir populated (`.git/sequencer`) — git2 reports `CherryPickSequence`, not
+/// the single-shot `CherryPick` state that [`cherry_pick_conflict`] produces.
+/// The single-shot variant has no sequencer because only one commit is in
+/// flight; a sequence always writes one, even when it stalls on the first
+/// item. This is the gap issue #29 pins: the shared `cherry-pick --continue`
+/// Finalize must clear the sequence state in a real repo, not just map the
+/// enum correctly (the mapping is unit-tested in git.rs).
+///
+/// Layout: master diverges `tracked.txt` (so B, which also touches
+/// `tracked.txt`, conflicts), while A touches a *different* file (`other.txt`)
+/// so it cherry-picks clean and the conflict is deferred to B — the last item,
+/// so `--continue` finalizes the whole sequence back to Clean in one step.
+fn cherry_pick_sequence_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    git_in(dir, &["branch", "topic"]);
+    // master diverges tracked.txt — B will conflict against this.
+    std::fs::write(dir.join("tracked.txt"), "on master\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master diverge"]);
+    // topic: A touches a clean file (applies clean), B touches tracked.txt
+    // (conflicts). topic~1 = A, topic = B.
+    git_in(dir, &["checkout", "topic"]);
+    std::fs::write(dir.join("other.txt"), "topic A\n").unwrap();
+    git_in(dir, &["add", "other.txt"]);
+    git_in(dir, &["commit", "-m", "topic A clean"]);
+    std::fs::write(dir.join("tracked.txt"), "on topic\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "topic B conflict"]);
+    git_in(dir, &["checkout", "master"]);
+    git_in(dir, &["cherry-pick", "topic~1", "topic"]);
+}
+
+/// Revert *sequence* conflict: `git revert C1 C2` where reverting C1 applies
+/// cleanly and reverting C2 conflicts, so the repo ends mid-sequence with the
+/// sequencer dir populated (`.git/sequencer`) — git2 reports `RevertSequence`,
+/// not the single-shot `Revert` state that [`revert_conflict`] produces.
+/// Mirrors [`cherry_pick_sequence_conflict`] for the revert half of issue #29.
+///
+/// Layout: C1 adds a throwaway file (`other.txt`) so reverting it is clean
+/// (just deletes the file); C2 changes `tracked.txt`, then C3 changes it
+/// *again*, so reverting C2 conflicts against C3's content. C2 is the last
+/// item, so `--continue` finalizes the whole sequence back to Clean in one
+/// step. HEAD~2 = C1, HEAD~1 = C2 after C3 lands on master.
+fn revert_sequence_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    // C1: add a throwaway file — reverting it is a clean deletion.
+    std::fs::write(dir.join("other.txt"), "add C1\n").unwrap();
+    git_in(dir, &["add", "other.txt"]);
+    git_in(dir, &["commit", "-m", "add other.txt"]);
+    // C2: change tracked.txt original -> changed.
+    std::fs::write(dir.join("tracked.txt"), "changed\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "change tracked"]);
+    // C3: change tracked.txt again so reverting C2 conflicts against this.
+    std::fs::write(dir.join("tracked.txt"), "master override\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master override"]);
+    // Revert C1 then C2: C1 clean (deletes other.txt), C2 conflicts.
+    git_in(dir, &["revert", "HEAD~2", "HEAD~1"]);
+}
+
 /// Delete/modify conflict: master deletes `tracked.txt`, other modifies it.
 /// The index carries no `our` stage for the path, so `conflicted_files()`
 /// classifies it `DeleteModify`. Repo ends in the Merge state.
@@ -1477,6 +1540,95 @@ async fn resolve_finalizes_revert() {
     );
 
     assert!(is_clean(dir.path()), "revert must be finalized");
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+}
+
+/// Cherry-pick *sequence* conflict resolved + finalized end-to-end (issue
+/// #29). The existing single-shot test ([`resolve_finalizes_cherry_pick`])
+/// pins the `CherryPick` state; this pins its sequence sibling
+/// `CherryPickSequence`, which git2 distinguishes by the `.git/sequencer`
+/// dir that `git cherry-pick A B` writes. Both map to the *same*
+/// `cherry-pick --continue` Finalize invocation (unit-tested in git.rs), but
+/// that mapping is an assumption until pinned against a real repo: a sequence
+/// state could carry sequencer bookkeeping that `--continue` refuses to clear.
+/// This proves it actually returns to Clean, not just that the invocation
+/// maps. The setup defers the conflict to the *last* item so finalize clears
+/// the whole sequence in one step.
+#[tokio::test]
+async fn resolve_finalizes_cherry_pick_sequence() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    cherry_pick_sequence_conflict(dir.path());
+
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    // The headline assertion: this is a *sequence* state, distinct from the
+    // single-shot CherryPick the sibling test pins. A setup regression that
+    // collapsed to CherryPick (e.g. a single-commit cherry-pick) would trip
+    // here before the finalize claim is even tested.
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::CherryPickSequence,
+        "setup must leave the repo mid-cherry-pick-sequence (sequencer present)"
+    );
+
+    let resolver = resolver_returning("merged\n");
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
+    assert!(
+        result.is_ok(),
+        "cherry-pick-sequence resolve should succeed: {:?}",
+        result
+    );
+
+    // The whole point of issue #29: the shared `cherry-pick --continue`
+    // Finalize clears the *sequence* state in a real repo, not just the
+    // single-shot one. A regression that special-cased CherryPick and left
+    // the sequencer dir behind would leave the repo non-clean here.
+    assert!(
+        is_clean(dir.path()),
+        "cherry-pick sequence must be finalized (sequencer cleared)"
+    );
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+}
+
+/// Revert *sequence* conflict resolved + finalized end-to-end (issue #29).
+/// Mirrors [`resolve_finalizes_cherry_pick_sequence`] for the revert half:
+/// the single-shot `Revert` state is pinned by [`resolve_finalizes_revert`],
+/// this pins its `RevertSequence` sibling (git2 distinguishes them by the
+/// `.git/sequencer` dir `git revert C1 C2` writes). Both map to the same
+/// `revert --continue` Finalize — pinned here against a real repo, not just
+/// the enum mapping. The conflict is the last item so finalize clears the
+/// whole sequence in one step.
+#[tokio::test]
+async fn resolve_finalizes_revert_sequence() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    revert_sequence_conflict(dir.path());
+
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::RevertSequence,
+        "setup must leave the repo mid-revert-sequence (sequencer present)"
+    );
+
+    let resolver = resolver_returning("merged\n");
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
+    assert!(
+        result.is_ok(),
+        "revert-sequence resolve should succeed: {:?}",
+        result
+    );
+
+    assert!(
+        is_clean(dir.path()),
+        "revert sequence must be finalized (sequencer cleared)"
+    );
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
     assert!(!file_has_markers(dir.path(), "tracked.txt"));
 }
