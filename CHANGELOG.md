@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-08-01
+
+### Features
+
+- Add `generate-completion` command to generate shell completions (#16)
+- Colorize commit type prefixes in output (#39)
+- Inset run output and wrap commit body to terminal width (#51)
+
+### Bug Fixes
+
+- Recurse untracked directories in workdir diff
+- Include error chain in abort message
+- Make git test suite cross-platform for windows CI
+
+### Refactoring
+
+- Split monolithic e2e test into feature modules
+
+### Testing
+
+- Pin staged-files single-commit Run (#26) (#35)
+- Harden staged-files single-commit Run assertions (#37)
+- Pin cargo fmt before diff capture with hunk alignment (#27) (#38)
+- Pin declining finalize when all files resolved by hand (#28) (#44)
+- Pin sequence Finalize states (CherryPickSequence/RevertSequence) (#29) (#40)
+- Pin multi-file cross-file Batch plans (#31) (#41)
+- Pin auto-detect accept-then-reject-all hand-off (#32) (#42)
+- Reject empty Batch plan before the loop (#34) (#43)
+- Pin am / ApplyMailbox refusal path (#33) (#45)
+- Dedupe finalize-state tests via shared helper (#49)
+- Pin commit-msg hook veto aborts the Run (#30) (#47)
+
+### Documentation
+
+- Add bilingual CONTRIBUTING guide (#36)
+
+### Continuous Integration
+
+- Matrix cargo test across ubuntu and windows
+
+### Miscellaneous
+
+- Enforce LF via .gitattributes
+
 ## [0.3.7] - 2026-07-31
 
 ### Bug Fixes
