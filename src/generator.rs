@@ -30,6 +30,22 @@ pub struct BatchPlanBatch {
     pub reason: Option<String>,
 }
 
+impl BatchPlanBatch {
+    /// De-duplicated file paths in this batch, in first-seen order. A file
+    /// listed in several `changes` entries of one batch still yields one entry
+    /// — one commit message per file. The single source of truth shared by the
+    /// plan-capture, staging, integrity-check, and resume paths.
+    pub fn unique_files(&self) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        for change in &self.changes {
+            if !paths.contains(&change.file) {
+                paths.push(change.file.clone());
+            }
+        }
+        paths
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchPlanOutput {
     pub batches: Vec<BatchPlanBatch>,
