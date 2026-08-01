@@ -504,7 +504,7 @@ fn resolve_cols(cols: usize) -> usize {
 ///
 /// Returns at least one piece; an empty input yields `vec![""]` so blank
 /// source lines round-trip as a single empty piece.
-fn wrap_line(line: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![line.to_string()];
     }
@@ -592,64 +592,41 @@ where
     result
 }
 
-/// How many reasoning lines the "Analyzing changes" spinner keeps on screen.
-pub(crate) const THINKING_MAX_LINES: usize = 10;
-
-/// A rolling window over the model's streamed reasoning, kept to the last
-/// [`THINKING_MAX_LINES`] non-blank lines. Rendered in place under the spinner
-/// so it reads like a scrolling "thinking" feed.
+/// Collects the model's streamed reasoning and emits each line once it is
+/// complete (terminated by `\n`). The caller prints each emitted line above the
+/// spinner via `MultiProgress::println`, which scrolls smoothly without the
+/// clear-each-line-then-repaint cycle that flickered when the reasoning was
+/// packed into the spinner's multi-line message.
 ///
-/// Each reasoning line is greedy-wrapped with [`wrap_line`] to `width` — the
-/// feed's content budget — never ellipsized; a line longer than the budget
-/// folds into several `│ `-indented display lines under the shared [`MARGIN`].
+/// Partial content (no trailing `\n` yet) is buffered internally and emitted
+/// when the next `\n` arrives. Blank lines are dropped to keep the feed
+/// information-dense.
 pub(crate) struct ThinkingView {
-    lines: Vec<String>,
     cur: String,
 }
 
 impl ThinkingView {
     pub(crate) fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            cur: String::new(),
-        }
+        Self { cur: String::new() }
     }
 
-    /// Ingest a reasoning delta (may be a partial line, many lines, or empty).
-    /// Blank lines are dropped to keep the window information-dense.
-    pub(crate) fn push(&mut self, delta: &str) {
+    /// Ingest a reasoning delta (may be a partial line, many lines, or empty)
+    /// and return the non-blank lines that were completed by this delta.
+    /// A delta that ends mid-line returns no lines for that fragment — it is
+    /// buffered until the next `\n`.
+    pub(crate) fn push(&mut self, delta: &str) -> Vec<String> {
+        let mut completed = Vec::new();
         for ch in delta.chars() {
             if ch == '\n' {
                 let line = std::mem::take(&mut self.cur);
                 if !line.trim().is_empty() {
-                    self.lines.push(line);
-                    if self.lines.len() > THINKING_MAX_LINES {
-                        self.lines.remove(0);
-                    }
+                    completed.push(line);
                 }
             } else {
                 self.cur.push(ch);
             }
         }
-    }
-
-    /// `title` (e.g. "Analyzing changes") on the first line, then up to
-    /// [`THINKING_MAX_LINES`] reasoning lines wrapped to `width` display
-    /// columns and indented under it — the latest visible, older ones having
-    /// scrolled off.
-    pub(crate) fn render(&self, title: &str, width: usize) -> String {
-        let mut out = String::from(title);
-        let mut shown = self.lines.clone();
-        if !self.cur.trim().is_empty() {
-            shown.push(self.cur.clone());
-        }
-        let start = shown.len().saturating_sub(THINKING_MAX_LINES);
-        for line in &shown[start..] {
-            for piece in wrap_line(line, width) {
-                out.push_str(&format!("\n{MARGIN}│ {piece}"));
-            }
-        }
-        out
+        completed
     }
 }
 
@@ -682,62 +659,44 @@ mod tests {
         }
     }
 
+    /// [`ThinkingView::push`] returns only lines terminated by `\n` in the
+    /// delta — partial content at the end is buffered until the next `\n`.
     #[test]
-    fn thinking_view_keeps_last_n_lines_and_drops_blanks() {
+    fn thinking_view_emits_complete_lines_and_drops_blanks() {
         let mut v = ThinkingView::new();
-        for i in 1..=12 {
-            v.push(&format!("line {i}\n\n"));
-        }
-        // lines 1-2 scrolled off; lines 3-12 remain (blank lines dropped).
-        let mut expected = vec!["Analyzing changes".to_string()];
-        for i in 3..=12 {
-            expected.push(format!("  │ line {i}"));
-        }
-        let rendered = v.render("Analyzing changes", 80);
-        assert_eq!(rendered.lines().collect::<Vec<_>>(), expected);
+        let emitted = v.push("line 1\n\nline 2\n");
+        // blank line dropped; two non-blank lines emitted.
+        assert_eq!(emitted, vec!["line 1", "line 2"]);
     }
 
+    /// A partial line with no trailing `\n` produces nothing — it is buffered
+    /// internally and emitted when the `\n` eventually arrives.
     #[test]
-    fn thinking_view_shows_partial_line_and_caps_at_max() {
+    fn thinking_view_buffers_partial_line_until_newline() {
         let mut v = ThinkingView::new();
-        for i in 1..=THINKING_MAX_LINES {
-            v.push(&format!("line {i}\n"));
-        }
-        v.push("in progress"); // partial current line (no trailing newline)
-        let rendered = v.render("Analyzing changes", 80);
-        let visible: Vec<&str> = rendered.lines().collect();
-        // max complete + 1 partial → render caps at THINKING_MAX_LINES lines.
-        assert_eq!(visible.len(), 1 + THINKING_MAX_LINES);
-        assert_eq!(visible.last(), Some(&"  │ in progress"));
-        // "line 1" scrolled off; the partial takes the 10th slot.
-        assert!(!visible.iter().any(|l| l.ends_with("line 1")));
+        assert!(v.push("in progress").is_empty());
+        let emitted = v.push(" done\n");
+        assert_eq!(emitted, vec!["in progress done"]);
     }
 
+    /// One logical line split across several deltas is assembled correctly —
+    /// the line appears once, only when its terminating `\n` arrives.
     #[test]
     fn thinking_view_assembles_split_chunks() {
         let mut v = ThinkingView::new();
-        // one logical line delivered across several deltas
-        v.push("hel");
-        v.push("lo");
-        v.push(" world\n");
-        assert_eq!(
-            v.render("t", 80).lines().collect::<Vec<_>>(),
-            vec!["t", "  │ hello world"]
-        );
+        assert!(v.push("hel").is_empty());
+        assert!(v.push("lo").is_empty());
+        let emitted = v.push(" world\n");
+        assert_eq!(emitted, vec!["hello world"]);
     }
 
-    /// Long reasoning lines wrap under the `│ ` indent instead of being
-    /// ellipsized — the behavior that replaced hard truncation. Over-long
-    /// tokens follow `wrap_line`'s hard-break rule.
+    /// A delta containing several `\n`-separated lines emits each one, in
+    /// order, in a single call.
     #[test]
-    fn thinking_view_wraps_long_lines() {
+    fn thinking_view_emits_many_lines_from_one_delta() {
         let mut v = ThinkingView::new();
-        v.push("one two three four five\n");
-        let rendered = v.render("t", 12); // content budget: 12 columns
-        assert_eq!(
-            rendered.lines().collect::<Vec<_>>(),
-            vec!["t", "  │ one two", "  │ three four", "  │ five"]
-        );
+        let emitted = v.push("a\nb\nc\n");
+        assert_eq!(emitted, vec!["a", "b", "c"]);
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format

@@ -18,7 +18,7 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -46,10 +46,14 @@ pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live, keeping the latest [`display::THINKING_MAX_LINES`] lines on
-/// screen.
+/// reasoning live. Each completed reasoning line scrolls above the spinner via
+/// [`MultiProgress::println`], which is indicatif's flicker-free path for text
+/// alongside a spinner — the spinner itself stays single-line (its in-place
+/// redraw is imperceptible), and the reasoning never triggers a multi-line
+/// clear-each-line-then-repaint cycle.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    let pb = ProgressBar::new_spinner();
+    let mp = MultiProgress::new();
+    let pb = mp.add(ProgressBar::new_spinner());
     pb.set_style(display::spinner_style()?);
     pb.set_message("Analyzing changes");
     pb.enable_steady_tick(Duration::from_millis(80));
@@ -59,8 +63,13 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // decoration and one column of breathing room.
     let feed_width = display::terminal_width().saturating_sub(6);
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
-        view.push(delta);
-        pb.set_message(view.render("Analyzing changes", feed_width));
+        for line in view.push(delta) {
+            // Greedy-wrap long lines under the "│ " indent, same as before —
+            // each wrapped piece prints as its own line above the spinner.
+            for piece in display::wrap_line(&line, feed_width) {
+                let _ = mp.println(format!("{}│ {piece}", display::MARGIN));
+            }
+        }
     })
     .await;
 
