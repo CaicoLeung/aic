@@ -516,7 +516,7 @@ pub(crate) async fn run_commit_workflow_impl(
                 anyhow::bail!(
                     "aborted on batch {} of {} after {} batch(es) committed. \
                      Remaining changes are still in the working tree — re-run \
-                     `aic` to continue: {e}",
+                     `aic` to continue: {e:#}",
                     i + 1,
                     count,
                     i
