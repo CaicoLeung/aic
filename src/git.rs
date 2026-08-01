@@ -436,6 +436,24 @@ impl Git {
         format_diff(&diff)
     }
 
+    /// Working-tree diff for one file (`path`) or every changed path, including
+    /// untracked files with their full content.
+    ///
+    /// The result is captured once per Run and consumed two ways: a numbered
+    /// view goes to the model, and the raw hunks are replayed per-batch by
+    /// [`Git::stage_hunks`] via `git apply --cached`. For that replay to land,
+    /// every path [`Git::status`] reports — including a file *inside* an
+    /// untracked directory — must resolve to a real patch here, or staging
+    /// silently no-ops and the batch aborts.
+    ///
+    /// That contract is why `recurse_untracked_dirs` is mandatory below.
+    /// `status()` expands untracked directories file-by-file, but
+    /// `diff_index_to_workdir` does not unless asked: it collapses a whole
+    /// untracked directory into one directory-level delta (path `src/foo/`),
+    /// so a per-file query like `src/foo/mod.rs` matches no delta and returns
+    /// an empty string. `stage_hunks` then feeds `git apply --cached` an empty
+    /// patch and the batch dies with "No valid patches in input". This is the
+    /// splitting-a-file-into-a-module case (e.g. `src/e2e.rs` → `src/e2e/`).
     pub fn diff_workdir(path: Option<&str>) -> anyhow::Result<String> {
         let repo = Self::repo()?;
         let index = repo.index().context("failed to get repository index")?;
@@ -443,6 +461,9 @@ impl Git {
         let mut opts = git2::DiffOptions::new();
         opts.include_untracked(true);
         opts.show_untracked_content(true);
+        // Expand untracked dirs one file at a time — see the doc comment above;
+        // without this, files inside a new directory get empty patches.
+        opts.recurse_untracked_dirs(true);
 
         let diff = repo
             .diff_index_to_workdir(Some(&index), Some(&mut opts))
@@ -1695,5 +1716,46 @@ index 1..2 100644\n\
 
         let after = run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
         assert_eq!(before, after, "no commit may land with an empty message");
+    }
+
+    /// Regression: `diff_workdir` must return a real new-file patch for a file
+    /// that lives inside an *untracked directory* (e.g. a new `src/foo/` module
+    /// created by splitting a single file into a module dir). Without
+    /// `recurse_untracked_dirs`, libgit2 collapses the whole untracked directory
+    /// into one directory-level delta, `format_diff_for_path` finds no delta for
+    /// the inner file, returns an empty patch, and `stage_hunks` later feeds
+    /// `git apply --cached` an empty input → "No valid patches in input" → the
+    /// whole batch aborts. This is the splitting-a-file-into-a-module case.
+    #[test]
+    fn diff_workdir_returns_content_for_file_in_untracked_dir() {
+        let _lock = GIT_CWD_MUTEX.lock();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+
+        // An untracked directory with a file inside — mirrors `src/e2e/`.
+        let new_dir = dir.path().join("mymod");
+        std::fs::create_dir(&new_dir).unwrap();
+        std::fs::write(
+            new_dir.join("mod.rs"),
+            "pub fn x() {}
+",
+        )
+        .unwrap();
+
+        let _guard = CwdGuard::new(dir.path());
+        let result = Git::diff_workdir(Some("mymod/mod.rs")).unwrap();
+        assert!(
+            !result.is_empty(),
+            "must produce a patch for a file in an untracked dir"
+        );
+        assert!(
+            result.contains("--- /dev/null"),
+            "must be a new-file patch; got:\n{result}"
+        );
+        // The rebuilt patch must actually apply to the index.
+        let patch = parse_file_patch(&result);
+        assert!(!patch.hunks.is_empty(), "must have at least one hunk");
+        run_git(&["apply", "--cached", "-"], Some(&result), &[])
+            .expect("rebuilt new-file patch must apply to the index");
     }
 }
