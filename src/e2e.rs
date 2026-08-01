@@ -461,6 +461,65 @@ fn revert_conflict(dir: &Path) {
     git_in(dir, &["revert", "HEAD~1"]);
 }
 
+/// Cherry-pick *sequence* conflict (issue #29): two commits applied by a single
+/// `git cherry-pick A B`. The first applies cleanly (it adds `extra.txt`, which
+/// master never touched); the second conflicts on `tracked.txt`. Because a
+/// sequencer is now active, the repo ends in the `CherryPickSequence` state —
+/// distinct from the single-shot `CherryPick` that [`cherry_pick_conflict`]
+/// produces (libgit2 keys the two on the `.git/sequencer/` dir). The
+/// conflicting commit is the *last* in the sequence, so finalizing it with
+/// `git cherry-pick --continue` drains the sequencer and returns the repo to
+/// Clean — the behavior the matching finalize test pins.
+fn cherry_pick_sequence_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    // master advances tracked.txt from the initial "original".
+    std::fs::write(dir.join("tracked.txt"), "on master\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master side"]);
+    // topic branches off the initial commit (no master side yet) with two
+    // commits: a clean addition, then a tracked.txt change that collides with
+    // master.
+    git_in(dir, &["branch", "topic", "master~1"]);
+    git_in(dir, &["checkout", "topic"]);
+    std::fs::write(dir.join("extra.txt"), "feature\n").unwrap();
+    git_in(dir, &["add", "extra.txt"]);
+    git_in(dir, &["commit", "-m", "topic clean add"]);
+    std::fs::write(dir.join("tracked.txt"), "on topic\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "topic tracked change"]);
+    git_in(dir, &["checkout", "master"]);
+    // Multi-commit cherry-pick: A (clean) then B (conflict). Activating the
+    // sequencer is what flips the state to CherryPickSequence.
+    git_in(dir, &["cherry-pick", "topic~1", "topic"]);
+}
+
+/// Revert *sequence* conflict (issue #29): two reverts issued by a single
+/// `git revert P Q`. The first reverts cleanly (it removes `fileP.txt`, which
+/// nothing else touched); the second collides with a later change to
+/// `tracked.txt`. Because a sequencer is now active, the repo ends in the
+/// `RevertSequence` state — distinct from the single-shot `Revert` that
+/// [`revert_conflict`] produces. The conflicting revert is the *last* in the
+/// sequence, so finalizing it with `git revert --continue` drains the
+/// sequencer and returns the repo to Clean — the behavior the matching finalize
+/// test pins.
+fn revert_sequence_conflict(dir: &Path) {
+    gh::init_test_repo(dir);
+    // P: a standalone addition that reverts cleanly later.
+    std::fs::write(dir.join("fileP.txt"), "p\n").unwrap();
+    git_in(dir, &["add", "fileP.txt"]);
+    git_in(dir, &["commit", "-m", "add fileP"]);
+    // Q: change tracked.txt; R: overwrite it so reverting Q conflicts.
+    std::fs::write(dir.join("tracked.txt"), "changed\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "change tracked"]);
+    std::fs::write(dir.join("tracked.txt"), "master override\n").unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "master override"]);
+    // Multi-commit revert: revert P (clean) then Q (conflict). Activating the
+    // sequencer is what flips the state to RevertSequence. Q is HEAD~1.
+    git_in(dir, &["revert", "--no-edit", "HEAD~2", "HEAD~1"]);
+}
+
 /// Delete/modify conflict: master deletes `tracked.txt`, other modifies it.
 /// The index carries no `our` stage for the path, so `conflicted_files()`
 /// classifies it `DeleteModify`. Repo ends in the Merge state.
@@ -1556,6 +1615,92 @@ async fn resolve_finalizes_revert() {
     assert!(is_clean(dir.path()), "revert must be finalized");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
     assert!(!file_has_markers(dir.path(), "tracked.txt"));
+}
+
+/// Cherry-pick *sequence* conflict resolved + finalized end-to-end (issue #29).
+/// Unlike the single-shot [`resolve_finalizes_cherry_pick`], the conflict is
+/// reached through a multi-commit `git cherry-pick A B`, so a sequencer is
+/// active and the repo sits in the `CherryPickSequence` state — which maps to
+/// the *same* `git cherry-pick --continue` Finalize. This test proves that
+/// Finalize actually drains the sequencer and clears the state in a real repo,
+/// not just that the invocation maps correctly (the latter is unit-tested).
+#[tokio::test]
+async fn resolve_finalizes_cherry_pick_sequence() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    cherry_pick_sequence_conflict(dir.path());
+
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::CherryPickSequence,
+        "setup must leave the repo mid-cherry-pick *sequence* (sequencer active)"
+    );
+
+    let resolver = resolver_returning("merged\n");
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
+    assert!(
+        result.is_ok(),
+        "cherry-pick sequence resolve should succeed: {:?}",
+        result
+    );
+
+    assert!(
+        is_clean(dir.path()),
+        "cherry-pick sequence must be finalized (sequencer drained)"
+    );
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+    // The clean first commit of the sequence (adding extra.txt) must have
+    // landed before the second hit its conflict — otherwise finalize would not
+    // return the repo to Clean. Its presence is the proof the sequence
+    // advanced past A.
+    assert_eq!(read_file(dir.path(), "extra.txt"), "feature\n");
+}
+
+/// Revert *sequence* conflict resolved + finalized end-to-end (issue #29).
+/// Unlike the single-shot [`resolve_finalizes_revert`], the conflict is
+/// reached through a multi-commit `git revert P Q`, so a sequencer is active
+/// and the repo sits in the `RevertSequence` state — which maps to the *same*
+/// `git revert --continue` Finalize. This test proves that Finalize actually
+/// drains the sequencer and clears the state in a real repo, not just that the
+/// invocation maps correctly (the latter is unit-tested).
+#[tokio::test]
+async fn resolve_finalizes_revert_sequence() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    revert_sequence_conflict(dir.path());
+
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    assert_eq!(
+        git::Git::state().unwrap(),
+        git::RepoState::RevertSequence,
+        "setup must leave the repo mid-revert *sequence* (sequencer active)"
+    );
+
+    let resolver = resolver_returning("merged\n");
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
+    assert!(
+        result.is_ok(),
+        "revert sequence resolve should succeed: {:?}",
+        result
+    );
+
+    assert!(
+        is_clean(dir.path()),
+        "revert sequence must be finalized (sequencer drained)"
+    );
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+    // The clean first revert of the sequence (removing fileP.txt) must have
+    // landed before the second hit its conflict — otherwise finalize would not
+    // return the repo to Clean. Its absence is the proof the sequence advanced
+    // past P.
+    assert!(!dir.path().join("fileP.txt").exists());
 }
 
 /// Delete/modify conflict (master deleted, other modified) is classified
