@@ -40,3 +40,7 @@ carapace_spec_clap = "1.2.1"
 [dev-dependencies]
 tempfile = "3"
 parking_lot = "0.12"
+http = "1" # for constructing rig's typed StatusCode errors in retry tests
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2" # RunLock PID-based stale-lock detection (kill(pid, 0))
