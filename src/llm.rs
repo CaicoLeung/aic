@@ -414,9 +414,14 @@ macro_rules! with_agent {
 //
 //   2. Transient transport/provider errors (rate limits, network blips, 5xx).
 //
-// Permanent failures (HTTP 4xx auth / bad request) fail fast — pointlessly
-// retrying them only wastes time. Unknown errors are treated as transient so
-// an unrecognized transient failure does not abort a whole multi-batch Run.
+// Permanent failures (HTTP 4xx auth / bad request, except 408 and 429) fail
+// fast — pointlessly retrying them only wastes time. Classification is driven
+// by the *typed* HTTP status reachable in the error chain (rig's
+// `http_client::Error` carries a `StatusCode` for every non-2xx response), not
+// by substring-sniffing the message, so an incidental token like a port number
+// or path can never flip a transient failure into a permanent one. Errors with
+// no typed status (network blip, EOF, an unrecognized failure) default to
+// transient — retrying is always safer than aborting a whole multi-batch Run.
 
 /// Total attempts per LLM call (the first try plus retries).
 const LLM_MAX_ATTEMPTS: u32 = 3;
@@ -436,23 +441,52 @@ fn is_empty_response(err: &anyhow::Error) -> bool {
 }
 
 /// Whether `err` is a transient transport/provider failure worth retrying.
-/// Anything that is not a clear permanent indicator (HTTP 4xx auth/request
-/// errors) is treated as transient, so unrecognized transient failures (rate
-/// limits, network blips) are retried rather than aborting the whole Run.
+///
+/// Walks the error chain for rig's typed HTTP status and classifies on the real
+/// code (see [`is_transient_status`]); an error with no typed status anywhere
+/// in the chain (network blip, EOF, an unrecognized failure) defaults to
+/// transient — retrying is always safer than aborting a whole multi-batch Run
+/// on an unrecognized failure.
 fn is_transient(err: &anyhow::Error) -> bool {
-    let msg = format!("{err:#}").to_lowercase();
-    const PERMANENT: &[&str] = &[
-        "401",
-        "403",
-        "400",
-        "404",
-        "invalid_api_key",
-        "invalid api key",
-        "unauthorized",
-        "forbidden",
-        "bad request",
-    ];
-    !PERMANENT.iter().any(|p| msg.contains(p))
+    match http_status(err) {
+        Some(code) => is_transient_status(code),
+        None => true,
+    }
+}
+
+/// Extract the first HTTP status code reachable in `err`'s cause chain. rig
+/// surfaces every non-2xx response as `http_client::Error::InvalidStatusCode`
+/// or `InvalidStatusCodeWithMessage`, so this finds real provider statuses
+/// without string-sniffing the formatted message.
+fn http_status(err: &anyhow::Error) -> Option<u16> {
+    for cause in err.chain() {
+        if let Some(code) = cause
+            .downcast_ref::<rig::http_client::Error>()
+            .and_then(status_from_http_error)
+        {
+            return Some(code);
+        }
+    }
+    None
+}
+
+fn status_from_http_error(e: &rig::http_client::Error) -> Option<u16> {
+    match e {
+        rig::http_client::Error::InvalidStatusCode(s) => Some(s.as_u16()),
+        rig::http_client::Error::InvalidStatusCodeWithMessage(s, _) => Some(s.as_u16()),
+        _ => None,
+    }
+}
+
+/// Standard retry classification: permanent client errors fail fast (4xx,
+/// except 408 Request Timeout and 429 Too Many Requests, which are transient);
+/// everything else (5xx, network, unknown status) is transient.
+fn is_transient_status(code: u16) -> bool {
+    if (400..500).contains(&code) {
+        code == 408 || code == 429
+    } else {
+        true
+    }
 }
 
 /// Retry when the model returned no usable content OR a transient error
@@ -729,34 +763,71 @@ mod tests {
         assert_eq!(Provider::Xai.env_key(), Some("XAI_API_KEY"));
     }
 
+    /// Build an anyhow error carrying a typed rig HTTP status, mirroring what
+    /// rig emits for a non-2xx response (`InvalidStatusCodeWithMessage`). Used
+    /// to exercise the typed classification path without a live network call.
+    fn http_status_err(code: http::StatusCode, msg: &str) -> anyhow::Error {
+        anyhow::Error::new(rig::http_client::Error::InvalidStatusCodeWithMessage(
+            code,
+            msg.to_string(),
+        ))
+    }
+
     #[test]
-    fn is_transient_retries_unknown_and_network_errors() {
-        // Unknown errors are treated as transient (retry) — safer for the goal
-        // of avoiding interruption.
+    fn is_transient_classifies_typed_4xx_as_permanent() {
+        // Real auth / request-shape errors carry a typed HTTP status → fail
+        // fast. These are no longer matched by sniffing the message string.
+        for code in [400, 401, 403, 404, 422] {
+            assert!(
+                !is_transient(&http_status_err(
+                    http::StatusCode::from_u16(code).unwrap(),
+                    "err"
+                )),
+                "{code} must be permanent"
+            );
+        }
+    }
+
+    #[test]
+    fn is_transient_retries_typed_5xx_and_transient_4xx() {
+        // 408 (Request Timeout) and 429 (Too Many Requests) are the two 4xx
+        // codes that are transient; all 5xx are transient.
+        for code in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                is_transient(&http_status_err(
+                    http::StatusCode::from_u16(code).unwrap(),
+                    "err"
+                )),
+                "{code} must be transient"
+            );
+        }
+    }
+
+    #[test]
+    fn is_transient_defaults_unknown_to_transient() {
+        // No typed status anywhere in the chain → default transient (retry),
+        // never aborting a whole multi-batch Run on an unrecognized failure.
         assert!(is_transient(&anyhow::anyhow!("connection reset by peer")));
-        assert!(is_transient(&anyhow::anyhow!("429 Too Many Requests")));
-        assert!(is_transient(&anyhow::anyhow!("500 Internal Server Error")));
         assert!(is_transient(&anyhow::anyhow!("timeout")));
         assert!(is_transient(&anyhow::anyhow!("EOF while reading header")));
+        // A bare message containing "401" but carrying NO typed status is still
+        // transient — classification is driven by the typed status, so an
+        // incidental token (a port, a path) can't flip it to permanent.
+        assert!(is_transient(&anyhow::anyhow!("redirected to port 401")));
     }
 
     #[test]
-    fn is_transient_fails_fast_on_permanent_errors() {
-        // Auth and request-shape errors are permanent — never retried.
-        assert!(!is_transient(&anyhow::anyhow!("401 Unauthorized")));
-        assert!(!is_transient(&anyhow::anyhow!("403 Forbidden")));
-        assert!(!is_transient(&anyhow::anyhow!("400 Bad Request")));
-        assert!(!is_transient(&anyhow::anyhow!("404 Not Found")));
-        assert!(!is_transient(&anyhow::anyhow!("invalid_api_key")));
-        assert!(!is_transient(&anyhow::anyhow!("invalid api key")));
-    }
-
-    #[test]
-    fn is_transient_is_case_insensitive() {
-        // The classifier lowercases the message before matching.
-        assert!(!is_transient(&anyhow::anyhow!("UNAUTHORIZED")));
-        assert!(!is_transient(&anyhow::anyhow!("Forbidden")));
-        assert!(is_transient(&anyhow::anyhow!("Timeout")));
+    fn is_transient_finds_status_through_wrapped_chain() {
+        // rig wraps the HTTP status under PromptError / CompletionError layers;
+        // anyhow's `.context` mirrors that wrapping, and the chain walk in
+        // [`http_status`] must still reach the typed status.
+        let err =
+            http_status_err(http::StatusCode::UNAUTHORIZED, "bad key").context("prompt failed");
+        assert_eq!(http_status(&err), Some(401));
+        assert!(
+            !is_transient(&err),
+            "status must be found through the wrapper"
+        );
     }
 
     #[test]
@@ -781,12 +852,21 @@ mod tests {
         assert!(should_retry(&anyhow::Error::new(
             StructuredOutputError::EmptyResponse
         )));
-        // A transient network error is retryable.
+        // A transient network error (no typed status) is retryable.
         assert!(should_retry(&anyhow::anyhow!("connection reset by peer")));
-        assert!(should_retry(&anyhow::anyhow!("500 Internal Server Error")));
-        // A permanent error fails fast.
-        assert!(!should_retry(&anyhow::anyhow!("401 Unauthorized")));
-        assert!(!should_retry(&anyhow::anyhow!("400 Bad Request")));
+        assert!(should_retry(&http_status_err(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            "5xx"
+        )));
+        // A permanent 4xx error fails fast.
+        assert!(!should_retry(&http_status_err(
+            http::StatusCode::UNAUTHORIZED,
+            "no key"
+        )));
+        assert!(!should_retry(&http_status_err(
+            http::StatusCode::BAD_REQUEST,
+            "bad req"
+        )));
     }
 
     /// A retryable failure (empty model output) is retried until it succeeds —
@@ -860,13 +940,18 @@ mod tests {
             let counter = counter.clone();
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err(anyhow::anyhow!("401 Unauthorized"))
+                Err(http_status_err(
+                    http::StatusCode::UNAUTHORIZED,
+                    "Unauthorized",
+                ))
             }
         })
         .await;
+        let err = result.expect_err("must surface the error");
         assert_eq!(
-            format!("{:#}", result.expect_err("must surface the error")),
-            "401 Unauthorized"
+            http_status(&err),
+            Some(401),
+            "the surfaced error must still carry the 401 status: {err:#}"
         );
         assert_eq!(
             attempts.load(Ordering::SeqCst),
