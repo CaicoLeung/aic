@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-08-01
+
+### Features
+
+- Add `generate-completion` command to generate shell completions (#16)
+- Colorize commit type prefixes in output (#39)
+- Inset run output and wrap commit body to terminal width (#51)
+
+### Bug Fixes
+
+- Recurse untracked directories in workdir diff
+- Include error chain in abort message
+- Make git test suite cross-platform for windows CI
+
+### Refactoring
+
+- Split monolithic e2e test into feature modules
+
+### Testing
+
+- Pin staged-files single-commit Run (#26) (#35)
+- Harden staged-files single-commit Run assertions (#37)
+- Pin cargo fmt before diff capture with hunk alignment (#27) (#38)
+- Pin declining finalize when all files resolved by hand (#28) (#44)
+- Pin sequence Finalize states (CherryPickSequence/RevertSequence) (#29) (#40)
+- Pin multi-file cross-file Batch plans (#31) (#41)
+- Pin auto-detect accept-then-reject-all hand-off (#32) (#42)
+- Reject empty Batch plan before the loop (#34) (#43)
+- Pin am / ApplyMailbox refusal path (#33) (#45)
+- Dedupe finalize-state tests via shared helper (#49)
+- Pin commit-msg hook veto aborts the Run (#30) (#47)
+
+### Documentation
+
+- Add bilingual CONTRIBUTING guide (#36)
+
+### Continuous Integration
+
+- Matrix cargo test across ubuntu and windows
+
+### Miscellaneous
+
+- Enforce LF via .gitattributes
+
+### Contributors
+- Paul
+- Caico Leung
+
 ## [0.3.7] - 2026-07-31
 
 ### Bug Fixes
@@ -25,11 +73,17 @@ All notable changes to this project will be documented in this file.
 
 - Add pull request template (#17)
 
+### Contributors
+- Caico Leung
+
 ## [0.3.6] - 2026-07-30
 
 ### Features
 
 - Streaming multi-batch commit splitting with testable orchestration (#13)
+
+### Contributors
+- Caico Leung
 
 ## [0.3.5] - 2026-07-30
 
@@ -40,6 +94,9 @@ All notable changes to this project will be documented in this file.
 ### Documentation
 
 - Document aic resolve for v0.3.0 (#11)
+
+### Contributors
+- Caico Leung
 
 ## [0.3.0] - 2026-07-29
 
@@ -54,6 +111,9 @@ All notable changes to this project will be documented in this file.
 
 - Make writer injectable so hand-off wording can be tested (#10)
 
+### Contributors
+- Caico Leung
+
 ## [0.2.3] - 2026-07-26
 
 ### Bug Fixes
@@ -63,6 +123,9 @@ All notable changes to this project will be documented in this file.
 ### Refactoring
 
 - Replace panel UI with line-based output (#5)
+
+### Contributors
+- Caico Leung
 
 ## [0.2.2] - 2026-07-26
 
@@ -77,17 +140,26 @@ All notable changes to this project will be documented in this file.
 - Handle working-tree deletions in add method
 - Reject untracked absent paths in add
 
+### Contributors
+- Caico Leung
+
 ## [0.2.1] - 2026-07-25
 
 ### Features
 
 - Update default model to deepseek-v4-flash
 
+### Contributors
+- Caico Leung
+
 ## [0.2.0] - 2026-07-09
 
 ### Features
 
 - Expand to 12 providers, refresh default models, add base URL
+
+### Contributors
+- Caico Leung
 
 ## [0.1.7] - 2026-07-08
 
@@ -104,6 +176,9 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous
 
 - Remove banner display
+
+### Contributors
+- Caico Leung
 
 ## [0.1.6] - 2026-07-04
 
@@ -150,6 +225,9 @@ All notable changes to this project will be documented in this file.
 - Skip empty diff
 - No changes to commit
 
+### Contributors
+- Caico Leung
+
 ## [0.1.4] - 2026-05-20
 
 ### Features
@@ -181,6 +259,9 @@ All notable changes to this project will be documented in this file.
 - Condense batch vector literals in tests
 - Format method chain across multiple lines
 
+### Contributors
+- Caico Leung
+
 ## [0.1.2] - 2026-05-20
 
 ### Features
@@ -195,6 +276,9 @@ All notable changes to this project will be documented in this file.
 ### Miscellaneous
 
 - Shorten banner text
+
+### Contributors
+- Caico Leung
 
 ## [0.1.1] - 2026-05-18
 
@@ -227,6 +311,9 @@ All notable changes to this project will be documented in this file.
 
 - Add CLAUDE.md to .gitignore
 - Update Cargo.toml with dist optimizations and metadata
+
+### Contributors
+- Caico Leung
 
 ## [0.1.0] - 2026-05-17
 
@@ -262,5 +349,8 @@ All notable changes to this project will be documented in this file.
 - Add .gitignore to exclude build artifacts
 - Add .DS_Store to .gitignore
 - Add Rust toolchain configuration
+
+### Contributors
+- Caico Leung
 
 

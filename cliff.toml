@@ -15,6 +15,10 @@ body = """
         - {{ commit.message | upper_first }}\
             {% if commit.breaking %} (**BREAKING**){% endif %}\
     {% endfor %}
+{% endfor %}\
+{% set names = commits | map(attribute="author") | map(attribute="name") | unique %}
+### Contributors
+{% for name in names %}- {{ name }}
 {% endfor %}\n
 """
 trim = true
