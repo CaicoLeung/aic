@@ -1482,155 +1482,96 @@ async fn resolve_offers_finalize_when_all_manual() {
 // error path. These close the gaps flagged in the PR #8 e2e review.
 // =====================================================================
 
-/// Cherry-pick conflict resolved + finalized end-to-end (ADR 0005). Unlike
-/// Merge, finalize shells out to `git cherry-pick --continue` — this verifies
-/// that path actually clears the CherryPick state in a real repo, not merely
-/// that `finalize_invocation` maps the enum (unit-tested in git.rs).
+/// Resolve a setup conflict and assert the workflow finalizes the repo back
+/// to a clean, empty working tree with the resolved content (`"merged\n"`).
+/// Shared tail of the four finalize-state tests — `CherryPick`/`Revert` and
+/// their `*Sequence` siblings (ADR 0005, issue #29): each test owns its setup
+/// + `CwdGuard`, then hands off here.
+///
+/// `expected` is asserted first so a setup regression — e.g. a sequence
+/// collapsing to its single-shot sibling — trips before the finalize claim is
+/// tested. `is_clean` alone only proves no operation is in progress; a finalize
+/// that committed the resolution but left a stray staged or untracked entry
+/// would still pass it, so the strict working-tree-empty guarantee is pinned
+/// too.
+async fn resolve_finalizes_clean(dir: &Path, expected: git::RepoState) {
+    assert_eq!(
+        git::Git::state().unwrap(),
+        expected,
+        "setup must leave the repo in the expected conflict state"
+    );
+
+    let resolver = resolver_returning("merged\n");
+
+    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
+    assert!(
+        result.is_ok(),
+        "{:?} resolve should succeed: {:?}",
+        expected,
+        result
+    );
+
+    assert!(is_clean(dir), "{:?} must be finalized", expected);
+    assert!(
+        worktree_is_empty(dir),
+        "{:?} must leave nothing staged or untracked",
+        expected
+    );
+    assert_eq!(read_file(dir, "tracked.txt"), "merged\n");
+    assert!(!file_has_markers(dir, "tracked.txt"));
+}
+
+/// Cherry-pick conflict finalized end-to-end (ADR 0005): `git cherry-pick
+/// --continue` actually clears the `CherryPick` state in a real repo, not
+/// merely the `finalize_invocation` enum mapping (unit-tested in git.rs).
 #[tokio::test]
 async fn resolve_finalizes_cherry_pick() {
     let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     cherry_pick_conflict(dir.path());
-
     let _guard = gh::CwdGuard::new(dir.path());
-
-    assert_eq!(
-        git::Git::state().unwrap(),
-        git::RepoState::CherryPick,
-        "setup must leave the repo mid-cherry-pick"
-    );
-
-    let resolver = resolver_returning("merged\n");
-
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
-    assert!(
-        result.is_ok(),
-        "cherry-pick resolve should succeed: {:?}",
-        result
-    );
-
-    assert!(is_clean(dir.path()), "cherry-pick must be finalized");
-    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
-    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+    resolve_finalizes_clean(dir.path(), git::RepoState::CherryPick).await;
 }
 
-/// Revert conflict resolved + finalized end-to-end (ADR 0005). Finalize runs
-/// `git revert --continue`; verifies the Revert state is cleared in a real repo.
+/// Revert conflict finalized end-to-end (ADR 0005): `git revert --continue`
+/// clears the `Revert` state in a real repo.
 #[tokio::test]
 async fn resolve_finalizes_revert() {
     let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     revert_conflict(dir.path());
-
     let _guard = gh::CwdGuard::new(dir.path());
-
-    assert_eq!(
-        git::Git::state().unwrap(),
-        git::RepoState::Revert,
-        "setup must leave the repo mid-revert"
-    );
-
-    let resolver = resolver_returning("merged\n");
-
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
-    assert!(
-        result.is_ok(),
-        "revert resolve should succeed: {:?}",
-        result
-    );
-
-    assert!(is_clean(dir.path()), "revert must be finalized");
-    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
-    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+    resolve_finalizes_clean(dir.path(), git::RepoState::Revert).await;
 }
 
-/// Cherry-pick *sequence* conflict resolved + finalized end-to-end (issue
-/// #29). The existing single-shot test ([`resolve_finalizes_cherry_pick`])
-/// pins the `CherryPick` state; this pins its sequence sibling
-/// `CherryPickSequence`, which git2 distinguishes by the `.git/sequencer`
-/// dir that `git cherry-pick A B` writes. Both map to the *same*
-/// `cherry-pick --continue` Finalize invocation (unit-tested in git.rs), but
-/// that mapping is an assumption until pinned against a real repo: a sequence
-/// state could carry sequencer bookkeeping that `--continue` refuses to clear.
-/// This proves it actually returns to Clean, not just that the invocation
-/// maps. The setup defers the conflict to the *last* item so finalize clears
-/// the whole sequence in one step.
+/// Cherry-pick *sequence* finalize (issue #29). `git cherry-pick A B` writes
+/// `.git/sequencer`, so git2 reports `CherryPickSequence` — distinct from the
+/// single-shot [`resolve_finalizes_cherry_pick`]. Both map to the same
+/// `cherry-pick --continue` Finalize; this pins that it clears the *sequence*
+/// state in a real repo, not just the enum mapping. Shared post-conditions in
+/// [`resolve_finalizes_clean`]; setup defers the conflict to the last item so
+/// finalize clears the whole sequence in one step.
 #[tokio::test]
 async fn resolve_finalizes_cherry_pick_sequence() {
     let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     cherry_pick_sequence_conflict(dir.path());
-
     let _guard = gh::CwdGuard::new(dir.path());
-
-    // The headline assertion: this is a *sequence* state, distinct from the
-    // single-shot CherryPick the sibling test pins. A setup regression that
-    // collapsed to CherryPick (e.g. a single-commit cherry-pick) would trip
-    // here before the finalize claim is even tested.
-    assert_eq!(
-        git::Git::state().unwrap(),
-        git::RepoState::CherryPickSequence,
-        "setup must leave the repo mid-cherry-pick-sequence (sequencer present)"
-    );
-
-    let resolver = resolver_returning("merged\n");
-
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
-    assert!(
-        result.is_ok(),
-        "cherry-pick-sequence resolve should succeed: {:?}",
-        result
-    );
-
-    // The whole point of issue #29: the shared `cherry-pick --continue`
-    // Finalize clears the *sequence* state in a real repo, not just the
-    // single-shot one. A regression that special-cased CherryPick and left
-    // the sequencer dir behind would leave the repo non-clean here.
-    assert!(
-        is_clean(dir.path()),
-        "cherry-pick sequence must be finalized (sequencer cleared)"
-    );
-    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
-    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+    resolve_finalizes_clean(dir.path(), git::RepoState::CherryPickSequence).await;
 }
 
-/// Revert *sequence* conflict resolved + finalized end-to-end (issue #29).
-/// Mirrors [`resolve_finalizes_cherry_pick_sequence`] for the revert half:
-/// the single-shot `Revert` state is pinned by [`resolve_finalizes_revert`],
-/// this pins its `RevertSequence` sibling (git2 distinguishes them by the
-/// `.git/sequencer` dir `git revert C1 C2` writes). Both map to the same
-/// `revert --continue` Finalize — pinned here against a real repo, not just
-/// the enum mapping. The conflict is the last item so finalize clears the
-/// whole sequence in one step.
+/// Revert *sequence* finalize (issue #29). Mirrors
+/// [`resolve_finalizes_cherry_pick_sequence`] for the revert half: `git revert
+/// C1 C2` writes `.git/sequencer`, so git2 reports `RevertSequence` — distinct
+/// from the single-shot [`resolve_finalizes_revert`]. Shared post-conditions
+/// in [`resolve_finalizes_clean`].
 #[tokio::test]
 async fn resolve_finalizes_revert_sequence() {
     let _lock = gh::GIT_CWD_MUTEX.lock();
     let dir = tempfile::tempdir().unwrap();
     revert_sequence_conflict(dir.path());
-
     let _guard = gh::CwdGuard::new(dir.path());
-
-    assert_eq!(
-        git::Git::state().unwrap(),
-        git::RepoState::RevertSequence,
-        "setup must leave the repo mid-revert-sequence (sequencer present)"
-    );
-
-    let resolver = resolver_returning("merged\n");
-
-    let result = run_resolve_workflow_impl(resolver, prompt_queue(vec![true]), sink()).await;
-    assert!(
-        result.is_ok(),
-        "revert-sequence resolve should succeed: {:?}",
-        result
-    );
-
-    assert!(
-        is_clean(dir.path()),
-        "revert sequence must be finalized (sequencer cleared)"
-    );
-    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
-    assert!(!file_has_markers(dir.path(), "tracked.txt"));
+    resolve_finalizes_clean(dir.path(), git::RepoState::RevertSequence).await;
 }
 
 /// Delete/modify conflict (master deleted, other modified) is classified
