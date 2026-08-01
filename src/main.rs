@@ -215,32 +215,63 @@ async fn generate_and_commit(
     Ok(())
 }
 
-/// Stage every change in one batch. Each file's selected hunks (the whole file
-/// when the plan left `hunks` empty) are applied from the diff captured before
-/// the loop, so hunk numbering stays stable across earlier commits to the same
-/// file.
-/// Map one file's plan-time hunk indices onto the file's *current*
-/// index→workdir diff, dropping hunks an earlier batch already committed.
+/// One file's planned hunks for a batch, split into two views that must
+/// never be confused:
 ///
-/// `planned` is the plan's `hunks` array for the file (empty = every hunk);
-/// `committed` is the set of original hunk indices already landed by earlier
-/// batches; `current_count` is how many hunks the current diff still has. The
-/// current diff keeps only the uncommitted hunks, in their original relative
-/// order, so original hunk `h` appears at position `h - (#committed < h)`.
-fn remaining_hunks_in_current(
+/// - `original`: 1-based indices in the file's **plan-time** diff — the
+///   numbering the model saw and the plan refers to. Recorded into `committed`
+///   so it stays stable for the rest of the Run.
+/// - `current`: matching 1-based positions in the file's **current**
+///   index→workdir diff — what `Git::stage_hunks` must index into, because an
+///   earlier batch (or a pre-commit hook) may have already landed some hunks
+///   and shrunk the diff.
+///
+/// Hunks already committed are dropped from both. Surviving hunks keep their
+/// original relative order, so an uncommitted original hunk `h` lands at
+/// current position `h - (#committed original indices < h)`. Splitting the two
+/// spaces into named fields (rather than returning one ambiguous `Vec`) is
+/// what stops callers from writing a remapped position back as an original
+/// index — the class of bug that aborted 3+-hunks-one-file Runs.
+struct HunkMapping {
+    original: Vec<usize>,
+    current: Vec<usize>,
+}
+
+/// Resolve a batch's planned hunks for one file against what's already
+/// committed.
+///
+/// `planned` is the plan's `hunks` array for the file (empty = every hunk of
+/// the file); `committed` is the set of **original** hunk indices already
+/// landed by earlier batches; `current_count` is how many hunks the current
+/// diff still has. When `planned` is empty the original count is reconstructed
+/// as `current_count + committed.len()` (each committed hunk removed one from
+/// the current diff).
+fn map_planned_hunks(
     planned: &[usize],
     committed: &HashSet<usize>,
     current_count: usize,
-) -> Vec<usize> {
-    let all: Vec<usize> = if planned.is_empty() {
+) -> HunkMapping {
+    // Empty `planned` means "the whole file"; rebuild the original hunk count
+    // from what the current diff still shows plus what's already gone.
+    let wanted: Vec<usize> = if planned.is_empty() {
         (1..=(current_count + committed.len())).collect()
     } else {
         planned.to_vec()
     };
-    all.into_iter()
-        .filter(|h| !committed.contains(h))
-        .map(|h| h - committed.iter().filter(|&&c| c < h).count())
-        .collect()
+
+    let mut original = Vec::with_capacity(wanted.len());
+    let mut current = Vec::with_capacity(wanted.len());
+    for h in wanted {
+        if committed.contains(&h) {
+            continue;
+        }
+        // Every committed original hunk before `h` shifts it down by one slot
+        // in the current (shrunk) diff.
+        let shift = committed.iter().filter(|&&c| c < h).count();
+        original.push(h);
+        current.push(h - shift);
+    }
+    HunkMapping { original, current }
 }
 
 /// Stage one batch's hunks from the *current* index→workdir diff and return
@@ -271,13 +302,15 @@ fn stage_batch_hunks(
         }
         let patch = git::parse_file_patch(&current);
         let committed = committed_hunks.entry(change.file.clone()).or_default();
-        let hunks = remaining_hunks_in_current(&change.hunks, committed, patch.hunks.len());
-        if hunks.is_empty() {
+        let mapping = map_planned_hunks(&change.hunks, committed, patch.hunks.len());
+        if mapping.current.is_empty() {
             continue;
         }
-        Git::stage_hunks(&current, &hunks)
+        Git::stage_hunks(&current, &mapping.current)
             .with_context(|| format!("staging hunks for {}", change.file))?;
-        committed.extend(hunks.iter().copied());
+        // Record ORIGINAL indices (not the remapped current positions) so the
+        // plan-time numbering the model saw stays stable for later batches.
+        committed.extend(mapping.original);
         staged_paths.push(change.file.clone());
     }
     Ok(staged_paths)
@@ -711,29 +744,47 @@ mod tests {
     }
 
     #[test]
-    fn remaining_hunks_maps_original_indices_onto_current_diff() {
-        // Hunks 1-2 already committed → plan's 3-7 map onto the current diff's 1-5.
+    fn map_planned_hunks_splits_original_and_current_indices() {
+        // Hunks 1-2 already committed → plan's 3-7 survive as original 3-7 and
+        // map onto the current diff's 1-5. The two views differ precisely when
+        // something is committed; conflating them is the bug this struct exists
+        // to prevent, so assert both.
         let committed: HashSet<usize> = [1usize, 2].into_iter().collect();
-        assert_eq!(
-            remaining_hunks_in_current(&[3, 4, 5, 6, 7], &committed, 5),
-            vec![1, 2, 3, 4, 5]
-        );
+        let m = map_planned_hunks(&[3, 4, 5, 6, 7], &committed, 5);
+        assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
+        assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
+
         // Empty planned hunks = every hunk of the file; the original count is
         // reconstructed as current + already-committed.
-        assert_eq!(
-            remaining_hunks_in_current(&[], &committed, 5),
-            vec![1, 2, 3, 4, 5]
-        );
-        // Nothing committed yet → indices pass through unchanged.
-        assert_eq!(
-            remaining_hunks_in_current(&[1, 2], &HashSet::new(), 2),
-            vec![1, 2]
-        );
-        // Interleaved committed hunks are dropped and positions recomputed.
+        let m = map_planned_hunks(&[], &committed, 5);
+        assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
+        assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
+
+        // Nothing committed yet → both views pass through unchanged.
+        let m = map_planned_hunks(&[1, 2], &HashSet::new(), 2);
+        assert_eq!(m.original, vec![1, 2]);
+        assert_eq!(m.current, vec![1, 2]);
+
+        // Interleaved committed hunks are dropped and current positions
+        // recomputed.
         let committed: HashSet<usize> = [1usize, 3, 5].into_iter().collect();
-        assert_eq!(
-            remaining_hunks_in_current(&[2, 4, 6], &committed, 3),
-            vec![1, 2, 3]
-        );
+        let m = map_planned_hunks(&[2, 4, 6], &committed, 3);
+        assert_eq!(m.original, vec![2, 4, 6]);
+        assert_eq!(m.current, vec![1, 2, 3]);
+
+        // The regression: three hunks of one file, split across three batches
+        // with NO hook. After batch 1 commits original hunk 1, batch 2's hunk
+        // 2 must map to current position 1; after batch 2, hunk 3 must map to
+        // current position 1 of a 1-hunk diff. Storing the remapped position
+        // (1) instead of the original (2 / 3) here used to corrupt `committed`
+        // and make batch 3 address a non-existent hunk 2.
+        let mut committed: HashSet<usize> = [1usize].into_iter().collect();
+        let m = map_planned_hunks(&[2], &committed, 2);
+        assert_eq!(m.original, vec![2]);
+        assert_eq!(m.current, vec![1]);
+        committed.extend(m.original);
+        let m = map_planned_hunks(&[3], &committed, 1);
+        assert_eq!(m.original, vec![3]);
+        assert_eq!(m.current, vec![1]);
     }
 }

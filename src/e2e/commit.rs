@@ -696,3 +696,88 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
         "working tree must be clean after the Run"
     );
 }
+
+/// Regression for the 3+-hunks-one-file case. The two-batch split test above
+/// (`commit_splits_one_file_across_two_batches`) hides it: with no pre-commit
+/// hook at all, splitting a single file's three hunks across three batches
+/// must still land one commit per hunk. An earlier hook-survival fix once
+/// stored *current* (remapped) hunk positions back into the per-file
+/// `committed` set instead of *original* indices — so batch 2 recorded
+/// position 1 instead of original hunk 2, batch 3 then addressed "hunk 2 of a
+/// 1-hunk diff" and the Run aborted. This test pins the original-index
+/// bookkeeping end-to-end.
+#[tokio::test]
+async fn commit_splits_one_file_across_three_batches() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // Three change sites, each padded far enough apart that git emits three
+    // separate hunks.
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}b0\n{pad}c0\n");
+    let changed = format!("a1\n{pad}b1\n{pad}c1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    // Stub plan: split the single file's three hunks across three batches.
+    let mk = |h: usize| generator::BatchPlanBatch {
+        changes: vec![generator::BatchChange {
+            file: "tracked.txt".to_string(),
+            hunks: vec![h],
+        }],
+        reason: Some(format!("change {h}")),
+    };
+    let plan = generator::BatchPlanOutput {
+        batches: vec![mk(1), mk(2), mk(3)],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: stub"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "three-batch split should succeed: {:?}",
+        result
+    );
+
+    // One commit per batch — three new commits over the base.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 3,
+        "three batches must land three commits, one per batch"
+    );
+    // Each commit carries exactly its prefix of hunks — no leak forward, no
+    // skip. HEAD~2 is batch 1 (a1 only), HEAD~1 adds batch 2 (b1), HEAD adds
+    // batch 3 (c1).
+    let head2 = file_at_ref(dir.path(), "HEAD~2", "tracked.txt");
+    assert!(head2.contains("a1"), "batch 1 must include hunk 1");
+    assert!(
+        !head2.contains("b1") && !head2.contains("c1"),
+        "batch 1 must be hunk 1 only"
+    );
+    let head1 = file_at_ref(dir.path(), "HEAD~1", "tracked.txt");
+    assert!(
+        head1.contains("a1") && head1.contains("b1"),
+        "batches 1 and 2 must be applied by HEAD~1"
+    );
+    assert!(!head1.contains("c1"), "batch 2 must not include hunk 3");
+    let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(
+        head.contains("a1") && head.contains("b1") && head.contains("c1"),
+        "all three hunks must be committed by HEAD"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean at the end"
+    );
+}
