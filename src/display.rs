@@ -399,6 +399,12 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
 
+    // `console` reads the process-global `colors_enabled()` flag at format
+    // time, so every test that flips it via `ColorGuard` races every other.
+    // Lock here for the whole test body to serialize the color-env tests and
+    // keep the suite safe to run multi-threaded.
+    static COLOR_ENV: Mutex<()> = Mutex::new(());
+
     /// Forces `console` to emit ANSI escapes for the guard's lifetime,
     /// restoring the prior state on drop. `console::Style` only renders
     /// escapes when the global `colors_enabled()` is true; in the test runner
@@ -455,6 +461,7 @@ mod tests {
 
     #[test]
     fn truecolor_when_colors_enabled() {
+        let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with(Buf {
@@ -491,6 +498,7 @@ mod tests {
 
     #[test]
     fn fix_type_gets_yellow_orange_color() {
+        let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with(Buf {
@@ -530,6 +538,7 @@ mod tests {
 
     #[test]
     fn no_colon_message_gets_gray_unknown_type() {
+        let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with(Buf {
