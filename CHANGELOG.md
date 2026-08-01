@@ -2,17 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.4.1] - 2026-08-01
 
-> 🎉 **Unreleased** — 4 changes · 1 contributor
+> 🎉 **0.4.1** — 7 changes · 1 contributor
 
 ### Features
 
 - Resolve contributor @handles via GitHub API (#54)
 - Contributor avatars in release notes (#55)
 - Contributor table — avatar + @handle below (#56)
-- Drop internal churn (test/refactor/ci/style/chore)
+- Cleaner release notes (noise, TL;DR, breaking, contributors) (#57)
 
+### Bug Fixes
+
+- Retry empty model responses instead of aborting the batch run (#59)
+- Survive pre-commit hooks that restage whole files (#61)
+
+### Refactors
+
+- Deepen six modules: staging, LLM seam, git handle, display width, conflict policy, diff parsing (#63)
 
 ### Contributors
 🎉 Thanks to the 1 contributor below!
