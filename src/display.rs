@@ -129,9 +129,10 @@ impl Display {
     }
 
     /// Effective text width for wrapped output: the terminal width clamped to
-    /// [`HARD_CAP`], minus both margins, floored at [`MIN_TEXT_WIDTH`] so a
-    /// tiny (or zero) reported width can't underflow into nonsense. `cols == 0`
-    /// (non-TTY / piped) resolves to [`FALLBACK_COLS`].
+    /// [`HARD_CAP`], minus both margins. `cols == 0` (non-TTY / piped) resolves
+    /// to [`FALLBACK_COLS`]. A sub-margin reported width saturates down to `0`,
+    /// which [`wrap_line`] treats as "don't wrap" — so a pathologically tiny
+    /// terminal never panics, it just emits the body unwrapped.
     fn text_width(&self) -> usize {
         let cols = if self.cols == 0 {
             FALLBACK_COLS
@@ -140,7 +141,6 @@ impl Display {
         };
         cols.min(HARD_CAP)
             .saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
-            .max(MIN_TEXT_WIDTH)
     }
 
     // ------------------------------------------------------------------
@@ -475,10 +475,6 @@ const RIGHT_MARGIN: usize = 2;
 /// body prose doesn't sprawl into 300-col spaghetti on ultrawide screens.
 const HARD_CAP: usize = 100;
 
-/// Floor for [`Display::text_width`] so a tiny / zero reported column count
-/// can't underflow the wrap budget into nonsense.
-const MIN_TEXT_WIDTH: usize = 20;
-
 /// Terminal width assumed when the real width is unknown (`cols == 0`, i.e.
 /// piped / non-TTY output). Matches console's own unix default.
 const FALLBACK_COLS: usize = 80;
@@ -490,6 +486,10 @@ const FALLBACK_COLS: usize = 80;
 /// callers feed it one source line at a time so existing newlines stay as hard
 /// breaks. A single token longer than `width` (e.g. a long URL) is hard-broken
 /// at the boundary; one ugly wrap beats a horizontal overflow.
+///
+/// `width == 0` disables wrapping entirely — the line returns as one piece,
+/// unchanged. [`Display::text_width`] yields `0` on a sub-margin terminal, so
+/// this guard is load-bearing there, not dead code.
 ///
 /// Returns at least one piece; an empty input yields `vec![""]` so blank
 /// source lines round-trip as a single empty piece.
@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn non_tty_fallback_width() {
         // cols=0 simulates unknown / non-TTY: text_width must fall back to
-        // FALLBACK_COLS (80) → wrap budget 76, not the MIN_TEXT_WIDTH floor.
+        // FALLBACK_COLS (80) → wrap budget 76.
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with_cols(
             Buf {
@@ -851,6 +851,25 @@ mod tests {
             );
         }
         assert_eq!(got[1..].join(" ").matches('w').count(), 50);
+    }
+
+    #[test]
+    fn sub_margin_terminal_emits_unwrapped_body() {
+        // cols below the combined margins saturate text_width to 0; wrap_line
+        // then returns the body as one piece instead of looping or panicking.
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            4,
+        );
+        d.commit_line("h000005", "feat: x", Some("supercalifragilistic token"), "");
+        let got = lines.lock().clone();
+        assert!(got[0].contains("feat: x"), "subject missing: {:?}", got[0]);
+        assert_eq!(got.len(), 2, "body should be one unwrapped piece: {got:?}");
+        assert!(got[1].ends_with("token"), "body tail lost: {:?}", got[1]);
     }
 
     #[test]
