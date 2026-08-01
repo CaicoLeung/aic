@@ -304,6 +304,34 @@ fn sink() -> Display {
     Display::with(BufferWrite::default())
 }
 
+/// Assert the resolve hand-off wording captured in `buf`:
+///   - the "not finalized" line exists and carries every `blocker` substring
+///     (e.g. `"1 rejected"`, `"1 failed to resolve"`), and
+///   - some line reports exactly `approved` staged resolutions
+///     (`"N resolved + staged"`).
+///
+/// Substring-based so each call site keeps the exact wording it pins; shared
+/// because the all-rejected and mixed-blocker tests assert the same hand-off
+/// shape, and a third hand-off test would otherwise copy it again.
+fn assert_not_finalized_handoff(buf: &BufferWrite, approved: u32, blockers: &[&str]) {
+    let lines = buf.lines();
+    let handoff = lines
+        .iter()
+        .find(|l| l.contains("not finalized"))
+        .expect("expected a hand-off 'not finalized' line");
+    for &blocker in blockers {
+        assert!(
+            handoff.contains(blocker),
+            "hand-off must report {blocker:?}, got: {handoff:?}"
+        );
+    }
+    let approved_count = format!("{approved} resolved + staged");
+    assert!(
+        lines.iter().any(|l| l.contains(approved_count.as_str())),
+        "hand-off must report {approved_count}, got: {lines:?}"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Shared repo setup helpers (git stays real).
 // ---------------------------------------------------------------------
@@ -834,6 +862,73 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
     assert!(is_clean(dir.path()), "merge must be finalized");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
     assert!(!file_has_markers(dir.path(), "tracked.txt"));
+}
+
+/// The third auto-detect combination (issue #32): the user accepts `resolve
+/// now?` — so the resolve workflow runs and the LLM proposes a resolution —
+/// but then rejects every proposed file. The sibling tests cover the two other
+/// exits from the auto-detect prompt: [`commit_run_auto_detect_aborts_when_user_declines`]
+/// (decline the offer outright, never reaching the resolver) and
+/// [`commit_run_auto_detect_yes_routes_to_full_resolve`] (accept then approve).
+/// The all-rejected hand-off is asserted piecewise by the direct-resolve
+/// partial-approval test, but never through the auto-detect entry point, so a
+/// regression that, say, finalized on an all-rejected repo or mis-counted the
+/// approved/rejected split *via the commit run* would ship green.
+///
+/// Contract pinned here: nothing is staged, the merge is NOT finalized (the
+/// rejected file stays unmerged with its markers), and the emitted hand-off
+/// reports zero approved plus one rejected.
+#[tokio::test]
+async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+
+    let resolver = resolver_returning("merged\n");
+    // [0] = "resolve now?" yes (route into the resolve workflow),
+    // [1] = "apply tracked.txt?" no (reject the only proposed resolution).
+    let _guard = gh::CwdGuard::new(dir.path());
+
+    let buf = BufferWrite::default();
+    let display = Display::with(buf.clone());
+    let result = run_commit_workflow_impl(
+        resolver,
+        prompt_queue(vec![true, false]),
+        display,
+        unreachable_planner(),
+        unreachable_messenger(),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "all-rejected hand-off should not error: {:?}",
+        result
+    );
+
+    // Approved count is zero → nothing was written or staged. The rejected
+    // file is untouched: still unmerged, still carrying its conflict markers,
+    // and NOT holding the resolver's proposed content.
+    assert!(
+        !is_clean(dir.path()),
+        "an all-rejected run must NOT finalize the merge"
+    );
+    assert!(
+        file_has_markers(dir.path(), "tracked.txt"),
+        "rejected file must keep its conflict markers"
+    );
+    assert!(
+        is_unmerged(dir.path(), "tracked.txt"),
+        "rejected file must stay unmerged in the index"
+    );
+    assert_ne!(
+        read_file(dir.path(), "tracked.txt"),
+        "merged\n",
+        "the rejected resolution must NOT be written to the worktree"
+    );
+
+    // The whole point: the hand-off reports the all-rejected outcome —
+    // zero approved, exactly one rejected, and the merge is not finalized.
+    assert_not_finalized_handoff(&buf, 0, &["1 rejected"]);
 }
 
 /// Headline hunk-split behavior: one file with two unrelated changes lands as
@@ -2048,26 +2143,17 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
         "resolver runs once per resolvable text file (errors do not retry)"
     );
 
-    // --- the whole point: the emitted hand-off line carries all three
-    // categories with correct counts, on one line. ---
-    let handoff = buf
-        .lines()
-        .into_iter()
-        .find(|l| l.contains("not finalized"))
-        .expect("expected a hand-off 'not finalized' line");
-    assert!(
-        handoff.contains("1 rejected")
-            && handoff.contains("1 failed to resolve")
-            && handoff.contains("1 need manual resolution"),
-        "hand-off line must list all three blocker kinds with counts, got: {handoff:?}"
-    );
-    // And the approved count is reported separately, not conflated.
-    assert!(
-        buf.lines()
-            .iter()
-            .any(|l| l.contains("1 resolved + staged")),
-        "expected an 'approved' line separate from the blockers, got: {:?}",
-        buf.lines()
+    // --- the whole point: the emitted hand-off line carries all three blocker
+    // categories with correct counts on one line, plus the single approved
+    // resolution reported separately (not conflated with the blockers). ---
+    assert_not_finalized_handoff(
+        &buf,
+        1,
+        &[
+            "1 rejected",
+            "1 failed to resolve",
+            "1 need manual resolution",
+        ],
     );
 
     // The buffer sink reports no color capability, so nothing it captures
