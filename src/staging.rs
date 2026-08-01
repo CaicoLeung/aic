@@ -33,6 +33,12 @@ pub struct Staging {
     committed_hunks: HashMap<String, HashSet<usize>>,
 }
 
+impl Default for Staging {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Staging {
     pub fn new() -> Self {
         Self {
