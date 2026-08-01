@@ -985,6 +985,11 @@ pub(crate) mod tests {
         let mut config = repo.config().unwrap();
         config.set_str("user.name", "test").unwrap();
         config.set_str("user.email", "test@test.com").unwrap();
+        // Pin line-ending handling so test repos are deterministic across
+        // platforms: Windows defaults to core.autocrlf=true, which rewrites
+        // working-tree files to CRLF on checkout and breaks LF assertions
+        // (e.g. e2e::resolve::resolve_finalizes_cherry_pick_sequence).
+        config.set_str("core.autocrlf", "false").unwrap();
 
         std::fs::write(dir.join("tracked.txt"), "original\n").unwrap();
         let mut index = repo.index().unwrap();
@@ -1128,8 +1133,12 @@ index 1..2 100644\n\
             msg.contains("does not exist in index"),
             "git's real stderr must be surfaced: {msg}"
         );
+        // ExitStatus renders as "exit status: N" on Unix and "exit code: N"
+        // on Windows (a std::os Display difference), so accept either — the
+        // point is that the non-zero exit info is surfaced, never a bare
+        // message.
         assert!(
-            msg.contains("exit status"),
+            msg.contains("exit status") || msg.contains("exit code"),
             "exit status must be surfaced: {msg}"
         );
     }
