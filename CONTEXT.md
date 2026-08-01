@@ -45,3 +45,25 @@ _Avoid_: fix, merged file, resolved content
 **Finalize**:
 The git operation that ends a Conflict after all its Resolutions are approved: `git commit` for a Merge, `git cherry-pick --continue` for a CherryPick, `git revert --continue` for a Revert. aic finalizes with git's default message — it does not call the LLM for a Finalize message.
 _Avoid_: complete, finish, commit (overloaded — see Run, Drafted Message)
+
+### Resume
+
+**Run state**:
+The persisted snapshot of an interrupted batch-plan Run, written to `.aic/active.json` (gitignored, auto-ensured). Holds the frozen Batch plan, the per-file captured diffs, a content Fingerprint of every planned file, the HEAD oid at plan time, and each Batch's progress. Its presence is the resume-available signal; it is deleted on clean completion.
+_Avoid_: checkpoint, save file, session state
+
+**Resume**:
+Replaying a Run state's pending Batches from the frozen snapshot — staging and committing exactly as the live Run would — without re-planning or re-capturing diffs. Triggered by auto-detect on a fresh Run (with a y/n offer) or the `--resume` flag; suppressed by `--no-resume`.
+_Avoid_: recover, restore, continue
+
+**Deferred batch**:
+A Batch skipped during Resume because one of its files drifted since plan time (Fingerprint mismatch). Its change is left unstaged and never lost; the rest of the Run still completes. The user re-runs `aic` to plan the deferred change fresh.
+_Avoid_: skipped batch, dropped batch, failed batch
+
+**Fingerprint**:
+The hex SHA-256 of a worktree file's bytes, captured at plan time and recomputed on Resume. A mismatch between the stored and current Fingerprint is what defers a Batch — it guards against replaying a stale diff snapshot.
+_Avoid_: hash, checksum, signature
+
+**Run log**:
+The permanent append-only timeline at `.aic/run.log` (gitignored) — one timestamped line per plan/commit/failure/resume event across all Runs, for post-mortem auditing. Best-effort; never load-bearing.
+_Avoid_: history, audit trail, journal
