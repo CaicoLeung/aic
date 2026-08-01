@@ -11,7 +11,8 @@ on:
     - cron: '0 3 * * 1'
 
 jobs:
-  check:
+  # fmt + clippy are OS-independent — run once on linux.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,8 +22,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy -- -D warnings
+
+  # cargo test covers both #[test] unit tests and the src/e2e/ suite
+  # (real-git tempdir tests with a stubbed LLM). Windows is a shipped
+  # release target (see release.yml), so we matrix here to catch path /
+  # CRLF / hook-shell-out regressions before they ship.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test
-      - run: bash scripts/test_release.sh
+      # Bash release-helper unit tests — POSIX mktemp syntax, linux-only.
+      - if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/test_release.sh
 
   deny:
     runs-on: ubuntu-latest
