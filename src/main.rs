@@ -127,14 +127,16 @@ async fn generate_and_commit(
 }
 
 /// Read a y/n answer from stdin. The label is written to stderr (Display is
-/// stderr-only) so piped stdout stays clean.
+/// stderr-only) so piped stdout stays clean. An empty answer (just Enter)
+/// defaults to `true` (yes); `n` / `no` / any other input returns `false`.
 fn prompt_yes_no(label: &str) -> anyhow::Result<bool> {
     use std::io::Write as _;
     eprint!("{label} [y/n] ");
     std::io::stderr().flush()?;
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
-    Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
+    let trimmed = input.trim().to_lowercase();
+    Ok(matches!(trimmed.as_str(), "" | "y" | "yes"))
 }
 
 /// Unified line diff between two strings for the resolution review (ADR 0005).
