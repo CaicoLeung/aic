@@ -125,6 +125,30 @@ impl RunState {
         out
     }
 
+    /// The HEAD oid the resume replay *assumes* is current: the sha of the
+    /// last batch that made a real commit, or the plan-time HEAD if no batch
+    /// committed yet. Batches recorded `Committed` with an empty sha ("nothing
+    /// left to stage" — a pre-commit hook landed their change via an earlier
+    /// batch) do *not* advance HEAD, so they are skipped. Returns `None` only
+    /// when this cannot be determined (no committed sha and an empty plan-time
+    /// HEAD); the caller then skips the drift check rather than aborting.
+    ///
+    /// The returned string is a *prefix* of the full oid (a 7-char commit sha
+    /// from `Git::commit`, or git's variable-length `--short` for the plan-time
+    /// HEAD). The caller matches it as a prefix against the full current HEAD,
+    /// so the two abbreviation forms never produce a false mismatch.
+    pub fn expected_head(&self) -> Option<&str> {
+        for entry in self.batches.iter().rev() {
+            if let BatchEntry::Committed { sha } = entry
+                && !sha.is_empty()
+            {
+                return Some(sha.as_str());
+            }
+        }
+        let h = self.head_at_plan.trim();
+        (!h.is_empty()).then_some(h)
+    }
+
     /// Atomically write state to `.aic/active.json` (temp + rename). Ensures
     /// `.aic/` is gitignored first so the state file never appears as an
     /// unstaged change in the next Run.
@@ -194,73 +218,93 @@ pub fn log(line: &str) {
     }
 }
 
-/// Exclusive advisory lock at `.aic/lock`. Created with `O_CREAT|O_EXCL` and
-/// stamped with the owner's PID; a second concurrent `aic` in the same
-/// worktree is refused — *unless* the held lock's owner is no longer alive
-/// (Unix), in which case the stale lock is reclaimed. Removed on drop.
+/// Exclusive advisory lock at `.aic/lock`. On Unix the lock is a kernel
+/// `flock(2)` on a held file descriptor — acquired atomically by the kernel
+/// and released automatically when the process exits (even on crash or
+/// `kill -9`), so an interrupted Run can never wedge future Runs and there is
+/// no stale sentinel to sniff or reclaim. On non-Unix (where `flock` is not
+/// available) the lock falls back to an `O_EXCL` sentinel file: first writer
+/// wins, with no self-heal (a crash leaves the sentinel until manual removal)
+/// but — having no reclaim step — no reclaim *race* either.
+///
+/// The lock file is a permanent target, never removed: unlinking it while it
+/// might be open would hand a fresh inode to a concurrent opener and silently
+/// break exclusion (the new fd flocks a different inode). It lives under the
+/// gitignored `.aic/`, so it never appears in `git status`.
 pub struct RunLock {
+    /// Held open for its Drop side-effect: closing the fd releases the flock.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    file: std::fs::File,
+    #[cfg(not(unix))]
     path: PathBuf,
 }
 
 impl RunLock {
-    /// Acquire the lock, refusing if a *live* Run holds it. A lock whose owner
-    /// process has died (crash, kill -9) is reclaimed so an interrupt can never
-    /// wedge future Runs.
+    /// Acquire the lock, refusing if another live Run already holds it.
     pub fn acquire() -> Result<Self> {
         let dir = aic_dir()?;
         std::fs::create_dir_all(&dir)?;
         ensure_self_ignored(&dir);
         let path = dir.join(LOCK);
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut f) => {
-                    // Stamp the owner PID so a later acquire can tell a live
-                    // holder from a crashed one. Write failures (read-only fs,
-                    // full disk) are non-fatal: the lock still excludes via its
-                    // mere existence, just without self-heal.
-                    let _ = write!(f, "{}", std::process::id());
-                    return Ok(Self { path });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if owner_alive(&path)? {
-                        anyhow::bail!(
-                            "another aic run is in progress in this worktree; \
-                             remove .aic/lock only if you are sure it is stale"
-                        );
-                    }
-                    // Stale lock (owner gone) — remove and retry the create.
-                    let _ = std::fs::remove_file(&path);
-                    continue;
-                }
-                Err(e) => return Err(e).with_context(|| format!("acquire {path:?}")),
-            }
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                file: flock_acquire(&path)?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .with_context(|| format!("acquire lock {path:?}"))?;
+            Ok(Self { path })
         }
     }
 }
 
-/// Whether the RunLock at `path` is held by a still-living process. On Unix we
-/// read the stamped PID and probe it with `kill(pid, 0)`; a dead owner yields
-/// `false` so the caller reclaims. On non-Unix we can't probe, so we conservatively
-/// assume the lock is live (never auto-reclaim — manual removal stays the escape).
+/// Open (creating if absent) the Unix lock *target* and take a non-blocking
+/// exclusive `flock` on it. The file is just a stable inode to lock; mutual
+/// exclusion is the advisory lock on the returned fd, NOT the file's
+/// existence — so `O_CREAT` (not `O_EXCL`) sidesteps the reclaim race: two
+/// concurrent openers get the same inode and contend on `flock`, which the
+/// kernel arbitrates atomically.
 #[cfg(unix)]
-fn owner_alive(path: &Path) -> Result<bool> {
-    let pid_str = std::fs::read_to_string(path).unwrap_or_default();
-    let Some(pid) = pid_str.trim().parse::<i32>().ok() else {
-        return Ok(false); // unreadable / unparseable → treat as stale
-    };
-    // kill(pid, 0) sends no signal; it only checks the process exists.
-    //   0         → process exists (alive)
-    //   -1, ESRCH → no such process (stale lock → reclaim)
-    //   -1, EPERM → exists but we may not signal it (assume alive)
-    let alive = unsafe { libc::kill(pid, 0) == 0 };
-    Ok(alive)
+fn flock_acquire(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("open lock target {path:?}"))?;
+    // LOCK_NB: fail at once if held, instead of blocking the Run forever.
+    // EWOULDBLOCK/EAGAIN → another live Run holds it; any other errno is a
+    // real I/O error surfaced to the caller.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = std::io::Error::last_os_error();
+        // EWOULDBLOCK and EAGAIN share the same value on every Rust Unix
+        // target, so one comparison covers both "would block" errno forms.
+        let held = e.raw_os_error() == Some(libc::EWOULDBLOCK);
+        if held {
+            anyhow::bail!(
+                "another aic run is in progress in this worktree; \
+                 it releases automatically when that run exits"
+            );
+        }
+        return Err(e).with_context(|| format!("flock {path:?}"));
+    }
+    Ok(file)
 }
 
+// Only the non-Unix sentinel path needs a Drop (to remove the file it
+// created). On Unix the held fd is the lock: RunLock has no custom Drop, so
+// dropping the struct closes the fd and the kernel releases the flock — the
+// canonical release path, and exactly what happens on a crash.
 #[cfg(not(unix))]
-fn owner_alive(_path: &Path) -> Result<bool> {
-    Ok(true)
-}
-
 impl Drop for RunLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -335,52 +379,95 @@ mod tests {
         assert_eq!(iso_utc(946_684_799), "1999-12-31T23:59:59Z");
     }
 
-    // --- RunLock stale-heal (Unix PID-based reclaim) --------------------------
+    // --- RunLock (kernel flock exclusion) ------------------------------------
     //
-    // A lock left behind by a crashed `aic` must not wedge future runs. The
-    // owner PID stamped into the lock is probed with `kill(pid, 0)`; a dead
-    // owner yields "stale" so `RunLock::acquire` reclaims the file.
+    // The lock is a `flock` on a held fd: a second acquire on the same target
+    // fails at once, and dropping the holder (closing the fd) lets the next
+    // acquire succeed — which is also exactly what the kernel does on a crash,
+    // so an interrupted run can never wedge future ones. These exercise
+    // `flock_acquire` on arbitrary temp paths (bypassing `aic_dir`/git).
 
     #[cfg(unix)]
     #[test]
-    fn owner_alive_detects_a_dead_pid() {
-        // Spawn a child, read its PID, reap it — now the PID is guaranteed dead.
-        let dead_pid = {
-            let mut child = std::process::Command::new("true").spawn().unwrap();
-            let pid = child.id() as i32;
-            child.wait().unwrap();
-            pid
+    fn flock_lock_excludes_a_second_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let _first = flock_acquire(&path).expect("first acquire must succeed");
+        let err =
+            flock_acquire(&path).expect_err("a second acquire while the first is held must fail");
+        assert!(
+            err.to_string().contains("another aic run"),
+            "expected the in-progress message, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flock_lock_releases_on_drop_so_it_can_be_reacquired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        {
+            let _first = flock_acquire(&path).expect("first acquire");
+        } // dropped → fd closed → flock released by the kernel
+        flock_acquire(&path).expect("re-acquire after the holder dropped must succeed");
+    }
+
+    // --- RunState::expected_head (resume base-drift predicate) ---------------
+
+    fn empty_state(head: &str) -> RunState {
+        RunState {
+            created_at: 0,
+            head_at_plan: head.into(),
+            plan: crate::generator::BatchPlanOutput {
+                batches: vec![crate::generator::BatchPlanBatch {
+                    changes: vec![],
+                    reason: None,
+                }],
+            },
+            raw_diffs: Default::default(),
+            file_hashes: Default::default(),
+            batches: vec![BatchEntry::Pending],
+        }
+    }
+
+    #[test]
+    fn expected_head_falls_back_to_plan_head_with_no_commits() {
+        // Nothing committed yet → the replay assumes the plan-time HEAD.
+        let rs = empty_state("abc1234");
+        assert_eq!(rs.expected_head(), Some("abc1234"));
+    }
+
+    #[test]
+    fn expected_head_is_the_last_real_commit_sha() {
+        // A committed batch supersedes the plan-time HEAD as the assumed tip.
+        let mut rs = empty_state("abc1234");
+        rs.batches[0] = BatchEntry::Committed {
+            sha: "deadbeef".into(),
         };
-        let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join("lock");
-        std::fs::write(&lock, dead_pid.to_string()).unwrap();
-        assert!(
-            !owner_alive(&lock).unwrap(),
-            "a reaped process's lock must be detected as stale"
+        assert_eq!(rs.expected_head(), Some("deadbeef"));
+
+        // A "nothing left to stage" batch (empty sha) does NOT advance HEAD —
+        // the last real commit remains the tip.
+        rs.batches.push(BatchEntry::Pending);
+        rs.batches
+            .push(BatchEntry::Committed { sha: String::new() });
+        assert_eq!(
+            rs.expected_head(),
+            Some("deadbeef"),
+            "an empty-sha (nothing-staged) batch must not become the tip"
         );
+
+        // A later real commit becomes the new tip.
+        rs.batches[2] = BatchEntry::Committed {
+            sha: "cafebabe".into(),
+        };
+        assert_eq!(rs.expected_head(), Some("cafebabe"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn owner_alive_detects_a_live_pid() {
-        // Our own process is alive → its lock is not stale.
-        let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join("lock");
-        std::fs::write(&lock, std::process::id().to_string()).unwrap();
-        assert!(
-            owner_alive(&lock).unwrap(),
-            "the current process's lock must be detected as live"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn owner_alive_treats_an_unparseable_lock_as_stale() {
-        // A corrupt or empty lock file can't identify a live owner → treat as
-        // stale so acquire reclaims instead of wedging.
-        let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join("lock");
-        std::fs::write(&lock, "not-a-pid").unwrap();
-        assert!(!owner_alive(&lock).unwrap());
+    fn expected_head_is_none_when_undeterminable() {
+        // No committed sha and an empty plan-time HEAD → can't validate.
+        let rs = empty_state("");
+        assert_eq!(rs.expected_head(), None);
     }
 }

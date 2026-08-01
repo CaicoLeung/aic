@@ -292,3 +292,69 @@ async fn resume_offer_declined_discards_and_runs_fresh() {
         "state cleared after the fresh run"
     );
 }
+
+/// If HEAD moved since the plan was captured (a manual commit, amend, rebase,
+/// …) the frozen snapshot may no longer apply to the current base. Resume must
+/// detect this and bail with a clear message — *before* staging a stale patch
+/// — and must leave the in-flight state intact (recoverable / inspectable) and
+/// the pending change untouched in the worktree.
+#[tokio::test]
+async fn resume_bails_when_head_moved_since_plan() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let plan = two_hunk_repo(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+    partial_failure(plan).await; // batch 1 committed, batch 2 pending (+staged)
+
+    // Externally advance HEAD after the interrupt, as a manual commit would.
+    // Unstage batch 2's hunk first so the empty commit doesn't absorb it; the
+    // worktree keeps the pending change, so its fingerprint still matches the
+    // plan-time one — meaning the bail below is provably from the HEAD check,
+    // not an integrity deferral.
+    git_in(dir.path(), &["reset", "--quiet", "HEAD"]);
+    git_in(
+        dir.path(),
+        &["commit", "--allow-empty", "-m", "external move"],
+    );
+    let commits_before = commit_count(dir.path());
+
+    let buf = BufferWrite::default();
+    let rs = runstate::RunState::load()
+        .unwrap()
+        .expect("state present before resume");
+    let err = run_resume_workflow_impl(
+        Display::with(buf.clone()),
+        messenger_fixed("should not be used"),
+        rs,
+    )
+    .await
+    .expect_err("a moved HEAD must abort resume, not replay a stale snapshot");
+    assert!(
+        err.to_string().contains("HEAD moved"),
+        "expected the HEAD-drift message, got: {err}"
+    );
+
+    // Nothing was committed by the aborted resume.
+    assert_eq!(
+        commit_count(dir.path()),
+        commits_before,
+        "an aborted resume must not create a commit"
+    );
+    // The pending change survives untouched in the worktree.
+    assert!(
+        read_file(dir.path(), "tracked.txt").contains("c1"),
+        "the pending change must remain in the worktree"
+    );
+    // State persists (not cleared) so it's recoverable / inspectable.
+    assert!(
+        runstate::RunState::load().unwrap().is_some(),
+        "state must persist after a HEAD-drift abort"
+    );
+    // The abort happened before the "resuming:" header was printed.
+    let rendered = buf.lines().join("\n");
+    assert!(
+        !rendered.contains("resuming:"),
+        "a HEAD-drift abort must not print the resume-start header: {rendered}"
+    );
+}

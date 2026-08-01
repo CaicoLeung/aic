@@ -698,6 +698,15 @@ impl Git {
         Ok(head.trim().to_string())
     }
 
+    /// Full (40-char) HEAD oid. Used by resume's HEAD-drift check, which must
+    /// match the current tip against the prefix stored in the run state (a
+    /// commit sha or a `--short` oid) regardless of how that prefix was
+    /// abbreviated — so it reads the full oid and matches as a prefix.
+    pub fn head_full() -> anyhow::Result<String> {
+        let head = run_git(&["rev-parse", "HEAD"], None, &[]).context("failed to resolve HEAD")?;
+        Ok(head.trim().to_string())
+    }
+
     /// Mixed-reset the index to HEAD (unstage everything, leave the workdir
     /// untouched). Resume replay calls this before staging each pending batch
     /// so a batch that staged its hunks then failed before committing does not

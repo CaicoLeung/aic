@@ -747,6 +747,38 @@ pub(crate) async fn run_resume_workflow_impl(
     runstate::log(&format!(
         "resume started: {committed_before}/{count} batch(es) already committed"
     ));
+
+    // Base drift: the frozen snapshot was captured against a specific HEAD,
+    // and the live Run advanced HEAD to the last committed batch's sha. If
+    // anything moved HEAD outside the Run since then (a manual commit, amend,
+    // rebase, pull), the captured diffs may no longer apply to the current
+    // base — replaying them could stage a wrong patch. Detect it here and bail
+    // with a clear, actionable message, instead of letting it surface later as
+    // an opaque `git apply` context mismatch. The fingerprint check below only
+    // guards worktree content; this guards the index/HEAD base.
+    let expected = rs.expected_head().map(str::to_owned);
+    let actual = Git::head_full().ok();
+    let head_drifted = match (&expected, &actual) {
+        (Some(exp), Some(now)) => !now.starts_with(exp.as_str()),
+        // Can't determine the expected or current HEAD → don't abort on it.
+        _ => false,
+    };
+    if head_drifted {
+        let exp = expected.as_deref().unwrap_or("?");
+        let now = actual
+            .as_deref()
+            .map(|s| &s[..7.min(s.len())])
+            .unwrap_or("?");
+        runstate::log(&format!(
+            "resume aborted: HEAD moved since the plan (expected {exp}, now {now})"
+        ));
+        anyhow::bail!(
+            "HEAD moved since the plan was captured (expected {exp}, now {now}) — \
+             the frozen snapshot may no longer apply to the current base. Re-run \
+             `aic` to plan the remaining changes fresh, or `aic --no-resume` to \
+             discard the interrupted plan."
+        );
+    }
     display.resume_start(committed_before, count);
 
     // Integrity: defer pending batches whose files drifted since plan time.
