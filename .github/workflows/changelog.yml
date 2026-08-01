@@ -21,6 +21,9 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      # git-cliff's [remote.github] needs a token to resolve @handles for the
+      # Contributors section; same secret already used by the release-edit step.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:

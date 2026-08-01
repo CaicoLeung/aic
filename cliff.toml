@@ -16,10 +16,10 @@ body = """
             {% if commit.breaking %} (**BREAKING**){% endif %}\
     {% endfor %}
 {% endfor %}\
-{% set names = commits | map(attribute="author") | map(attribute="name") | unique %}
+{% set handles = commits | map(attribute="github.username") | unique %}
 ### Contributors
-{% for name in names %}- {{ name }}
-{% endfor %}\n
+{% for handle in handles %}{% if handle and not handle is containing("[bot]") %}- @{{ handle }}
+{% endif %}{% endfor %}\n
 """
 trim = true
 footer = ""
@@ -48,3 +48,7 @@ protect_breaking_commits = false
 filter_commits = false
 tag_pattern = "v[0-9].*"
 sort_commits = "oldest"
+
+[remote.github]
+owner = "CaicoLeung"
+repo = "aic"
