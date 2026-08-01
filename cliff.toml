@@ -9,15 +9,18 @@ body = """
 {% else %}\
     ## [Unreleased]
 {% endif %}\
-{% for group, commits in commits | group_by(attribute="group") %}
+{% set handles = commits | map(attribute="github.username") | unique %}
+    > 🎉 **{% if version %}{{ version | trim_start_matches(pat="v") }}{% else %}Unreleased{% endif %}** — {{ commits | length }} change{{ commits | length | pluralize }} · {{ handles | length }} contributor{{ handles | length | pluralize }}
+{% for group, gcommits in commits | group_by(attribute="group") %}
     ### {{ group | striptags | trim | upper_first }}
-    {% for commit in commits %}
+    {% for commit in gcommits %}
         - {{ commit.message | upper_first }}\
             {% if commit.breaking %} (**BREAKING**){% endif %}\
     {% endfor %}
-{% endfor %}\
-{% set handles = commits | map(attribute="github.username") | unique %}
+{% endfor %}
+
 ### Contributors
+🎉 Thanks to the {{ handles | length }} contributor{{ handles | length | pluralize }} below!
 <table><tr>{% for handle in handles %}{% if handle and not handle is containing("[bot]") %}<td align="center"><a href="https://github.com/{{ handle }}"><img src="https://github.com/{{ handle }}.png?size=96" width="64" height="64"><br><sub><b>@{{ handle }}</b></sub></a></td>{% endif %}{% endfor %}</tr></table>\n
 """
 trim = true
@@ -29,19 +32,20 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_parsers = [
-    { message = "^feat", group = "<!-- 0 -->Features" },
-    { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
-    { message = "^refactor", group = "<!-- 2 -->Refactoring" },
+    { message = "^[a-z]+.*!:", group = "<!-- 0 -->Breaking Changes" },
+    { message = "^feat", group = "<!-- 1 -->Features" },
+    { message = "^fix", group = "<!-- 2 -->Bug Fixes" },
+    { message = "^refactor", skip = true },
     { message = "^perf", group = "<!-- 3 -->Performance" },
-    { message = "^test", group = "<!-- 4 -->Testing" },
-    { message = "^doc", group = "<!-- 5 -->Documentation" },
-    { message = "^ci", group = "<!-- 7 -->Continuous Integration" },
+    { message = "^test", skip = true },
+    { message = "^doc", group = "<!-- 4 -->Documentation" },
+    { message = "^ci", skip = true },
     { message = "^chore\\(deps\\)", skip = true },
     { message = "^chore: update CHANGELOG", skip = true },
     { message = "^chore: bump version", skip = true },
     { message = "^chore\\(release\\)", skip = true },
-    { message = "^style", group = "<!-- 8 -->Styling" },
-    { message = "^chore", group = "<!-- 9 -->Miscellaneous" },
+    { message = "^style", skip = true },
+    { message = "^chore", skip = true },
 ]
 protect_breaking_commits = false
 filter_commits = false
