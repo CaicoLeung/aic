@@ -1,7 +1,7 @@
 use anyhow::Context;
 use git2::{DiffFormat, DiffLineType, ObjectType, Repository, Status, Tree};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
 #[derive(Debug, serde::Serialize)]
@@ -679,6 +679,32 @@ impl Git {
                 _ => {}
             }
         }
+        Ok(())
+    }
+
+    /// The repository's working directory (the checkout root), resolved from
+    /// the current directory. Used by the run-state layer to place `.aic/`.
+    pub fn workdir() -> anyhow::Result<PathBuf> {
+        let repo = Self::repo()?;
+        repo.workdir()
+            .map(|p| p.to_path_buf())
+            .context("repository has no working directory (bare repo)")
+    }
+
+    /// Short (7-char) HEAD oid, for stamping the plan's origin commit.
+    pub fn head_short() -> anyhow::Result<String> {
+        let head = run_git(&["rev-parse", "--short", "HEAD"], None, &[])
+            .context("failed to resolve HEAD")?;
+        Ok(head.trim().to_string())
+    }
+
+    /// Mixed-reset the index to HEAD (unstage everything, leave the workdir
+    /// untouched). Resume replay calls this before staging each pending batch
+    /// so a batch that staged its hunks then failed before committing does not
+    /// leave a dirty index that makes re-staging fail on a context mismatch.
+    pub fn reset_index_to_head() -> anyhow::Result<()> {
+        run_git(&["reset", "--mixed", "--quiet", "HEAD"], None, &[])
+            .context("failed to reset index to HEAD")?;
         Ok(())
     }
 
