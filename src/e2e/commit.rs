@@ -605,3 +605,252 @@ async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
         "the change must remain unstaged (not staged/committed), got: {status:?}"
     );
 }
+
+/// A pre-commit hook that re-stages whole files (the lint-staged/prettier
+/// pattern used by the maintainer's own aic-web repo: `prettier --write` then
+/// `git add`) silently broadens a batch commit: staging hunk 1 and committing
+/// lands the *entire* file, because the hook `git add`s the full worktree
+/// content back into the index. The plan's later batch for that file then has
+/// nothing left to stage, and replaying the plan-time snapshot used to die with
+/// `git apply`'s "patch does not apply". The workflow must skip the swallowed
+/// batch and finish the Run instead of aborting.
+#[tokio::test]
+async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // A base with two change sites far enough apart that git emits two
+    // separate hunks (>= ~6 unchanged lines between them).
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}c0\n");
+    let changed = format!("a1\n{pad}c1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    // Simulate lint-staged: the pre-commit hook re-stages the full file, so a
+    // commit of hunk 1 actually lands both hunks.
+    let hooks = dir.path().join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\ngit add tracked.txt\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let plan = generator::BatchPlanOutput {
+        batches: vec![
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![1],
+                }],
+                reason: Some("change a".into()),
+            },
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![2],
+                }],
+                reason: Some("change c".into()),
+            },
+        ],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("feat: hook swallows the rest"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "the Run must complete, not abort, when a hook commits more than the batch: {:?}",
+        result
+    );
+
+    // Only batch 1 lands (it carries the whole file); the swallowed batch 2 is
+    // skipped rather than failing on a stale snapshot.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "exactly one commit must land — the second batch has nothing left to stage"
+    );
+    // The hook's re-stage means both hunks are in that one commit.
+    let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(head.contains("a1"), "hunk 1 must be committed");
+    assert!(
+        head.contains("c1"),
+        "hunk 2 must be committed too (hook re-staged it)"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean after the Run"
+    );
+}
+
+/// Regression for the 3+-hunks-one-file case. The two-batch split test above
+/// (`commit_splits_one_file_across_two_batches`) hides it: with no pre-commit
+/// hook at all, splitting a single file's three hunks across three batches
+/// must still land one commit per hunk. An earlier hook-survival fix once
+/// stored *current* (remapped) hunk positions back into the per-file
+/// `committed` set instead of *original* indices — so batch 2 recorded
+/// position 1 instead of original hunk 2, batch 3 then addressed "hunk 2 of a
+/// 1-hunk diff" and the Run aborted. This test pins the original-index
+/// bookkeeping end-to-end.
+#[tokio::test]
+async fn commit_splits_one_file_across_three_batches() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // Three change sites, each padded far enough apart that git emits three
+    // separate hunks.
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}b0\n{pad}c0\n");
+    let changed = format!("a1\n{pad}b1\n{pad}c1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    // Stub plan: split the single file's three hunks across three batches.
+    let mk = |h: usize| generator::BatchPlanBatch {
+        changes: vec![generator::BatchChange {
+            file: "tracked.txt".to_string(),
+            hunks: vec![h],
+        }],
+        reason: Some(format!("change {h}")),
+    };
+    let plan = generator::BatchPlanOutput {
+        batches: vec![mk(1), mk(2), mk(3)],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: stub"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "three-batch split should succeed: {:?}",
+        result
+    );
+
+    // One commit per batch — three new commits over the base.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 3,
+        "three batches must land three commits, one per batch"
+    );
+    // Each commit carries exactly its prefix of hunks — no leak forward, no
+    // skip. HEAD~2 is batch 1 (a1 only), HEAD~1 adds batch 2 (b1), HEAD adds
+    // batch 3 (c1).
+    let head2 = file_at_ref(dir.path(), "HEAD~2", "tracked.txt");
+    assert!(head2.contains("a1"), "batch 1 must include hunk 1");
+    assert!(
+        !head2.contains("b1") && !head2.contains("c1"),
+        "batch 1 must be hunk 1 only"
+    );
+    let head1 = file_at_ref(dir.path(), "HEAD~1", "tracked.txt");
+    assert!(
+        head1.contains("a1") && head1.contains("b1"),
+        "batches 1 and 2 must be applied by HEAD~1"
+    );
+    assert!(!head1.contains("c1"), "batch 2 must not include hunk 3");
+    let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(
+        head.contains("a1") && head.contains("b1") && head.contains("c1"),
+        "all three hunks must be committed by HEAD"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean at the end"
+    );
+}
+
+/// Two `changes` entries for the SAME file in one batch (disjoint hunks) must
+/// land exactly one commit carrying both hunks — not two commits, and not a
+/// commit-message prompt that lists the file twice. This is the contract the
+/// removed `unique_batch_files` helper enforced; `stage_batch_hunks` now
+/// restores it structurally by grouping a file's hunks across its entries
+/// before staging.
+#[tokio::test]
+async fn commit_batch_merges_same_file_changes_into_one_commit() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}b0\n");
+    let changed = format!("a1\n{pad}b1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    // One batch, TWO changes entries for the same file with disjoint hunks.
+    // `validate_batch_plan` accepts this (no duplicate hunk); the workflow
+    // must treat it as one logical unit.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![
+                generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![1],
+                },
+                generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![2],
+                },
+            ],
+            reason: Some("both edits".into()),
+        }],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("feat: same-file disjoint hunks"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "one-batch same-file split should succeed: {:?}",
+        result
+    );
+
+    // Exactly one commit — the two entries merge into one logical unit, never
+    // two, and the file is staged once rather than listed twice in the prompt.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "two changes entries for one file must merge into one commit"
+    );
+    let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(
+        head.contains("a1") && head.contains("b1"),
+        "both hunks must be in the single commit"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean after the Run"
+    );
+}
