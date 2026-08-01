@@ -764,6 +764,77 @@ async fn commit_splits_one_file_across_two_batches() {
     );
 }
 
+/// The other Run commit shape (issue #26): when files are already staged, the
+/// default Run re-stages them, drafts one message via the `CommitMessenger`,
+/// and commits — never reaching the `BatchPlanner`. This is the simpler of the
+/// two Run shapes and the one the README leads with ("stage a diff, get one
+/// commit"). The unstaged multi-Batch path is pinned by
+/// [`commit_splits_one_file_across_two_batches`]; this pins its staged
+/// counterpart so a regression that drops the staged file or routes staged
+/// work into the planner would fail loudly instead of shipping green.
+#[tokio::test]
+async fn commit_staged_files_single_commit() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // Modify a tracked file and stage it — the entry condition for the staged
+    // single-commit path. A non-Rust file keeps this test focused on the
+    // commit shape; staged-Rust formatting is a separate coverage gap.
+    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+
+    let before = commit_count(dir.path());
+    let (resolver, seen) = resolver_recording();
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver,
+        prompt_queue(vec![]),
+        sink(),
+        unreachable_planner(), // staged path must NOT plan
+        messenger_fixed("feat: staged change"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "staged single-commit Run should succeed: {:?}",
+        result
+    );
+
+    // Exactly one new commit landed.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "the staged path must land exactly one commit"
+    );
+    // Its tree contains the staged change.
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "tracked.txt"),
+        "staged change\n",
+        "the commit's tree must contain the staged change"
+    );
+    // The drafted message survived into the commit — pins that the messenger
+    // (not some skip path) produced it.
+    assert!(
+        git_out(dir.path(), &["log", "-1", "--pretty=%B"]).contains("feat: staged change"),
+        "the messenger's drafted message must land in the commit"
+    );
+    // The working tree is clean afterward: no merge/rebase state, and nothing
+    // left staged or unstaged.
+    assert!(is_clean(dir.path()), "no merge/rebase state must remain");
+    assert_eq!(
+        git_out(dir.path(), &["status", "--porcelain"]).trim(),
+        "",
+        "working tree must be clean after the staged commit"
+    );
+    // Neither the resolver nor the planner was reached on this path.
+    assert!(
+        seen.lock().is_empty(),
+        "resolver must not run on the non-conflicted staged path"
+    );
+}
+
 /// A mid-loop failure (here: the 2nd batch's message step errors after batch 1
 /// already committed) must abort with the unified message naming how many
 /// batches committed — and those earlier commits must persist in the repo.
