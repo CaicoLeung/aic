@@ -36,9 +36,9 @@ Once the tag is pushed, CI does the rest:
 
 1. `release.yml` — preflight (token check) → build 5 targets → smoke-test 4 →
    sign archives (zipsign) → checksum + installers → publish GitHub Release →
-   push Homebrew formula.
-2. `changelog.yml` — rewrites the release body with git-cliff notes and commits
-   `CHANGELOG.md` back to `main` (3-attempt retry on push races).
+   push Homebrew formula. The release body is cargo-dist's announcement, which
+   embeds the matching `CHANGELOG.md` entry (Release Notes) plus the
+   install/download sections — no separate changelog step is needed.
 
 `self_update` users run `aic update`; Homebrew users run `brew upgrade aic`.
 
