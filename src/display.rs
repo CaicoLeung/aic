@@ -132,19 +132,13 @@ impl Display {
         self.out.write_line("");
     }
 
-    /// Effective text width for wrapped output: the terminal width clamped to
-    /// [`HARD_CAP`], minus both margins. `cols == 0` (non-TTY / piped) resolves
-    /// to [`FALLBACK_COLS`]. A sub-margin reported width saturates down to `0`,
-    /// which [`wrap_line`] treats as "don't wrap" — so a pathologically tiny
-    /// terminal never panics, it just emits the body unwrapped.
+    /// Effective text width for wrapped output: the shared width resolution
+    /// ([`resolve_cols`] — fallback + [`HARD_CAP`] cap), minus both margins.
+    /// A sub-margin reported width saturates down to `0`, which [`wrap_line`]
+    /// treats as "don't wrap" — so a pathologically tiny terminal never
+    /// panics, it just emits the body unwrapped.
     fn text_width(&self) -> usize {
-        let cols = if self.cols == 0 {
-            FALLBACK_COLS
-        } else {
-            self.cols
-        };
-        cols.min(HARD_CAP)
-            .saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
+        resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
     }
 
     // ------------------------------------------------------------------
@@ -477,6 +471,25 @@ const HARD_CAP: usize = 100;
 /// piped / non-TTY output). Matches console's own unix default.
 const FALLBACK_COLS: usize = 80;
 
+/// Minimum usable width for in-place progress rendering: the spinner glyph +
+/// its label need at least this much room, so a pathologically narrow terminal
+/// (or a misreported size) doesn't crush the spinner. Applies only to
+/// [`terminal_width`] (progress); wrapped body text instead saturates its
+/// margin-subtracted width down to `0` (see [`Display::text_width`]).
+const MIN_PROGRESS_WIDTH: usize = 20;
+
+/// Resolve a raw terminal column count into a usable width — the single
+/// resolution shared by [`terminal_width`] (progress rendering) and
+/// [`Display::text_width`] (wrapped body). `cols == 0` (non-TTY / piped, where
+/// `Term::stderr()` reports no size) falls back to [`FALLBACK_COLS`]; the
+/// result is capped at [`HARD_CAP`] so ultrawide terminals don't sprawl body
+/// prose. Consumers add their own tail: progress floors at
+/// [`MIN_PROGRESS_WIDTH`], body text subtracts its margins.
+fn resolve_cols(cols: usize) -> usize {
+    let cols = if cols == 0 { FALLBACK_COLS } else { cols };
+    cols.min(HARD_CAP)
+}
+
 /// Greedy word-wrap of a single line (no embedded newlines) to `width` display
 /// columns, counted in `char`s (not bytes) so CJK commit bodies wrap correctly.
 ///
@@ -542,15 +555,14 @@ fn finalize_hint(state: RepoState) -> String {
 // Progress: in-place spinner + streaming reasoning feed
 // ------------------------------------------------------------------
 
-/// Terminal width for in-place progress rendering — the same source and
-/// resolution as [`Display::text_width`]: `Term::stderr()`, `0` (piped /
-/// non-TTY) resolving to [`FALLBACK_COLS`], capped at [`HARD_CAP`]. This is
-/// the codebase's single width source; the reasoning feed below and the
-/// spinner templates consume it.
+/// Terminal width for in-place progress rendering. Shares the codebase's one
+/// width resolution with [`Display::text_width`] via [`resolve_cols`]
+/// (`Term::stderr()`, `0`→[`FALLBACK_COLS`], capped at [`HARD_CAP`]); progress
+/// additionally floors at [`MIN_PROGRESS_WIDTH`] so the spinner + label keep
+/// room, where `text_width` instead subtracts its margins. The reasoning feed
+/// below and the spinner templates consume this.
 pub(crate) fn terminal_width() -> usize {
-    let cols = Term::stderr().size().1 as usize;
-    let cols = if cols == 0 { FALLBACK_COLS } else { cols };
-    cols.clamp(20, HARD_CAP)
+    resolve_cols(Term::stderr().size().1 as usize).max(MIN_PROGRESS_WIDTH)
 }
 
 /// Shared indicatif spinner style: a braille tick and a prefix matching
