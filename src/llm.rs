@@ -48,6 +48,23 @@ fn retry_backoff(attempt: usize) -> Duration {
     Duration::from_millis(RETRY_BACKOFF_BASE_MS * attempt as u64)
 }
 
+/// The single retry decision shared by [`retry_model_call`] and the inline
+/// streaming loop in [`LLMAgent::stream_typed_with_reasoning`]: if `err` is a
+/// retryable "no usable content" failure (see [`is_retryable`]) and the budget
+/// tracked by `attempts` isn't spent, bump `attempts` and return the backoff
+/// to wait before the next attempt; otherwise return `None`, meaning the
+/// caller propagates `err`. Centralizing the budget gate + backoff here keeps
+/// the two retry seams from drifting — the exact class of bug
+/// [`is_retryable`]'s broadening closed for the batch-plan path.
+fn retry_decision(err: &anyhow::Error, attempts: &mut usize) -> Option<Duration> {
+    if is_retryable(err) && *attempts < RETRY_BUDGET {
+        *attempts += 1;
+        Some(retry_backoff(*attempts))
+    } else {
+        None
+    }
+}
+
 /// Run `op`, retrying it up to [`RETRY_BUDGET`] extra times when the model
 /// returns no usable content (see [`is_retryable`]), with a short linear
 /// backoff. Any other error propagates immediately.
@@ -60,11 +77,10 @@ where
     loop {
         match op().await {
             Ok(value) => return Ok(value),
-            Err(err) if is_retryable(&err) && attempts < RETRY_BUDGET => {
-                attempts += 1;
-                tokio::time::sleep(retry_backoff(attempts)).await;
-            }
-            Err(err) => return Err(err),
+            Err(err) => match retry_decision(&err, &mut attempts) {
+                Some(backoff) => tokio::time::sleep(backoff).await,
+                None => return Err(err),
+            },
         }
     }
 }
@@ -591,12 +607,12 @@ impl LLMAgent {
     /// "no usable content" and get the same budget and backoff as
     /// [`Self::schema`] (see [`is_retryable`]). A real stream error (auth,
     /// rate limit, network) propagates immediately, never retried.
-    ///
     /// The loop is inline rather than [`retry_model_call`]: the reasoning
     /// callback is a borrowed `FnMut`, which an escaping async closure could
     /// not reborrow across attempts — the same constraint the old
-    /// `stream_with_reasoning` documented. The policy (budget, backoff,
-    /// classification) is still the shared one.
+    /// `stream_with_reasoning` documented. The retry policy itself (budget,
+    /// backoff, classification) is the shared [`retry_decision`], so the two
+    /// seams can't drift.
     pub async fn stream_typed_with_reasoning<T>(
         &self,
         prompt: &str,
@@ -617,11 +633,10 @@ impl LLMAgent {
             };
             match parsed {
                 Ok(value) => return Ok(value),
-                Err(err) if is_retryable(&err) && attempts < RETRY_BUDGET => {
-                    attempts += 1;
-                    tokio::time::sleep(retry_backoff(attempts)).await;
-                }
-                Err(err) => return Err(err),
+                Err(err) => match retry_decision(&err, &mut attempts) {
+                    Some(backoff) => tokio::time::sleep(backoff).await,
+                    None => return Err(err),
+                },
             }
         }
     }
@@ -843,6 +858,31 @@ mod tests {
         .await;
         assert_eq!(result.expect("must succeed after one retry"), "ok");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// [`retry_decision`] is the shared backbone of both retry seams: it must
+    /// advance the attempt counter and yield a backoff while the budget holds,
+    /// then return `None` exactly when the budget is spent — and never offer a
+    /// retry for a non-content error. Pins the boundary both loops rely on.
+    #[test]
+    fn retry_decision_advances_within_budget_then_stops() {
+        let retryable = anyhow::Error::new(StructuredOutputError::EmptyResponse);
+        let other = anyhow::anyhow!("network / auth / etc.");
+
+        let mut attempts = 0usize;
+        // First two retryable failures consume the budget (RETRY_BUDGET == 2),
+        // each advancing the counter and yielding a backoff.
+        assert!(retry_decision(&retryable, &mut attempts).is_some());
+        assert_eq!(attempts, 1);
+        assert!(retry_decision(&retryable, &mut attempts).is_some());
+        assert_eq!(attempts, RETRY_BUDGET);
+        // Budget spent: no more retries, counter unchanged.
+        assert!(retry_decision(&retryable, &mut attempts).is_none());
+        assert_eq!(attempts, RETRY_BUDGET);
+        // A non-content error is never retried, regardless of remaining budget.
+        let mut fresh = 0usize;
+        assert!(retry_decision(&other, &mut fresh).is_none());
+        assert_eq!(fresh, 0, "non-content errors must not consume the budget");
     }
 
     /// `is_retryable` classifies the two unusable-content shapes as retriable
