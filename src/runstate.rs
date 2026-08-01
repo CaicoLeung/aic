@@ -39,11 +39,6 @@ const ACTIVE: &str = "active.json";
 const LOG: &str = "run.log";
 const LOCK: &str = "lock";
 
-/// Sentinel fingerprint for a file that no longer exists in the worktree
-/// (tracked file deleted, or an untracked path removed). Compared as a plain
-/// string, so a present-then-deleted file never matches its plan-time hash.
-const DELETED: &str = "<deleted>";
-
 /// One Run's full in-flight state. Serialized to `.aic/active.json`.
 #[derive(Serialize, Deserialize)]
 pub struct RunState {
@@ -56,9 +51,11 @@ pub struct RunState {
     /// Each file's captured workdir-vs-HEAD diff, replayed per-batch. Frozen at
     /// plan time so hunk numbering stays stable across the Run's commits.
     pub raw_diffs: std::collections::HashMap<String, String>,
-    /// `{file -> content fingerprint}` of the worktree file at plan time.
-    /// Recomputed on resume; a mismatch defers the batch.
-    pub file_hashes: std::collections::HashMap<String, String>,
+    /// `{file -> content fingerprint}` of the worktree file at plan time
+    /// (`Some(hash)` when present, `None` when absent/deleted). Recomputed on
+    /// resume; a mismatch defers the batch. Typed as `Option<String>` so the
+    /// deleted case is unforgeable rather than relying on a string sentinel.
+    pub file_hashes: std::collections::HashMap<String, Option<String>>,
     /// Per-batch progress, aligned with `plan.batches`.
     pub batches: Vec<BatchEntry>,
 }
@@ -119,10 +116,11 @@ impl RunState {
     pub fn integrity_violations(&self) -> Vec<(usize, Vec<String>)> {
         let mut out = Vec::new();
         for i in self.pending_indices() {
-            let changed: Vec<String> = Self::batch_files(&self.plan.batches[i])
+            let changed: Vec<String> = self.plan.batches[i]
+                .unique_files()
                 .into_iter()
                 .filter(|f| {
-                    let stored = self.file_hashes.get(f).map(String::as_str).unwrap_or("");
+                    let stored = self.file_hashes.get(f).cloned().flatten();
                     fingerprint(f) != stored
                 })
                 .collect();
@@ -167,21 +165,21 @@ impl RunState {
 }
 
 /// Content fingerprint of a worktree file: hex SHA-256 of its bytes, or
-/// [`DELETED`] when it cannot be read (gone, or otherwise unhashable). A
-/// present-then-deleted file therefore never matches its plan-time hash.
-pub fn fingerprint(path: &str) -> String {
-    match Git::read_worktree(path) {
-        Ok(bytes) => {
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            hasher
-                .finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
-        }
-        Err(_) => DELETED.to_string(),
-    }
+/// `None` when it cannot be read (gone, or otherwise unhashable). A
+/// present-then-deleted file (`Some(h)` vs `None`) therefore never matches its
+/// plan-time fingerprint, and the deleted state is represented by a typed
+/// `None` rather than a forgeable string sentinel.
+pub fn fingerprint(path: &str) -> Option<String> {
+    let bytes = Git::read_worktree(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    )
 }
 
 /// Append one timestamped line to `.aic/run.log`. Best-effort: log failures are
@@ -247,19 +245,19 @@ fn ensure_self_ignored(dir: &Path) {
     }
 }
 
-/// Current time as `(Unix epoch seconds, ISO-8601 UTC string)`. Computed from
-/// `std::time` via the civil-from-days algorithm, so no time crate is needed.
-fn now() -> (u64, String) {
-    let secs = std::time::SystemTime::now()
+/// Current time as Unix epoch seconds. The single source of "now" shared by
+/// `active.json`'s `created_at` and the run-log timestamps, computed from
+/// `std::time` so no time crate is needed.
+pub fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    (secs, iso_utc(secs))
+        .unwrap_or(0)
 }
 
-/// ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`) for an epoch-seconds timestamp.
+/// ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`) for the current instant.
 fn iso_utc_now() -> String {
-    now().1
+    iso_utc(epoch_now())
 }
 
 fn iso_utc(epoch_secs: u64) -> String {

@@ -643,14 +643,11 @@ pub(crate) async fn run_commit_workflow_impl(
         // Persist the frozen plan so an interrupted Run can be replayed. The
         // fingerprint of every planned file is captured now and rechecked on
         // resume; a file the user mutates since plan time defers its batch.
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let created_at = runstate::epoch_now();
         let head = Git::head_short().unwrap_or_default();
-        let mut file_hashes: HashMap<String, String> = HashMap::new();
+        let mut file_hashes: HashMap<String, Option<String>> = HashMap::new();
         for batch in &result.batches {
-            for f in unique_batch_files(batch) {
+            for f in batch.unique_files() {
                 file_hashes
                     .entry(f.clone())
                     .or_insert_with(|| runstate::fingerprint(&f));
