@@ -44,118 +44,22 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
-/// Shared indicatif spinner style: a braille tick and a prefix matching
-/// [`display::MARGIN`] so the spinner glyph sits at the same 2-column inset as
-/// the rest of the run's stderr block — not flush against the edge. One place
-/// to change the inset or tick animation for every spinner in the run; the
-/// prefix is sourced from `Display`'s margin constant instead of a literal
-/// that has to be kept in sync by hand.
-fn spinner_style() -> anyhow::Result<indicatif::ProgressStyle> {
-    Ok(indicatif::ProgressStyle::default_spinner()
-        .template(&format!("{}{{spinner}} {{msg}}", display::MARGIN))?
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"))
-}
-
-async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
-where
-    F: Future<Output = anyhow::Result<T>>,
-{
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(spinner_style()?);
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(80));
-
-    let result = fut.await;
-    pb.disable_steady_tick();
-    pb.finish_and_clear();
-    result
-}
-
-/// How many reasoning lines the "Analyzing changes" spinner keeps on screen.
-const THINKING_MAX_LINES: usize = 10;
-
-/// A rolling window over the model's streamed reasoning, kept to the last
-/// [`THINKING_MAX_LINES`] non-blank lines. Rendered in place under the spinner
-/// so it reads like a scrolling "thinking" feed.
-struct ThinkingView {
-    lines: Vec<String>,
-    cur: String,
-}
-
-impl ThinkingView {
-    fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            cur: String::new(),
-        }
-    }
-
-    /// Ingest a reasoning delta (may be a partial line, many lines, or empty).
-    /// Blank lines are dropped to keep the window information-dense.
-    fn push(&mut self, delta: &str) {
-        for ch in delta.chars() {
-            if ch == '\n' {
-                let line = std::mem::take(&mut self.cur);
-                if !line.trim().is_empty() {
-                    self.lines.push(line);
-                    if self.lines.len() > THINKING_MAX_LINES {
-                        self.lines.remove(0);
-                    }
-                }
-            } else {
-                self.cur.push(ch);
-            }
-        }
-    }
-
-    /// `title` (e.g. "Analyzing changes") on the first line, then up to
-    /// [`THINKING_MAX_LINES`] reasoning lines indented under it — the latest
-    /// visible, older ones having scrolled off.
-    fn render(&self, title: &str) -> String {
-        let width = terminal_width().saturating_sub(6).clamp(20, 200);
-        let mut out = String::from(title);
-        let mut shown = self.lines.clone();
-        if !self.cur.trim().is_empty() {
-            shown.push(self.cur.clone());
-        }
-        let start = shown.len().saturating_sub(THINKING_MAX_LINES);
-        for line in &shown[start..] {
-            out.push_str("\n  │ ");
-            out.push_str(&truncate(line, width));
-        }
-        out
-    }
-}
-
-fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&w: &usize| (20..=500).contains(&w))
-        .unwrap_or(100)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
-    t.push('…');
-    t
-}
-
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live, keeping the latest [`THINKING_MAX_LINES`] lines on screen.
+/// reasoning live, keeping the latest [`display::THINKING_MAX_LINES`] lines on
+/// screen.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     let pb = ProgressBar::new_spinner();
-    pb.set_style(spinner_style()?);
+    pb.set_style(display::spinner_style()?);
     pb.set_message("Analyzing changes");
     pb.enable_steady_tick(Duration::from_millis(80));
 
-    let mut view = ThinkingView::new();
+    let mut view = display::ThinkingView::new();
+    // The feed's content budget: the shared terminal width minus the "│ "
+    // decoration and one column of breathing room.
+    let feed_width = display::terminal_width().saturating_sub(6);
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
         view.push(delta);
-        pb.set_message(view.render("Analyzing changes"));
+        pb.set_message(view.render("Analyzing changes", feed_width));
     })
     .await;
 
@@ -214,7 +118,8 @@ async fn generate_and_commit(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
-    let result = with_spinner("Generating commit message", messenger(diff.to_string())).await?;
+    let result =
+        display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
     let hash = git.commit(result.message.clone(), result.body.clone())?;
     display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
     Ok(())
@@ -315,19 +220,25 @@ pub(crate) async fn run_resolve_workflow_impl(
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
 
-        let resolved =
-            match with_spinner(&format!("Resolving {}", f.path), resolve(original.clone())).await {
-                Ok(r) => r,
-                Err(e) => {
-                    display.skipped(&f.path, &format!("LLM error: {e:#}"));
-                    skipped_failed += 1;
-                    continue;
-                }
-            };
+        let resolved = match display::with_spinner(
+            &format!("Resolving {}", f.path),
+            resolve(original.clone()),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                display.skipped(&f.path, &format!("LLM error: {e:#}"));
+                skipped_failed += 1;
+                continue;
+            }
+        };
 
         // Marker validation — auto-retry once (ADR 0005).
         let resolved = if git::has_conflict_markers(&resolved) {
-            match with_spinner(&format!("Retrying {}", f.path), resolve(original.clone())).await {
+            match display::with_spinner(&format!("Retrying {}", f.path), resolve(original.clone()))
+                .await
+            {
                 Ok(retry) if !git::has_conflict_markers(&retry) => retry,
                 _ => {
                     display.skipped(&f.path, "markers remain after retry");
@@ -609,49 +520,5 @@ mod tests {
                 "{shell:?}: completion script did not reference the `aic` binary"
             );
         }
-    }
-
-    #[test]
-    fn thinking_view_keeps_last_n_lines_and_drops_blanks() {
-        let mut v = ThinkingView::new();
-        for i in 1..=12 {
-            v.push(&format!("line {i}\n\n"));
-        }
-        // lines 1-2 scrolled off; lines 3-12 remain (blank lines dropped).
-        let mut expected = vec!["Analyzing changes".to_string()];
-        for i in 3..=12 {
-            expected.push(format!("  │ line {i}"));
-        }
-        let rendered = v.render("Analyzing changes");
-        assert_eq!(rendered.lines().collect::<Vec<_>>(), expected);
-    }
-
-    #[test]
-    fn thinking_view_shows_partial_line_and_caps_at_max() {
-        let mut v = ThinkingView::new();
-        for i in 1..=THINKING_MAX_LINES {
-            v.push(&format!("line {i}\n"));
-        }
-        v.push("in progress"); // partial current line (no trailing newline)
-        let rendered = v.render("Analyzing changes");
-        let visible: Vec<&str> = rendered.lines().collect();
-        // max complete + 1 partial → render caps at THINKING_MAX_LINES lines.
-        assert_eq!(visible.len(), 1 + THINKING_MAX_LINES);
-        assert_eq!(visible.last(), Some(&"  │ in progress"));
-        // "line 1" scrolled off; the partial takes the 10th slot.
-        assert!(!visible.iter().any(|l| l.ends_with("line 1")));
-    }
-
-    #[test]
-    fn thinking_view_assembles_split_chunks() {
-        let mut v = ThinkingView::new();
-        // one logical line delivered across several deltas
-        v.push("hel");
-        v.push("lo");
-        v.push(" world\n");
-        assert_eq!(
-            v.render("t").lines().collect::<Vec<_>>(),
-            vec!["t", "  │ hello world"]
-        );
     }
 }

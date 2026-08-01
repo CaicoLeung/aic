@@ -1,4 +1,6 @@
 use console::{Style, Term};
+use std::future::Future;
+use std::time::Duration;
 
 use crate::git::{ConflictedFile, RepoState};
 use crate::types::CommitType;
@@ -542,11 +544,172 @@ fn finalize_hint(state: RepoState) -> &'static str {
     }
 }
 
+// ------------------------------------------------------------------
+// Progress: in-place spinner + streaming reasoning feed
+// ------------------------------------------------------------------
+
+/// Terminal width for in-place progress rendering — the same source and
+/// resolution as [`Display::text_width`]: `Term::stderr()`, `0` (piped /
+/// non-TTY) resolving to [`FALLBACK_COLS`], capped at [`HARD_CAP`]. This is
+/// the codebase's single width source; the reasoning feed below and the
+/// spinner templates consume it.
+pub(crate) fn terminal_width() -> usize {
+    let cols = Term::stderr().size().1 as usize;
+    let cols = if cols == 0 { FALLBACK_COLS } else { cols };
+    cols.clamp(20, HARD_CAP)
+}
+
+/// Shared indicatif spinner style: a braille tick and a prefix matching
+/// [`MARGIN`] so the spinner glyph sits at the same 2-column inset as the rest
+/// of the run's stderr block — not flush against the edge. One place to
+/// change the inset or tick animation for every spinner in the run.
+pub(crate) fn spinner_style() -> anyhow::Result<indicatif::ProgressStyle> {
+    Ok(indicatif::ProgressStyle::default_spinner()
+        .template(&format!("{MARGIN}{{spinner}} {{msg}}"))?
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"))
+}
+
+/// Run `fut` behind an in-place spinner labeled `msg`; the spinner is cleared
+/// when the future completes, success or error.
+pub(crate) async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(spinner_style()?);
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+
+    let result = fut.await;
+    pb.disable_steady_tick();
+    pb.finish_and_clear();
+    result
+}
+
+/// How many reasoning lines the "Analyzing changes" spinner keeps on screen.
+pub(crate) const THINKING_MAX_LINES: usize = 10;
+
+/// A rolling window over the model's streamed reasoning, kept to the last
+/// [`THINKING_MAX_LINES`] non-blank lines. Rendered in place under the spinner
+/// so it reads like a scrolling "thinking" feed.
+///
+/// Each reasoning line is greedy-wrapped with [`wrap_line`] to `width` — the
+/// feed's content budget — never ellipsized; a line longer than the budget
+/// folds into several `│ `-indented display lines under the shared [`MARGIN`].
+pub(crate) struct ThinkingView {
+    lines: Vec<String>,
+    cur: String,
+}
+
+impl ThinkingView {
+    pub(crate) fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            cur: String::new(),
+        }
+    }
+
+    /// Ingest a reasoning delta (may be a partial line, many lines, or empty).
+    /// Blank lines are dropped to keep the window information-dense.
+    pub(crate) fn push(&mut self, delta: &str) {
+        for ch in delta.chars() {
+            if ch == '\n' {
+                let line = std::mem::take(&mut self.cur);
+                if !line.trim().is_empty() {
+                    self.lines.push(line);
+                    if self.lines.len() > THINKING_MAX_LINES {
+                        self.lines.remove(0);
+                    }
+                }
+            } else {
+                self.cur.push(ch);
+            }
+        }
+    }
+
+    /// `title` (e.g. "Analyzing changes") on the first line, then up to
+    /// [`THINKING_MAX_LINES`] reasoning lines wrapped to `width` display
+    /// columns and indented under it — the latest visible, older ones having
+    /// scrolled off.
+    pub(crate) fn render(&self, title: &str, width: usize) -> String {
+        let mut out = String::from(title);
+        let mut shown = self.lines.clone();
+        if !self.cur.trim().is_empty() {
+            shown.push(self.cur.clone());
+        }
+        let start = shown.len().saturating_sub(THINKING_MAX_LINES);
+        for line in &shown[start..] {
+            for piece in wrap_line(line, width) {
+                out.push_str(&format!("\n{MARGIN}│ {piece}"));
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::Arc;
+
+    #[test]
+    fn thinking_view_keeps_last_n_lines_and_drops_blanks() {
+        let mut v = ThinkingView::new();
+        for i in 1..=12 {
+            v.push(&format!("line {i}\n\n"));
+        }
+        // lines 1-2 scrolled off; lines 3-12 remain (blank lines dropped).
+        let mut expected = vec!["Analyzing changes".to_string()];
+        for i in 3..=12 {
+            expected.push(format!("  │ line {i}"));
+        }
+        let rendered = v.render("Analyzing changes", 80);
+        assert_eq!(rendered.lines().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn thinking_view_shows_partial_line_and_caps_at_max() {
+        let mut v = ThinkingView::new();
+        for i in 1..=THINKING_MAX_LINES {
+            v.push(&format!("line {i}\n"));
+        }
+        v.push("in progress"); // partial current line (no trailing newline)
+        let rendered = v.render("Analyzing changes", 80);
+        let visible: Vec<&str> = rendered.lines().collect();
+        // max complete + 1 partial → render caps at THINKING_MAX_LINES lines.
+        assert_eq!(visible.len(), 1 + THINKING_MAX_LINES);
+        assert_eq!(visible.last(), Some(&"  │ in progress"));
+        // "line 1" scrolled off; the partial takes the 10th slot.
+        assert!(!visible.iter().any(|l| l.ends_with("line 1")));
+    }
+
+    #[test]
+    fn thinking_view_assembles_split_chunks() {
+        let mut v = ThinkingView::new();
+        // one logical line delivered across several deltas
+        v.push("hel");
+        v.push("lo");
+        v.push(" world\n");
+        assert_eq!(
+            v.render("t", 80).lines().collect::<Vec<_>>(),
+            vec!["t", "  │ hello world"]
+        );
+    }
+
+    /// Long reasoning lines wrap under the `│ ` indent instead of being
+    /// ellipsized — the behavior that replaced hard truncation. Over-long
+    /// tokens follow `wrap_line`'s hard-break rule.
+    #[test]
+    fn thinking_view_wraps_long_lines() {
+        let mut v = ThinkingView::new();
+        v.push("one two three four five\n");
+        let rendered = v.render("t", 12); // content budget: 12 columns
+        assert_eq!(
+            rendered.lines().collect::<Vec<_>>(),
+            vec!["t", "  │ one two", "  │ three four", "  │ five"]
+        );
+    }
 
     // `console` reads the process-global `colors_enabled()` flag at format
     // time, so every test that flips it via `ColorGuard` races every other.
