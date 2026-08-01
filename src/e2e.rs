@@ -701,13 +701,24 @@ fn is_clean(dir: &Path) -> bool {
     Repository::open(dir).unwrap().state() == git2::RepositoryState::Clean
 }
 
+/// Raw `git status --porcelain` output, returned **untrimmed**. The leading
+/// `XY` status codes are load-bearing: `" M"` means unstaged while `"M "`
+/// means staged, so trimming away the leading space discards the exact signal
+/// some tests assert on. Callers that only care about emptiness should use
+/// [`worktree_is_empty`]; callers pinning a specific entry keep the leading
+/// space and trim only the trailing newline themselves (see
+/// [`commit_empty_batch_plan_is_rejected_before_the_loop`]).
+fn status_porcelain(dir: &Path) -> String {
+    git_out(dir, &["status", "--porcelain"])
+}
+
 /// `true` if `git status --porcelain` is empty — no staged, unstaged, or
 /// untracked entries. The strict "working tree is clean" guarantee the
 /// commit-workflow tests pin: a regression that committed *and* re-left the
 /// change staged (or dropped it entirely) would keep `is_clean` green but
 /// trip this.
 fn worktree_is_empty(dir: &Path) -> bool {
-    git_out(dir, &["status", "--porcelain"]).trim().is_empty()
+    status_porcelain(dir).trim().is_empty()
 }
 
 /// File content as recorded at a git revision (e.g. "HEAD", "HEAD~1"), via
@@ -1229,10 +1240,10 @@ async fn commit_staged_files_in_one_commit() {
     // The working tree is clean afterward: no merge/rebase state, and nothing
     // left staged or unstaged.
     assert!(is_clean(dir.path()), "no merge/rebase state must remain");
-    assert_eq!(
-        git_out(dir.path(), &["status", "--porcelain"]).trim(),
-        "",
-        "working tree must be clean after the staged commit"
+    let status = status_porcelain(dir.path());
+    assert!(
+        status.trim().is_empty(),
+        "working tree must be clean after the staged commit, got: {status:?}"
     );
 }
 
@@ -1299,6 +1310,83 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
     let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
     assert!(head.contains("a1"), "batch 1 must be committed");
     assert!(!head.contains("c1"), "batch 2 must NOT be committed");
+}
+
+/// Issue #34: an empty Batch plan (the planner returns zero batches over real
+/// unstaged work) is *rejected* before the batch loop, not silently no-op'd.
+/// The workflow validates the plan against the captured file/hunk counts the
+/// moment it returns, and [`validate_batch_plan`] bails on an empty `batches`
+/// list — so the loop never starts. This pins the intended contract end-to-end
+/// against a real repo (the validator itself is unit-tested in `generator.rs`,
+/// but whether the workflow rejects before the loop or no-ops was unpinned):
+/// the Run errors out with the validation message, *no* commit lands, the
+/// unstaged change survives in the workdir, and the `CommitMessenger` is
+/// never reached (the loop body never executes for zero batches).
+#[tokio::test]
+async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // One unstaged change on a single-hunk file — the entry condition for the
+    // unstaged/Batch path that reaches the planner.
+    std::fs::write(dir.path().join("tracked.txt"), "unstaged change\n").unwrap();
+
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let err = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        // Planner hands back a plan with zero batches — the regressions this
+        // test guards are (a) the workflow accepting it as a clean no-op and
+        // (b) the workflow entering the loop and committing nothing but still
+        // returning Ok. Both would surface as a missing error here.
+        planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
+        unreachable_messenger(),
+    )
+    .await
+    .expect_err("an empty batch plan must be rejected, not silently no-op'd");
+
+    // The documented outcome is validation rejection: the error carries the
+    // validator's "no batches" bail surfaced through the workflow's
+    // "batch plan validation failed" context.
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("no batches"),
+        "expected the empty-plan rejection, got: {msg}"
+    );
+    assert!(
+        msg.contains("batch plan validation failed"),
+        "expected the validation context, got: {msg}"
+    );
+
+    // No partial commit: commit count is unchanged.
+    assert_eq!(
+        commit_count(dir.path()),
+        before,
+        "an empty plan must not create a commit"
+    );
+
+    // The unstaged change survives intact — not committed (HEAD still holds the
+    // base) and not staged (still purely a workdir edit, not an index edit).
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "tracked.txt"),
+        "original\n",
+        "HEAD must still hold the base — the change must not be committed"
+    );
+    assert_eq!(
+        read_file(dir.path(), "tracked.txt"),
+        "unstaged change\n",
+        "the workdir edit must survive untouched"
+    );
+    let status = status_porcelain(dir.path());
+    assert_eq!(
+        status.trim_end(),
+        " M tracked.txt",
+        "the change must remain unstaged (not staged/committed), got: {status:?}"
+    );
 }
 
 // =====================================================================
