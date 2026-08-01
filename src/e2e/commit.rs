@@ -781,3 +781,76 @@ async fn commit_splits_one_file_across_three_batches() {
         "working tree must be clean at the end"
     );
 }
+
+/// Two `changes` entries for the SAME file in one batch (disjoint hunks) must
+/// land exactly one commit carrying both hunks — not two commits, and not a
+/// commit-message prompt that lists the file twice. This is the contract the
+/// removed `unique_batch_files` helper enforced; `stage_batch_hunks` now
+/// restores it structurally by grouping a file's hunks across its entries
+/// before staging.
+#[tokio::test]
+async fn commit_batch_merges_same_file_changes_into_one_commit() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let base = format!("a0\n{pad}b0\n");
+    let changed = format!("a1\n{pad}b1\n");
+    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+
+    // One batch, TWO changes entries for the same file with disjoint hunks.
+    // `validate_batch_plan` accepts this (no duplicate hunk); the workflow
+    // must treat it as one logical unit.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![
+                generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![1],
+                },
+                generator::BatchChange {
+                    file: "tracked.txt".to_string(),
+                    hunks: vec![2],
+                },
+            ],
+            reason: Some("both edits".into()),
+        }],
+    };
+    let before = commit_count(dir.path());
+    let _g = gh::CwdGuard::new(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("feat: same-file disjoint hunks"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "one-batch same-file split should succeed: {:?}",
+        result
+    );
+
+    // Exactly one commit — the two entries merge into one logical unit, never
+    // two, and the file is staged once rather than listed twice in the prompt.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "two changes entries for one file must merge into one commit"
+    );
+    let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
+    assert!(
+        head.contains("a1") && head.contains("b1"),
+        "both hunks must be in the single commit"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "working tree must be clean after the Run"
+    );
+}

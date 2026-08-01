@@ -275,7 +275,7 @@ fn map_planned_hunks(
 }
 
 /// Stage one batch's hunks from the *current* index→workdir diff and return
-/// the paths actually staged.
+/// the paths actually staged — deduplicated by file, in first-seen order.
 ///
 /// Staging from a fresh diff (rather than the plan-time snapshot) is what keeps
 /// a Run alive when a pre-commit hook commits more than the batch staged:
@@ -284,34 +284,63 @@ fn map_planned_hunks(
 /// nothing left to stage. Replaying the stale snapshot then dies with `git
 /// apply`'s "patch does not apply". Files whose changes already landed are
 /// skipped (with a notice) and the run continues with the rest.
+///
+/// A file split across several `changes` entries of one batch (disjoint hunks)
+/// is merged into a single staging pass and a single entry of the returned
+/// list, so it produces one commit message — the contract the old
+/// `unique_batch_files` enforced. Grouping also stages all of a file's hunks
+/// in one `git apply` (cheaper than one call per entry) and keeps
+/// `committed_hunks` free of within-batch cross-entry remapping: each file's
+/// current-diff fetch happens once, before any of its hunks are staged.
 fn stage_batch_hunks(
     batch: &generator::BatchPlanBatch,
     committed_hunks: &mut HashMap<String, HashSet<usize>>,
     display: &Display,
 ) -> anyhow::Result<Vec<String>> {
-    let mut staged_paths: Vec<String> = Vec::new();
+    // Gather each file's planned hunks across its (possibly several) `changes`
+    // entries, preserving first-seen file order. An empty `hunks` slice means
+    // "the whole file" for that entry; `validate_batch_plan` rejects mixing
+    // whole-file and per-hunk entries for the same file, so concatenating the
+    // slices yields the right `planned` for every reachable plan (a lone
+    // whole-file entry stays empty → `map_planned_hunks` expands it).
+    let mut files: Vec<String> = Vec::new();
+    let mut hunks_by_file: HashMap<String, Vec<usize>> = HashMap::new();
     for change in &batch.changes {
-        let current = Git::diff_workdir(Some(change.file.as_str()))?;
+        if !hunks_by_file.contains_key(&change.file) {
+            files.push(change.file.clone());
+        }
+        hunks_by_file
+            .entry(change.file.clone())
+            .or_default()
+            .extend_from_slice(&change.hunks);
+    }
+
+    let mut staged_paths: Vec<String> = Vec::new();
+    for file in &files {
+        let planned = hunks_by_file
+            .get(file)
+            .expect("every file in `files` has an entry in `hunks_by_file`");
+        let current = Git::diff_workdir(Some(file.as_str()))?;
         if current.trim().is_empty() {
             display.warn(&format!(
                 "{}: all its changes were already committed (a pre-commit hook may have \
                  staged the whole file) — nothing left in this batch",
-                change.file
+                file
             ));
             continue;
         }
         let patch = git::parse_file_patch(&current);
-        let committed = committed_hunks.entry(change.file.clone()).or_default();
-        let mapping = map_planned_hunks(&change.hunks, committed, patch.hunks.len());
+        let committed = committed_hunks.entry(file.clone()).or_default();
+        let mapping = map_planned_hunks(planned, committed, patch.hunks.len());
         if mapping.current.is_empty() {
             continue;
         }
         Git::stage_hunks(&current, &mapping.current)
-            .with_context(|| format!("staging hunks for {}", change.file))?;
+            .with_context(|| format!("staging hunks for {}", file))?;
         // Record ORIGINAL indices (not the remapped current positions) so the
         // plan-time numbering the model saw stays stable for later batches.
         committed.extend(mapping.original);
-        staged_paths.push(change.file.clone());
+        staged_paths.push(file.clone());
     }
     Ok(staged_paths)
 }
@@ -548,9 +577,13 @@ pub(crate) async fn run_commit_workflow_impl(
         // hunks out from under the indices the model returned.
         format_rust_files(&all_unstaged, &display);
 
-        // Capture each file's raw workdir-vs-HEAD diff once. The numbered view
-        // goes to the model; the raw hunks are staged per-batch. Numbering is
-        // stable because both derive from this same snapshot.
+        // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
+        // feeds the two consumers that must agree on hunk numbering: the
+        // numbered view sent to the model, and `file_hunk_counts` for
+        // `validate_batch_plan`. Staging does NOT read from it —
+        // `stage_batch_hunks` re-reads a fresh diff per batch (so the Run
+        // survives pre-commit hooks that re-stage whole files) and remaps the
+        // plan-time indices onto the current diff via `committed_hunks`.
         let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
