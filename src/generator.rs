@@ -5,7 +5,7 @@ use crate::prompt::PromptConfig;
 
 pub struct Generator {}
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct CommitOutput {
     pub message: String,
     pub body: Option<String>,
@@ -14,7 +14,7 @@ pub struct CommitOutput {
 /// One file's contribution to a batch. A single file can appear in several
 /// batches with disjoint hunks — `git add -p` style — because a file often
 /// mixes changes of different scopes.
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchChange {
     /// Repo-relative file path.
     pub file: String,
@@ -24,13 +24,13 @@ pub struct BatchChange {
     pub hunks: Vec<usize>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchPlanBatch {
     pub changes: Vec<BatchChange>,
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchPlanOutput {
     pub batches: Vec<BatchPlanBatch>,
 }
