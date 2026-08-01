@@ -394,9 +394,9 @@ impl Git {
             opts.pathspec(p);
         }
 
-        let mut index = self.index()?;
+        let index = self.index()?;
         let diff = repo
-            .diff_tree_to_index(head_tree.as_ref(), Some(&mut index), Some(&mut opts))
+            .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))
             .context("failed to compute diff")?;
 
         format_diff(&diff)
@@ -657,7 +657,7 @@ impl Git {
             let path = conflict_path(&c);
             let kind = match (c.our.as_ref(), c.their.as_ref()) {
                 (None, _) | (_, None) => ConflictKind::DeleteModify,
-                _ => classify_worktree(&repo, &path),
+                _ => classify_worktree(repo, &path),
             };
             out.push(ConflictedFile { path, kind });
         }
