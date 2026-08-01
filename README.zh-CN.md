@@ -189,9 +189,7 @@ OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 必须显式
 
 ## Contributing
 
-- commit 前运行 `cargo fmt`
-- 运行 `cargo clippy -- -D warnings` 并修复所有 warning
-- 为 `src/` 中的新行为添加测试，或在 `tests/` 中添加 integration test
+详见 [CONTRIBUTING.zh-CN.md](./CONTRIBUTING.zh-CN.md) — 分支规则、提交风格、评审预期。(English: [CONTRIBUTING.md](./CONTRIBUTING.md))
 
 ## License
 

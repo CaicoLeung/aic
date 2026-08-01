@@ -189,9 +189,7 @@ You can also run plain `aic` in a conflicted repo — it notices and offers to h
 
 ## Contributing
 
-- Run `cargo fmt` before committing
-- Run `cargo clippy -- -D warnings` and fix all warnings
-- Add tests for new behaviour in `src/` or as integration tests in `tests/`
+See [CONTRIBUTING.md](./CONTRIBUTING.md) — branch rules, commit style, and what to expect from review. (简体中文: [CONTRIBUTING.zh-CN.md](./CONTRIBUTING.zh-CN.md))
 
 ## License
 
