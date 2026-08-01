@@ -265,14 +265,8 @@ impl Display {
                 )
             };
             self.emit(&format!("  {}{}", f.path, tag));
-            if let crate::git::ConflictKind::Oversized { bytes, lines } = &f.kind {
-                self.emit(&format!(
-                    "    {}",
-                    self.styled(
-                        &format!("{bytes} bytes, {lines} lines (> cap)"),
-                        dim.clone()
-                    ),
-                ));
+            if let Some(note) = f.kind.size_note() {
+                self.emit(&format!("    {}", self.styled(&note, dim.clone())));
             }
         }
         self.emit_blank();
@@ -397,7 +391,7 @@ impl Display {
                 dim,
             ),
         ));
-        self.emit(&format!("    {}", self.styled(finalize_hint(state), cyan)));
+        self.emit(&format!("    {}", self.styled(&finalize_hint(state), cyan)));
     }
 
     /// `aic resolve` on a clean repo.
@@ -422,7 +416,7 @@ impl Display {
         ));
         self.emit(&format!(
             "  resolve manually, then run {}",
-            self.styled(finalize_hint(state), Style::new().cyan()),
+            self.styled(&finalize_hint(state), Style::new().cyan()),
         ));
     }
 
@@ -436,7 +430,7 @@ impl Display {
         ));
         self.emit(&format!(
             "  finalize with {}",
-            self.styled(finalize_hint(state), Style::new().cyan()),
+            self.styled(&finalize_hint(state), Style::new().cyan()),
         ));
     }
 
@@ -529,19 +523,19 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 }
 
 /// The git command a user runs to finalize a state by hand, for hand-off /
-/// refuse messages. Mirrors `RepoState::finalize_invocation` but as a single
-/// display string (no aic involvement).
-fn finalize_hint(state: RepoState) -> &'static str {
-    match state {
-        RepoState::Merge => "git commit",
-        RepoState::CherryPick | RepoState::CherryPickSequence => "git cherry-pick --continue",
-        RepoState::Revert | RepoState::RevertSequence => "git revert --continue",
-        RepoState::Rebase | RepoState::RebaseInteractive | RepoState::RebaseMerge => {
-            "git rebase --continue"
-        }
-        RepoState::ApplyMailbox | RepoState::ApplyMailboxOrRebase => "git am --continue",
-        RepoState::Clean => "git commit",
+/// refuse messages. Derived from [`RepoState::finalize_invocation`] (what aic
+/// runs) and [`RepoState::manual_finalize_command`] (what the user runs for
+/// states aic refuses) — one mapping, no hand-mirroring.
+fn finalize_hint(state: RepoState) -> String {
+    if state == RepoState::Clean {
+        // Unreachable in practice: hints render only for conflict states.
+        return "git commit".to_string();
     }
+    let args = state
+        .finalize_invocation()
+        .or_else(|| state.manual_finalize_command())
+        .expect("every conflict state has a finalize or manual command");
+    format!("git {}", args.join(" "))
 }
 
 // ------------------------------------------------------------------
@@ -652,6 +646,29 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::Arc;
+
+    /// The contract that replaced the hand-mirrored hint: every conflict state
+    /// resolves to the exact command a user runs, derived from the single
+    /// `RepoState` mapping (`finalize_invocation` for what aic runs,
+    /// `manual_finalize_command` for what the user runs on refused states).
+    #[test]
+    fn finalize_hint_covers_every_state_with_the_right_command() {
+        for (state, expected) in [
+            (RepoState::Clean, "git commit"),
+            (RepoState::Merge, "git commit --no-edit"),
+            (RepoState::CherryPick, "git cherry-pick --continue"),
+            (RepoState::CherryPickSequence, "git cherry-pick --continue"),
+            (RepoState::Revert, "git revert --continue"),
+            (RepoState::RevertSequence, "git revert --continue"),
+            (RepoState::Rebase, "git rebase --continue"),
+            (RepoState::RebaseInteractive, "git rebase --continue"),
+            (RepoState::RebaseMerge, "git rebase --continue"),
+            (RepoState::ApplyMailbox, "git am --continue"),
+            (RepoState::ApplyMailboxOrRebase, "git am --continue"),
+        ] {
+            assert_eq!(finalize_hint(state), expected, "state {state:?}");
+        }
+    }
 
     #[test]
     fn thinking_view_keeps_last_n_lines_and_drops_blanks() {

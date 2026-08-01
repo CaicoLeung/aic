@@ -216,6 +216,21 @@ impl RepoState {
             _ => None,
         }
     }
+
+    /// The git command a *user* runs to finalize a state aic refuses to
+    /// finalize (rebase / am — v1, ADR 0005), as args for `git`. `None` for
+    /// states aic finalizes itself and for non-conflict states. The single
+    /// source for the "resolve manually" hints — display derives its hint
+    /// text from this, never re-mirrors it.
+    pub fn manual_finalize_command(&self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Rebase | Self::RebaseInteractive | Self::RebaseMerge => {
+                Some(&["rebase", "--continue"][..])
+            }
+            Self::ApplyMailbox | Self::ApplyMailboxOrRebase => Some(&["am", "--continue"][..]),
+            _ => None,
+        }
+    }
 }
 
 /// Why a conflicted file is or isn't eligible for AI resolution (ADR 0005).
@@ -245,6 +260,18 @@ impl ConflictKind {
             Self::Binary => "binary",
             Self::DeleteModify => "delete/modify",
             Self::Oversized { .. } => "oversized",
+        }
+    }
+
+    /// The size detail line for an oversized file, or `None` for every other
+    /// kind. Display renders it (dimmed) under the file's summary row; the
+    /// content is size-cap policy and stays behind the interface.
+    pub fn size_note(&self) -> Option<String> {
+        match self {
+            Self::Oversized { bytes, lines } => {
+                Some(format!("{bytes} bytes, {lines} lines (> cap)"))
+            }
+            _ => None,
         }
     }
 }
@@ -784,9 +811,12 @@ impl Git {
         // wrapper that would mislabel a clean non-zero exit (git ran fine, it
         // just refused).
         let args = state.finalize_invocation().ok_or_else(|| {
+            let hint = state
+                .manual_finalize_command()
+                .map(|args| format!(" (e.g. `git {}`)", args.join(" ")))
+                .unwrap_or_default();
             anyhow::anyhow!(
-                "aic cannot finalize a {} state in v1; resolve manually \
-                 (e.g. `git rebase --continue`)",
+                "aic cannot finalize a {} state in v1; resolve manually{hint}",
                 state.label()
             )
         })?;
