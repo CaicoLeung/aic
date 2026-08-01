@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::generator::{BatchPlanBatch, BatchPlanOutput};
+use crate::generator::BatchPlanOutput;
 use crate::git::Git;
 
 const DIR: &str = ".aic";
@@ -67,8 +67,10 @@ pub enum BatchEntry {
     Pending,
     /// Committed as `sha`.
     Committed { sha: String },
-    /// Deferred — a file it touches changed since plan time; left unstaged.
-    Skipped { reason: String },
+    /// Deferred — a file it touches changed since plan time; left unstaged so
+    /// the user's change is never lost. (CONTEXT.md ubiquitous language:
+    /// "Deferred batch".)
+    Deferred { reason: String },
 }
 
 impl RunState {
@@ -80,15 +82,15 @@ impl RunState {
             .count()
     }
 
-    /// Count how many batches have been deferred (skipped).
-    pub fn count_skipped(&self) -> usize {
+    /// Count how many batches have been deferred.
+    pub fn count_deferred(&self) -> usize {
         self.batches
             .iter()
-            .filter(|e| matches!(e, BatchEntry::Skipped { .. }))
+            .filter(|e| matches!(e, BatchEntry::Deferred { .. }))
             .count()
     }
 
-    /// Indices of batches still pending (not committed, not skipped).
+    /// Indices of batches still pending (not committed, not deferred).
     pub fn pending_indices(&self) -> Vec<usize> {
         self.batches
             .iter()
@@ -96,17 +98,6 @@ impl RunState {
             .filter(|(_, e)| matches!(e, BatchEntry::Pending))
             .map(|(i, _)| i)
             .collect()
-    }
-
-    /// De-duplicated file paths in one batch, in first-seen order.
-    fn batch_files(batch: &BatchPlanBatch) -> Vec<String> {
-        let mut paths: Vec<String> = Vec::new();
-        for change in &batch.changes {
-            if !paths.contains(&change.file) {
-                paths.push(change.file.clone());
-            }
-        }
-        paths
     }
 
     /// For every still-pending batch, find files whose worktree content no

@@ -195,12 +195,19 @@ fn format_rust_files(paths: &[String], display: &Display) {
     }
 }
 
+/// Outcome of committing one batch: the commit's short oid and its message.
+/// A struct (not a tuple) so the two `String`s can't be swapped at a call site.
+struct CommitOutcome {
+    sha: String,
+    message: String,
+}
+
 async fn generate_and_commit(
     paths: &[String],
     display: &Display,
     prefix: &str,
     messenger: &CommitMessenger,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<CommitOutcome> {
     let files: Vec<serde_json::Value> = paths
         .iter()
         .map(|p| {
@@ -213,7 +220,10 @@ async fn generate_and_commit(
     let result = with_spinner("Generating commit message", messenger(diff.to_string())).await?;
     let hash = Git::commit(result.message.clone(), result.body.clone())?;
     display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
-    Ok((hash, result.message))
+    Ok(CommitOutcome {
+        sha: hash,
+        message: result.message,
+    })
 }
 
 /// One file's planned hunks for a batch, split into two views that must never
@@ -343,18 +353,6 @@ fn stage_batch_hunks_from_snapshot(
             .with_context(|| format!("staging hunks for {}", change.file))?;
     }
     Ok(())
-}
-
-/// De-duplicated file paths in a batch, in first-seen order. A file listed in
-/// several `changes` entries of one batch still produces one commit message.
-fn unique_batch_files(batch: &generator::BatchPlanBatch) -> Vec<String> {
-    let mut paths: Vec<String> = Vec::new();
-    for change in &batch.changes {
-        if !paths.contains(&change.file) {
-            paths.push(change.file.clone());
-        }
-    }
-    paths
 }
 
 /// Read a y/n answer from stdin. The label is written to stderr (Display is
@@ -582,7 +580,7 @@ pub(crate) async fn run_commit_workflow_impl(
         display.resume_offer(
             prev.count_committed(),
             prev.batches.len(),
-            prev.count_skipped(),
+            prev.count_deferred(),
         );
         if prompt("resume this run?")? {
             return run_resume_workflow_impl(display, messenger, prev).await;
@@ -678,20 +676,23 @@ pub(crate) async fn run_commit_workflow_impl(
                 if paths.is_empty() {
                     // Every file in this batch already landed via an earlier
                     // batch or a pre-commit hook — nothing to commit.
-                    return Ok::<Option<(String, String)>, anyhow::Error>(None);
+                    return Ok::<Option<CommitOutcome>, anyhow::Error>(None);
                 }
                 let committed = generate_and_commit(&paths, &display, &prefix, &messenger).await?;
                 Ok(Some(committed))
             };
             match outcome.await {
-                Ok(Some((sha, msg))) => {
-                    rs.batches[i] = runstate::BatchEntry::Committed { sha: sha.clone() };
+                Ok(Some(commit)) => {
+                    rs.batches[i] = runstate::BatchEntry::Committed {
+                        sha: commit.sha.clone(),
+                    };
                     let _ = rs.save();
                     runstate::log(&format!(
-                        "batch {}/{} committed {sha}: {}",
+                        "batch {}/{} committed {}: {}",
                         i + 1,
                         count,
-                        msg.lines().next().unwrap_or("")
+                        commit.sha,
+                        commit.message.lines().next().unwrap_or("")
                     ));
                 }
                 Ok(None) => {
@@ -750,10 +751,10 @@ pub(crate) async fn run_resume_workflow_impl(
 
     // Integrity: defer pending batches whose files drifted since plan time.
     for (i, files) in rs.integrity_violations() {
-        rs.batches[i] = runstate::BatchEntry::Skipped {
+        rs.batches[i] = runstate::BatchEntry::Deferred {
             reason: format!("files changed since plan: {}", files.join(", ")),
         };
-        display.resume_skipped(i + 1, &files);
+        display.resume_deferred(i + 1, &files);
         runstate::log(&format!(
             "batch {}/{} deferred: files changed since plan: {}",
             i + 1,
@@ -767,35 +768,38 @@ pub(crate) async fn run_resume_workflow_impl(
     for i in rs.pending_indices() {
         let batch = &rs.plan.batches[i];
         let prefix = format!("[{}/{count}]", i + 1);
-        let paths = unique_batch_files(batch);
+        let paths = batch.unique_files();
         // A prior failed attempt may have staged this batch's hunks without
         // committing; reset to HEAD so re-staging starts from a clean index.
         Git::reset_index_to_head()?;
         stage_batch_hunks_from_snapshot(batch, &rs.raw_diffs)?;
-        let (sha, msg) = generate_and_commit(&paths, &display, &prefix, &messenger).await?;
-        rs.batches[i] = runstate::BatchEntry::Committed { sha: sha.clone() };
+        let commit = generate_and_commit(&paths, &display, &prefix, &messenger).await?;
+        rs.batches[i] = runstate::BatchEntry::Committed {
+            sha: commit.sha.clone(),
+        };
         let _ = rs.save();
         runstate::log(&format!(
-            "batch {}/{} committed {sha}: {}",
+            "batch {}/{} committed {}: {}",
             i + 1,
             count,
-            msg.lines().next().unwrap_or("")
+            commit.sha,
+            commit.message.lines().next().unwrap_or("")
         ));
     }
 
     let committed = rs.count_committed();
-    let skipped = rs.count_skipped();
+    let deferred = rs.count_deferred();
     let _ = runstate::RunState::clear();
-    if skipped == 0 {
+    if deferred == 0 {
         runstate::log(&format!(
             "resume completed: {committed}/{count} batch(es) committed"
         ));
         display.resume_completed(committed, count);
     } else {
         runstate::log(&format!(
-            "resume completed: {committed}/{count} committed, {skipped} deferred"
+            "resume completed: {committed}/{count} committed, {deferred} deferred"
         ));
-        display.resume_completed_with_skipped(committed, count, skipped);
+        display.resume_completed_with_deferred(committed, count, deferred);
     }
     Ok(())
 }

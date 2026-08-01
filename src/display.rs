@@ -430,17 +430,17 @@ impl Display {
 
     /// Offer to resume an interrupted batch-plan run.
     /// `committed`/`total` are committed-vs-planned batch counts;
-    /// `skipped` counts batches previously deferred during this state.
-    pub fn resume_offer(&self, committed: usize, total: usize, skipped: usize) {
+    /// `deferred` counts batches previously deferred during this state.
+    pub fn resume_offer(&self, committed: usize, total: usize, deferred: usize) {
         let cyan = Style::new().cyan().bold();
         self.emit_blank();
         self.emit(&self.styled(
             &format!("an interrupted run is resumable — {committed}/{total} batches committed",),
             cyan,
         ));
-        if skipped > 0 {
+        if deferred > 0 {
             let dim = Style::new().dim();
-            self.emit(&self.styled(&format!("{skipped} batch(es) were deferred"), dim));
+            self.emit(&self.styled(&format!("{deferred} batch(es) were deferred"), dim));
         }
     }
 
@@ -460,7 +460,7 @@ impl Display {
     }
 
     /// A batch was deferred because one of its files changed since plan time.
-    pub fn resume_skipped(&self, batch: usize, files: &[String]) {
+    pub fn resume_deferred(&self, batch: usize, files: &[String]) {
         let yellow = Style::new().yellow();
         self.emit(&format!(
             "{} batch {batch} deferred: file(s) changed since the plan — {}",
@@ -480,12 +480,12 @@ impl Display {
     }
 
     /// Resume finished with some batches deferred (left unstaged for a fresh run).
-    pub fn resume_completed_with_skipped(&self, committed: usize, total: usize, skipped: usize) {
+    pub fn resume_completed_with_deferred(&self, committed: usize, total: usize, deferred: usize) {
         let green = Style::new().green().bold();
         let yellow = Style::new().yellow();
         self.emit_blank();
         self.emit(&self.styled(
-            &format!("resume complete: {committed}/{total} committed, {skipped} deferred"),
+            &format!("resume complete: {committed}/{total} committed, {deferred} deferred"),
             green,
         ));
         self.emit(&self.styled(
