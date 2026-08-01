@@ -2,14 +2,62 @@ use anyhow::Result;
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::CompletionClient;
-use rig::completion::{Prompt, TypedPrompt};
+use rig::completion::{Prompt, StructuredOutputError, TypedPrompt};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 use std::io::Write;
+use std::time::Duration;
 
 pub const DEFAULT_PROVIDER: &str = "openai";
 
 /// Default endpoint for a locally-run Ollama server.
 pub const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434";
+
+/// Extra attempts a model call gets after returning an empty response.
+///
+/// Reasoning models (DeepSeek's `deepseek-v4-flash` included) intermittently
+/// spend their entire output budget on `reasoning_content` and come back with
+/// an empty `content`. rig's `prompt_typed` then fails with
+/// [`StructuredOutputError::EmptyResponse`] — which previously aborted a whole
+/// multi-batch `aic` run on a single unlucky call. Retrying usually succeeds
+/// because the model re-rolls its reasoning path each attempt (verified against
+/// the DeepSeek API: 3 of 4 budget-starved calls recovered within 3 attempts).
+/// Non-empty errors are never retried.
+const EMPTY_RESPONSE_RETRIES: usize = 2;
+
+/// Whether `err` is rig's "model returned no content" error.
+fn is_empty_response(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<StructuredOutputError>(),
+        Some(StructuredOutputError::EmptyResponse)
+    )
+}
+
+/// Linear backoff between empty-response retries, so a flaky provider gets a
+/// moment to recover before the next attempt.
+fn empty_response_backoff(attempt: usize) -> Duration {
+    Duration::from_millis(300 * attempt as u64)
+}
+
+/// Run `op`, retrying it up to [`EMPTY_RESPONSE_RETRIES`] extra times when the
+/// model returns an empty response (see [`EMPTY_RESPONSE_RETRIES`]), with a
+/// short linear backoff. Any other error propagates immediately.
+async fn retry_empty_response<T, F, Fut>(mut op: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempts = 0usize;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if is_empty_response(&err) && attempts < EMPTY_RESPONSE_RETRIES => {
+                attempts += 1;
+                tokio::time::sleep(empty_response_backoff(attempts)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -261,6 +309,7 @@ impl LLM {
     }
 }
 
+#[derive(Clone)]
 pub struct LLMAgent {
     llm: LLM,
     system_prompt: String,
@@ -433,43 +482,68 @@ impl LLMAgent {
     /// deltas to `on_reasoning` instead of printing them, and returns only the
     /// accumulated assistant text. Providers that emit no reasoning (e.g. plain
     /// completions, Ollama) simply produce text and never call `on_reasoning`.
+    ///
+    /// A stream that produces only reasoning and no text (a reasoning model
+    /// blowing its output budget) is treated like an empty response and
+    /// retried — the same policy as [`Self::schema`].
     pub async fn stream_with_reasoning(
         &self,
         prompt: &str,
         mut on_reasoning: impl FnMut(&str),
     ) -> Result<String> {
-        let mut output = String::new();
-        with_agent!(self, agent, {
-            let mut stream = agent.stream_prompt(prompt).await;
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(Text { text }),
-                    )) => output.push_str(&text),
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                    )) => on_reasoning(&reasoning),
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Reasoning(r),
-                    )) => {
-                        let text = r.display_text();
-                        if !text.is_empty() {
-                            on_reasoning(&text);
+        // Inline loop rather than [`retry_empty_response`]: the reasoning
+        // callback is a borrowed `FnMut`, which an escaping async closure could
+        // not reborrow across attempts. Empty output is the streaming analogue
+        // of [`StructuredOutputError::EmptyResponse`].
+        let mut attempts = 0usize;
+        loop {
+            let mut output = String::new();
+            with_agent!(self, agent, {
+                let mut stream = agent.stream_prompt(prompt).await;
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(MultiTurnStreamItem::StreamAssistantItem(
+                            StreamedAssistantContent::Text(Text { text }),
+                        )) => output.push_str(&text),
+                        Ok(MultiTurnStreamItem::StreamAssistantItem(
+                            StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                        )) => on_reasoning(&reasoning),
+                        Ok(MultiTurnStreamItem::StreamAssistantItem(
+                            StreamedAssistantContent::Reasoning(r),
+                        )) => {
+                            let text = r.display_text();
+                            if !text.is_empty() {
+                                on_reasoning(&text);
+                            }
                         }
+                        Ok(_) => {}
+                        Err(e) => anyhow::bail!("Stream error: {e}"),
                     }
-                    Ok(_) => {}
-                    Err(e) => anyhow::bail!("Stream error: {e}"),
                 }
+            });
+            if !output.trim().is_empty() {
+                return Ok(output);
             }
-        });
-        Ok(output)
+            if attempts >= EMPTY_RESPONSE_RETRIES {
+                return Err(anyhow::Error::new(StructuredOutputError::EmptyResponse));
+            }
+            attempts += 1;
+            tokio::time::sleep(empty_response_backoff(attempts)).await;
+        }
     }
 
     pub async fn schema<T>(&self, prompt: &str) -> Result<T>
     where
         T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,
     {
-        with_agent!(self, agent, Ok(agent.prompt_typed(prompt).await?))
+        let this = self.clone();
+        let prompt = prompt.to_string();
+        retry_empty_response(move || {
+            let this = this.clone();
+            let prompt = prompt.clone();
+            async move { with_agent!(this, agent, Ok(agent.prompt_typed(&prompt).await?)) }
+        })
+        .await
     }
 }
 
@@ -562,5 +636,91 @@ mod tests {
         assert!(Provider::OpenAI.env_key().is_some());
         assert!(Provider::Xai.env_key().is_some());
         assert_eq!(Provider::Xai.env_key(), Some("XAI_API_KEY"));
+    }
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    /// The heart of the regression fix: a model call that returns an empty
+    /// response (DeepSeek reasoning models blowing their output budget) is
+    /// retried and the run succeeds — instead of aborting the whole multi-batch
+    /// commit run. Pins the retry count too, so a future change that, say,
+    /// makes retries infinite is caught.
+    #[tokio::test]
+    async fn retry_empty_response_retries_then_succeeds() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let result: anyhow::Result<&str> = retry_empty_response(move || {
+            let counter = counter.clone();
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(anyhow::Error::new(StructuredOutputError::EmptyResponse))
+                } else {
+                    Ok("ok")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.expect("must succeed after retries"), "ok");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            EMPTY_RESPONSE_RETRIES + 1,
+            "an empty response must be retried up to the configured budget"
+        );
+    }
+
+    /// Persistent empty responses exhaust the retry budget and surface the
+    /// original error — the run aborts with the actionable re-run message, it
+    /// does not hang or loop forever.
+    #[tokio::test]
+    async fn retry_empty_response_gives_up_after_budget() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let result: anyhow::Result<()> = retry_empty_response(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::Error::new(StructuredOutputError::EmptyResponse))
+            }
+        })
+        .await;
+        let err = result.expect_err("must give up after the retry budget");
+        assert!(
+            is_empty_response(&err),
+            "the surfaced error must still be the empty-response error: {err:#}"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            EMPTY_RESPONSE_RETRIES + 1,
+            "must stop after the configured budget"
+        );
+    }
+
+    /// Non-empty errors are not retried — a genuine failure (auth, rate limit,
+    /// context overflow) should surface immediately, not be masked by retries.
+    #[tokio::test]
+    async fn retry_empty_response_does_not_retry_other_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let result: anyhow::Result<()> = retry_empty_response(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("boom"))
+            }
+        })
+        .await;
+        assert_eq!(
+            format!("{:#}", result.expect_err("must surface the error")),
+            "boom"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "non-empty errors must not be retried"
+        );
     }
 }
