@@ -166,6 +166,23 @@ fn planner_fixed(plan: generator::BatchPlanOutput) -> BatchPlanner {
     )
 }
 
+/// Planner that records every diff it was called with, then returns a fixed
+/// plan. The fmt-before-diff e2e test (issue #27) needs to inspect the exact
+/// diff string the workflow handed the planner — that diff must reflect the
+/// *formatted* source, proving `format_rust_files` ran before capture.
+fn planner_recording(plan: generator::BatchPlanOutput) -> (BatchPlanner, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    let p: BatchPlanner = Box::new(
+        move |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+            seen2.lock().push(diff);
+            let plan = plan.clone();
+            Box::pin(async move { Ok(plan) })
+        },
+    );
+    (p, seen)
+}
+
 /// A one-batch plan carrying hunk 1 of a single file — the whole change, in
 /// one commit. The hook e2e tests (issue #20) only need one commit, so the
 /// plan is trivially small; the split tests build their multi-batch plans
@@ -322,6 +339,36 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 fn merge_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     gh::make_content_conflict(dir);
+}
+
+/// Minimal cargo project on top of [`gh::init_test_repo`]: a dependency-free
+/// `Cargo.toml`, a formatted `src/main.rs`, and a `/target` `.gitignore`, all
+/// committed. `format_rust_files` runs `cargo fmt --all` from the workflow's
+/// [`gh::CwdGuard`], which needs a manifest to operate on — impossible in a
+/// plain `init_test_repo` git repo. Used by the fmt-before-diff e2e test
+/// (issue #27).
+///
+/// The base `main.rs` has its two edit sites (lines 3 and 12) ≥8 lines apart,
+/// so the formatted diff splits into two hunks under git's default three-line
+/// context — the geometry the hunk-stability test relies on.
+fn init_cargo_repo(dir: &Path) {
+    gh::init_test_repo(dir);
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"fmttest\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
+    )
+    .unwrap();
+    // `cargo fmt` may emit build metadata or a lockfile; keep both out of
+    // `Git::status` so only the Rust source under test appears as unstaged.
+    std::fs::write(dir.join(".gitignore"), "/target\nCargo.lock\n").unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/main.rs"),
+        "fn main() {\n    // edit site 1\n    let value = 1;\n    // pad 0\n    // pad 1\n    // pad 2\n    // pad 3\n    // pad 4\n    // pad 5\n    // pad 6\n    // pad 7\n    let other = 2;\n}\n",
+    )
+    .unwrap();
+    git_in(dir, &["add", "Cargo.toml", ".gitignore", "src/main.rs"]);
+    git_in(dir, &["commit", "-m", "formatted base"]);
 }
 
 /// Two content conflicts (`tracked.txt` modify/modify, `second.txt` add/add)
@@ -542,9 +589,21 @@ fn staged_blob_has_markers(dir: &Path, rel: &str) -> bool {
 }
 
 /// `true` if the repo is clean (no merge/rebase/… in progress) — i.e. finalize
-/// actually landed a commit.
+/// actually landed a commit. NOTE: this is *operational* cleanliness only;
+/// a Clean state can still carry staged, unstaged, or untracked entries. Use
+/// [`worktree_is_empty`] when a test must also assert nothing is left
+/// uncommitted.
 fn is_clean(dir: &Path) -> bool {
     Repository::open(dir).unwrap().state() == git2::RepositoryState::Clean
+}
+
+/// `true` if `git status --porcelain` is empty — no staged, unstaged, or
+/// untracked entries. The strict "working tree is clean" guarantee the
+/// commit-workflow tests pin: a regression that committed *and* re-left the
+/// change staged (or dropped it entirely) would keep `is_clean` green but
+/// trip this.
+fn worktree_is_empty(dir: &Path) -> bool {
+    git_out(dir, &["status", "--porcelain"]).trim().is_empty()
 }
 
 /// File content as recorded at a git revision (e.g. "HEAD", "HEAD~1"), via
@@ -902,6 +961,155 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
     let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
     assert!(head.contains("a1"), "batch 1 must be committed");
     assert!(!head.contains("c1"), "batch 2 must NOT be committed");
+}
+
+// =====================================================================
+// cargo fmt runs before the unstaged diff is captured (issue #27)
+// =====================================================================
+//
+// Before an unstaged Run captures per-file diffs and asks the model for a
+// Batch plan, aic formats Rust files so the hunk numbers the model returns
+// still line up with what gets staged — formatting *after* capture would
+// shift hunks out from under their indices and stage the wrong lines. The
+// staged-files shape of the Run is pinned separately by
+// [`commit_staged_files_in_one_commit`]; this section pins the fmt ordering
+// on the unstaged/Batch shape.
+
+/// Issue #27: prove `cargo fmt` runs *before* the unstaged diff is captured
+/// (hunk-stability guard). The workdir edit is a genuine change (1 → 2 and
+/// 2 → 3) wrapped in formatting violations; `cargo fmt --all` rewrites it to
+/// formatted Rust before the workflow captures the diff the planner sees and
+/// stages from.
+///
+/// The base file's two edit sites are ≥8 lines apart, so the diff has two
+/// hunks. The stub plan splits the file across two batches by hunk index
+/// (batch 1: hunk 2, batch 2: hunk 1). The fingerprints of the unformatted
+/// edit (`value=2`, `other=3`) are text rustfmt never leaves, so a passing
+/// run proves the planner saw the post-format diff — and that hunk 2 staged
+/// exactly the formatted `other` change (hunk 1 untouched until batch 2)
+/// proves the staged hunk indices matched that post-format diff, not a
+/// shifted one.
+#[tokio::test]
+async fn commit_run_formats_rust_before_capturing_diff() {
+    let _lock = gh::GIT_CWD_MUTEX.lock();
+    let dir = tempfile::tempdir().unwrap();
+    init_cargo_repo(dir.path());
+
+    // Unstaged edit: both edit sites get a real change wrapped in a
+    // formatting violation, with the separating pad lines untouched so the
+    // diff keeps its two-hunk structure.
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n    // edit site 1\n    let value=2;\n    // pad 0\n    // pad 1\n    // pad 2\n    // pad 3\n    // pad 4\n    // pad 5\n    // pad 6\n    // pad 7\n    let other=3;\n}\n",
+    )
+    .unwrap();
+
+    // Stub plan: hunk 2 first, hunk 1 second — indices that only exist
+    // against the formatted two-hunk diff.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "src/main.rs".to_string(),
+                    hunks: vec![2],
+                }],
+                reason: Some("value bump".into()),
+            },
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "src/main.rs".to_string(),
+                    hunks: vec![1],
+                }],
+                reason: Some("other bump".into()),
+            },
+        ],
+    };
+    let (planner, seen) = planner_recording(plan);
+    let _g = gh::CwdGuard::new(dir.path());
+    let before = commit_count(dir.path());
+
+    let result = run_commit_workflow_impl(
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner,
+        messenger_fixed("chore: value bump"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "fmt-before-diff Run should succeed: {:?}",
+        result
+    );
+
+    // The planner WAS reached — the unstaged/Batch path ran, not a skip.
+    let captured = seen.lock().clone();
+    assert_eq!(captured.len(), 1, "planner must be called exactly once");
+
+    // Headline assertion: the diff the planner received reflects the
+    // FORMATTED source with both hunks present, not the crammed single-hunk
+    // edit. `value=2`/`other=3` are fingerprints rustfmt never leaves; the
+    // formatted forms are always `value = 2` / `other = 3`.
+    let diff = &captured[0];
+    assert!(
+        diff.contains("let value = 2"),
+        "planner must see the formatted diff; got:\n{diff}"
+    );
+    assert!(
+        diff.contains("let other = 3"),
+        "planner must see the formatted diff; got:\n{diff}"
+    );
+    assert!(
+        !diff.contains("value=2") && !diff.contains("other=3"),
+        "planner must NOT see the unformatted workdir text — cargo fmt must \
+         run before diff capture; got:\n{diff}"
+    );
+
+    // Exactly two batch commits land.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 2,
+        "two batch commits must land"
+    );
+
+    // Batch 1 staged hunk 2 of the post-format diff: the `other` change
+    // only. The `value` change (hunk 1) must be absent — a fmt-after-diff
+    // regression hands the model a one-hunk diff where hunk 2 does not
+    // exist, so this landing proves the staged hunk index matched the
+    // post-format diff.
+    let after_batch1 = file_at_ref(dir.path(), "HEAD~1", "src/main.rs");
+    assert!(
+        after_batch1.contains("let other = 3;"),
+        "batch 1 must carry hunk 2 (the `other` change); got:\n{after_batch1}"
+    );
+    assert!(
+        !after_batch1.contains("let value = 2"),
+        "batch 1 must NOT carry hunk 1 (the `value` change); got:\n{after_batch1}"
+    );
+    assert!(
+        after_batch1.contains("let value = 1;"),
+        "batch 1 must leave hunk 1 unstaged; got:\n{after_batch1}"
+    );
+
+    // Batch 2 staged hunk 1; the final commit holds the fully formatted
+    // file, and the working tree is empty — every hunk landed exactly once.
+    let head = file_at_ref(dir.path(), "HEAD", "src/main.rs");
+    assert!(
+        head.contains("let value = 2;") && head.contains("let other = 3;"),
+        "final commit must hold both formatted changes; got:\n{head}"
+    );
+    assert!(
+        !head.contains("value=2"),
+        "final commit must not carry the unformatted edit; got:\n{head}"
+    );
+    assert!(
+        is_clean(dir.path()),
+        "repo must be in a clean state at the end"
+    );
+    assert!(
+        worktree_is_empty(dir.path()),
+        "working tree must be empty at the end — both hunks staged and committed"
+    );
 }
 
 // =====================================================================
