@@ -474,6 +474,21 @@ fn jitter() -> Duration {
     Duration::from_millis((nanos % 500) as u64)
 }
 
+/// Classify `err` and, if it is retryable, return the backoff to wait before
+/// the next attempt (printing the retry notice). `None` means stop: out of
+/// budget, or a permanent error. The single source of truth for retry *policy*
+/// — shared by [`with_retry`] (the non-streaming call sites) and the streaming
+/// loop in [`LLMAgent::stream_with_reasoning`], which keeps its own outer loop
+/// only because its `&mut` reasoning callback can't escape a `FnMut` closure.
+fn retry_backoff(attempt: u32, err: &anyhow::Error) -> Option<Duration> {
+    if attempt >= LLM_MAX_ATTEMPTS || !should_retry(err) {
+        return None;
+    }
+    let backoff = LLM_BASE_DELAY * 2u32.pow(attempt - 1);
+    retry_notice(attempt, LLM_MAX_ATTEMPTS, backoff, err);
+    Some(backoff)
+}
+
 /// Run `f`, retrying on retryable failures (empty/budget output or a transient
 /// error) with exponential backoff. A permanent error fails fast. A
 /// best-effort notice is printed to stderr on each retry.
@@ -487,15 +502,13 @@ where
         attempt += 1;
         match f().await {
             Ok(v) => return Ok(v),
-            Err(e) => {
-                if attempt < LLM_MAX_ATTEMPTS && should_retry(&e) {
-                    let backoff = LLM_BASE_DELAY * 2u32.pow(attempt - 1);
-                    retry_notice(attempt, LLM_MAX_ATTEMPTS, backoff, &e);
+            Err(e) => match retry_backoff(attempt, &e) {
+                Some(backoff) => {
                     tokio::time::sleep(backoff + jitter()).await;
                     continue;
                 }
-                return Err(e);
-            }
+                None => return Err(e),
+            },
         }
     }
 }
@@ -557,10 +570,12 @@ impl LLMAgent {
         mut on_reasoning: impl FnMut(&str),
     ) -> Result<String> {
         let prompt = prompt.to_string();
-        // Retry loop inlined (not via `with_retry`) because the reasoning
-        // callback is borrowed mutably and cannot escape a FnMut closure into
-        // the returned future. Each attempt's async block borrows
-        // `on_reasoning` locally and is fully awaited before the next attempt.
+        // The retry *policy* is shared with the non-streaming call sites via
+        // [`retry_backoff`]; this method keeps its own outer loop only because
+        // the reasoning callback is borrowed mutably and cannot escape a
+        // `FnMut` closure into a returned future (the lending-callback
+        // constraint). Each attempt's async block borrows `on_reasoning`
+        // locally and is fully awaited before the next attempt.
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -599,15 +614,13 @@ impl LLMAgent {
             .await;
             match outcome {
                 Ok(v) => return Ok(v),
-                Err(e) => {
-                    if attempt < LLM_MAX_ATTEMPTS && should_retry(&e) {
-                        let backoff = LLM_BASE_DELAY * 2u32.pow(attempt - 1);
-                        retry_notice(attempt, LLM_MAX_ATTEMPTS, backoff, &e);
+                Err(e) => match retry_backoff(attempt, &e) {
+                    Some(backoff) => {
                         tokio::time::sleep(backoff + jitter()).await;
                         continue;
                     }
-                    return Err(e);
-                }
+                    None => return Err(e),
+                },
             }
         }
     }
