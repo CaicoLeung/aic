@@ -182,10 +182,10 @@ fn format_rust_files(paths: &[String], display: &Display) {
             display.formatted_notice(rust_files.len());
         }
         Ok(s) => {
-            eprintln!("⚠️  rustfmt exited with {}", s);
+            display.warn(&format!("rustfmt exited with {}", s));
         }
         Err(e) => {
-            eprintln!("⚠️  Failed to run rustfmt: {e}");
+            display.warn(&format!("Failed to run rustfmt: {e}"));
         }
     }
 }
