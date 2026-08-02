@@ -24,6 +24,7 @@ futures = "0.3"
 git2 = "0.21"
 indicatif = "0.17"
 console = "0.16"
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 rig-core = "0.36"
 schemars = "1"
 similar = "2"
