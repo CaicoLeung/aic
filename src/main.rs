@@ -18,11 +18,10 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
-use indicatif::{MultiProgress, ProgressBar};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::time::Duration;
 
 /// A boxed, `Send` future — the return type of the resolver seam.
 pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -63,15 +62,23 @@ fn print_reasoning_line(mp: &MultiProgress, width: usize, line: &str) -> bool {
 /// [`MultiProgress::println`], which is indicatif's flicker-free path for text
 /// alongside a spinner — the spinner itself stays single-line (its in-place
 /// redraw is imperceptible), and the reasoning never triggers a multi-line
-/// clear-each-line-then-repaint cycle. The trail is capped at
-/// [`display::REASONING_SCROLL_LIMIT`] lines; a final partial line and the
-/// overflow summary are drained by [`display::ThinkingView::flush`].
+/// clear-each-line-then-repaint cycle. The view is a sliding window with no
+/// line cap; older lines scroll off the top of the terminal while the spinner
+/// stays pinned at the bottom. The `MultiProgress` draw target is rate-limited
+/// to 60 fps so bursts of completions coalesce into one repaint — higher
+/// effective frame rate, no flicker.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     let mp = MultiProgress::new();
+    // Rate-limit repaints so a burst of completed reasoning lines coalesces
+    // into one paint instead of flickering the whole progress region — see
+    // `display::PROGRESS_REDRAW_HZ` for the rationale and the chosen rate.
+    mp.set_draw_target(ProgressDrawTarget::stderr_with_hz(
+        display::PROGRESS_REDRAW_HZ,
+    ));
     let pb = mp.add(ProgressBar::new_spinner());
     pb.set_style(display::spinner_style()?);
     pb.set_message("Analyzing changes");
-    pb.enable_steady_tick(Duration::from_millis(80));
+    pb.enable_steady_tick(display::SPINNER_TICK);
 
     let mut view = display::ThinkingView::new();
     // The feed's content budget: the shared terminal width minus the "│ "
@@ -94,9 +101,8 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     })
     .await;
 
-    // Drain the tail: any partial line that never got its final `\n`, plus
-    // the overflow summary — the last reasoning visible before the spinner
-    // clears.
+    // Drain the tail: a partial line that never got its final `\n` — the
+    // last reasoning visible before the spinner clears.
     if printing {
         for line in view.flush() {
             if !print_reasoning_line(&mp, feed_width, &line) {
