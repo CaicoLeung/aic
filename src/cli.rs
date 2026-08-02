@@ -29,21 +29,3 @@ pub enum Commands {
     ///   aic completion
     Completion,
 }
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
-pub enum CompletionShell {
-    #[value(name = "bash")]
-    Bash,
-    #[value(name = "elvish")]
-    Elvish,
-    #[value(name = "fish")]
-    Fish,
-    #[value(name = "nushell")]
-    Nushell,
-    #[value(name = "powershell")]
-    PowerShell,
-    #[value(name = "zsh")]
-    Zsh,
-    #[value(name = "carapace-spec")]
-    Spec,
-}

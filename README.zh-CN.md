@@ -90,7 +90,7 @@ cargo build --release
 aic completion            # 交互式选择 shell 并安装
 ```
 
-重载 shell（`exec $SHELL`）后 Tab 补全即生效。支持 `zsh`、`bash`、`fish`、`nushell`。zsh/bash/fish 重载即自动生效；nushell 需在 `config.nu` 加一行 `source`（安装后会打印）。（macOS 的 Homebrew 用户可零配置获得 zsh 补全 —— Homebrew 的 `site-functions` 目录已在 `$fpath` 中。）
+重载 shell（`exec $SHELL`）后 Tab 补全即生效。支持：`bash`、`fish`、`zsh`、`nushell`。`bash` 和 `fish` 重载即自动生效；`zsh` 在 Homebrew 下自动生效（其 `site-functions` 目录已在 `$fpath` 中），其他情况需手动加入 `$fpath`；`nushell` 需在 `config.nu` 加一行 `source`（安装后会打印）。
 
 ## Quick Start
 
