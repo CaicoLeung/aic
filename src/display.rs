@@ -584,7 +584,7 @@ where
     let pb = indicatif::ProgressBar::new_spinner();
     pb.set_style(spinner_style()?);
     pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(80));
+    pb.enable_steady_tick(SPINNER_TICK);
 
     let result = fut.await;
     pb.disable_steady_tick();
@@ -592,54 +592,45 @@ where
     result
 }
 
-/// How many reasoning lines are printed above the spinner before the trail is
-/// collapsed into a summary. Keeps the terminal usable when a verbose model
-/// (e.g. DeepSeek-style chain-of-thought) streams hundreds of lines.
-pub(crate) const REASONING_SCROLL_LIMIT: usize = 50;
+/// Animation frame rate for every spinner in the run: the braille tick
+/// advances once per tick, so a shorter interval is a smoother spin. 50 ms ≈
+/// 20 fps, down from the previous 80 ms. Paired with the rate-limited
+/// `MultiProgress` draw target used by the streaming-reasoning path, it also
+/// caps repaint bursts that read as flicker.
+pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 
-/// Collects the model's streamed reasoning and emits each line once it is
-/// complete (terminated by `\n`). The caller prints each emitted line above the
-/// spinner via `MultiProgress::println`, which scrolls smoothly without the
-/// clear-each-line-then-repaint cycle that flickered when the reasoning was
-/// packed into the spinner's multi-line message.
+/// A sliding-window view over the model's streamed reasoning. Each completed
+/// line (terminated by `\n`) is emitted in arrival order so the caller can
+/// print it above the spinner via `MultiProgress::println`; older lines scroll
+/// off the top of the terminal naturally while the spinner stays pinned at the
+/// bottom — a true tail window, not a cap-then-collapse.
 ///
 /// Partial content (no trailing `\n` yet) is buffered internally and emitted
 /// when the next `\n` arrives; a line still pending when the stream ends is
 /// drained by [`flush`](Self::flush). Blank lines are dropped to keep the feed
-/// information-dense. Past [`REASONING_SCROLL_LIMIT`] emitted lines, further
-/// lines are counted rather than emitted — [`flush`](Self::flush) reports
-/// them as a single summary line.
+/// information-dense. There is deliberately no line budget: a verbose
+/// chain-of-thought streams as many lines as it produces and the terminal's
+/// own scrollback is the window.
 pub(crate) struct ThinkingView {
     cur: String,
-    printed: usize,
-    hidden: usize,
 }
 
 impl ThinkingView {
     pub(crate) fn new() -> Self {
-        Self {
-            cur: String::new(),
-            printed: 0,
-            hidden: 0,
-        }
+        Self { cur: String::new() }
     }
 
     /// Ingest a reasoning delta (may be a partial line, many lines, or empty)
-    /// and return the non-blank lines that were completed by this delta and
-    /// still fit the scroll budget. A delta that ends mid-line returns no
-    /// lines for that fragment — it is buffered until the next `\n`.
+    /// and return the non-blank lines completed by this delta, in arrival
+    /// order. A delta that ends mid-line returns no lines for that fragment —
+    /// it is buffered until the next `\n`.
     pub(crate) fn push(&mut self, delta: &str) -> Vec<String> {
         let mut completed = Vec::new();
         for ch in delta.chars() {
             if ch == '\n' {
                 let line = std::mem::take(&mut self.cur);
                 if !line.trim().is_empty() {
-                    if self.printed < REASONING_SCROLL_LIMIT {
-                        self.printed += 1;
-                        completed.push(line);
-                    } else {
-                        self.hidden += 1;
-                    }
+                    completed.push(line);
                 }
             } else {
                 self.cur.push(ch);
@@ -648,26 +639,16 @@ impl ThinkingView {
         completed
     }
 
-    /// Drain the tail of the stream: any line still pending (the stream may
-    /// end without a final `\n`), followed by a one-line summary when lines
-    /// were hidden by the scroll budget. Returns the lines to print, in
-    /// order. Idempotent — call once after the last [`push`](Self::push).
+    /// Drain the tail of the stream: any line still pending when the stream
+    /// ends without a final `\n`. Returns it (if non-blank) for the caller to
+    /// print. Idempotent — call once after the last [`push`](Self::push).
     pub(crate) fn flush(&mut self) -> Vec<String> {
-        let mut out = Vec::new();
         let line = std::mem::take(&mut self.cur);
-        if !line.trim().is_empty() {
-            if self.printed < REASONING_SCROLL_LIMIT {
-                self.printed += 1;
-                out.push(line);
-            } else {
-                self.hidden += 1;
-            }
+        if line.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![line]
         }
-        if self.hidden > 0 {
-            out.push(format!("… {} more reasoning lines hidden", self.hidden));
-            self.hidden = 0;
-        }
-        out
     }
 }
 
@@ -751,37 +732,33 @@ mod tests {
         assert!(v.flush().is_empty());
     }
 
-    /// Past [`REASONING_SCROLL_LIMIT`] lines, further lines are counted and
-    /// reported as one summary line by [`ThinkingView::flush`] — a verbose
-    /// model can't flood the terminal.
+    /// The view is a sliding window with no budget: every non-blank completed
+    /// line is emitted in order, however many arrive — nothing hidden,
+    /// nothing summarized.
     #[test]
-    fn thinking_view_caps_scroll_and_summarizes_overflow() {
+    fn thinking_view_emits_all_lines_with_no_cap() {
         let mut v = ThinkingView::new();
         let mut emitted = Vec::new();
-        for i in 1..=REASONING_SCROLL_LIMIT + 3 {
+        for i in 1..=200 {
             emitted.extend(v.push(&format!("line {i}\n")));
         }
-        // exactly the budget is emitted, in order
-        assert_eq!(emitted.len(), REASONING_SCROLL_LIMIT);
+        assert_eq!(emitted.len(), 200);
         assert_eq!(emitted.first(), Some(&"line 1".to_string()));
-        assert_eq!(
-            emitted.last(),
-            Some(&format!("line {REASONING_SCROLL_LIMIT}"))
-        );
-        // the three overflow lines come back as a single summary
-        assert_eq!(v.flush(), vec!["… 3 more reasoning lines hidden"]);
+        assert_eq!(emitted.last(), Some(&"line 200".to_string()));
+        // nothing pending, nothing hidden
+        assert!(v.flush().is_empty());
     }
 
-    /// A partial line at stream end counts against the scroll budget too:
-    /// once the budget is exhausted it is hidden rather than emitted.
+    /// A trailing partial line after a long run is still drained by `flush` —
+    /// length never causes a drop.
     #[test]
-    fn thinking_view_flush_hides_partial_line_after_cap() {
+    fn thinking_view_flush_drains_partial_after_many_lines() {
         let mut v = ThinkingView::new();
-        for i in 1..=REASONING_SCROLL_LIMIT {
+        for i in 1..=50 {
             v.push(&format!("line {i}\n"));
         }
         assert!(v.push("trailing partial").is_empty());
-        assert_eq!(v.flush(), vec!["… 1 more reasoning lines hidden"]);
+        assert_eq!(v.flush(), vec!["trailing partial".to_string()]);
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format
