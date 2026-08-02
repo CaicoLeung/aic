@@ -598,15 +598,6 @@ where
 /// 20 fps, down from the previous 80 ms.
 pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 
-/// Maximum repaint rate for the in-place reasoning window. The window redraws
-/// on every reasoning delta; without a cap each delta forces an immediate
-/// clear-and-redraw of the multi-line region, which flickers. Limiting it to
-/// 60 Hz coalesces sub-frame updates into one paint — the window scrolls
-/// smoothly with no flicker and no dropped lines. Named in hertz to match the
-/// `ProgressDrawTarget::stderr_with_hz` parameter it feeds, and paired with
-/// [`SPINNER_TICK`] as the two knobs that set the streaming path's smoothness.
-pub(crate) const PROGRESS_REDRAW_HZ: u8 = 60;
-
 /// How many reasoning *lines* stay visible at once — a logical-line cap, not a
 /// terminal-row cap. The window rolls: each new completed line enters at the
 /// bottom and the oldest is dropped once the count exceeds this, so the newest

@@ -18,7 +18,6 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
-use indicatif::{ProgressBar, ProgressDrawTarget};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -44,68 +43,34 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
-/// Build the spinner's in-place message: the one-line label on top, followed
-/// by the rolling reasoning window — each retained line greedy-wrapped under
-/// the shared `│ ` indent. Redrawn in place by the rate-limited draw target,
-/// never printed as a permanent line, so it leaves no residue in the
-/// scrollback. On stream end the caller freezes the spinner (see
-/// [`analyze_changes`]) rather than clearing it, leaving this capped window
-/// visible on screen.
-fn reasoning_message(label: &str, width: usize, window: &[String]) -> String {
-    let mut msg = String::from(label);
-    for line in window {
-        for piece in display::wrap_line(line, width) {
-            msg.push('\n');
-            msg.push_str(display::MARGIN);
-            msg.push_str("│ ");
-            msg.push_str(&piece);
-        }
-    }
-    msg
-}
-
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling
-/// [`display::REASONING_WINDOW`]-*line* block that redraws in place as the
+/// [`display::REASONING_WINDOW`]-*line* window that redraws in place as the
 /// model thinks — newest lines at the bottom, oldest scrolled out of the
 /// window — and is left visible (capped to [`display::REASONING_WINDOW`] lines,
 /// each possibly wrapped to several terminal rows) once thinking ends, so the
-/// user can read what the model thought. The draw target is rate-limited so the
-/// in-place redraws coalesce into one paint per frame: the window scrolls
-/// smoothly with no flicker.
+/// user can read what the model thought.
+///
+/// Rendering is hand-rolled via [`display::ReasoningRenderer`] rather than an
+/// indicatif multi-line spinner: indicatif repaints by blanking every row then
+/// redrawing them, and its steady tick forced that ~20×/s, so a multi-row
+/// window flickered. The renderer clears and rewrites one row at a time (any
+/// instant has at most one blank row) and repaints only on a reasoning change,
+/// so the window is flicker-free. See [`display::ReasoningRenderer`] for the
+/// redraw contract.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    let pb = ProgressBar::new_spinner();
-    // Rate-limit repaints so the rolling reasoning window redraws at most
-    // `PROGRESS_REDRAW_HZ` times per second — without it each delta forces an
-    // immediate clear-and-redraw of the multi-line region, which flickers.
-    pb.set_draw_target(ProgressDrawTarget::stderr_with_hz(
-        display::PROGRESS_REDRAW_HZ,
-    ));
-    pb.set_style(display::spinner_style()?);
-    let label = "Analyzing changes";
-    pb.set_message(label.to_string());
-    pb.enable_steady_tick(display::SPINNER_TICK);
-
     let mut view = display::ThinkingView::new();
-    // Content budget for each wrapped reasoning row: the shared terminal
-    // width minus the `MARGIN` + "│ " decoration and one column of breathing
-    // room.
-    let feed_width = display::terminal_width().saturating_sub(6);
+    let mut renderer = display::ReasoningRenderer::new("Analyzing changes");
 
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
         let window = view.push(delta);
-        pb.set_message(reasoning_message(label, feed_width, &window));
+        renderer.paint(&window);
     })
     .await;
 
-    // Thinking is over. Leave the final reasoning window visible (capped at
-    // REASONING_WINDOW rows) so the user can actually read what the model
-    // thought — clearing on completion made the whole feed vanish. The window
-    // is already size-capped, so this can't reintroduce the unbounded-scrollback
-    // flood that "hide on completion" was really about. Freeze the spinner on
-    // its last frame to mark the phase done.
-    pb.disable_steady_tick();
-    pb.finish();
+    // Leave the final capped window visible; `finish` parks the cursor below it
+    // (and the renderer's Drop is a backstop if the stream aborted first).
+    renderer.finish();
     result
 }
 
