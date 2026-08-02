@@ -69,11 +69,12 @@ fn print_reasoning_line(mp: &MultiProgress, width: usize, line: &str) -> bool {
 /// effective frame rate, no flicker.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     let mp = MultiProgress::new();
-    // Rate-limit repaints: without this, every `println` forces an immediate
-    // redraw and a burst of completed reasoning lines flickers the whole
-    // progress region. 60 fps coalesces sub-frame updates into a single paint
-    // — smooth to the eye, no perceptible flicker, no dropped lines.
-    mp.set_draw_target(ProgressDrawTarget::stderr_with_hz(60));
+    // Rate-limit repaints so a burst of completed reasoning lines coalesces
+    // into one paint instead of flickering the whole progress region — see
+    // `display::PROGRESS_REDRAW_HZ` for the rationale and the chosen rate.
+    mp.set_draw_target(ProgressDrawTarget::stderr_with_hz(
+        display::PROGRESS_REDRAW_HZ,
+    ));
     let pb = mp.add(ProgressBar::new_spinner());
     pb.set_style(display::spinner_style()?);
     pb.set_message("Analyzing changes");

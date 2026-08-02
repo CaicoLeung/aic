@@ -594,10 +594,17 @@ where
 
 /// Animation frame rate for every spinner in the run: the braille tick
 /// advances once per tick, so a shorter interval is a smoother spin. 50 ms ≈
-/// 20 fps, down from the previous 80 ms. Paired with the rate-limited
-/// `MultiProgress` draw target used by the streaming-reasoning path, it also
-/// caps repaint bursts that read as flicker.
+/// 20 fps, down from the previous 80 ms.
 pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
+
+/// Maximum repaint rate for the streaming-reasoning `MultiProgress`. Without
+/// a cap, every `println` forces an immediate full-region redraw and a burst
+/// of completed reasoning lines flickers the whole progress area; limiting it
+/// to 60 Hz coalesces sub-frame updates into one paint — no flicker, no
+/// dropped lines. Named in hertz to match the
+/// `ProgressDrawTarget::stderr_with_hz` parameter it feeds, and paired with
+/// [`SPINNER_TICK`] as the two knobs that set the streaming path's smoothness.
+pub(crate) const PROGRESS_REDRAW_HZ: u8 = 60;
 
 /// A sliding-window view over the model's streamed reasoning. Each completed
 /// line (terminated by `\n`) is emitted in arrival order so the caller can
