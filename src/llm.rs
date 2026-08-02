@@ -374,20 +374,20 @@ impl Provider {
     pub fn models(&self) -> &'static [&'static str] {
         match self {
             Self::OpenAI => &["gpt-5", "gpt-5-mini", "gpt-5-nano"],
-            Self::Anthropic => &["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"],
+            Self::Anthropic => &["claude-sonnet-4-5", "claude-haiku-4-5"],
             Self::Gemini => &[
                 "gemini-2.5-pro",
                 "gemini-2.5-flash",
                 "gemini-2.5-flash-lite",
             ],
-            Self::DeepSeek => &["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+            Self::DeepSeek => &["deepseek-v4-flash", "deepseek-v4-pro"],
             Self::Groq => &[
                 "llama-3.3-70b-versatile",
-                "llama-3.3-70b-specdec",
-                "deepseek-r1-distill-llama-70b",
+                "llama-3.1-8b-instant",
+                "openai/gpt-oss-120b",
             ],
-            Self::Ollama => &["llama3.3", "qwen2.5", "deepseek-r1", "mistral"],
-            Self::Xai => &["grok-4.3", "grok-4", "grok-4-fast"],
+            Self::Ollama => &["llama3.3", "qwen2.5", "qwen3", "deepseek-r1"],
+            Self::Xai => &["grok-4.5", "grok-4.3"],
             Self::Mistral => &[
                 "mistral-large-latest",
                 "mistral-small-latest",
@@ -397,12 +397,13 @@ impl Provider {
             Self::Perplexity => &[
                 "sonar",
                 "sonar-pro",
-                "sonar-reasoning",
                 "sonar-reasoning-pro",
+                "sonar-deep-research",
             ],
             Self::Together => &[
                 "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                "meta-llama/Llama-3.3-8B-Instruct-Turbo",
+                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+                "deepseek-ai/DeepSeek-V3.1",
             ],
             Self::OpenAiCompatible => &[],
         }
