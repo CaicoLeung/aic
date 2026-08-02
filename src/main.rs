@@ -18,7 +18,6 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -44,75 +43,35 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
-/// Print one reasoning line above the spinner, greedy-wrapped under the
-/// shared `│ ` indent. Returns `false` on the first write failure (e.g.
-/// stderr closed) so the caller can stop trying — reasoning display is
-/// best-effort and must never break the commit flow.
-fn print_reasoning_line(mp: &MultiProgress, width: usize, line: &str) -> bool {
-    for piece in display::wrap_line(line, width) {
-        if mp.println(format!("{}│ {piece}", display::MARGIN)).is_err() {
-            return false;
-        }
-    }
-    true
-}
-
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live. Each completed reasoning line scrolls above the spinner via
-/// [`MultiProgress::println`], which is indicatif's flicker-free path for text
-/// alongside a spinner — the spinner itself stays single-line (its in-place
-/// redraw is imperceptible), and the reasoning never triggers a multi-line
-/// clear-each-line-then-repaint cycle. The view is a sliding window with no
-/// line cap; older lines scroll off the top of the terminal while the spinner
-/// stays pinned at the bottom. The `MultiProgress` draw target is rate-limited
-/// to 60 fps so bursts of completions coalesce into one repaint — higher
-/// effective frame rate, no flicker.
+/// reasoning live. The reasoning is shown as a rolling
+/// [`display::REASONING_WINDOW`]-row block that redraws in place as the
+/// model thinks — newest rows at the bottom, oldest scrolled out of the
+/// window — and is erased when thinking ends, so the reasoning never lingers
+/// on screen or in the scrollback. The cap bounds the in-place block while
+/// it streams, even when a line wraps long.
+///
+/// Rendering is hand-rolled via [`display::ReasoningRenderer`] rather than an
+/// indicatif multi-line spinner: indicatif repaints by blanking every row then
+/// redrawing them, and its steady tick forced that ~20×/s, so a multi-row
+/// window flickered. The renderer clears and rewrites one row at a time (any
+/// instant has at most one blank row) and repaints only on a reasoning change,
+/// so the window is flicker-free. See [`display::ReasoningRenderer`] for the
+/// redraw contract.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    let mp = MultiProgress::new();
-    // Rate-limit repaints so a burst of completed reasoning lines coalesces
-    // into one paint instead of flickering the whole progress region — see
-    // `display::PROGRESS_REDRAW_HZ` for the rationale and the chosen rate.
-    mp.set_draw_target(ProgressDrawTarget::stderr_with_hz(
-        display::PROGRESS_REDRAW_HZ,
-    ));
-    let pb = mp.add(ProgressBar::new_spinner());
-    pb.set_style(display::spinner_style()?);
-    pb.set_message("Analyzing changes");
-    pb.enable_steady_tick(display::SPINNER_TICK);
-
     let mut view = display::ThinkingView::new();
-    // The feed's content budget: the shared terminal width minus the "│ "
-    // decoration and one column of breathing room.
-    let feed_width = display::terminal_width().saturating_sub(6);
+    let mut renderer = display::ReasoningRenderer::new("Analyzing changes");
 
-    // Best-effort: once a write fails, stop printing rather than failing per
-    // line; the spinner itself keeps working.
-    let mut printing = true;
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
-        if !printing {
-            return;
-        }
-        for line in view.push(delta) {
-            if !print_reasoning_line(&mp, feed_width, &line) {
-                printing = false;
-                break;
-            }
-        }
+        let window = view.push(delta);
+        renderer.paint(&window);
     })
     .await;
 
-    // Drain the tail: a partial line that never got its final `\n` — the
-    // last reasoning visible before the spinner clears.
-    if printing {
-        for line in view.flush() {
-            if !print_reasoning_line(&mp, feed_width, &line) {
-                break;
-            }
-        }
-    }
-
-    pb.disable_steady_tick();
-    pb.finish_and_clear();
+    // Thinking is over: `finish` erases the reasoning block (in-place all
+    // along, so nothing ever hit the scrollback) and parks the cursor below
+    // it. The renderer's Drop is a backstop if the stream aborted first.
+    renderer.finish();
     result
 }
 

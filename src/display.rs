@@ -1,4 +1,5 @@
 use console::{Style, Term};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Duration;
 
@@ -597,65 +598,280 @@ where
 /// 20 fps, down from the previous 80 ms.
 pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 
-/// Maximum repaint rate for the streaming-reasoning `MultiProgress`. Without
-/// a cap, every `println` forces an immediate full-region redraw and a burst
-/// of completed reasoning lines flickers the whole progress area; limiting it
-/// to 60 Hz coalesces sub-frame updates into one paint — no flicker, no
-/// dropped lines. Named in hertz to match the
-/// `ProgressDrawTarget::stderr_with_hz` parameter it feeds, and paired with
-/// [`SPINNER_TICK`] as the two knobs that set the streaming path's smoothness.
-pub(crate) const PROGRESS_REDRAW_HZ: u8 = 60;
-
-/// A sliding-window view over the model's streamed reasoning. Each completed
-/// line (terminated by `\n`) is emitted in arrival order so the caller can
-/// print it above the spinner via `MultiProgress::println`; older lines scroll
-/// off the top of the terminal naturally while the spinner stays pinned at the
-/// bottom — a true tail window, not a cap-then-collapse.
+/// How many reasoning rows stay visible at once — a *rendered-row* cap. The
+/// window rolls: each new completed line enters at the bottom and the oldest
+/// is dropped once the count exceeds this, so the reasoning block never grows
+/// past it. Older reasoning scrolls *within* the window (the newest rows
+/// always visible), not into the terminal scrollback.
 ///
-/// Partial content (no trailing `\n` yet) is buffered internally and emitted
-/// when the next `\n` arrives; a line still pending when the stream ends is
-/// drained by [`flush`](Self::flush). Blank lines are dropped to keep the feed
-/// information-dense. There is deliberately no line budget: a verbose
-/// chain-of-thought streams as many lines as it produces and the terminal's
-/// own scrollback is the window.
+/// Enforced on the rendered rows (see [`reasoning_rows`], which applies it
+/// after greedy wrap), so a single long line that wraps to several rows still
+/// cannot grow the region. [`ThinkingView`] bounds its stored lines to this
+/// count as a memory guard; together with the spinner row the whole in-place
+/// region stays at [`REASONING_WINDOW`] + 1 rows.
+pub(crate) const REASONING_WINDOW: usize = 12;
+
+/// A rolling window over the model's streamed reasoning, sized to
+/// [`REASONING_WINDOW`] logical lines (the retention window; the rendered-row
+/// cap lives in [`reasoning_rows`]). The caller renders [`push`](Self::push)'s
+/// returned window into the spinner's in-place multi-line message, so the block
+/// redraws in place — never printed as permanent lines that linger in the
+/// scrollback — and is erased once thinking ends ([`ReasoningRenderer::finish`]),
+/// leaving the terminal clean for the rest of the run. The cap keeps the block
+/// bounded while it streams, so no unbounded region ever accumulates.
+///
+/// Completed lines (terminated by `\n`) roll into the window; the in-progress
+/// partial line (no trailing `\n` yet) is shown as the window's last line while
+/// it builds and counts against the same budget. Blank lines are dropped to
+/// keep the feed information-dense.
 pub(crate) struct ThinkingView {
+    lines: VecDeque<String>,
     cur: String,
 }
 
 impl ThinkingView {
     pub(crate) fn new() -> Self {
-        Self { cur: String::new() }
+        Self {
+            lines: VecDeque::new(),
+            cur: String::new(),
+        }
     }
 
     /// Ingest a reasoning delta (may be a partial line, many lines, or empty)
-    /// and return the non-blank lines completed by this delta, in arrival
-    /// order. A delta that ends mid-line returns no lines for that fragment —
-    /// it is buffered until the next `\n`.
+    /// and return the current window: the newest completed lines plus the
+    /// in-progress partial line, oldest-first, capped to [`REASONING_WINDOW`]
+    /// lines. A delta that ends mid-line leaves the partial buffered and shown
+    /// as the window's last line until the next `\n`.
     pub(crate) fn push(&mut self, delta: &str) -> Vec<String> {
-        let mut completed = Vec::new();
         for ch in delta.chars() {
             if ch == '\n' {
                 let line = std::mem::take(&mut self.cur);
                 if !line.trim().is_empty() {
-                    completed.push(line);
+                    self.push_line(line);
                 }
             } else {
                 self.cur.push(ch);
             }
         }
-        completed
+        self.window()
     }
 
-    /// Drain the tail of the stream: any line still pending when the stream
-    /// ends without a final `\n`. Returns it (if non-blank) for the caller to
-    /// print. Idempotent — call once after the last [`push`](Self::push).
-    pub(crate) fn flush(&mut self) -> Vec<String> {
-        let line = std::mem::take(&mut self.cur);
-        if line.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![line]
+    /// Append a completed line, then bound *storage* to [`REASONING_WINDOW`] —
+    /// not the visible window. This stops a long chain-of-thought from
+    /// retaining every completed line forever; the visible cap lives in
+    /// [`window`](Self::window), which also accounts for the in-progress
+    /// partial row.
+    fn push_line(&mut self, line: String) {
+        self.lines.push_back(line);
+        if self.lines.len() > REASONING_WINDOW {
+            self.lines.pop_front();
         }
+    }
+
+    /// The line-level window: the newest [`REASONING_WINDOW`] lines, completed
+    /// lines oldest→newest then the in-progress partial as the last line. The
+    /// partial counts against the same budget, so a full window trims its
+    /// oldest completed line here to make room. This bounds retention
+    /// (memory); the *visible* row cap is applied by [`reasoning_rows`] after
+    /// wrapping, since one line can render to several rows.
+    fn window(&self) -> Vec<String> {
+        let mut rows: Vec<String> = self.lines.iter().cloned().collect();
+        if !self.cur.trim().is_empty() {
+            rows.push(self.cur.clone());
+        }
+        let start = rows.len().saturating_sub(REASONING_WINDOW);
+        rows[start..].to_vec()
+    }
+}
+
+/// Braille frames for the analysis spinner. Advanced once per reasoning
+/// delta (see [`ReasoningRenderer`]) so the glyph spins while reasoning flows
+/// and freezes when it stalls — incidental animation that needs no background
+/// ticker, since a steady tick is exactly what forced indicatif's flickering
+/// full-block repaints.
+const REASONING_GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Build the visual rows for one reasoning frame: the spinner+label row on
+/// top, then each retained reasoning line greedy-wrapped under the shared
+/// `│ ` indent. Pure (no I/O) so the layout is unit-testable; the renderer
+/// paints exactly what this returns.
+///
+/// `feed_width` is the per-piece wrap budget. An empty `window` yields just
+/// the spinner row. The reasoning rows (everything below the spinner row) are
+/// capped to [`REASONING_WINDOW`]: a long line wraps to several rows, so the
+/// newest [`REASONING_WINDOW`] *rendered rows* are kept and the oldest drop
+/// out — the top row may start mid-line, exactly like a terminal tail window.
+fn reasoning_rows(glyph: &str, label: &str, window: &[String], feed_width: usize) -> Vec<String> {
+    let mut rows = Vec::with_capacity(window.len() + 1);
+    rows.push(format!("{MARGIN}{glyph} {label}"));
+    for line in window {
+        for piece in wrap_line(line, feed_width) {
+            rows.push(format!("{MARGIN}│ {piece}"));
+        }
+    }
+    // The load-bearing rendered-row cap: the line window alone can't bound
+    // the on-screen region, because one long line wraps to many rows. Keep
+    // the newest REASONING_WINDOW rows below the spinner row.
+    let start = 1 + (rows.len() - 1).saturating_sub(REASONING_WINDOW);
+    rows.drain(1..start);
+    rows
+}
+
+/// Flicker-free in-place renderer for the streaming reasoning window.
+///
+/// Replaces the indicatif multi-line spinner, whose redraw is a two-phase
+/// "blank every row, then repaint every row" — the blank gap scaled with the
+/// window height and the spinner's steady tick forced it ~20×/s, so a 12-line
+/// (often 20–36 visual rows) block flickered visibly. This renderer paints
+/// with **interleaved clear-then-write**: move to the top of the previous
+/// frame, then clear a line and rewrite it immediately before descending to
+/// the next. At any instant at most one row is blank, and only until it is
+/// rewritten — imperceptible regardless of window height or update rate.
+///
+/// There is no steady tick: a frame is painted only when reasoning changes,
+/// and the glyph advances on each paint so it spins with the stream and
+/// freezes when it stalls. [`finish`](Self::finish) erases the frame once
+/// thinking ends — the reasoning never lingers on screen or in the scrollback
+/// (it was in-place all along) — and parks the cursor below the cleared
+/// region. All writes are best-effort: a closed stderr just stops drawing,
+/// never breaks the commit flow. A no-op off a terminal.
+pub(crate) struct ReasoningRenderer {
+    term: Term,
+    label: &'static str,
+    feed_width: usize,
+    glyph: usize,
+    prev_height: usize,
+    /// `true` once a frame has been painted and not yet finished — guards
+    /// [`Drop`] so a mid-stream error still erases the frame.
+    active: bool,
+}
+
+/// ANSI escapes for the in-place repaint. Hand-written (rather than via
+/// `console::Term`'s cursor/clear methods) so the exact byte sequence is
+/// assembled by the pure [`frame_bytes`] helper and its anti-flicker
+/// interleaving is unit-testable.
+const CLR_LINE: &str = "\x1b[2K"; // erase the current line
+const UP: &str = "\x1b[1A"; // cursor up one row
+const DOWN: &str = "\x1b[1B"; // cursor down one row
+
+/// Assemble the byte sequence to repaint `rows` over a previous frame
+/// `prev_height` rows tall. The repaint is **interleaved clear-then-write**:
+/// move to the top, then for each row `\r` + clear + write, descending between
+/// rows; a shorter new frame blanks its stale tail and returns the cursor to
+/// the last live row. No two rows are ever blanked without the first being
+/// rewritten first — the property that kills the flicker indicatif's
+/// "blank-all-then-rewrite-all" repaint suffers from.
+fn frame_bytes(rows: &[String], prev_height: usize) -> String {
+    let height = rows.len();
+    let mut out = String::new();
+    if prev_height == 0 {
+        // First frame: open on a fresh line below whatever came before.
+        out.push('\n');
+    } else {
+        for _ in 0..prev_height.saturating_sub(1) {
+            out.push_str(UP);
+        }
+    }
+    for (i, row) in rows.iter().enumerate() {
+        out.push('\r');
+        out.push_str(CLR_LINE);
+        out.push_str(row);
+        if i + 1 < height {
+            out.push_str(DOWN);
+        }
+    }
+    if height < prev_height {
+        for _ in height..prev_height {
+            out.push_str(DOWN);
+            out.push('\r');
+            out.push_str(CLR_LINE);
+        }
+        for _ in height..prev_height {
+            out.push_str(UP);
+        }
+    }
+    out
+}
+
+/// Assemble the byte sequence to erase a `prev_height`-row frame, leaving the
+/// cursor at the start of its last (now blank) row — the block is gone and
+/// subsequent output continues on a fresh line below it. Mirrors
+/// [`frame_bytes`]'s per-row clear-then-descend shape; the cursor enters at
+/// the start of the frame's last row (where [`frame_bytes`] parks it).
+fn clear_frame_bytes(prev_height: usize) -> String {
+    let mut out = String::new();
+    for _ in 0..prev_height.saturating_sub(1) {
+        out.push_str(UP);
+    }
+    for i in 0..prev_height {
+        out.push('\r');
+        out.push_str(CLR_LINE);
+        if i + 1 < prev_height {
+            out.push_str(DOWN);
+        }
+    }
+    out
+}
+
+impl ReasoningRenderer {
+    /// Bind a renderer to stderr with `label` on the spinner row. `feed_width`
+    /// is resolved once from [`terminal_width`]; a resize mid-stream only
+    /// changes wrap widths, never correctness.
+    pub(crate) fn new(label: &'static str) -> Self {
+        Self {
+            term: Term::stderr(),
+            label,
+            feed_width: terminal_width().saturating_sub(6),
+            glyph: 0,
+            prev_height: 0,
+            active: false,
+        }
+    }
+
+    /// Paint one frame for the reasoning `window`. Safe to call on every
+    /// delta; a no-op off a terminal.
+    pub(crate) fn paint(&mut self, window: &[String]) {
+        if !self.term.is_term() {
+            return;
+        }
+        let glyph = REASONING_GLYPHS[self.glyph % REASONING_GLYPHS.len()];
+        self.glyph = self.glyph.wrapping_add(1);
+        let rows = reasoning_rows(glyph, self.label, window, self.feed_width);
+        self.draw_rows(&rows);
+    }
+
+    /// Repaint `rows` in place via [`frame_bytes`]: one write of the assembled
+    /// escape sequence, then a flush. Pure byte assembly lives in
+    /// [`frame_bytes`] so the anti-flicker interleaving is unit-testable.
+    fn draw_rows(&mut self, rows: &[String]) {
+        let bytes = frame_bytes(rows, self.prev_height);
+        let _ = self.term.write_str(&bytes);
+        let _ = self.term.flush();
+        self.prev_height = rows.len();
+        self.active = true;
+    }
+
+    /// End the reasoning stream: erase the whole frame — spinner row and
+    /// reasoning rows — so the block vanishes once thinking is done, and
+    /// leave the cursor below the cleared region for the rest of the run's
+    /// stderr. Idempotent; also the [`Drop`] backstop for an aborted stream.
+    pub(crate) fn finish(&mut self) {
+        if !self.active {
+            return;
+        }
+        let bytes = clear_frame_bytes(self.prev_height);
+        let _ = self.term.write_str(&bytes);
+        let _ = self.term.flush();
+        self.prev_height = 0;
+        self.active = false;
+    }
+}
+
+impl Drop for ReasoningRenderer {
+    fn drop(&mut self) {
+        // Backstop: if the stream aborted before `finish`, still erase the
+        // frame so the rest of the run's stderr is clean.
+        self.finish();
     }
 }
 
@@ -688,95 +904,230 @@ mod tests {
         }
     }
 
-    /// [`ThinkingView::push`] returns only lines terminated by `\n` in the
-    /// delta — partial content at the end is buffered until the next `\n`.
+    /// [`ThinkingView::push`] returns the current window: completed lines
+    /// (blank ones dropped) in arrival order, oldest-first.
     #[test]
-    fn thinking_view_emits_complete_lines_and_drops_blanks() {
+    fn thinking_view_window_shows_completed_lines_and_drops_blanks() {
         let mut v = ThinkingView::new();
-        let emitted = v.push("line 1\n\nline 2\n");
-        // blank line dropped; two non-blank lines emitted.
-        assert_eq!(emitted, vec!["line 1", "line 2"]);
+        let window = v.push("line 1\n\nline 2\n");
+        assert_eq!(window, vec!["line 1", "line 2"]);
     }
 
-    /// A partial line with no trailing `\n` produces nothing — it is buffered
-    /// internally and emitted when the `\n` eventually arrives.
+    /// A partial line with no trailing `\n` is the window's last row while it
+    /// builds, then collapses into a completed row when the `\n` arrives.
     #[test]
-    fn thinking_view_buffers_partial_line_until_newline() {
+    fn thinking_view_partial_is_last_window_row_until_newline() {
         let mut v = ThinkingView::new();
-        assert!(v.push("in progress").is_empty());
-        let emitted = v.push(" done\n");
-        assert_eq!(emitted, vec!["in progress done"]);
+        assert_eq!(v.push("in progress"), vec!["in progress"]);
+        let window = v.push(" done\n");
+        assert_eq!(window, vec!["in progress done"]);
     }
 
-    /// One logical line split across several deltas is assembled correctly —
-    /// the line appears once, only when its terminating `\n` arrives.
+    /// One logical line split across several deltas assembles into a single
+    /// window row, shown live as it grows.
     #[test]
     fn thinking_view_assembles_split_chunks() {
         let mut v = ThinkingView::new();
-        assert!(v.push("hel").is_empty());
-        assert!(v.push("lo").is_empty());
-        let emitted = v.push(" world\n");
-        assert_eq!(emitted, vec!["hello world"]);
+        assert_eq!(v.push("hel"), vec!["hel"]);
+        assert_eq!(v.push("lo"), vec!["hello"]);
+        assert_eq!(v.push(" world\n"), vec!["hello world"]);
     }
 
-    /// A delta containing several `\n`-separated lines emits each one, in
-    /// order, in a single call.
+    /// A delta containing several `\n`-separated lines yields a window with
+    /// each one, in order.
     #[test]
-    fn thinking_view_emits_many_lines_from_one_delta() {
+    fn thinking_view_many_lines_one_delta() {
         let mut v = ThinkingView::new();
-        let emitted = v.push("a\nb\nc\n");
-        assert_eq!(emitted, vec!["a", "b", "c"]);
+        assert_eq!(v.push("a\nb\nc\n"), vec!["a", "b", "c"]);
     }
 
-    /// The stream may end without a trailing `\n`; the buffered partial line
-    /// is drained by [`ThinkingView::flush`] rather than silently dropped.
+    /// The window rolls: past [`REASONING_WINDOW`] rows the oldest completed
+    /// line is dropped, so the window stays capped and always shows the newest
+    /// rows.
     #[test]
-    fn thinking_view_flush_drains_trailing_partial_line() {
+    fn thinking_view_rolls_at_capacity() {
         let mut v = ThinkingView::new();
-        assert!(v.push("in progress").is_empty());
-        assert_eq!(v.flush(), vec!["in progress"]);
-        // idempotent: a second flush has nothing left to emit
-        assert!(v.flush().is_empty());
-    }
-
-    /// The view is a sliding window with no budget: every non-blank completed
-    /// line is emitted in order, however many arrive — nothing hidden,
-    /// nothing summarized.
-    #[test]
-    fn thinking_view_emits_all_lines_with_no_cap() {
-        let mut v = ThinkingView::new();
-        let mut emitted = Vec::new();
-        for i in 1..=200 {
-            emitted.extend(v.push(&format!("line {i}\n")));
+        for i in 1..=15 {
+            v.push(&format!("line {i}\n"));
         }
-        assert_eq!(emitted.len(), 200);
-        assert_eq!(emitted.first(), Some(&"line 1".to_string()));
-        assert_eq!(emitted.last(), Some(&"line 200".to_string()));
-        // nothing pending, nothing hidden
-        assert!(v.flush().is_empty());
+        let window = v.push("");
+        assert_eq!(window.len(), REASONING_WINDOW);
+        assert_eq!(window.first(), Some(&"line 4".to_string()));
+        assert_eq!(window.last(), Some(&"line 15".to_string()));
     }
 
-    /// A trailing partial line is still drained by `flush` even after a long
-    /// run well past the retired scroll budget: length never causes a drop,
-    /// and the partial is an extra line on top of the ones already emitted —
-    /// not a substitute for any that were hidden.
+    /// The in-progress partial line counts against the same budget: with the
+    /// window full of completed rows, a partial drops the oldest completed row
+    /// so the window never exceeds [`REASONING_WINDOW`].
     #[test]
-    fn thinking_view_flush_drains_partial_after_many_lines() {
+    fn thinking_view_partial_counts_against_budget() {
         let mut v = ThinkingView::new();
-        let mut emitted = Vec::new();
-        // 200 is deliberately past the old `REASONING_SCROLL_LIMIT` (50) so
-        // this keeps catching a regression if anyone reintroduces a cap.
-        for i in 1..=200 {
-            emitted.extend(v.push(&format!("line {i}\n")));
+        for i in 1..=REASONING_WINDOW {
+            v.push(&format!("line {i}\n"));
         }
-        // every completed line came out in full, in order
-        assert_eq!(emitted.len(), 200);
-        assert_eq!(emitted.last(), Some(&"line 200".to_string()));
-        // the trailing partial is buffered, not emitted alongside them
-        assert!(v.push("trailing partial").is_empty());
-        // and it is still drained at the end — length never causes a drop
-        assert_eq!(v.flush(), vec!["trailing partial".to_string()]);
-        assert!(v.flush().is_empty());
+        let window = v.push("in progress");
+        assert_eq!(window.len(), REASONING_WINDOW);
+        // oldest completed row rolled out to make room for the partial
+        assert_eq!(window.first(), Some(&"line 2".to_string()));
+        assert_eq!(window.last(), Some(&"in progress".to_string()));
+    }
+
+    /// [`reasoning_rows`] always leads with the spinner+label row, even when
+    /// the window is empty (the stream just started).
+    #[test]
+    fn reasoning_rows_leads_with_spinner_for_empty_window() {
+        let rows = reasoning_rows("⠋", "Analyzing", &[], 80);
+        assert_eq!(rows, vec![format!("{MARGIN}⠋ Analyzing")]);
+    }
+
+    /// Each retained line becomes one indented row when it fits the budget.
+    #[test]
+    fn reasoning_rows_indents_each_line() {
+        let window = vec!["line 1".to_string(), "line 2".to_string()];
+        let rows = reasoning_rows("⠙", "Analyzing", &window, 80);
+        assert_eq!(
+            rows,
+            vec![
+                format!("{MARGIN}⠙ Analyzing"),
+                format!("{MARGIN}│ line 1"),
+                format!("{MARGIN}│ line 2"),
+            ]
+        );
+    }
+
+    /// A line longer than the budget wraps to several rows under the same
+    /// `│ ` indent — the visual height can exceed the logical-line count.
+    #[test]
+    fn reasoning_rows_wraps_long_lines_to_multiple_rows() {
+        let prefix = format!("{MARGIN}│ ");
+        let rows = reasoning_rows("⠹", "Analyzing", &["the quick brown fox".to_string()], 10);
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+        // every row after the spinner carries the `│ ` indent…
+        for row in &rows[1..] {
+            assert!(row.starts_with(&prefix), "unindented row: {row:?}");
+        }
+        // …and the words survive the greedy wrap, rejoinable losslessly.
+        let body: String = rows[1..]
+            .iter()
+            .filter_map(|r| r.strip_prefix(&prefix))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(body, "the quick brown fox");
+    }
+
+    /// The load-bearing rendered-row cap: wrap pieces count against
+    /// [`REASONING_WINDOW`], so a window whose lines wrap to more rows than
+    /// the budget shows only the newest rows — the oldest wrap pieces (and
+    /// whole lines) roll out, the spinner row is never dropped.
+    #[test]
+    fn reasoning_rows_caps_rendered_rows_to_window_budget() {
+        let prefix = format!("{MARGIN}│ ");
+        // 12 lines × 2 wrap pieces = 24 rendered rows, over the 12-row budget.
+        let window: Vec<String> = (1..=12).map(|i| format!("line {i} with words")).collect();
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 10);
+        assert_eq!(rows.len(), REASONING_WINDOW + 1);
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+        for row in &rows[1..] {
+            assert!(row.starts_with(&prefix), "unindented row: {row:?}");
+        }
+        // The newest rows survived, losslessly rejoinable: lines 7–12 only.
+        let body: String = rows[1..]
+            .iter()
+            .filter_map(|r| r.strip_prefix(&prefix))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            body,
+            (7..=12)
+                .map(|i| format!("line {i} with words"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
+    /// A single pathological line that wraps far past the budget still cannot
+    /// grow the region: only the newest [`REASONING_WINDOW`] rendered rows are
+    /// kept, the top row a mid-line cut like a terminal tail window.
+    #[test]
+    fn reasoning_rows_caps_single_long_line() {
+        let prefix = format!("{MARGIN}│ ");
+        let long = "word ".repeat(60); // 300 chars → 30 wrap pieces at width 10
+        let rows = reasoning_rows("⠹", "Analyzing", &[long], 10);
+        assert_eq!(rows.len(), REASONING_WINDOW + 1);
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+        // 12 rows of "word word" = 24 words of the 60 — the newest tail only.
+        let words: usize = rows[1..]
+            .iter()
+            .map(|r| r.strip_prefix(&prefix).unwrap().split_whitespace().count())
+            .sum();
+        assert_eq!(words, 24);
+    }
+
+    /// First paint (no previous frame) opens on a fresh line and clears+writes
+    /// its single row in place — no cursor-up preamble.
+    #[test]
+    fn frame_bytes_first_frame_opens_on_fresh_line() {
+        let out = frame_bytes(&["only".to_string()], 0);
+        assert_eq!(out, format!("\n\r{CLR_LINE}only"));
+    }
+
+    /// The load-bearing anti-flicker property: a same-height repaint clears
+    /// each row and rewrites it *immediately* before descending — never the
+    /// "blank every row, then rewrite every row" two-phase that flickered. The
+    /// full byte sequence is asserted, so any regression to a clear-all-then-
+    /// write-all repaint fails here.
+    #[test]
+    fn frame_bytes_repaint_is_interleaved_clear_then_write() {
+        let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let out = frame_bytes(&rows, 3);
+        // up to top (2 rows), then per row: CR + clear + write, descending.
+        let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
+        assert_eq!(out, expected);
+        // each cleared row is rewritten before the next is touched: no run of
+        // two clears without content between them.
+        assert!(
+            !out.contains(&format!("{CLR_LINE}{CLR_LINE}")),
+            "adjacent clears would blank multiple rows at once (flicker)"
+        );
+    }
+
+    /// A shorter new frame blanks the stale tail rows below it and returns the
+    /// cursor to the last live row, so a shrunken window leaves no ghosts.
+    #[test]
+    fn frame_bytes_shorter_frame_clears_stale_tail() {
+        let out = frame_bytes(&["a".to_string()], 3);
+        let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}{UP}");
+        assert_eq!(out, expected);
+    }
+
+    /// A taller new frame descends into fresh rows below the previous frame —
+    /// each new row cleared then written in place as it appears.
+    #[test]
+    fn frame_bytes_taller_frame_descends_into_new_rows() {
+        let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let out = frame_bytes(&rows, 1);
+        let expected = format!("\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
+        assert_eq!(out, expected);
+    }
+
+    /// Erasing a frame rises to its top, clears each row in place as it
+    /// descends, and ends at the start of the last (blank) row — the block is
+    /// gone and subsequent output continues on a fresh line below it.
+    #[test]
+    fn clear_frame_bytes_erases_every_row_and_ends_below() {
+        // 2-row frame: cursor sits on the last row → one UP, then clear row 1,
+        // descend, clear row 2.
+        let out = clear_frame_bytes(2);
+        assert_eq!(out, format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}"));
+        // 1-row frame needs no cursor movement: just clear the single row.
+        assert_eq!(clear_frame_bytes(1), format!("\r{CLR_LINE}"));
+    }
+
+    /// A zero-height frame (nothing ever painted) is a no-op — keeps
+    /// [`ReasoningRenderer::finish`] trivially safe when no frame was drawn.
+    #[test]
+    fn clear_frame_bytes_noop_for_zero_rows() {
+        assert_eq!(clear_frame_bytes(0), "");
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format
