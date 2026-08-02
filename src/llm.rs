@@ -363,6 +363,50 @@ impl Provider {
             Self::OpenAiCompatible => "",
         }
     }
+
+    /// Curated, currently-recommended model IDs for the `aic setup` picker.
+    /// Empty for providers where a fixed list doesn't fit (OpenRouter exposes
+    /// thousands; OpenAI-compatible points at a user's own server). The picker
+    /// pre-selects the provider's [`default_model`](Self::default_model) when
+    /// present, otherwise the first entry. These are best-effort and may lag
+    /// behind each provider's latest releases — the picker always offers a
+    /// "custom" escape hatch.
+    pub fn models(&self) -> &'static [&'static str] {
+        match self {
+            Self::OpenAI => &["gpt-5", "gpt-5-mini", "gpt-5-nano"],
+            Self::Anthropic => &["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"],
+            Self::Gemini => &[
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+            ],
+            Self::DeepSeek => &["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+            Self::Groq => &[
+                "llama-3.3-70b-versatile",
+                "llama-3.3-70b-specdec",
+                "deepseek-r1-distill-llama-70b",
+            ],
+            Self::Ollama => &["llama3.3", "qwen2.5", "deepseek-r1", "mistral"],
+            Self::Xai => &["grok-4.3", "grok-4", "grok-4-fast"],
+            Self::Mistral => &[
+                "mistral-large-latest",
+                "mistral-small-latest",
+                "codestral-latest",
+            ],
+            Self::OpenRouter => &[],
+            Self::Perplexity => &[
+                "sonar",
+                "sonar-pro",
+                "sonar-reasoning",
+                "sonar-reasoning-pro",
+            ],
+            Self::Together => &[
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                "meta-llama/Llama-3.3-8B-Instruct-Turbo",
+            ],
+            Self::OpenAiCompatible => &[],
+        }
+    }
 }
 
 #[derive(Clone)]
