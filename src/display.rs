@@ -983,6 +983,53 @@ mod tests {
         assert_eq!(body, "the quick brown fox");
     }
 
+    /// First paint (no previous frame) opens on a fresh line and clears+writes
+    /// its single row in place — no cursor-up preamble.
+    #[test]
+    fn frame_bytes_first_frame_opens_on_fresh_line() {
+        let out = frame_bytes(&["only".to_string()], 0);
+        assert_eq!(out, format!("\n\r{CLR_LINE}only"));
+    }
+
+    /// The load-bearing anti-flicker property: a same-height repaint clears
+    /// each row and rewrites it *immediately* before descending — never the
+    /// "blank every row, then rewrite every row" two-phase that flickered. The
+    /// full byte sequence is asserted, so any regression to a clear-all-then-
+    /// write-all repaint fails here.
+    #[test]
+    fn frame_bytes_repaint_is_interleaved_clear_then_write() {
+        let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let out = frame_bytes(&rows, 3);
+        // up to top (2 rows), then per row: CR + clear + write, descending.
+        let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
+        assert_eq!(out, expected);
+        // each cleared row is rewritten before the next is touched: no run of
+        // two clears without content between them.
+        assert!(
+            !out.contains(&format!("{CLR_LINE}{CLR_LINE}")),
+            "adjacent clears would blank multiple rows at once (flicker)"
+        );
+    }
+
+    /// A shorter new frame blanks the stale tail rows below it and returns the
+    /// cursor to the last live row, so a shrunken window leaves no ghosts.
+    #[test]
+    fn frame_bytes_shorter_frame_clears_stale_tail() {
+        let out = frame_bytes(&["a".to_string()], 3);
+        let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}{UP}");
+        assert_eq!(out, expected);
+    }
+
+    /// A taller new frame descends into fresh rows below the previous frame —
+    /// each new row cleared then written in place as it appears.
+    #[test]
+    fn frame_bytes_taller_frame_descends_into_new_rows() {
+        let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let out = frame_bytes(&rows, 1);
+        let expected = format!("\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
+        assert_eq!(out, expected);
+    }
+
     // `console` reads the process-global `colors_enabled()` flag at format
     // time, so every test that flips it via `ColorGuard` races every other.
     // Lock here for the whole test body to serialize the color-env tests and
