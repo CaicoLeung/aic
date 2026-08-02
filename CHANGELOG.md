@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.4] - 2026-08-02
+
+> 🎉 **0.4.4** — 2 changes · 1 contributor
+
+### Features
+
+- ESC back-navigation + curated model picker (#74)
+
+### Bug Fixes
+
+- Cap reasoning to a rolling 12-row window, keep it visible (#73)
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.4.3] - 2026-08-02
 
 > 🎉 **0.4.3** — 2 changes · 1 contributor
