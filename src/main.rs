@@ -45,12 +45,27 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
+/// Print one reasoning line above the spinner, greedy-wrapped under the
+/// shared `│ ` indent. Returns `false` on the first write failure (e.g.
+/// stderr closed) so the caller can stop trying — reasoning display is
+/// best-effort and must never break the commit flow.
+fn print_reasoning_line(mp: &MultiProgress, width: usize, line: &str) -> bool {
+    for piece in display::wrap_line(line, width) {
+        if mp.println(format!("{}│ {piece}", display::MARGIN)).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. Each completed reasoning line scrolls above the spinner via
 /// [`MultiProgress::println`], which is indicatif's flicker-free path for text
 /// alongside a spinner — the spinner itself stays single-line (its in-place
 /// redraw is imperceptible), and the reasoning never triggers a multi-line
-/// clear-each-line-then-repaint cycle.
+/// clear-each-line-then-repaint cycle. The trail is capped at
+/// [`display::REASONING_SCROLL_LIMIT`] lines; a final partial line and the
+/// overflow summary are drained by [`display::ThinkingView::flush`].
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     let mp = MultiProgress::new();
     let pb = mp.add(ProgressBar::new_spinner());
@@ -62,16 +77,33 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // The feed's content budget: the shared terminal width minus the "│ "
     // decoration and one column of breathing room.
     let feed_width = display::terminal_width().saturating_sub(6);
+
+    // Best-effort: once a write fails, stop printing rather than failing per
+    // line; the spinner itself keeps working.
+    let mut printing = true;
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
+        if !printing {
+            return;
+        }
         for line in view.push(delta) {
-            // Greedy-wrap long lines under the "│ " indent, same as before —
-            // each wrapped piece prints as its own line above the spinner.
-            for piece in display::wrap_line(&line, feed_width) {
-                let _ = mp.println(format!("{}│ {piece}", display::MARGIN));
+            if !print_reasoning_line(&mp, feed_width, &line) {
+                printing = false;
+                break;
             }
         }
     })
     .await;
+
+    // Drain the tail: any partial line that never got its final `\n`, plus
+    // the overflow summary — the last reasoning visible before the spinner
+    // clears.
+    if printing {
+        for line in view.flush() {
+            if !print_reasoning_line(&mp, feed_width, &line) {
+                break;
+            }
+        }
+    }
 
     pb.disable_steady_tick();
     pb.finish_and_clear();
