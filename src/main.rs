@@ -18,7 +18,7 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget};
+use indicatif::{ProgressBar, ProgressDrawTarget};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -44,75 +44,65 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
-/// Print one reasoning line above the spinner, greedy-wrapped under the
-/// shared `│ ` indent. Returns `false` on the first write failure (e.g.
-/// stderr closed) so the caller can stop trying — reasoning display is
-/// best-effort and must never break the commit flow.
-fn print_reasoning_line(mp: &MultiProgress, width: usize, line: &str) -> bool {
-    for piece in display::wrap_line(line, width) {
-        if mp.println(format!("{}│ {piece}", display::MARGIN)).is_err() {
-            return false;
+/// Build the spinner's in-place message: the one-line label on top, followed
+/// by the rolling reasoning window — each logical line greedy-wrapped under
+/// the shared `│ ` indent. Redrawn in place by the rate-limited draw target,
+/// never printed as a permanent line, so it disappears entirely when the
+/// spinner clears.
+fn reasoning_message(label: &str, width: usize, window: &[String]) -> String {
+    let mut msg = String::from(label);
+    for line in window {
+        for piece in display::wrap_line(line, width) {
+            msg.push('\n');
+            msg.push_str(display::MARGIN);
+            msg.push_str("│ ");
+            msg.push_str(&piece);
         }
     }
-    true
+    msg
 }
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live. Each completed reasoning line scrolls above the spinner via
-/// [`MultiProgress::println`], which is indicatif's flicker-free path for text
-/// alongside a spinner — the spinner itself stays single-line (its in-place
-/// redraw is imperceptible), and the reasoning never triggers a multi-line
-/// clear-each-line-then-repaint cycle. The view is a sliding window with no
-/// line cap; older lines scroll off the top of the terminal while the spinner
-/// stays pinned at the bottom. The `MultiProgress` draw target is rate-limited
-/// to 60 fps so bursts of completions coalesce into one repaint — higher
-/// effective frame rate, no flicker.
+/// reasoning live. The reasoning is shown as a rolling [`display::REASONING_WINDOW`]-row
+/// block that redraws in place as the model thinks — newest rows at the
+/// bottom, oldest scrolled out of the window — and is left visible (capped to
+/// [`display::REASONING_WINDOW`] rows) once thinking ends, so the user can read what
+/// the model thought. The draw target is rate-limited so the in-place redraws
+/// coalesce into one paint per frame: the window scrolls smoothly with no
+/// flicker.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    let mp = MultiProgress::new();
-    // Rate-limit repaints so a burst of completed reasoning lines coalesces
-    // into one paint instead of flickering the whole progress region — see
-    // `display::PROGRESS_REDRAW_HZ` for the rationale and the chosen rate.
-    mp.set_draw_target(ProgressDrawTarget::stderr_with_hz(
+    let pb = ProgressBar::new_spinner();
+    // Rate-limit repaints so the rolling reasoning window redraws at most
+    // `PROGRESS_REDRAW_HZ` times per second — without it each delta forces an
+    // immediate clear-and-redraw of the multi-line region, which flickers.
+    pb.set_draw_target(ProgressDrawTarget::stderr_with_hz(
         display::PROGRESS_REDRAW_HZ,
     ));
-    let pb = mp.add(ProgressBar::new_spinner());
     pb.set_style(display::spinner_style()?);
-    pb.set_message("Analyzing changes");
+    let label = "Analyzing changes";
+    pb.set_message(label.to_string());
     pb.enable_steady_tick(display::SPINNER_TICK);
 
     let mut view = display::ThinkingView::new();
-    // The feed's content budget: the shared terminal width minus the "│ "
-    // decoration and one column of breathing room.
+    // Content budget for each wrapped reasoning row: the shared terminal
+    // width minus the `MARGIN` + "│ " decoration and one column of breathing
+    // room.
     let feed_width = display::terminal_width().saturating_sub(6);
 
-    // Best-effort: once a write fails, stop printing rather than failing per
-    // line; the spinner itself keeps working.
-    let mut printing = true;
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
-        if !printing {
-            return;
-        }
-        for line in view.push(delta) {
-            if !print_reasoning_line(&mp, feed_width, &line) {
-                printing = false;
-                break;
-            }
-        }
+        let window = view.push(delta);
+        pb.set_message(reasoning_message(label, feed_width, &window));
     })
     .await;
 
-    // Drain the tail: a partial line that never got its final `\n` — the
-    // last reasoning visible before the spinner clears.
-    if printing {
-        for line in view.flush() {
-            if !print_reasoning_line(&mp, feed_width, &line) {
-                break;
-            }
-        }
-    }
-
+    // Thinking is over. Leave the final reasoning window visible (capped at
+    // REASONING_WINDOW rows) so the user can actually read what the model
+    // thought — clearing on completion made the whole feed vanish. The window
+    // is already size-capped, so this can't reintroduce the unbounded-scrollback
+    // flood that "hide on completion" was really about. Freeze the spinner on
+    // its last frame to mark the phase done.
     pb.disable_steady_tick();
-    pb.finish_and_clear();
+    pb.finish();
     result
 }
 

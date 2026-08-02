@@ -1,4 +1,5 @@
 use console::{Style, Term};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Duration;
 
@@ -597,65 +598,89 @@ where
 /// 20 fps, down from the previous 80 ms.
 pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 
-/// Maximum repaint rate for the streaming-reasoning `MultiProgress`. Without
-/// a cap, every `println` forces an immediate full-region redraw and a burst
-/// of completed reasoning lines flickers the whole progress area; limiting it
-/// to 60 Hz coalesces sub-frame updates into one paint — no flicker, no
-/// dropped lines. Named in hertz to match the
+/// Maximum repaint rate for the in-place reasoning window. The window redraws
+/// on every reasoning delta; without a cap each delta forces an immediate
+/// clear-and-redraw of the multi-line region, which flickers. Limiting it to
+/// 60 Hz coalesces sub-frame updates into one paint — the window scrolls
+/// smoothly with no flicker and no dropped lines. Named in hertz to match the
 /// `ProgressDrawTarget::stderr_with_hz` parameter it feeds, and paired with
 /// [`SPINNER_TICK`] as the two knobs that set the streaming path's smoothness.
 pub(crate) const PROGRESS_REDRAW_HZ: u8 = 60;
 
-/// A sliding-window view over the model's streamed reasoning. Each completed
-/// line (terminated by `\n`) is emitted in arrival order so the caller can
-/// print it above the spinner via `MultiProgress::println`; older lines scroll
-/// off the top of the terminal naturally while the spinner stays pinned at the
-/// bottom — a true tail window, not a cap-then-collapse.
+/// How many reasoning rows stay visible at once. The window rolls: each new
+/// completed line enters at the bottom and the oldest is dropped once the
+/// count exceeds this, so the spinner region never grows past it. Older
+/// reasoning scrolls *within* the window (the newest rows always visible),
+/// not into the terminal scrollback.
+pub(crate) const REASONING_WINDOW: usize = 12;
+
+/// A rolling window over the model's streamed reasoning, sized to
+/// [`REASONING_WINDOW`]. The caller renders [`push`](Self::push)'s returned
+/// window into the spinner's in-place multi-line message, so the block redraws
+/// in place (never printed as permanent lines that linger after the spinner
+/// clears) and vanishes entirely the moment thinking ends.
 ///
-/// Partial content (no trailing `\n` yet) is buffered internally and emitted
-/// when the next `\n` arrives; a line still pending when the stream ends is
-/// drained by [`flush`](Self::flush). Blank lines are dropped to keep the feed
-/// information-dense. There is deliberately no line budget: a verbose
-/// chain-of-thought streams as many lines as it produces and the terminal's
-/// own scrollback is the window.
+/// Completed lines (terminated by `\n`) roll into the window; the in-progress
+/// partial line (no trailing `\n` yet) is shown as the window's last row while
+/// it builds and counts against the same budget. Blank lines are dropped to
+/// keep the feed information-dense.
 pub(crate) struct ThinkingView {
+    lines: VecDeque<String>,
     cur: String,
 }
 
 impl ThinkingView {
     pub(crate) fn new() -> Self {
-        Self { cur: String::new() }
+        Self {
+            lines: VecDeque::new(),
+            cur: String::new(),
+        }
     }
 
     /// Ingest a reasoning delta (may be a partial line, many lines, or empty)
-    /// and return the non-blank lines completed by this delta, in arrival
-    /// order. A delta that ends mid-line returns no lines for that fragment —
-    /// it is buffered until the next `\n`.
+    /// and return the current window: the newest completed lines plus the
+    /// in-progress partial line, oldest-first, capped to [`REASONING_WINDOW`]
+    /// rows. A delta that ends mid-line leaves the partial buffered and shown
+    /// as the window's last row until the next `\n`.
     pub(crate) fn push(&mut self, delta: &str) -> Vec<String> {
-        let mut completed = Vec::new();
         for ch in delta.chars() {
             if ch == '\n' {
                 let line = std::mem::take(&mut self.cur);
                 if !line.trim().is_empty() {
-                    completed.push(line);
+                    self.push_line(line);
                 }
             } else {
                 self.cur.push(ch);
             }
         }
-        completed
+        self.window()
     }
 
-    /// Drain the tail of the stream: any line still pending when the stream
-    /// ends without a final `\n`. Returns it (if non-blank) for the caller to
-    /// print. Idempotent — call once after the last [`push`](Self::push).
-    pub(crate) fn flush(&mut self) -> Vec<String> {
-        let line = std::mem::take(&mut self.cur);
-        if line.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![line]
+    /// Append a completed line, then bound *storage* to [`REASONING_WINDOW`] —
+    /// not the visible window. This stops a long chain-of-thought from
+    /// retaining every completed line forever; the visible cap lives in
+    /// [`window`](Self::window), which also accounts for the in-progress
+    /// partial row.
+    fn push_line(&mut self, line: String) {
+        self.lines.push_back(line);
+        if self.lines.len() > REASONING_WINDOW {
+            self.lines.pop_front();
         }
+    }
+
+    /// The single source of truth for the *visible* cap: the newest
+    /// [`REASONING_WINDOW`] rows, completed lines oldest→newest then the
+    /// in-progress partial as the last row. The partial counts against the same
+    /// budget, so a full window trims its oldest completed line here to make
+    /// room — this is the load-bearing cap; [`push_line`](Self::push_line)
+    /// only guards memory.
+    fn window(&self) -> Vec<String> {
+        let mut rows: Vec<String> = self.lines.iter().cloned().collect();
+        if !self.cur.trim().is_empty() {
+            rows.push(self.cur.clone());
+        }
+        let start = rows.len().saturating_sub(REASONING_WINDOW);
+        rows[start..].to_vec()
     }
 }
 
@@ -688,95 +713,72 @@ mod tests {
         }
     }
 
-    /// [`ThinkingView::push`] returns only lines terminated by `\n` in the
-    /// delta — partial content at the end is buffered until the next `\n`.
+    /// [`ThinkingView::push`] returns the current window: completed lines
+    /// (blank ones dropped) in arrival order, oldest-first.
     #[test]
-    fn thinking_view_emits_complete_lines_and_drops_blanks() {
+    fn thinking_view_window_shows_completed_lines_and_drops_blanks() {
         let mut v = ThinkingView::new();
-        let emitted = v.push("line 1\n\nline 2\n");
-        // blank line dropped; two non-blank lines emitted.
-        assert_eq!(emitted, vec!["line 1", "line 2"]);
+        let window = v.push("line 1\n\nline 2\n");
+        assert_eq!(window, vec!["line 1", "line 2"]);
     }
 
-    /// A partial line with no trailing `\n` produces nothing — it is buffered
-    /// internally and emitted when the `\n` eventually arrives.
+    /// A partial line with no trailing `\n` is the window's last row while it
+    /// builds, then collapses into a completed row when the `\n` arrives.
     #[test]
-    fn thinking_view_buffers_partial_line_until_newline() {
+    fn thinking_view_partial_is_last_window_row_until_newline() {
         let mut v = ThinkingView::new();
-        assert!(v.push("in progress").is_empty());
-        let emitted = v.push(" done\n");
-        assert_eq!(emitted, vec!["in progress done"]);
+        assert_eq!(v.push("in progress"), vec!["in progress"]);
+        let window = v.push(" done\n");
+        assert_eq!(window, vec!["in progress done"]);
     }
 
-    /// One logical line split across several deltas is assembled correctly —
-    /// the line appears once, only when its terminating `\n` arrives.
+    /// One logical line split across several deltas assembles into a single
+    /// window row, shown live as it grows.
     #[test]
     fn thinking_view_assembles_split_chunks() {
         let mut v = ThinkingView::new();
-        assert!(v.push("hel").is_empty());
-        assert!(v.push("lo").is_empty());
-        let emitted = v.push(" world\n");
-        assert_eq!(emitted, vec!["hello world"]);
+        assert_eq!(v.push("hel"), vec!["hel"]);
+        assert_eq!(v.push("lo"), vec!["hello"]);
+        assert_eq!(v.push(" world\n"), vec!["hello world"]);
     }
 
-    /// A delta containing several `\n`-separated lines emits each one, in
-    /// order, in a single call.
+    /// A delta containing several `\n`-separated lines yields a window with
+    /// each one, in order.
     #[test]
-    fn thinking_view_emits_many_lines_from_one_delta() {
+    fn thinking_view_many_lines_one_delta() {
         let mut v = ThinkingView::new();
-        let emitted = v.push("a\nb\nc\n");
-        assert_eq!(emitted, vec!["a", "b", "c"]);
+        assert_eq!(v.push("a\nb\nc\n"), vec!["a", "b", "c"]);
     }
 
-    /// The stream may end without a trailing `\n`; the buffered partial line
-    /// is drained by [`ThinkingView::flush`] rather than silently dropped.
+    /// The window rolls: past [`REASONING_WINDOW`] rows the oldest completed
+    /// line is dropped, so the window stays capped and always shows the newest
+    /// rows.
     #[test]
-    fn thinking_view_flush_drains_trailing_partial_line() {
+    fn thinking_view_rolls_at_capacity() {
         let mut v = ThinkingView::new();
-        assert!(v.push("in progress").is_empty());
-        assert_eq!(v.flush(), vec!["in progress"]);
-        // idempotent: a second flush has nothing left to emit
-        assert!(v.flush().is_empty());
-    }
-
-    /// The view is a sliding window with no budget: every non-blank completed
-    /// line is emitted in order, however many arrive — nothing hidden,
-    /// nothing summarized.
-    #[test]
-    fn thinking_view_emits_all_lines_with_no_cap() {
-        let mut v = ThinkingView::new();
-        let mut emitted = Vec::new();
-        for i in 1..=200 {
-            emitted.extend(v.push(&format!("line {i}\n")));
+        for i in 1..=15 {
+            v.push(&format!("line {i}\n"));
         }
-        assert_eq!(emitted.len(), 200);
-        assert_eq!(emitted.first(), Some(&"line 1".to_string()));
-        assert_eq!(emitted.last(), Some(&"line 200".to_string()));
-        // nothing pending, nothing hidden
-        assert!(v.flush().is_empty());
+        let window = v.push("");
+        assert_eq!(window.len(), REASONING_WINDOW);
+        assert_eq!(window.first(), Some(&"line 4".to_string()));
+        assert_eq!(window.last(), Some(&"line 15".to_string()));
     }
 
-    /// A trailing partial line is still drained by `flush` even after a long
-    /// run well past the retired scroll budget: length never causes a drop,
-    /// and the partial is an extra line on top of the ones already emitted —
-    /// not a substitute for any that were hidden.
+    /// The in-progress partial line counts against the same budget: with the
+    /// window full of completed rows, a partial drops the oldest completed row
+    /// so the window never exceeds [`REASONING_WINDOW`].
     #[test]
-    fn thinking_view_flush_drains_partial_after_many_lines() {
+    fn thinking_view_partial_counts_against_budget() {
         let mut v = ThinkingView::new();
-        let mut emitted = Vec::new();
-        // 200 is deliberately past the old `REASONING_SCROLL_LIMIT` (50) so
-        // this keeps catching a regression if anyone reintroduces a cap.
-        for i in 1..=200 {
-            emitted.extend(v.push(&format!("line {i}\n")));
+        for i in 1..=REASONING_WINDOW {
+            v.push(&format!("line {i}\n"));
         }
-        // every completed line came out in full, in order
-        assert_eq!(emitted.len(), 200);
-        assert_eq!(emitted.last(), Some(&"line 200".to_string()));
-        // the trailing partial is buffered, not emitted alongside them
-        assert!(v.push("trailing partial").is_empty());
-        // and it is still drained at the end — length never causes a drop
-        assert_eq!(v.flush(), vec!["trailing partial".to_string()]);
-        assert!(v.flush().is_empty());
+        let window = v.push("in progress");
+        assert_eq!(window.len(), REASONING_WINDOW);
+        // oldest completed row rolled out to make room for the partial
+        assert_eq!(window.first(), Some(&"line 2".to_string()));
+        assert_eq!(window.last(), Some(&"in progress".to_string()));
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format
