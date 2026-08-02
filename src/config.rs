@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
+
+use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
 
@@ -185,82 +187,195 @@ fn resolve_base_url(config_value: Option<&str>, provider: &Provider) -> (Option<
 // --- Interactive setup ---
 
 pub fn run_setup() -> Result<()> {
-    println!("aic setup\n");
-
-    let providers = Provider::all();
-    println!("Select provider:");
-    for (i, provider) in providers.iter().enumerate() {
-        let suffix = match provider.default_model() {
-            "" => "(model required)".to_string(),
-            m => format!("({m})"),
-        };
-        println!("  {}. {} {}", i + 1, provider.display(), suffix);
+    if !io::stdin().is_terminal() {
+        let path = config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.config/aic/config.toml".into());
+        eprintln!("aic setup needs an interactive terminal, but stdin is not a TTY.");
+        eprintln!("To configure non-interactively you can either:");
+        eprintln!(
+            "  • write the config file at {path} (TOML keys: backend, api_key, model, base_url), or"
+        );
+        eprintln!(
+            "  • set environment variables: LLM_BACKEND, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL"
+        );
+        anyhow::bail!("cannot run interactive setup without a TTY");
     }
-    print!("> ");
-    io::stdout().flush()?;
 
-    let choice = read_line()?;
-    let index: usize = choice.trim().parse().with_context(|| "invalid number")?;
-    if index == 0 || index > providers.len() {
-        anyhow::bail!("invalid choice: must be 1-{}", providers.len());
-    }
-    let provider = providers[index - 1];
-    let backend = provider.name().to_string();
-    println!();
+    println!("aic setup — configure your AI provider\n");
 
-    // API key — required for cloud providers, optional for OpenAI-compatible,
-    // unused for Ollama.
-    let api_key = match provider.env_key() {
-        Some(_) => {
-            println!("API key:");
-            print!("> ");
-            io::stdout().flush()?;
-            let key = read_line()?;
-            let key = key.trim().to_string();
-            if key.is_empty() {
-                anyhow::bail!("API key cannot be empty for {backend}");
-            }
-            println!();
-            Some(key)
-        }
-        None if provider == Provider::OpenAiCompatible => {
-            println!("API key (optional — leave blank for keyless servers):");
-            print!("> ");
-            io::stdout().flush()?;
-            let key = read_line()?;
-            let key = key.trim().to_string();
-            println!();
-            if key.is_empty() { None } else { Some(key) }
+    let theme = ColorfulTheme::default();
+    match collect_config(&theme)? {
+        Some(config) => {
+            config.save()?;
+            let path = config_path().context("could not determine config path")?;
+            println!("\n✅ Saved to {}\n", path.display());
+            Ok(())
         }
         None => {
-            println!("{} does not require an API key.\n", provider.display());
+            println!("Setup cancelled. Nothing was saved.");
+            Ok(())
+        }
+    }
+}
+
+/// Gather config field-by-field via dialoguer prompts. Returns `None` when the
+/// user cancels at any step (Esc / Ctrl-C / EOF); the caller prints the cancel
+/// notice, so this function is silent on the cancel path.
+fn collect_config(theme: &ColorfulTheme) -> Result<Option<Config>> {
+    let existing = Config::load().unwrap_or(None);
+    let existing_provider = existing
+        .as_ref()
+        .and_then(|c| c.backend.as_deref())
+        .map(Provider::from_name);
+
+    // --- Provider -----------------------------------------------------------
+    let providers = Provider::all();
+    let items: Vec<String> = providers
+        .iter()
+        .map(|p| match p.default_model() {
+            "" => format!("{}  (no default — you'll pick a model)", p.display()),
+            m => format!("{}  ({m})", p.display()),
+        })
+        .collect();
+    let default_idx = existing_provider
+        .and_then(|ep| providers.iter().position(|p| *p == ep))
+        .unwrap_or(0);
+
+    let idx = match cancel(
+        Select::with_theme(theme)
+            .with_prompt("Choose your AI provider (↑/↓ to move, Enter to select)")
+            .items(&items)
+            .default(default_idx)
+            .interact(),
+    )? {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    let provider = providers[idx];
+
+    // Reuse values from the existing config only when the provider is
+    // unchanged — switching provider resets key/base-url/model prefill because
+    // the old values are almost certainly invalid for the new provider.
+    let same_provider = existing_provider == Some(provider);
+    let prev_key = same_provider
+        .then(|| existing.as_ref().and_then(|c| c.api_key.clone()))
+        .flatten();
+    let prev_base_url = same_provider
+        .then(|| existing.as_ref().and_then(|c| c.base_url.clone()))
+        .flatten();
+    let prev_model = same_provider
+        .then(|| existing.as_ref().and_then(|c| c.model.clone()))
+        .flatten();
+
+    // --- API key ------------------------------------------------------------
+    let api_key: Option<String> = match provider.env_key() {
+        // Cloud provider — key required.
+        Some(_) => match prev_key.as_deref() {
+            Some(k) => {
+                let prompt = format!(
+                    "API key (Enter to keep {masked}, or paste a new one)",
+                    masked = mask_key(k)
+                );
+                let entered = match cancel(
+                    Password::with_theme(theme)
+                        .with_prompt(&prompt)
+                        .allow_empty_password(true)
+                        .interact(),
+                )? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                let trimmed = entered.trim().to_string();
+                Some(if trimmed.is_empty() {
+                    k.to_string()
+                } else {
+                    trimmed
+                })
+            }
+            None => {
+                let entered = match cancel(
+                    Password::with_theme(theme)
+                        .with_prompt("API key (paste your key — input stays hidden)")
+                        .allow_empty_password(false)
+                        .interact(),
+                )? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+                let trimmed = entered.trim().to_string();
+                if trimmed.is_empty() {
+                    anyhow::bail!("API key cannot be empty for {}", provider.name());
+                }
+                Some(trimmed)
+            }
+        },
+        // OpenAI-compatible — key optional (keyless servers allowed).
+        None if provider == Provider::OpenAiCompatible => {
+            let prompt = match prev_key.as_deref() {
+                Some(k) => format!(
+                    "API key (Enter to keep {masked}, or leave blank for a keyless server)",
+                    masked = mask_key(k)
+                ),
+                None => "API key (optional — leave blank for a keyless server)".to_string(),
+            };
+            let entered = match cancel(
+                Password::with_theme(theme)
+                    .with_prompt(&prompt)
+                    .allow_empty_password(true)
+                    .interact(),
+            )? {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            let trimmed = entered.trim().to_string();
+            match (trimmed.is_empty(), prev_key) {
+                (true, Some(k)) => Some(k),
+                (true, None) => None,
+                (false, _) => Some(trimmed),
+            }
+        }
+        // Ollama — runs locally, no key needed.
+        None => {
+            println!(
+                "ℹ {} runs locally and needs no API key.",
+                provider.display()
+            );
             None
         }
     };
 
-    // Base URL — required for OpenAI-compatible, optional with a default for
-    // Ollama, unused for cloud providers.
-    let base_url = match provider.base_url_requirement() {
+    // --- Base URL -----------------------------------------------------------
+    let base_url: Option<String> = match provider.base_url_requirement() {
         BaseUrlRequirement::Required => {
-            println!("Base URL (required — e.g. http://localhost:1234/v1):");
-            print!("> ");
-            io::stdout().flush()?;
-            let url = read_line()?;
-            let url = url.trim().to_string();
-            if url.is_empty() {
-                anyhow::bail!("base URL cannot be empty for {backend}");
+            let mut input = Input::<String>::with_theme(theme)
+                .with_prompt("Base URL (e.g. http://localhost:1234/v1)");
+            if let Some(prev) = prev_base_url.as_deref() {
+                input = input.default(prev.to_string());
             }
-            println!();
-            Some(url)
+            let entered = match cancel(input.interact())? {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            let trimmed = entered.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("base URL cannot be empty for {}", provider.name());
+            }
+            Some(trimmed)
         }
         BaseUrlRequirement::Optional(default) => {
-            println!("Base URL [{default}]:");
-            print!("> ");
-            io::stdout().flush()?;
-            let url = read_line()?;
-            let trimmed = url.trim().to_string();
-            println!();
-            if trimmed.is_empty() {
+            let dflt = prev_base_url.as_deref().unwrap_or(default).to_string();
+            let entered = match cancel(
+                Input::<String>::with_theme(theme)
+                    .with_prompt("Base URL")
+                    .default(dflt)
+                    .interact(),
+            )? {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            let trimmed = entered.trim().to_string();
+            if trimmed == default {
                 None
             } else {
                 Some(trimmed)
@@ -269,54 +384,120 @@ pub fn run_setup() -> Result<()> {
         BaseUrlRequirement::None => None,
     };
 
-    // Model — required when the provider has no default (OpenRouter,
-    // OpenAI-compatible); otherwise the default is offered.
+    // --- Model --------------------------------------------------------------
     let default_model = provider.default_model();
-    let model = if default_model.is_empty() {
-        println!("Model (required):");
-        print!("> ");
-        io::stdout().flush()?;
-        let m = read_line()?;
-        let m = m.trim().to_string();
-        if m.is_empty() {
-            anyhow::bail!("model cannot be empty for {backend}");
+    let model: Option<String> = if default_model.is_empty() {
+        // No provider default — model is required.
+        let mut input = Input::<String>::with_theme(theme)
+            .with_prompt("Model (required)")
+            .validate_with(|s: &String| {
+                if s.trim().is_empty() {
+                    Err("model cannot be empty")
+                } else {
+                    Ok(())
+                }
+            });
+        if let Some(prev) = prev_model.as_deref() {
+            input = input.default(prev.to_string());
         }
-        println!();
-        Some(m)
+        let entered = match cancel(input.interact())? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        Some(entered.trim().to_string())
     } else {
-        println!("Model [{default_model}]:");
-        print!("> ");
-        io::stdout().flush()?;
-        let m = read_line()?;
-        let trimmed = m.trim().to_string();
-        println!();
-        if trimmed.is_empty() {
+        let dflt = prev_model.as_deref().unwrap_or(default_model).to_string();
+        let entered = match cancel(
+            Input::<String>::with_theme(theme)
+                .with_prompt("Model")
+                .default(dflt)
+                .interact(),
+        )? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let trimmed = entered.trim().to_string();
+        if trimmed == default_model {
             None
         } else {
             Some(trimmed)
         }
     };
 
-    let config = Config {
-        backend: Some(backend.clone()),
+    // --- Summary + confirm --------------------------------------------------
+    println!();
+    println!("  provider: {}", provider.display());
+    match &base_url {
+        Some(u) => println!("  base url: {u}"),
+        None => match provider.base_url_requirement() {
+            BaseUrlRequirement::Optional(d) => println!("  base url: {d}  (default)"),
+            _ => println!("  base url:  (provider default)"),
+        },
+    }
+    let model_display =
+        model
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .unwrap_or(if default_model.is_empty() {
+                "(none)"
+            } else {
+                default_model
+            });
+    println!("  model:    {model_display}");
+    match &api_key {
+        Some(k) if !k.is_empty() => println!("  api key:  {}", mask_key(k)),
+        _ => match provider.env_key() {
+            Some(_) => println!("  api key:  (not set)"),
+            None => println!("  api key:  (not required)"),
+        },
+    }
+    println!();
+
+    let confirmed = match cancel(
+        Confirm::with_theme(theme)
+            .with_prompt("Save this config?")
+            .default(true)
+            .interact(),
+    )? {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    if !confirmed {
+        return Ok(None);
+    }
+
+    Ok(Some(Config {
+        backend: Some(provider.name().to_string()),
         api_key,
         model,
         base_url,
-    };
-    config.save()?;
+    }))
+}
 
-    let path = config_path().context("could not determine config path")?;
-    println!("Saved to {}\n", path.display());
-    println!("  provider: {backend}");
-    if let Some(b) = &config.base_url {
-        println!("  base url: {b}");
+/// Mask a secret for the prompt hint and pre-save summary. Never reveals the
+/// full value.
+fn mask_key(k: &str) -> String {
+    if k.is_empty() {
+        return "(empty)".to_string();
     }
-    println!(
-        "  model:    {}",
-        config.model.as_deref().unwrap_or(default_model)
-    );
+    "•".repeat(k.len().min(12))
+}
 
-    Ok(())
+/// Translate a dialoguer `interact()` result into `Option<T>`: `None` means the
+/// user cancelled (Esc / Ctrl-C / EOF). Any other error is propagated.
+fn cancel<T>(res: std::result::Result<T, dialoguer::Error>) -> Result<Option<T>> {
+    match res {
+        Ok(v) => Ok(Some(v)),
+        Err(dialoguer::Error::IO(e))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err::<Option<T>, dialoguer::Error>(e).context("could not read terminal input"),
+    }
 }
 
 pub fn run_list() -> Result<()> {
@@ -343,10 +524,4 @@ pub fn run_list() -> Result<()> {
     );
 
     Ok(())
-}
-
-fn read_line() -> Result<String> {
-    let mut buf = String::new();
-    io::stdin().read_line(&mut buf)?;
-    Ok(buf)
 }
