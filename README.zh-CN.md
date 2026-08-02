@@ -82,6 +82,16 @@ cargo build --release
 # binary 位于 target/release/aic
 ```
 
+### Shell 补全（Tab 自动补全）
+
+一条命令即可安装补全 —— `aic` 会交互式让你选择 shell（默认高亮 `$SHELL` 探测到的），并把脚本写入约定位置：
+
+```sh
+aic completion            # 交互式选择 shell 并安装
+```
+
+重载 shell（`exec $SHELL`）后 Tab 补全即生效。支持 `zsh`、`bash`、`fish`、`nushell`。zsh/bash/fish 重载即自动生效；nushell 需在 `config.nu` 加一行 `source`（安装后会打印）。（macOS 的 Homebrew 用户可零配置获得 zsh 补全 —— Homebrew 的 `site-functions` 目录已在 `$fpath` 中。）
+
 ## Quick Start
 
 ```sh

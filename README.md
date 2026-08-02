@@ -82,6 +82,16 @@ cargo build --release
 # binary at target/release/aic
 ```
 
+### Shell completion (Tab)
+
+Install completions with one command — `aic` prompts you to pick a shell (defaulting to your `$SHELL`) and writes the script to its conventional location:
+
+```sh
+aic completion            # pick a shell interactively, then install
+```
+
+Reload your shell (`exec $SHELL`) and Tab completion is active. Supported: `zsh`, `bash`, `fish`, `nushell`. zsh/bash/fish are autoloaded; nushell needs a `source` line in `config.nu` (printed after install). (macOS Homebrew users get zsh completions with zero extra config — Homebrew's `site-functions` dir is already on `$fpath`.)
+
 ## Quick Start
 
 ```sh

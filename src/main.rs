@@ -17,6 +17,7 @@ use crate::cli::Commands;
 use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
+use std::io::IsTerminal;
 use clap::{CommandFactory, Parser};
 use std::future::Future;
 use std::path::Path;
@@ -486,6 +487,183 @@ fn write_completion(shell: cli::CompletionShell, out: &mut dyn std::io::Write) {
     }
 }
 
+use std::path::PathBuf;
+
+/// Lowercase name used in user-facing messages — mirrors clap's `#[value(name)]`.
+fn shell_name(shell: cli::CompletionShell) -> &'static str {
+    use cli::CompletionShell::*;
+    match shell {
+        Bash => "bash",
+        Elvish => "elvish",
+        Fish => "fish",
+        Nushell => "nushell",
+        PowerShell => "powershell",
+        Zsh => "zsh",
+        Spec => "carapace-spec",
+    }
+}
+
+/// Maps a shell basename (e.g. the tail of `$SHELL`) to its completion enum.
+/// Pure so it can be unit-tested without touching the process environment.
+fn shell_from_name(name: &str) -> Option<cli::CompletionShell> {
+    use cli::CompletionShell::*;
+    Some(match name {
+        "zsh" => Zsh,
+        "bash" => Bash,
+        "fish" => Fish,
+        "nu" | "nushell" => Nushell,
+        "elvish" => Elvish,
+        _ => return None,
+    })
+}
+
+/// Best-effort detection of the current shell from `$SHELL`. `$SHELL` reflects
+/// the login shell rather than the one actually running, so it's only a hint —
+/// callers let the user override with an explicit argument.
+fn detect_shell() -> Option<cli::CompletionShell> {
+    let shell = std::env::var("SHELL").ok()?;
+    let name = shell.rsplit('/').next()?;
+    shell_from_name(name)
+}
+
+/// If `aic` itself lives under a Homebrew prefix, returns that prefix so zsh
+/// completions can land in the tap's autoloaded `site-functions` directory.
+fn homebrew_prefix_from(exe: &Path) -> Option<PathBuf> {
+    for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
+        if exe.starts_with(prefix) {
+            return Some(prefix.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Conventional install path for `shell`'s completion script, plus whether that
+/// location is autoloaded (no user action beyond reloading the shell).
+///
+/// `None` means this shell has no file-based autoload location and the user
+/// should print the script and wire it up themselves. Supported shells: `bash`
+/// and `fish` are autoloaded; `zsh` is autoloaded under a Homebrew prefix
+/// (Homebrew adds `share/zsh/site-functions` to `$fpath`) but needs a manual
+/// `$fpath` entry otherwise; `nushell` lands in its config dir but must be
+/// `source`d from `config.nu`.
+fn completion_install_target(
+    shell: cli::CompletionShell,
+    home: &Path,
+    brew_prefix: Option<&Path>,
+) -> Option<(PathBuf, bool)> {
+    use cli::CompletionShell::*;
+    match shell {
+        Fish => Some((home.join(".config/fish/completions/aic.fish"), true)),
+        Bash => Some((home.join(".local/share/bash-completion/completions/aic"), true)),
+        Zsh => {
+            if let Some(prefix) = brew_prefix {
+                Some((prefix.join("share/zsh/site-functions/_aic"), true))
+            } else {
+                Some((home.join(".local/share/zsh/site-functions/_aic"), false))
+            }
+        }
+        // Nushell has a config dir but no autoload — the user must `source` it.
+        Nushell => Some((home.join(".config/nushell/aic.nu"), false)),
+        // No file-based autoload location; print the script and wire it up.
+        Elvish | PowerShell | Spec => None,
+    }
+}
+
+/// Writes `shell`'s completion script to the path from [`completion_install_target`].
+///
+/// Split from [`install_completion`] so the file I/O can be exercised against a
+/// temp directory instead of the real home.
+fn install_completion_impl(
+    shell: cli::CompletionShell,
+    home: &Path,
+    brew_prefix: Option<&Path>,
+) -> anyhow::Result<(PathBuf, bool)> {
+    let (path, autoloaded) = completion_install_target(shell, home, brew_prefix).ok_or_else(|| {
+        anyhow::anyhow!(
+            "automatic install isn't supported for {0} completions",
+            shell_name(shell)
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut buf = Vec::new();
+    write_completion(shell, &mut buf);
+    std::fs::write(&path, buf)?;
+    Ok((path, autoloaded))
+}
+
+/// Installs `shell`'s completion to its conventional location and prints the
+/// result, plus any follow-up the user needs (such as adding a dir to `$fpath`).
+fn install_completion(shell: cli::CompletionShell) -> anyhow::Result<()> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine your home directory"))?;
+    let brew_prefix = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.canonicalize().ok())
+        .as_deref()
+        .and_then(homebrew_prefix_from);
+
+    let (path, autoloaded) = install_completion_impl(shell, &home, brew_prefix.as_deref())?;
+    eprintln!("Installed {0} completion to: {1}", shell_name(shell), path.display());
+    if autoloaded {
+        eprintln!(
+            "Reload your shell (e.g. `exec {0}`) and Tab completion will be active.",
+            shell_name(shell)
+        );
+    } else {
+        // Non-autoloaded installs need a shell-specific hook to take effect.
+        match shell {
+            cli::CompletionShell::Zsh => {
+                if let Some(dir) = path.parent() {
+                    eprintln!(
+                        "Add this directory to $fpath for it to take effect:\n  \
+                         fpath+=({})  # then: autoload -Uz compinit && compinit",
+                        dir.display()
+                    );
+                }
+            }
+            cli::CompletionShell::Nushell => {
+                eprintln!(
+                    "Source it from your nushell config to take effect — add to `config.nu`:\n  \
+                     source {}",
+                    path.display()
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Interactively pick a shell to install completions for, defaulting the
+/// highlight to `default` (usually the detected login shell). Returns `None`
+/// when the user cancels (Esc / Ctrl-C).
+fn prompt_shell(
+    default: Option<cli::CompletionShell>,
+) -> anyhow::Result<Option<cli::CompletionShell>> {
+    use cli::CompletionShell;
+    use dialoguer::{Select, theme::ColorfulTheme};
+
+    let shells = [
+        CompletionShell::Bash,
+        CompletionShell::Zsh,
+        CompletionShell::Fish,
+        CompletionShell::Nushell,
+    ];
+    let labels = ["bash", "zsh", "fish", "nushell"];
+    let highlight = default
+        .and_then(|d| shells.iter().position(|&s| s == d))
+        .unwrap_or(0);
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Install completions for which shell?")
+        .items(&labels)
+        .default(highlight)
+        .interact_opt()?;
+    Ok(selection.map(|i| shells[i]))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
@@ -495,9 +673,26 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::List) => config::run_list(),
         Some(Commands::Update) => update::run_update(),
         Some(Commands::Resolve) => run_resolve_workflow().await,
-        Some(Commands::GenerateCompletion { shell }) => {
-            write_completion(shell, &mut std::io::stdout());
-            Ok(())
+        Some(Commands::Completion) => {
+            // Interactive when stdout is a terminal; fall back to $SHELL
+            // detection for scripts and pipes.
+            let shell = if std::io::stdout().is_terminal() {
+                match prompt_shell(detect_shell())? {
+                    Some(shell) => shell,
+                    None => {
+                        eprintln!("Cancelled.");
+                        return Ok(());
+                    }
+                }
+            } else {
+                detect_shell().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "couldn't detect your shell from $SHELL; run `aic completion` in a \
+                         terminal to pick one (bash, zsh, fish, nushell)"
+                    )
+                })?
+            };
+            install_completion(shell)
         }
         None => run_commit_workflow().await,
     }
@@ -529,5 +724,108 @@ mod tests {
                 "{shell:?}: completion script did not reference the `aic` binary"
             );
         }
+    }
+
+    #[test]
+    fn shell_from_name_maps_known_shells_and_rejects_unknown() {
+        use crate::cli::CompletionShell;
+        assert_eq!(shell_from_name("zsh"), Some(CompletionShell::Zsh));
+        assert_eq!(shell_from_name("bash"), Some(CompletionShell::Bash));
+        assert_eq!(shell_from_name("fish"), Some(CompletionShell::Fish));
+        assert_eq!(shell_from_name("nu"), Some(CompletionShell::Nushell));
+        assert_eq!(shell_from_name("nushell"), Some(CompletionShell::Nushell));
+        assert_eq!(shell_from_name("elvish"), Some(CompletionShell::Elvish));
+        assert_eq!(shell_from_name("tcsh"), None);
+        assert_eq!(shell_from_name(""), None);
+    }
+
+    #[test]
+    fn homebrew_prefix_matches_brew_locations_only() {
+        use std::path::Path;
+        assert_eq!(
+            homebrew_prefix_from(Path::new("/opt/homebrew/bin/aic")),
+            Some(Path::new("/opt/homebrew").to_path_buf())
+        );
+        assert_eq!(
+            homebrew_prefix_from(Path::new("/usr/local/bin/aic")),
+            Some(Path::new("/usr/local").to_path_buf())
+        );
+        assert_eq!(homebrew_prefix_from(Path::new("/usr/bin/aic")), None);
+        assert_eq!(homebrew_prefix_from(Path::new("/home/me/.cargo/bin/aic")), None);
+    }
+
+    #[test]
+    fn completion_install_target_picks_autoloaded_dirs() {
+        use crate::cli::CompletionShell;
+        use std::path::Path;
+        let home = Path::new("/home/me");
+
+        // fish & bash: always autoloaded via their conventional dirs.
+        let (p, auto) = completion_install_target(CompletionShell::Fish, home, None).unwrap();
+        assert_eq!(p, Path::new("/home/me/.config/fish/completions/aic.fish"));
+        assert!(auto);
+
+        let (p, auto) = completion_install_target(CompletionShell::Bash, home, None).unwrap();
+        assert_eq!(p, Path::new("/home/me/.local/share/bash-completion/completions/aic"));
+        assert!(auto);
+
+        // zsh under a Homebrew prefix: autoloaded via the tap's fpath entry.
+        let (p, auto) =
+            completion_install_target(CompletionShell::Zsh, home, Some(Path::new("/opt/homebrew")))
+                .unwrap();
+        assert_eq!(p, Path::new("/opt/homebrew/share/zsh/site-functions/_aic"));
+        assert!(auto);
+
+        // zsh elsewhere: XDG dir, needs the user to add it to $fpath.
+        let (p, auto) = completion_install_target(CompletionShell::Zsh, home, None).unwrap();
+        assert_eq!(p, Path::new("/home/me/.local/share/zsh/site-functions/_aic"));
+        assert!(!auto);
+
+        // nushell: lands in its config dir but isn't autoloaded.
+        let (p, auto) = completion_install_target(CompletionShell::Nushell, home, None).unwrap();
+        assert_eq!(p, Path::new("/home/me/.config/nushell/aic.nu"));
+        assert!(!auto);
+
+        // shells with no file-based location print instead.
+        assert!(completion_install_target(CompletionShell::Elvish, home, None).is_none());
+        assert!(completion_install_target(CompletionShell::PowerShell, home, None).is_none());
+        assert!(completion_install_target(CompletionShell::Spec, home, None).is_none());
+    }
+
+    #[test]
+    fn install_completion_impl_writes_a_nonempty_script_to_the_right_path() {
+        use crate::cli::CompletionShell;
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // zsh (XDG fallback): file lands at the expected path and references aic.
+        let (path, autoloaded) =
+            install_completion_impl(CompletionShell::Zsh, dir.path(), None).expect("install zsh");
+        assert!(!autoloaded);
+        assert!(path.ends_with(".local/share/zsh/site-functions/_aic"));
+        let body = std::fs::read_to_string(&path).expect("read installed script");
+        assert!(!body.is_empty());
+        assert!(body.contains("aic"));
+
+        // fish: autoloaded, distinct filename.
+        let (path, autoloaded) =
+            install_completion_impl(CompletionShell::Fish, dir.path(), None).expect("install fish");
+        assert!(autoloaded);
+        assert!(path.ends_with(".config/fish/completions/aic.fish"));
+
+        // nushell: installed to its config dir, not autoloaded.
+        let (path, autoloaded) =
+            install_completion_impl(CompletionShell::Nushell, dir.path(), None)
+                .expect("install nushell");
+        assert!(!autoloaded);
+        assert!(path.ends_with(".config/nushell/aic.nu"));
+        let body = std::fs::read_to_string(&path).expect("read installed script");
+        assert!(!body.is_empty());
+        assert!(body.contains("aic"));
+
+        // an unsupported shell errors instead of silently doing nothing.
+        let err = install_completion_impl(CompletionShell::Elvish, dir.path(), None)
+            .err()
+            .expect("elvish install should fail");
+        assert!(format!("{err}").contains("elvish"));
     }
 }

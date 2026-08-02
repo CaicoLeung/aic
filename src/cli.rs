@@ -21,16 +21,13 @@ pub enum Commands {
     Update,
     /// Resolve git merge conflicts in the working tree via the LLM
     Resolve,
-    /// Generate shell completion script
+    /// Install shell completion script
     ///
-    /// Prints a completion script for the given shell to stdout. Redirect it to
-    /// the location your shell expects, for example:
+    /// Interactively pick a shell and install its completion (the highlight
+    /// defaults to your `$SHELL`):
     ///
-    ///   aic generate-completion zsh > _aic   # place on a directory in $fpath
-    GenerateCompletion {
-        #[arg(value_enum)]
-        shell: CompletionShell,
-    },
+    ///   aic completion
+    Completion,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
