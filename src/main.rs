@@ -101,9 +101,8 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     })
     .await;
 
-    // Drain the tail: any partial line that never got its final `\n`, plus
-    // the overflow summary — the last reasoning visible before the spinner
-    // clears.
+    // Drain the tail: a partial line that never got its final `\n` — the
+    // last reasoning visible before the spinner clears.
     if printing {
         for line in view.flush() {
             if !print_reasoning_line(&mp, feed_width, &line) {
