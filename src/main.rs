@@ -484,6 +484,13 @@ impl Shell {
     /// Installable shells, in menu order.
     const ALL: [Self; 4] = [Self::Bash, Self::Zsh, Self::Fish, Self::Nushell];
 
+    /// Maps a shell basename (e.g. the tail of `$SHELL`) to a `Shell`.
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|&shell| shell.detect_names().contains(&name))
+    }
+
     /// Lowercase display name — the menu label and the word used in messages.
     fn name(self) -> &'static str {
         match self {
@@ -533,18 +540,14 @@ impl Shell {
                 path: home.join(".local/share/bash-completion/completions/aic"),
                 autoloaded: true,
             },
-            Self::Zsh => match brew_prefix {
-                Some(prefix) => CompletionTarget {
-                    path: prefix.join("share/zsh/site-functions/_aic"),
-                    // Not autoloaded: only loads if the user's zsh has this dir
-                    // on $fpath (Homebrew's own zsh yes, macOS system zsh no).
-                    autoloaded: false,
-                },
-                None => CompletionTarget {
-                    path: home.join(".local/share/zsh/site-functions/_aic"),
-                    autoloaded: false,
-                },
-            },
+            // Never autoloaded: the site-functions dir loads only if the user's
+            // zsh has it on $fpath (Homebrew's own zsh yes; system zsh no).
+            Self::Zsh => {
+                let dir = brew_prefix
+                    .map(|p| p.join("share/zsh/site-functions"))
+                    .unwrap_or_else(|| home.join(".local/share/zsh/site-functions"));
+                CompletionTarget { path: dir.join("_aic"), autoloaded: false }
+            }
             Self::Nushell => CompletionTarget {
                 path: home.join(".config/nushell/aic.nu"),
                 autoloaded: false,
@@ -574,32 +577,22 @@ impl Shell {
     }
 }
 
-/// Maps a shell basename (e.g. the tail of `$SHELL`) to a `Shell`. Pure so it
-/// can be unit-tested without touching the process environment.
-fn shell_from_name(name: &str) -> Option<Shell> {
-    Shell::ALL
-        .into_iter()
-        .find(|&shell| shell.detect_names().contains(&name))
-}
-
 /// Best-effort detection of the current shell from `$SHELL`. `$SHELL` is the
 /// login shell, not necessarily the one actually running, so it's only a hint —
 /// it defaults the interactive menu and is the non-TTY fallback.
 fn detect_shell() -> Option<Shell> {
     let shell = std::env::var("SHELL").ok()?;
     let name = shell.rsplit('/').next()?;
-    shell_from_name(name)
+    Shell::from_name(name)
 }
 
 /// If `aic` itself lives under a Homebrew prefix, returns that prefix so zsh
-/// completions can land in the tap's autoloaded `site-functions` directory.
+/// completions can land in the tap's conventional `site-functions` directory.
 fn homebrew_prefix_from(exe: &Path) -> Option<PathBuf> {
-    for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
-        if exe.starts_with(prefix) {
-            return Some(prefix.to_path_buf());
-        }
-    }
-    None
+    [Path::new("/opt/homebrew"), Path::new("/usr/local")]
+        .into_iter()
+        .find(|prefix| exe.starts_with(prefix))
+        .map(Path::to_path_buf)
 }
 
 /// Writes `shell`'s completion script to `out`.
@@ -635,9 +628,8 @@ fn install_completion(shell: Shell) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("could not determine your home directory"))?;
     let brew_prefix = std::env::current_exe()
         .ok()
-        .and_then(|e| e.canonicalize().ok())
-        .as_deref()
-        .and_then(homebrew_prefix_from);
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| homebrew_prefix_from(&exe));
 
     let target = install_completion_impl(shell, &home, brew_prefix.as_deref())?;
     eprintln!(
@@ -728,14 +720,14 @@ mod tests {
     }
 
     #[test]
-    fn shell_from_name_maps_known_shells_and_rejects_unknown() {
-        assert_eq!(shell_from_name("zsh"), Some(Shell::Zsh));
-        assert_eq!(shell_from_name("bash"), Some(Shell::Bash));
-        assert_eq!(shell_from_name("fish"), Some(Shell::Fish));
-        assert_eq!(shell_from_name("nu"), Some(Shell::Nushell));
-        assert_eq!(shell_from_name("nushell"), Some(Shell::Nushell));
-        assert_eq!(shell_from_name("tcsh"), None);
-        assert_eq!(shell_from_name(""), None);
+    fn from_name_maps_known_shells_and_rejects_unknown() {
+        assert_eq!(Shell::from_name("zsh"), Some(Shell::Zsh));
+        assert_eq!(Shell::from_name("bash"), Some(Shell::Bash));
+        assert_eq!(Shell::from_name("fish"), Some(Shell::Fish));
+        assert_eq!(Shell::from_name("nu"), Some(Shell::Nushell));
+        assert_eq!(Shell::from_name("nushell"), Some(Shell::Nushell));
+        assert_eq!(Shell::from_name("tcsh"), None);
+        assert_eq!(Shell::from_name(""), None);
     }
 
     #[test]
