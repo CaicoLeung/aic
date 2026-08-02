@@ -598,20 +598,22 @@ where
 /// 20 fps, down from the previous 80 ms.
 pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 
-/// How many reasoning *lines* stay visible at once — a logical-line cap, not a
-/// terminal-row cap. The window rolls: each new completed line enters at the
-/// bottom and the oldest is dropped once the count exceeds this, so the newest
-/// [`REASONING_WINDOW`] lines are always shown. Older reasoning scrolls
-/// *within* the window, not into the terminal scrollback.
+/// How many reasoning rows stay visible at once — a *rendered-row* cap. The
+/// window rolls: each new completed line enters at the bottom and the oldest
+/// is dropped once the count exceeds this, so the reasoning block never grows
+/// past it. Older reasoning scrolls *within* the window (the newest rows
+/// always visible), not into the terminal scrollback.
 ///
-/// Because each line is greedy-wrapped to the terminal width when rendered
-/// (see [`wrap_line`]), a long line can occupy several terminal rows, so the
-/// on-screen region may be taller than this count: it caps how many reasoning
-/// lines are retained, not the rendered height.
+/// Enforced on the rendered rows (see [`reasoning_rows`], which applies it
+/// after greedy wrap), so a single long line that wraps to several rows still
+/// cannot grow the region. [`ThinkingView`] bounds its stored lines to this
+/// count as a memory guard; together with the spinner row the whole in-place
+/// region stays at [`REASONING_WINDOW`] + 1 rows.
 pub(crate) const REASONING_WINDOW: usize = 12;
 
 /// A rolling window over the model's streamed reasoning, sized to
-/// [`REASONING_WINDOW`] logical lines. The caller renders [`push`](Self::push)'s
+/// [`REASONING_WINDOW`] logical lines (the retention window; the rendered-row
+/// cap lives in [`reasoning_rows`]). The caller renders [`push`](Self::push)'s
 /// returned window into the spinner's in-place multi-line message, so the block
 /// redraws in place (never printed as permanent lines that linger in the
 /// scrollback) and is *left visible* — capped at [`REASONING_WINDOW`] lines —
@@ -640,8 +642,8 @@ impl ThinkingView {
     /// Ingest a reasoning delta (may be a partial line, many lines, or empty)
     /// and return the current window: the newest completed lines plus the
     /// in-progress partial line, oldest-first, capped to [`REASONING_WINDOW`]
-    /// rows. A delta that ends mid-line leaves the partial buffered and shown
-    /// as the window's last row until the next `\n`.
+    /// lines. A delta that ends mid-line leaves the partial buffered and shown
+    /// as the window's last line until the next `\n`.
     pub(crate) fn push(&mut self, delta: &str) -> Vec<String> {
         for ch in delta.chars() {
             if ch == '\n' {
@@ -668,12 +670,12 @@ impl ThinkingView {
         }
     }
 
-    /// The single source of truth for the *visible* cap: the newest
-    /// [`REASONING_WINDOW`] rows, completed lines oldest→newest then the
-    /// in-progress partial as the last row. The partial counts against the same
-    /// budget, so a full window trims its oldest completed line here to make
-    /// room — this is the load-bearing cap; [`push_line`](Self::push_line)
-    /// only guards memory.
+    /// The line-level window: the newest [`REASONING_WINDOW`] lines, completed
+    /// lines oldest→newest then the in-progress partial as the last line. The
+    /// partial counts against the same budget, so a full window trims its
+    /// oldest completed line here to make room. This bounds retention
+    /// (memory); the *visible* row cap is applied by [`reasoning_rows`] after
+    /// wrapping, since one line can render to several rows.
     fn window(&self) -> Vec<String> {
         let mut rows: Vec<String> = self.lines.iter().cloned().collect();
         if !self.cur.trim().is_empty() {
@@ -697,7 +699,10 @@ const REASONING_GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 /// paints exactly what this returns.
 ///
 /// `feed_width` is the per-piece wrap budget. An empty `window` yields just
-/// the spinner row.
+/// the spinner row. The reasoning rows (everything below the spinner row) are
+/// capped to [`REASONING_WINDOW`]: a long line wraps to several rows, so the
+/// newest [`REASONING_WINDOW`] *rendered rows* are kept and the oldest drop
+/// out — the top row may start mid-line, exactly like a terminal tail window.
 fn reasoning_rows(glyph: &str, label: &str, window: &[String], feed_width: usize) -> Vec<String> {
     let mut rows = Vec::with_capacity(window.len() + 1);
     rows.push(format!("{MARGIN}{glyph} {label}"));
@@ -706,6 +711,11 @@ fn reasoning_rows(glyph: &str, label: &str, window: &[String], feed_width: usize
             rows.push(format!("{MARGIN}│ {piece}"));
         }
     }
+    // The load-bearing rendered-row cap: the line window alone can't bound
+    // the on-screen region, because one long line wraps to many rows. Keep
+    // the newest REASONING_WINDOW rows below the spinner row.
+    let start = 1 + (rows.len() - 1).saturating_sub(REASONING_WINDOW);
+    rows.drain(1..start);
     rows
 }
 
@@ -981,6 +991,54 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(body, "the quick brown fox");
+    }
+
+    /// The load-bearing rendered-row cap: wrap pieces count against
+    /// [`REASONING_WINDOW`], so a window whose lines wrap to more rows than
+    /// the budget shows only the newest rows — the oldest wrap pieces (and
+    /// whole lines) roll out, the spinner row is never dropped.
+    #[test]
+    fn reasoning_rows_caps_rendered_rows_to_window_budget() {
+        let prefix = format!("{MARGIN}│ ");
+        // 12 lines × 2 wrap pieces = 24 rendered rows, over the 12-row budget.
+        let window: Vec<String> = (1..=12).map(|i| format!("line {i} with words")).collect();
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 10);
+        assert_eq!(rows.len(), REASONING_WINDOW + 1);
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+        for row in &rows[1..] {
+            assert!(row.starts_with(&prefix), "unindented row: {row:?}");
+        }
+        // The newest rows survived, losslessly rejoinable: lines 7–12 only.
+        let body: String = rows[1..]
+            .iter()
+            .filter_map(|r| r.strip_prefix(&prefix))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            body,
+            (7..=12)
+                .map(|i| format!("line {i} with words"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
+    /// A single pathological line that wraps far past the budget still cannot
+    /// grow the region: only the newest [`REASONING_WINDOW`] rendered rows are
+    /// kept, the top row a mid-line cut like a terminal tail window.
+    #[test]
+    fn reasoning_rows_caps_single_long_line() {
+        let prefix = format!("{MARGIN}│ ");
+        let long = "word ".repeat(60); // 300 chars → 30 wrap pieces at width 10
+        let rows = reasoning_rows("⠹", "Analyzing", &[long], 10);
+        assert_eq!(rows.len(), REASONING_WINDOW + 1);
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+        // 12 rows of "word word" = 24 words of the 60 — the newest tail only.
+        let words: usize = rows[1..]
+            .iter()
+            .map(|r| r.strip_prefix(&prefix).unwrap().split_whitespace().count())
+            .sum();
+        assert_eq!(words, 24);
     }
 
     /// First paint (no previous frame) opens on a fresh line and clears+writes

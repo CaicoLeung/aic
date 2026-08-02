@@ -45,11 +45,11 @@ pub(crate) type CommitMessenger =
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling
-/// [`display::REASONING_WINDOW`]-*line* window that redraws in place as the
-/// model thinks — newest lines at the bottom, oldest scrolled out of the
-/// window — and is left visible (capped to [`display::REASONING_WINDOW`] lines,
-/// each possibly wrapped to several terminal rows) once thinking ends, so the
-/// user can read what the model thought.
+/// [`display::REASONING_WINDOW`]-row block that redraws in place as the
+/// model thinks — newest rows at the bottom, oldest scrolled out of the
+/// window — and is left visible (capped to [`display::REASONING_WINDOW`]
+/// rendered rows, so the region is bounded even when a line wraps long) once
+/// thinking ends, so the user can read what the model thought.
 ///
 /// Rendering is hand-rolled via [`display::ReasoningRenderer`] rather than an
 /// indicatif multi-line spinner: indicatif repaints by blanking every row then
