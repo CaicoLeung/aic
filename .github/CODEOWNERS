@@ -1,0 +1,8 @@
+# CODEOWNERS — every file is owned by the repository owner, so the
+# "Require code owner review" branch rule on `main` guarantees no PR merges
+# without @CaicoLeung's approval. The owner merges their own PRs via the
+# ruleset's pull-request bypass.
+#
+# Syntax: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+* @CaicoLeung
