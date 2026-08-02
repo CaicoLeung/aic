@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
+use console::{Key, Term};
+use dialoguer::{Confirm, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-
-use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
 
@@ -202,10 +202,11 @@ pub fn run_setup() -> Result<()> {
         anyhow::bail!("cannot run interactive setup without a TTY");
     }
 
-    println!("aic setup — configure your AI provider\n");
+    println!("aic setup — configure your AI provider");
+    println!("  ↑/↓ move · Enter confirm · Esc back · Ctrl-C cancel\n");
 
     let theme = ColorfulTheme::default();
-    match collect_config(&theme)? {
+    match wizard(&theme)? {
         Some(config) => {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
@@ -219,17 +220,142 @@ pub fn run_setup() -> Result<()> {
     }
 }
 
-/// Gather config field-by-field via dialoguer prompts. Returns `None` when the
-/// user cancels at any step (Esc / Ctrl-C / EOF); the caller prints the cancel
-/// notice, so this function is silent on the cancel path.
-fn collect_config(theme: &ColorfulTheme) -> Result<Option<Config>> {
+/// Per-step outcome for the setup state machine.
+enum Nav {
+    Next,
+    Back,
+    Cancel,
+}
+
+/// In-progress wizard selections. Values persist across back-navigation so
+/// the user can edit one field without losing the others.
+#[derive(Default)]
+struct Draft {
+    provider: Option<Provider>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Provider,
+    ApiKey,
+    BaseUrl,
+    Model,
+    Confirm,
+}
+
+/// Run the setup wizard. Returns `None` when the user cancels (Esc on the
+/// first step, or Ctrl-C anywhere). Silent on the cancel path — the caller
+/// prints the notice.
+fn wizard(theme: &ColorfulTheme) -> Result<Option<Config>> {
     let existing = Config::load().unwrap_or(None);
     let existing_provider = existing
         .as_ref()
         .and_then(|c| c.backend.as_deref())
         .map(Provider::from_name);
 
-    // --- Provider -----------------------------------------------------------
+    let mut draft = Draft::default();
+    let mut step = Step::Provider;
+    loop {
+        let nav = match step {
+            Step::Provider => step_provider(theme, existing_provider, &mut draft)?,
+            Step::ApiKey => step_api_key(&existing, existing_provider, &mut draft)?,
+            Step::BaseUrl => step_base_url(&existing, existing_provider, &mut draft)?,
+            Step::Model => step_model(theme, &existing, existing_provider, &mut draft)?,
+            Step::Confirm => step_confirm(theme, &draft)?,
+        };
+        // Recompute after the step runs: `step_provider` may change the provider
+        // (clearing key/url/model, which changes which steps apply). `step` is
+        // always a member here — navigation only moves to a step already in the
+        // list, and the provider can only change while `step == Provider`.
+        let steps = applicable_steps(draft.provider.unwrap_or(Provider::OpenAI));
+        let idx = steps
+            .iter()
+            .position(|s| *s == step)
+            .expect("current step is always applicable");
+        match nav {
+            Nav::Cancel => return Ok(None),
+            Nav::Back => {
+                if idx == 0 {
+                    return Ok(None);
+                }
+                step = steps[idx - 1];
+            }
+            Nav::Next => {
+                if idx + 1 == steps.len() {
+                    return Ok(Some(finalize(draft)));
+                }
+                step = steps[idx + 1];
+            }
+        }
+    }
+}
+
+fn key_applies(p: Provider) -> bool {
+    p.env_key().is_some() || p == Provider::OpenAiCompatible
+}
+
+fn base_url_applies(p: Provider) -> bool {
+    !matches!(p.base_url_requirement(), BaseUrlRequirement::None)
+}
+
+/// Ordered wizard steps that actually apply to `p`. Steps that would be a
+/// no-op — an API key for local Ollama, a base URL for a cloud provider — are
+/// absent, so forward/back never lands on one. `Provider` always starts the
+/// list and `Confirm` always ends it. Navigation is just index ±1 off this
+/// list (see [`wizard`]), replacing the two symmetric `next`/`prev` match
+/// trees that previously had to be kept in lock-step.
+fn applicable_steps(p: Provider) -> Vec<Step> {
+    let mut steps = vec![Step::Provider];
+    if key_applies(p) {
+        steps.push(Step::ApiKey);
+    }
+    if base_url_applies(p) {
+        steps.push(Step::BaseUrl);
+    }
+    steps.push(Step::Model);
+    steps.push(Step::Confirm);
+    steps
+}
+
+fn finalize(draft: Draft) -> Config {
+    let provider = draft.provider.unwrap_or(Provider::OpenAI);
+    Config {
+        backend: Some(provider.name().to_string()),
+        api_key: draft.api_key,
+        model: draft.model,
+        base_url: draft.base_url,
+    }
+}
+
+/// Effective initial value for one field, in precedence order: the in-session
+/// draft value first, then the existing-config value when the provider is
+/// unchanged, else none. `field` selects which `Config` column to read, so the
+/// one shared body replaces the old per-field `key/base_url/model_initial`
+/// triple that were byte-for-byte apart from the field they touched.
+fn field_initial(
+    draft_val: Option<&str>,
+    existing: &Option<Config>,
+    existing_provider: Option<Provider>,
+    draft_provider: Option<Provider>,
+    field: impl Fn(&Config) -> Option<&String>,
+) -> Option<String> {
+    if let Some(v) = draft_val {
+        return Some(v.to_string());
+    }
+    if existing_provider.is_some() && existing_provider == draft_provider {
+        return existing.as_ref().and_then(field).cloned();
+    }
+    None
+}
+
+fn step_provider(
+    theme: &ColorfulTheme,
+    existing_provider: Option<Provider>,
+    draft: &mut Draft,
+) -> Result<Nav> {
     let providers = Provider::all();
     let items: Vec<String> = providers
         .iter()
@@ -238,196 +364,232 @@ fn collect_config(theme: &ColorfulTheme) -> Result<Option<Config>> {
             m => format!("{}  ({m})", p.display()),
         })
         .collect();
-    let default_idx = existing_provider
+    let default_idx = draft
+        .provider
+        .or(existing_provider)
         .and_then(|ep| providers.iter().position(|p| *p == ep))
         .unwrap_or(0);
 
-    let idx = match cancel(
+    match opt_nav(
         Select::with_theme(theme)
-            .with_prompt("Choose your AI provider (↑/↓ to move, Enter to select)")
+            .with_prompt("Choose your AI provider")
             .items(&items)
             .default(default_idx)
-            .interact(),
+            .interact_opt(),
     )? {
-        Some(i) => i,
-        None => return Ok(None),
-    };
-    let provider = providers[idx];
+        OptNav::Value(i) => {
+            let chosen = providers[i];
+            // Switching provider invalidates previously entered key/url/model.
+            if draft.provider != Some(chosen) {
+                draft.api_key = None;
+                draft.base_url = None;
+                draft.model = None;
+            }
+            draft.provider = Some(chosen);
+            Ok(Nav::Next)
+        }
+        OptNav::Back => Ok(Nav::Back),
+        OptNav::Cancel => Ok(Nav::Cancel),
+    }
+}
 
-    // Reuse values from the existing config only when the provider is
-    // unchanged — switching provider resets key/base-url/model prefill because
-    // the old values are almost certainly invalid for the new provider.
-    let same_provider = existing_provider == Some(provider);
-    let prev_key = same_provider
-        .then(|| existing.as_ref().and_then(|c| c.api_key.clone()))
-        .flatten();
-    let prev_base_url = same_provider
-        .then(|| existing.as_ref().and_then(|c| c.base_url.clone()))
-        .flatten();
-    let prev_model = same_provider
-        .then(|| existing.as_ref().and_then(|c| c.model.clone()))
-        .flatten();
-
-    // --- API key ------------------------------------------------------------
-    let api_key: Option<String> = match provider.env_key() {
+fn step_api_key(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft) -> Result<Nav> {
+    let provider = draft.provider.expect("provider chosen before api key");
+    let initial = field_initial(
+        draft.api_key.as_deref(),
+        existing,
+        ep,
+        draft.provider,
+        |c| c.api_key.as_ref(),
+    );
+    match provider.env_key() {
         // Cloud provider — key required.
-        Some(_) => match prev_key.as_deref() {
-            Some(k) => {
-                let prompt = format!(
-                    "API key (Enter to keep {masked}, or paste a new one)",
-                    masked = mask_key(k)
-                );
-                let entered = match cancel(
-                    Password::with_theme(theme)
-                        .with_prompt(&prompt)
-                        .allow_empty_password(true)
-                        .interact(),
-                )? {
-                    Some(v) => v,
-                    None => return Ok(None),
-                };
-                let trimmed = entered.trim().to_string();
-                Some(if trimmed.is_empty() {
-                    k.to_string()
-                } else {
-                    trimmed
-                })
-            }
-            None => {
-                let entered = match cancel(
-                    Password::with_theme(theme)
-                        .with_prompt("API key (paste your key — input stays hidden)")
-                        .allow_empty_password(false)
-                        .interact(),
-                )? {
-                    Some(v) => v,
-                    None => return Ok(None),
-                };
-                let trimmed = entered.trim().to_string();
-                if trimmed.is_empty() {
-                    anyhow::bail!("API key cannot be empty for {}", provider.name());
+        Some(_) => {
+            let prompt = match initial.as_deref() {
+                Some(_) => format!(
+                    "API key (Enter keeps {masked}, or paste a new one)",
+                    masked = mask_key(initial.as_deref().unwrap_or(""))
+                ),
+                None => "API key (paste — input stays hidden)".to_string(),
+            };
+            match prompt_text(
+                &prompt,
+                true,
+                initial.as_deref(),
+                false,
+                "API key cannot be empty",
+            )? {
+                TextAct::Value(v) => {
+                    draft.api_key = Some(v);
+                    Ok(Nav::Next)
                 }
-                Some(trimmed)
+                TextAct::Back => Ok(Nav::Back),
+                TextAct::Cancel => Ok(Nav::Cancel),
             }
-        },
+        }
         // OpenAI-compatible — key optional (keyless servers allowed).
         None if provider == Provider::OpenAiCompatible => {
-            let prompt = match prev_key.as_deref() {
-                Some(k) => format!(
-                    "API key (Enter to keep {masked}, or leave blank for a keyless server)",
-                    masked = mask_key(k)
-                ),
-                None => "API key (optional — leave blank for a keyless server)".to_string(),
+            let prompt = match initial.as_deref() {
+                Some(_) => "API key (Enter keeps, blank = keyless server)",
+                None => "API key (optional — blank for a keyless server)",
             };
-            let entered = match cancel(
-                Password::with_theme(theme)
-                    .with_prompt(&prompt)
-                    .allow_empty_password(true)
-                    .interact(),
-            )? {
-                Some(v) => v,
-                None => return Ok(None),
-            };
-            let trimmed = entered.trim().to_string();
-            match (trimmed.is_empty(), prev_key) {
-                (true, Some(k)) => Some(k),
-                (true, None) => None,
-                (false, _) => Some(trimmed),
-            }
-        }
-        // Ollama — runs locally, no key needed.
-        None => {
-            println!(
-                "ℹ {} runs locally and needs no API key.",
-                provider.display()
-            );
-            None
-        }
-    };
-
-    // --- Base URL -----------------------------------------------------------
-    let base_url: Option<String> = match provider.base_url_requirement() {
-        BaseUrlRequirement::Required => {
-            let mut input = Input::<String>::with_theme(theme)
-                .with_prompt("Base URL (e.g. http://localhost:1234/v1)");
-            if let Some(prev) = prev_base_url.as_deref() {
-                input = input.default(prev.to_string());
-            }
-            let entered = match cancel(input.interact())? {
-                Some(v) => v,
-                None => return Ok(None),
-            };
-            let trimmed = entered.trim().to_string();
-            if trimmed.is_empty() {
-                anyhow::bail!("base URL cannot be empty for {}", provider.name());
-            }
-            Some(trimmed)
-        }
-        BaseUrlRequirement::Optional(default) => {
-            let dflt = prev_base_url.as_deref().unwrap_or(default).to_string();
-            let entered = match cancel(
-                Input::<String>::with_theme(theme)
-                    .with_prompt("Base URL")
-                    .default(dflt)
-                    .interact(),
-            )? {
-                Some(v) => v,
-                None => return Ok(None),
-            };
-            let trimmed = entered.trim().to_string();
-            if trimmed == default {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }
-        BaseUrlRequirement::None => None,
-    };
-
-    // --- Model --------------------------------------------------------------
-    let default_model = provider.default_model();
-    let model: Option<String> = if default_model.is_empty() {
-        // No provider default — model is required.
-        let mut input = Input::<String>::with_theme(theme)
-            .with_prompt("Model (required)")
-            .validate_with(|s: &String| {
-                if s.trim().is_empty() {
-                    Err("model cannot be empty")
-                } else {
-                    Ok(())
+            match prompt_text(prompt, true, initial.as_deref(), true, "")? {
+                TextAct::Value(v) => {
+                    draft.api_key = if v.is_empty() { None } else { Some(v) };
+                    Ok(Nav::Next)
                 }
-            });
-        if let Some(prev) = prev_model.as_deref() {
-            input = input.default(prev.to_string());
+                TextAct::Back => Ok(Nav::Back),
+                TextAct::Cancel => Ok(Nav::Cancel),
+            }
         }
-        let entered = match cancel(input.interact())? {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        Some(entered.trim().to_string())
-    } else {
-        let dflt = prev_model.as_deref().unwrap_or(default_model).to_string();
-        let entered = match cancel(
-            Input::<String>::with_theme(theme)
-                .with_prompt("Model")
-                .default(dflt)
-                .interact(),
-        )? {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let trimmed = entered.trim().to_string();
-        if trimmed == default_model {
-            None
-        } else {
-            Some(trimmed)
+        // Ollama — unreachable (step skipped via key_applies); defensive.
+        None => {
+            draft.api_key = None;
+            Ok(Nav::Next)
         }
-    };
+    }
+}
 
-    // --- Summary + confirm --------------------------------------------------
+fn step_base_url(
+    existing: &Option<Config>,
+    ep: Option<Provider>,
+    draft: &mut Draft,
+) -> Result<Nav> {
+    let provider = draft.provider.expect("provider chosen before base url");
+    let initial = field_initial(
+        draft.base_url.as_deref(),
+        existing,
+        ep,
+        draft.provider,
+        |c| c.base_url.as_ref(),
+    );
+    match provider.base_url_requirement() {
+        BaseUrlRequirement::Required => match prompt_text(
+            "Base URL (e.g. http://localhost:1234/v1)",
+            false,
+            initial.as_deref(),
+            false,
+            "base URL cannot be empty",
+        )? {
+            TextAct::Value(v) => {
+                draft.base_url = Some(v);
+                Ok(Nav::Next)
+            }
+            TextAct::Back => Ok(Nav::Back),
+            TextAct::Cancel => Ok(Nav::Cancel),
+        },
+        BaseUrlRequirement::Optional(default) => {
+            let dflt = initial.as_deref().unwrap_or(default);
+            match prompt_text(
+                &format!("Base URL (Enter for default: {default})"),
+                false,
+                Some(dflt),
+                true,
+                "",
+            )? {
+                TextAct::Value(v) => {
+                    draft.base_url = if v == default { None } else { Some(v) };
+                    Ok(Nav::Next)
+                }
+                TextAct::Back => Ok(Nav::Back),
+                TextAct::Cancel => Ok(Nav::Cancel),
+            }
+        }
+        // Unreachable (step skipped via base_url_applies); defensive.
+        BaseUrlRequirement::None => Ok(Nav::Next),
+    }
+}
+
+fn step_model(
+    theme: &ColorfulTheme,
+    existing: &Option<Config>,
+    ep: Option<Provider>,
+    draft: &mut Draft,
+) -> Result<Nav> {
+    let provider = draft.provider.expect("provider chosen before model");
+    let default_model = provider.default_model();
+    let models = provider.models();
+    let initial = field_initial(draft.model.as_deref(), existing, ep, draft.provider, |c| {
+        c.model.as_ref()
+    });
+
+    // No curated list (OpenRouter, OpenAI-compatible) -> required free text.
+    if models.is_empty() {
+        return match prompt_text(
+            "Model (required)",
+            false,
+            initial.as_deref(),
+            false,
+            "model cannot be empty",
+        )? {
+            TextAct::Value(v) => {
+                draft.model = Some(v);
+                Ok(Nav::Next)
+            }
+            TextAct::Back => Ok(Nav::Back),
+            TextAct::Cancel => Ok(Nav::Cancel),
+        };
+    }
+
+    let mut items: Vec<String> = models.iter().map(|m| (*m).to_string()).collect();
+    items.push("✏️  Custom model…".to_string());
+    let custom_idx = items.len() - 1;
+    let highlight = initial
+        .as_deref()
+        .and_then(|v| models.iter().position(|m| *m == v))
+        .unwrap_or_else(|| {
+            if default_model.is_empty() {
+                0
+            } else {
+                models.iter().position(|m| *m == default_model).unwrap_or(0)
+            }
+        });
+
+    loop {
+        match opt_nav(
+            Select::with_theme(theme)
+                .with_prompt("Model")
+                .items(&items)
+                .default(highlight)
+                .interact_opt(),
+        )? {
+            OptNav::Value(i) if i == custom_idx => {
+                match prompt_text("Custom model", false, None, false, "model cannot be empty")? {
+                    TextAct::Value(v) => {
+                        draft.model = Some(v);
+                        return Ok(Nav::Next);
+                    }
+                    // "Custom model…" is a sub-mode of the Model step, not a
+                    // separate step: Esc cancels the custom entry and returns to
+                    // the model picker (Esc there then leaves the step), so the
+                    // "Esc goes back on every step" invariant holds at step
+                    // granularity.
+                    TextAct::Back => continue,
+                    TextAct::Cancel => return Ok(Nav::Cancel),
+                }
+            }
+            OptNav::Value(i) => {
+                let m = models[i];
+                draft.model = if !default_model.is_empty() && m == default_model {
+                    None
+                } else {
+                    Some(m.to_string())
+                };
+                return Ok(Nav::Next);
+            }
+            OptNav::Back => return Ok(Nav::Back),
+            OptNav::Cancel => return Ok(Nav::Cancel),
+        }
+    }
+}
+
+fn step_confirm(theme: &ColorfulTheme, draft: &Draft) -> Result<Nav> {
+    let provider = draft.provider.expect("provider chosen before confirm");
+    let default_model = provider.default_model();
+
     println!();
     println!("  provider: {}", provider.display());
-    match &base_url {
+    match &draft.base_url {
         Some(u) => println!("  base url: {u}"),
         None => match provider.base_url_requirement() {
             BaseUrlRequirement::Optional(d) => println!("  base url: {d}  (default)"),
@@ -435,7 +597,8 @@ fn collect_config(theme: &ColorfulTheme) -> Result<Option<Config>> {
         },
     }
     let model_display =
-        model
+        draft
+            .model
             .as_deref()
             .filter(|m| !m.is_empty())
             .unwrap_or(if default_model.is_empty() {
@@ -444,7 +607,7 @@ fn collect_config(theme: &ColorfulTheme) -> Result<Option<Config>> {
                 default_model
             });
     println!("  model:    {model_display}");
-    match &api_key {
+    match &draft.api_key {
         Some(k) if !k.is_empty() => println!("  api key:  {}", mask_key(k)),
         _ => match provider.env_key() {
             Some(_) => println!("  api key:  (not set)"),
@@ -453,25 +616,16 @@ fn collect_config(theme: &ColorfulTheme) -> Result<Option<Config>> {
     }
     println!();
 
-    let confirmed = match cancel(
+    match opt_nav(
         Confirm::with_theme(theme)
-            .with_prompt("Save this config?")
+            .with_prompt("Save this config?  (y = save · Esc/n = go back)")
             .default(true)
-            .interact(),
+            .interact_opt(),
     )? {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    if !confirmed {
-        return Ok(None);
+        OptNav::Value(true) => Ok(Nav::Next),
+        OptNav::Value(false) | OptNav::Back => Ok(Nav::Back),
+        OptNav::Cancel => Ok(Nav::Cancel),
     }
-
-    Ok(Some(Config {
-        backend: Some(provider.name().to_string()),
-        api_key,
-        model,
-        base_url,
-    }))
 }
 
 /// Mask a secret for the prompt hint and pre-save summary. Never reveals the
@@ -483,20 +637,100 @@ fn mask_key(k: &str) -> String {
     "•".repeat(k.len().min(12))
 }
 
-/// Translate a dialoguer `interact()` result into `Option<T>`: `None` means the
-/// user cancelled (Esc / Ctrl-C / EOF). Any other error is propagated.
-fn cancel<T>(res: std::result::Result<T, dialoguer::Error>) -> Result<Option<T>> {
+/// Map a dialoguer `interact_opt()` result onto the wizard's nav: a value is
+/// `Next`-bound, `None` (Esc) is `Back`, and Ctrl-C / EOF is `Cancel`.
+enum OptNav<T> {
+    Value(T),
+    Back,
+    Cancel,
+}
+
+fn opt_nav<T>(res: std::result::Result<Option<T>, dialoguer::Error>) -> Result<OptNav<T>> {
     match res {
-        Ok(v) => Ok(Some(v)),
+        Ok(Some(v)) => Ok(OptNav::Value(v)),
+        Ok(None) => Ok(OptNav::Back),
         Err(dialoguer::Error::IO(e))
             if matches!(
                 e.kind(),
                 io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
             ) =>
         {
-            Ok(None)
+            Ok(OptNav::Cancel)
         }
-        Err(e) => Err::<Option<T>, dialoguer::Error>(e).context("could not read terminal input"),
+        Err(e) => Err::<OptNav<T>, dialoguer::Error>(e).context("could not read terminal input"),
+    }
+}
+
+/// Outcome of a raw-mode text prompt.
+enum TextAct {
+    Value(String),
+    Back,
+    Cancel,
+}
+
+/// Read a line of text in raw mode so we can intercept Esc (back) and Ctrl-C
+/// (cancel) — which dialoguer's `Input`/`Password` can't do. `masked` hides
+/// each typed char (for secrets). `initial` is offered as the kept value when
+/// the user presses Enter on an empty line.
+fn prompt_text(
+    prompt: &str,
+    masked: bool,
+    initial: Option<&str>,
+    allow_empty: bool,
+    empty_hint: &str,
+) -> Result<TextAct> {
+    // stdout (not stderr) so this stays in lock-step with dialoguer's
+    // Select/Confirm rendering — prompts and menus never interleave when the
+    // streams are split.
+    let term = Term::stdout();
+    let init_hint = match (initial, masked) {
+        (Some(_), true) => "  [current: ••••]".to_string(),
+        (Some(d), false) => format!("  [current: {d}]"),
+        _ => String::new(),
+    };
+    term.write_line(&format!("{prompt}{init_hint}"))?;
+    term.write_line("  Enter = confirm · Esc = back · Ctrl-C = cancel")?;
+
+    // `read_key_raw` puts the terminal in raw mode for each keypress (console
+    // restores cooked mode automatically) and returns `Key::CtrlC` on Ctrl-C
+    // instead of raising SIGINT, so we can treat it as a graceful cancel.
+    let mut buf = String::new();
+    loop {
+        let key = term.read_key_raw().context("could not read keypress")?;
+        match key {
+            Key::Enter => {
+                let _ = term.write_str("\r\n");
+                let trimmed = buf.trim().to_string();
+                if trimmed.is_empty() {
+                    if let Some(d) = initial {
+                        return Ok(TextAct::Value(d.to_string()));
+                    }
+                    if allow_empty {
+                        return Ok(TextAct::Value(String::new()));
+                    }
+                    // Required + empty: flash the hint and keep reading.
+                    let _ = term.write_str(&format!("  {empty_hint} — try again: "));
+                    continue;
+                }
+                return Ok(TextAct::Value(trimmed));
+            }
+            Key::Escape => return Ok(TextAct::Back),
+            Key::CtrlC => return Ok(TextAct::Cancel),
+            Key::Backspace => {
+                if buf.pop().is_some() {
+                    let _ = term.write_str("\u{8} \u{8}");
+                }
+            }
+            Key::Char(c) if !c.is_control() => {
+                buf.push(c);
+                if masked {
+                    let _ = term.write_str("•");
+                } else {
+                    let _ = term.write_str(&c.to_string());
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -524,4 +758,150 @@ pub fn run_list() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(
+        backend: &str,
+        api_key: Option<&str>,
+        model: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Config {
+        Config {
+            backend: Some(backend.to_string()),
+            api_key: api_key.map(String::from),
+            model: model.map(String::from),
+            base_url: base_url.map(String::from),
+        }
+    }
+
+    fn draft(
+        provider: Option<Provider>,
+        api_key: Option<&str>,
+        model: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Draft {
+        Draft {
+            provider,
+            api_key: api_key.map(String::from),
+            model: model.map(String::from),
+            base_url: base_url.map(String::from),
+        }
+    }
+
+    #[test]
+    fn key_and_base_url_applicability() {
+        // Cloud provider: key applies, no base URL.
+        assert!(key_applies(Provider::OpenAI));
+        assert!(!base_url_applies(Provider::OpenAI));
+        // Local Ollama: no key, optional base URL.
+        assert!(!key_applies(Provider::Ollama));
+        assert!(base_url_applies(Provider::Ollama));
+        // OpenAI-compatible: optional key (keyless servers) + required base URL.
+        assert!(key_applies(Provider::OpenAiCompatible));
+        assert!(base_url_applies(Provider::OpenAiCompatible));
+    }
+
+    #[test]
+    fn applicable_steps_skip_no_op_steps() {
+        // OpenAI has a key but no base URL -> ApiKey present, BaseUrl absent.
+        assert_eq!(
+            applicable_steps(Provider::OpenAI),
+            vec![Step::Provider, Step::ApiKey, Step::Model, Step::Confirm]
+        );
+        // Ollama has no key but a base URL -> BaseUrl present, ApiKey absent.
+        assert_eq!(
+            applicable_steps(Provider::Ollama),
+            vec![Step::Provider, Step::BaseUrl, Step::Model, Step::Confirm]
+        );
+        // OpenAI-compatible needs both.
+        assert_eq!(
+            applicable_steps(Provider::OpenAiCompatible),
+            vec![
+                Step::Provider,
+                Step::ApiKey,
+                Step::BaseUrl,
+                Step::Model,
+                Step::Confirm,
+            ]
+        );
+    }
+
+    #[test]
+    fn applicable_steps_always_bracketed_and_unique() {
+        // Every provider's list starts at Provider and ends at Confirm with
+        // Model present, so back never escapes past the first step and forward
+        // always reaches the save gate. No step repeats.
+        for p in Provider::all() {
+            let steps = applicable_steps(*p);
+            assert_eq!(
+                steps.first(),
+                Some(&Step::Provider),
+                "{p:?} missing Provider"
+            );
+            assert_eq!(steps.last(), Some(&Step::Confirm), "{p:?} missing Confirm");
+            assert!(steps.contains(&Step::Model), "{p:?} missing Model");
+            assert_eq!(
+                steps.iter().filter(|s| **s == Step::Provider).count(),
+                1,
+                "{p:?} has a duplicate Provider"
+            );
+        }
+    }
+
+    #[test]
+    fn field_initial_precedence() {
+        let existing: Option<Config> =
+            Some(cfg("openai", Some("old-key"), Some("old-model"), None));
+        let key = |d: &Draft, ex: &Option<Config>, ep: Option<Provider>| {
+            field_initial(d.api_key.as_deref(), ex, ep, d.provider, |c| {
+                c.api_key.as_ref()
+            })
+        };
+
+        // 1. Draft value wins over the existing config value.
+        let d = draft(Some(Provider::OpenAI), Some("draft-key"), None, None);
+        assert_eq!(
+            key(&d, &existing, Some(Provider::OpenAI)),
+            Some("draft-key".to_string())
+        );
+
+        // 2. No draft value, same provider -> reuse the existing config value.
+        let d = draft(Some(Provider::OpenAI), None, None, None);
+        assert_eq!(
+            key(&d, &existing, Some(Provider::OpenAI)),
+            Some("old-key".to_string())
+        );
+
+        // 3. No draft value, provider changed -> old value is invalid, no reuse.
+        let d = draft(Some(Provider::Anthropic), None, None, None);
+        assert_eq!(key(&d, &existing, Some(Provider::OpenAI)), None);
+
+        // 4. No draft value and no existing config at all.
+        let d = draft(Some(Provider::OpenAI), None, None, None);
+        assert_eq!(key(&d, &None, None), None);
+    }
+
+    #[test]
+    fn finalize_defaults_provider_and_carries_fields() {
+        // No provider chosen -> defaults to OpenAI; other fields carried.
+        let out = finalize(draft(None, Some("k"), Some("m"), None));
+        assert_eq!(out.backend.as_deref(), Some("openai"));
+        assert_eq!(out.api_key.as_deref(), Some("k"));
+        assert_eq!(out.model.as_deref(), Some("m"));
+        assert_eq!(out.base_url, None);
+
+        // A chosen provider wins and base_url round-trips.
+        let out = finalize(draft(
+            Some(Provider::Ollama),
+            None,
+            None,
+            Some("http://host:11434"),
+        ));
+        assert_eq!(out.backend.as_deref(), Some("ollama"));
+        assert_eq!(out.base_url.as_deref(), Some("http://host:11434"));
+    }
 }
