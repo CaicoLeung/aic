@@ -2,26 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.3] - 2026-08-02
+
+> 🎉 **0.4.3** — 2 changes · 1 contributor
+
+### Features
+
+- Arrow-key driven interactive configuration
+- Stream reasoning as a sliding window, cut flicker (#68)
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.4.2] - 2026-08-02
 
 > 🎉 **0.4.2** — 3 changes · 1 contributor
 
 ### Features
 
-- Default to yes on empty input (#65)
+- Default to yes on empty input
 
 ### Bug Fixes
 
-- Eliminate spinner flicker during reasoning stream (#66)
-- Drain trailing reasoning, cap scroll, harden prints (#66)
+- Eliminate spinner flicker during reasoning stream
+- Drain trailing reasoning, cap scroll, harden prints
+
 
 ### Contributors
 🎉 Thanks to the 1 contributor below!
 <table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
-
 ## [0.4.1] - 2026-08-01
 
-> 🎉 **0.4.1** — 7 changes · 1 contributor
+> 🎉 **0.4.1** — 6 changes · 1 contributor
 
 ### Features
 
@@ -35,9 +48,6 @@ All notable changes to this project will be documented in this file.
 - Retry empty model responses instead of aborting the batch run (#59)
 - Survive pre-commit hooks that restage whole files (#61)
 
-### Refactors
-
-- Deepen six modules: staging, LLM seam, git handle, display width, conflict policy, diff parsing (#63)
 
 ### Contributors
 🎉 Thanks to the 1 contributor below!
