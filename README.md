@@ -90,7 +90,7 @@ Install completions with one command — `aic` prompts you to pick a shell (defa
 aic completion            # pick a shell interactively, then install
 ```
 
-Reload your shell (`exec $SHELL`) and Tab completion is active. Supported: `bash`, `fish`, `zsh`, `nushell`. `bash` and `fish` are autoloaded; `zsh` is autoloaded under Homebrew (its `site-functions` dir is already on `$fpath`) but otherwise needs a `$fpath` entry; `nushell` needs a `source` line in `config.nu` (printed after install).
+Reload your shell (`exec $SHELL`) and Tab completion is active. Supported: `bash`, `fish`, `zsh`, `nushell`. `bash` and `fish` are autoloaded; `zsh` needs its `site-functions` dir on `$fpath` (the entry is printed after install) — it's already there under Homebrew's own zsh but not macOS system zsh; `nushell` needs a `source` line in `config.nu` (printed after install).
 
 ## Quick Start
 

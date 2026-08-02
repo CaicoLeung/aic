@@ -517,10 +517,12 @@ impl Shell {
     }
 
     /// Conventional install location for this shell, plus whether the shell
-    /// autoloads it. `bash` and `fish` are always autoloaded; `zsh` is autoloaded
-    /// only under a Homebrew prefix (Homebrew adds `share/zsh/site-functions` to
-    /// `$fpath`) and otherwise lands in an XDG dir the user must add to `$fpath`;
-    /// `nushell` lands in its config dir but must be `source`d from `config.nu`.
+    /// autoloads it. `bash` and `fish` are always autoloaded; `zsh` never is —
+    /// its `site-functions` dir only loads when it's on `$fpath`, which depends
+    /// on the user's zsh (Homebrew's own zsh adds the brew dir; macOS system
+    /// zsh does not), so a follow-up is always shown. The Homebrew dir is still
+    /// the better *location* when `aic` is brewed. `nushell` lands in its config
+    /// dir but must be `source`d from `config.nu`.
     fn install_target(self, home: &Path, brew_prefix: Option<&Path>) -> CompletionTarget {
         match self {
             Self::Fish => CompletionTarget {
@@ -534,7 +536,9 @@ impl Shell {
             Self::Zsh => match brew_prefix {
                 Some(prefix) => CompletionTarget {
                     path: prefix.join("share/zsh/site-functions/_aic"),
-                    autoloaded: true,
+                    // Not autoloaded: only loads if the user's zsh has this dir
+                    // on $fpath (Homebrew's own zsh yes, macOS system zsh no).
+                    autoloaded: false,
                 },
                 None => CompletionTarget {
                     path: home.join(".local/share/zsh/site-functions/_aic"),
@@ -772,13 +776,15 @@ mod tests {
         );
         assert!(t.autoloaded);
 
-        // zsh under a Homebrew prefix: autoloaded via the tap's fpath entry.
+        // zsh under a Homebrew prefix: better location, but still not autoloaded
+        // — the brew site-functions dir only loads if the user's zsh has it on
+        // $fpath (Homebrew's own zsh yes, macOS system zsh no).
         let t = Shell::Zsh.install_target(home, Some(Path::new("/opt/homebrew")));
         assert_eq!(
             t.path,
             Path::new("/opt/homebrew/share/zsh/site-functions/_aic")
         );
-        assert!(t.autoloaded);
+        assert!(!t.autoloaded);
 
         // zsh elsewhere: XDG dir, needs the user to add it to $fpath.
         let t = Shell::Zsh.install_target(home, None);
