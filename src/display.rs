@@ -756,16 +756,27 @@ mod tests {
         assert!(v.flush().is_empty());
     }
 
-    /// A trailing partial line after a long run is still drained by `flush` —
-    /// length never causes a drop.
+    /// A trailing partial line is still drained by `flush` even after a long
+    /// run well past the retired scroll budget: length never causes a drop,
+    /// and the partial is an extra line on top of the ones already emitted —
+    /// not a substitute for any that were hidden.
     #[test]
     fn thinking_view_flush_drains_partial_after_many_lines() {
         let mut v = ThinkingView::new();
-        for i in 1..=50 {
-            v.push(&format!("line {i}\n"));
+        let mut emitted = Vec::new();
+        // 200 is deliberately past the old `REASONING_SCROLL_LIMIT` (50) so
+        // this keeps catching a regression if anyone reintroduces a cap.
+        for i in 1..=200 {
+            emitted.extend(v.push(&format!("line {i}\n")));
         }
+        // every completed line came out in full, in order
+        assert_eq!(emitted.len(), 200);
+        assert_eq!(emitted.last(), Some(&"line 200".to_string()));
+        // the trailing partial is buffered, not emitted alongside them
         assert!(v.push("trailing partial").is_empty());
+        // and it is still drained at the end — length never causes a drop
         assert_eq!(v.flush(), vec!["trailing partial".to_string()]);
+        assert!(v.flush().is_empty());
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format
