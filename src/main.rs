@@ -546,7 +546,10 @@ impl Shell {
                 let dir = brew_prefix
                     .map(|p| p.join("share/zsh/site-functions"))
                     .unwrap_or_else(|| home.join(".local/share/zsh/site-functions"));
-                CompletionTarget { path: dir.join("_aic"), autoloaded: false }
+                CompletionTarget {
+                    path: dir.join("_aic"),
+                    autoloaded: false,
+                }
             }
             Self::Nushell => CompletionTarget {
                 path: home.join(".config/nushell/aic.nu"),
