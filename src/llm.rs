@@ -403,7 +403,7 @@ impl Provider {
             Self::Together => &[
                 "meta-llama/Llama-3.3-70B-Instruct-Turbo",
                 "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                "deepseek-ai/DeepSeek-V3.1",
+                "deepseek-ai/DeepSeek-V4-Pro",
             ],
             Self::OpenAiCompatible => &[],
         }
