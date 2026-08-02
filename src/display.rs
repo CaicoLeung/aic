@@ -607,21 +607,30 @@ pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 /// [`SPINNER_TICK`] as the two knobs that set the streaming path's smoothness.
 pub(crate) const PROGRESS_REDRAW_HZ: u8 = 60;
 
-/// How many reasoning rows stay visible at once. The window rolls: each new
-/// completed line enters at the bottom and the oldest is dropped once the
-/// count exceeds this, so the spinner region never grows past it. Older
-/// reasoning scrolls *within* the window (the newest rows always visible),
-/// not into the terminal scrollback.
+/// How many reasoning *lines* stay visible at once — a logical-line cap, not a
+/// terminal-row cap. The window rolls: each new completed line enters at the
+/// bottom and the oldest is dropped once the count exceeds this, so the newest
+/// [`REASONING_WINDOW`] lines are always shown. Older reasoning scrolls
+/// *within* the window, not into the terminal scrollback.
+///
+/// Because each line is greedy-wrapped to the terminal width when rendered
+/// (see [`wrap_line`]), a long line can occupy several terminal rows, so the
+/// on-screen region may be taller than this count: it caps how many reasoning
+/// lines are retained, not the rendered height.
 pub(crate) const REASONING_WINDOW: usize = 12;
 
 /// A rolling window over the model's streamed reasoning, sized to
-/// [`REASONING_WINDOW`]. The caller renders [`push`](Self::push)'s returned
-/// window into the spinner's in-place multi-line message, so the block redraws
-/// in place (never printed as permanent lines that linger after the spinner
-/// clears) and vanishes entirely the moment thinking ends.
+/// [`REASONING_WINDOW`] logical lines. The caller renders [`push`](Self::push)'s
+/// returned window into the spinner's in-place multi-line message, so the block
+/// redraws in place (never printed as permanent lines that linger in the
+/// scrollback) and is *left visible* — capped at [`REASONING_WINDOW`] lines —
+/// once thinking ends, so the user can read what the model thought. Clearing on
+/// completion was dropped on purpose: it made the feed vanish before it could
+/// be read, and the line cap already prevents the unbounded-scrollback flood
+/// that "hide on completion" was reacting to.
 ///
 /// Completed lines (terminated by `\n`) roll into the window; the in-progress
-/// partial line (no trailing `\n` yet) is shown as the window's last row while
+/// partial line (no trailing `\n` yet) is shown as the window's last line while
 /// it builds and counts against the same budget. Blank lines are dropped to
 /// keep the feed information-dense.
 pub(crate) struct ThinkingView {

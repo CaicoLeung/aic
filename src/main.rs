@@ -45,10 +45,12 @@ pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
 /// Build the spinner's in-place message: the one-line label on top, followed
-/// by the rolling reasoning window — each logical line greedy-wrapped under
+/// by the rolling reasoning window — each retained line greedy-wrapped under
 /// the shared `│ ` indent. Redrawn in place by the rate-limited draw target,
-/// never printed as a permanent line, so it disappears entirely when the
-/// spinner clears.
+/// never printed as a permanent line, so it leaves no residue in the
+/// scrollback. On stream end the caller freezes the spinner (see
+/// [`analyze_changes`]) rather than clearing it, leaving this capped window
+/// visible on screen.
 fn reasoning_message(label: &str, width: usize, window: &[String]) -> String {
     let mut msg = String::from(label);
     for line in window {
@@ -63,13 +65,14 @@ fn reasoning_message(label: &str, width: usize, window: &[String]) -> String {
 }
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live. The reasoning is shown as a rolling [`display::REASONING_WINDOW`]-row
-/// block that redraws in place as the model thinks — newest rows at the
-/// bottom, oldest scrolled out of the window — and is left visible (capped to
-/// [`display::REASONING_WINDOW`] rows) once thinking ends, so the user can read what
-/// the model thought. The draw target is rate-limited so the in-place redraws
-/// coalesce into one paint per frame: the window scrolls smoothly with no
-/// flicker.
+/// reasoning live. The reasoning is shown as a rolling
+/// [`display::REASONING_WINDOW`]-*line* block that redraws in place as the
+/// model thinks — newest lines at the bottom, oldest scrolled out of the
+/// window — and is left visible (capped to [`display::REASONING_WINDOW`] lines,
+/// each possibly wrapped to several terminal rows) once thinking ends, so the
+/// user can read what the model thought. The draw target is rate-limited so the
+/// in-place redraws coalesce into one paint per frame: the window scrolls
+/// smoothly with no flicker.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     let pb = ProgressBar::new_spinner();
     // Rate-limit repaints so the rolling reasoning window redraws at most
