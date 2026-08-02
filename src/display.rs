@@ -693,6 +693,165 @@ impl ThinkingView {
     }
 }
 
+/// Braille frames for the analysis spinner. Advanced once per reasoning
+/// delta (see [`ReasoningRenderer`]) so the glyph spins while reasoning flows
+/// and freezes when it stalls — incidental animation that needs no background
+/// ticker, since a steady tick is exactly what forced indicatif's flickering
+/// full-block repaints.
+const REASONING_GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Build the visual rows for one reasoning frame: the spinner+label row on
+/// top, then each retained reasoning line greedy-wrapped under the shared
+/// `│ ` indent. Pure (no I/O) so the layout is unit-testable; the renderer
+/// paints exactly what this returns.
+///
+/// `feed_width` is the per-piece wrap budget. An empty `window` yields just
+/// the spinner row.
+fn reasoning_rows(glyph: &str, label: &str, window: &[String], feed_width: usize) -> Vec<String> {
+    let mut rows = Vec::with_capacity(window.len() + 1);
+    rows.push(format!("{MARGIN}{glyph} {label}"));
+    for line in window {
+        for piece in wrap_line(line, feed_width) {
+            rows.push(format!("{MARGIN}│ {piece}"));
+        }
+    }
+    rows
+}
+
+/// Flicker-free in-place renderer for the streaming reasoning window.
+///
+/// Replaces the indicatif multi-line spinner, whose redraw is a two-phase
+/// "blank every row, then repaint every row" — the blank gap scaled with the
+/// window height and the spinner's steady tick forced it ~20×/s, so a 12-line
+/// (often 20–36 visual rows) block flickered visibly. This renderer paints
+/// with **interleaved clear-then-write**: move to the top of the previous
+/// frame, then clear a line and rewrite it immediately before descending to
+/// the next. At any instant at most one row is blank, and only until it is
+/// rewritten — imperceptible regardless of window height or update rate.
+///
+/// There is no steady tick: a frame is painted only when reasoning changes,
+/// and the glyph advances on each paint so it spins with the stream and
+/// freezes when it stalls. [`finish`](Self::finish) leaves the last frame
+/// visible (the window is size-capped, so no scrollback flood) and drops the
+/// cursor below it. All writes are best-effort: a closed stderr just stops
+/// drawing, never breaks the commit flow. A no-op off a terminal.
+pub(crate) struct ReasoningRenderer {
+    term: Term,
+    label: &'static str,
+    feed_width: usize,
+    glyph: usize,
+    prev_height: usize,
+    /// `true` once a frame has been painted and not yet finished — guards
+    /// [`Drop`] so a mid-stream error still parks the cursor below the frame.
+    active: bool,
+}
+
+/// ANSI escapes for the in-place repaint. Hand-written (rather than via
+/// `console::Term`'s cursor/clear methods) so the exact byte sequence is
+/// assembled by the pure [`frame_bytes`] helper and its anti-flicker
+/// interleaving is unit-testable.
+const CLR_LINE: &str = "\x1b[2K"; // erase the current line
+const UP: &str = "\x1b[1A"; // cursor up one row
+const DOWN: &str = "\x1b[1B"; // cursor down one row
+
+/// Assemble the byte sequence to repaint `rows` over a previous frame
+/// `prev_height` rows tall. The repaint is **interleaved clear-then-write**:
+/// move to the top, then for each row `\r` + clear + write, descending between
+/// rows; a shorter new frame blanks its stale tail and returns the cursor to
+/// the last live row. No two rows are ever blanked without the first being
+/// rewritten first — the property that kills the flicker indicatif's
+/// "blank-all-then-rewrite-all" repaint suffers from.
+fn frame_bytes(rows: &[String], prev_height: usize) -> String {
+    let height = rows.len();
+    let mut out = String::new();
+    if prev_height == 0 {
+        // First frame: open on a fresh line below whatever came before.
+        out.push('\n');
+    } else {
+        for _ in 0..prev_height.saturating_sub(1) {
+            out.push_str(UP);
+        }
+    }
+    for (i, row) in rows.iter().enumerate() {
+        out.push('\r');
+        out.push_str(CLR_LINE);
+        out.push_str(row);
+        if i + 1 < height {
+            out.push_str(DOWN);
+        }
+    }
+    if height < prev_height {
+        for _ in height..prev_height {
+            out.push_str(DOWN);
+            out.push('\r');
+            out.push_str(CLR_LINE);
+        }
+        for _ in height..prev_height {
+            out.push_str(UP);
+        }
+    }
+    out
+}
+
+impl ReasoningRenderer {
+    /// Bind a renderer to stderr with `label` on the spinner row. `feed_width`
+    /// is resolved once from [`terminal_width`]; a resize mid-stream only
+    /// changes wrap widths, never correctness.
+    pub(crate) fn new(label: &'static str) -> Self {
+        Self {
+            term: Term::stderr(),
+            label,
+            feed_width: terminal_width().saturating_sub(6),
+            glyph: 0,
+            prev_height: 0,
+            active: false,
+        }
+    }
+
+    /// Paint one frame for the reasoning `window`. Safe to call on every
+    /// delta; a no-op off a terminal.
+    pub(crate) fn paint(&mut self, window: &[String]) {
+        if !self.term.is_term() {
+            return;
+        }
+        let glyph = REASONING_GLYPHS[self.glyph % REASONING_GLYPHS.len()];
+        self.glyph = self.glyph.wrapping_add(1);
+        let rows = reasoning_rows(glyph, self.label, window, self.feed_width);
+        self.draw_rows(&rows);
+    }
+
+    /// Repaint `rows` in place via [`frame_bytes`]: one write of the assembled
+    /// escape sequence, then a flush. Pure byte assembly lives in
+    /// [`frame_bytes`] so the anti-flicker interleaving is unit-testable.
+    fn draw_rows(&mut self, rows: &[String]) {
+        let bytes = frame_bytes(rows, self.prev_height);
+        let _ = self.term.write_str(&bytes);
+        let _ = self.term.flush();
+        self.prev_height = rows.len();
+        self.active = true;
+    }
+
+    /// Leave the last frame visible and drop the cursor one line below it so
+    /// subsequent output doesn't overwrite the window. Idempotent.
+    pub(crate) fn finish(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _ = self.term.move_cursor_down(1);
+        let _ = self.term.write_str("\r");
+        let _ = self.term.flush();
+        self.active = false;
+    }
+}
+
+impl Drop for ReasoningRenderer {
+    fn drop(&mut self) {
+        // Backstop: if the stream aborted before `finish`, still park the
+        // cursor below the frame so the rest of the run's stderr is clean.
+        self.finish();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,6 +947,49 @@ mod tests {
         // oldest completed row rolled out to make room for the partial
         assert_eq!(window.first(), Some(&"line 2".to_string()));
         assert_eq!(window.last(), Some(&"in progress".to_string()));
+    }
+
+    /// [`reasoning_rows`] always leads with the spinner+label row, even when
+    /// the window is empty (the stream just started).
+    #[test]
+    fn reasoning_rows_leads_with_spinner_for_empty_window() {
+        let rows = reasoning_rows("⠋", "Analyzing", &[], 80);
+        assert_eq!(rows, vec![format!("{MARGIN}⠋ Analyzing")]);
+    }
+
+    /// Each retained line becomes one indented row when it fits the budget.
+    #[test]
+    fn reasoning_rows_indents_each_line() {
+        let window = vec!["line 1".to_string(), "line 2".to_string()];
+        let rows = reasoning_rows("⠙", "Analyzing", &window, 80);
+        assert_eq!(
+            rows,
+            vec![
+                format!("{MARGIN}⠙ Analyzing"),
+                format!("{MARGIN}│ line 1"),
+                format!("{MARGIN}│ line 2"),
+            ]
+        );
+    }
+
+    /// A line longer than the budget wraps to several rows under the same
+    /// `│ ` indent — the visual height can exceed the logical-line count.
+    #[test]
+    fn reasoning_rows_wraps_long_lines_to_multiple_rows() {
+        let prefix = format!("{MARGIN}│ ");
+        let rows = reasoning_rows("⠹", "Analyzing", &["the quick brown fox".to_string()], 10);
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+        // every row after the spinner carries the `│ ` indent…
+        for row in &rows[1..] {
+            assert!(row.starts_with(&prefix), "unindented row: {row:?}");
+        }
+        // …and the words survive the greedy wrap, rejoinable losslessly.
+        let body: String = rows[1..]
+            .iter()
+            .filter_map(|r| r.strip_prefix(&prefix))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(body, "the quick brown fox");
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format
