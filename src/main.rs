@@ -47,9 +47,9 @@ pub(crate) type CommitMessenger =
 /// reasoning live. The reasoning is shown as a rolling
 /// [`display::REASONING_WINDOW`]-row block that redraws in place as the
 /// model thinks — newest rows at the bottom, oldest scrolled out of the
-/// window — and is left visible (capped to [`display::REASONING_WINDOW`]
-/// rendered rows, so the region is bounded even when a line wraps long) once
-/// thinking ends, so the user can read what the model thought.
+/// window — and is erased when thinking ends, so the reasoning never lingers
+/// on screen or in the scrollback. The cap bounds the in-place block while
+/// it streams, even when a line wraps long.
 ///
 /// Rendering is hand-rolled via [`display::ReasoningRenderer`] rather than an
 /// indicatif multi-line spinner: indicatif repaints by blanking every row then
@@ -68,8 +68,9 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     })
     .await;
 
-    // Leave the final capped window visible; `finish` parks the cursor below it
-    // (and the renderer's Drop is a backstop if the stream aborted first).
+    // Thinking is over: `finish` erases the reasoning block (in-place all
+    // along, so nothing ever hit the scrollback) and parks the cursor below
+    // it. The renderer's Drop is a backstop if the stream aborted first.
     renderer.finish();
     result
 }

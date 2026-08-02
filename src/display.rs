@@ -615,12 +615,10 @@ pub(crate) const REASONING_WINDOW: usize = 12;
 /// [`REASONING_WINDOW`] logical lines (the retention window; the rendered-row
 /// cap lives in [`reasoning_rows`]). The caller renders [`push`](Self::push)'s
 /// returned window into the spinner's in-place multi-line message, so the block
-/// redraws in place (never printed as permanent lines that linger in the
-/// scrollback) and is *left visible* — capped at [`REASONING_WINDOW`] lines —
-/// once thinking ends, so the user can read what the model thought. Clearing on
-/// completion was dropped on purpose: it made the feed vanish before it could
-/// be read, and the line cap already prevents the unbounded-scrollback flood
-/// that "hide on completion" was reacting to.
+/// redraws in place — never printed as permanent lines that linger in the
+/// scrollback — and is erased once thinking ends ([`ReasoningRenderer::finish`]),
+/// leaving the terminal clean for the rest of the run. The cap keeps the block
+/// bounded while it streams, so no unbounded region ever accumulates.
 ///
 /// Completed lines (terminated by `\n`) roll into the window; the in-progress
 /// partial line (no trailing `\n` yet) is shown as the window's last line while
@@ -732,10 +730,11 @@ fn reasoning_rows(glyph: &str, label: &str, window: &[String], feed_width: usize
 ///
 /// There is no steady tick: a frame is painted only when reasoning changes,
 /// and the glyph advances on each paint so it spins with the stream and
-/// freezes when it stalls. [`finish`](Self::finish) leaves the last frame
-/// visible (the window is size-capped, so no scrollback flood) and drops the
-/// cursor below it. All writes are best-effort: a closed stderr just stops
-/// drawing, never breaks the commit flow. A no-op off a terminal.
+/// freezes when it stalls. [`finish`](Self::finish) erases the frame once
+/// thinking ends — the reasoning never lingers on screen or in the scrollback
+/// (it was in-place all along) — and parks the cursor below the cleared
+/// region. All writes are best-effort: a closed stderr just stops drawing,
+/// never breaks the commit flow. A no-op off a terminal.
 pub(crate) struct ReasoningRenderer {
     term: Term,
     label: &'static str,
@@ -743,7 +742,7 @@ pub(crate) struct ReasoningRenderer {
     glyph: usize,
     prev_height: usize,
     /// `true` once a frame has been painted and not yet finished — guards
-    /// [`Drop`] so a mid-stream error still parks the cursor below the frame.
+    /// [`Drop`] so a mid-stream error still erases the frame.
     active: bool,
 }
 
@@ -794,6 +793,26 @@ fn frame_bytes(rows: &[String], prev_height: usize) -> String {
     out
 }
 
+/// Assemble the byte sequence to erase a `prev_height`-row frame, leaving the
+/// cursor at the start of its last (now blank) row — the block is gone and
+/// subsequent output continues on a fresh line below it. Mirrors
+/// [`frame_bytes`]'s per-row clear-then-descend shape; the cursor enters at
+/// the start of the frame's last row (where [`frame_bytes`] parks it).
+fn clear_frame_bytes(prev_height: usize) -> String {
+    let mut out = String::new();
+    for _ in 0..prev_height.saturating_sub(1) {
+        out.push_str(UP);
+    }
+    for i in 0..prev_height {
+        out.push('\r');
+        out.push_str(CLR_LINE);
+        if i + 1 < prev_height {
+            out.push_str(DOWN);
+        }
+    }
+    out
+}
+
 impl ReasoningRenderer {
     /// Bind a renderer to stderr with `label` on the spinner row. `feed_width`
     /// is resolved once from [`terminal_width`]; a resize mid-stream only
@@ -832,23 +851,26 @@ impl ReasoningRenderer {
         self.active = true;
     }
 
-    /// Leave the last frame visible and drop the cursor one line below it so
-    /// subsequent output doesn't overwrite the window. Idempotent.
+    /// End the reasoning stream: erase the whole frame — spinner row and
+    /// reasoning rows — so the block vanishes once thinking is done, and
+    /// leave the cursor below the cleared region for the rest of the run's
+    /// stderr. Idempotent; also the [`Drop`] backstop for an aborted stream.
     pub(crate) fn finish(&mut self) {
         if !self.active {
             return;
         }
-        let _ = self.term.move_cursor_down(1);
-        let _ = self.term.write_str("\r");
+        let bytes = clear_frame_bytes(self.prev_height);
+        let _ = self.term.write_str(&bytes);
         let _ = self.term.flush();
+        self.prev_height = 0;
         self.active = false;
     }
 }
 
 impl Drop for ReasoningRenderer {
     fn drop(&mut self) {
-        // Backstop: if the stream aborted before `finish`, still park the
-        // cursor below the frame so the rest of the run's stderr is clean.
+        // Backstop: if the stream aborted before `finish`, still erase the
+        // frame so the rest of the run's stderr is clean.
         self.finish();
     }
 }
@@ -1086,6 +1108,26 @@ mod tests {
         let out = frame_bytes(&rows, 1);
         let expected = format!("\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
         assert_eq!(out, expected);
+    }
+
+    /// Erasing a frame rises to its top, clears each row in place as it
+    /// descends, and ends at the start of the last (blank) row — the block is
+    /// gone and subsequent output continues on a fresh line below it.
+    #[test]
+    fn clear_frame_bytes_erases_every_row_and_ends_below() {
+        // 2-row frame: cursor sits on the last row → one UP, then clear row 1,
+        // descend, clear row 2.
+        let out = clear_frame_bytes(2);
+        assert_eq!(out, format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}"));
+        // 1-row frame needs no cursor movement: just clear the single row.
+        assert_eq!(clear_frame_bytes(1), format!("\r{CLR_LINE}"));
+    }
+
+    /// A zero-height frame (nothing ever painted) is a no-op — keeps
+    /// [`ReasoningRenderer::finish`] trivially safe when no frame was drawn.
+    #[test]
+    fn clear_frame_bytes_noop_for_zero_rows() {
+        assert_eq!(clear_frame_bytes(0), "");
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format
