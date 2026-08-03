@@ -745,10 +745,14 @@ pub(crate) struct ReasoningRenderer {
     /// [`Drop`] so a mid-stream error still erases the frame.
     active: bool,
     /// `true` while the terminal cursor is hidden for the active stream. Set
-    /// when the first frame emits [`HIDE`] and cleared when [`finish`] emits
+    /// when the first frame emits [`HIDE`] and cleared when [`ReasoningRenderer::finish`] emits
     /// [`SHOW`]. Owning the visibility state explicitly — rather than inferring
     /// it from `prev_height == 0` — is what guarantees every [`HIDE`] is paired
     /// with exactly one [`SHOW`], even if a frame were ever painted with no rows.
+    /// That zero-row case is currently unreachable — [`reasoning_rows`] always
+    /// yields at least the spinner row, so `first_frame` is true exactly once
+    /// per stream — but the flag is retained as a contract guard against a
+    /// future caller that paints before any row exists.
     cursor_hidden: bool,
 }
 
@@ -882,12 +886,16 @@ impl ReasoningRenderer {
     /// [`frame_bytes`] so the anti-flicker interleaving is unit-testable.
     fn draw_rows(&mut self, rows: &[String]) {
         let first_frame = self.prev_height == 0;
+        // Record the cursor-hidden state BEFORE the write: the flag mirrors
+        // exactly when frame_bytes emits HIDE (prev_height == 0), so finishing
+        // the in-memory tracking ahead of the side effect means a hidden cursor
+        // can never be stranded — even if a future insertion between here and
+        // the write panicked, Drop's finish would still see cursor_hidden and
+        // emit the owed SHOW.
+        self.cursor_hidden |= first_frame;
         let bytes = frame_bytes(rows, self.prev_height);
         let _ = self.term.write_str(&bytes);
         let _ = self.term.flush();
-        // frame_bytes emits HIDE on the first frame of a stream; mirror it here
-        // so finish knows the cursor is hidden and a SHOW is owed at the end.
-        self.cursor_hidden |= first_frame;
         self.prev_height = rows.len();
         self.active = true;
     }
