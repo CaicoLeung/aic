@@ -744,6 +744,16 @@ pub(crate) struct ReasoningRenderer {
     /// `true` once a frame has been painted and not yet finished — guards
     /// [`Drop`] so a mid-stream error still erases the frame.
     active: bool,
+    /// `true` while the terminal cursor is hidden for the active stream. Set
+    /// when the first frame emits [`HIDE`] and cleared when [`ReasoningRenderer::finish`] emits
+    /// [`SHOW`]. Owning the visibility state explicitly — rather than inferring
+    /// it from `prev_height == 0` — is what guarantees every [`HIDE`] is paired
+    /// with exactly one [`SHOW`], even if a frame were ever painted with no rows.
+    /// That zero-row case is currently unreachable — [`reasoning_rows`] always
+    /// yields at least the spinner row, so `first_frame` is true exactly once
+    /// per stream — but the flag is retained as a contract guard against a
+    /// future caller that paints before any row exists.
+    cursor_hidden: bool,
 }
 
 /// ANSI escapes for the in-place repaint. Hand-written (rather than via
@@ -754,6 +764,17 @@ const CLR_LINE: &str = "\x1b[2K"; // erase the current line
 const UP: &str = "\x1b[1A"; // cursor up one row
 const DOWN: &str = "\x1b[1B"; // cursor down one row
 
+/// Hide the terminal cursor for the whole reasoning stream. While the renderer
+/// repaints the frame top-to-bottom the hardware caret would otherwise sit, row
+/// by row, at the tail of each freshly written line — mid-row over the
+/// *previous* frame's longer text on the rows below — which reads as the caret
+/// "jumping between characters" during fast streaming. Emitted once on the
+/// first frame and held until [`SHOW`] at [`ReasoningRenderer::finish`], so the
+/// caret is simply absent while reasoning flows and reappears, parked, once
+/// thinking ends — no per-frame flicker, no smearing across the region.
+const HIDE: &str = "\x1b[?25l"; // DECRST — hide cursor
+const SHOW: &str = "\x1b[?25h"; // DECSET — show cursor
+
 /// Assemble the byte sequence to repaint `rows` over a previous frame
 /// `prev_height` rows tall. The repaint is **interleaved clear-then-write**:
 /// move to the top, then for each row `\r` + clear + write, descending between
@@ -761,11 +782,20 @@ const DOWN: &str = "\x1b[1B"; // cursor down one row
 /// the last live row. No two rows are ever blanked without the first being
 /// rewritten first — the property that kills the flicker indicatif's
 /// "blank-all-then-rewrite-all" repaint suffers from.
+///
+/// Cursor visibility is a stream-spanning concern, not a per-frame one. The
+/// first repaint emits [`HIDE`] (when `prev_height == 0`) and the caret stays
+/// hidden for the whole stream; only [`clear_frame_bytes`] at
+/// [`ReasoningRenderer::finish`] restores it ([`SHOW`]). Mid-stream repaints
+/// emit neither — the caret stays hidden, so where it sits during the traversal
+/// is irrelevant and can never smear across the repainted rows.
 fn frame_bytes(rows: &[String], prev_height: usize) -> String {
     let height = rows.len();
     let mut out = String::new();
     if prev_height == 0 {
-        // First frame: open on a fresh line below whatever came before.
+        // First frame of the stream: hide the cursor for the whole stream
+        // (restored by clear_frame_bytes at finish) and open on a fresh line.
+        out.push_str(HIDE);
         out.push('\n');
     } else {
         for _ in 0..prev_height.saturating_sub(1) {
@@ -796,9 +826,16 @@ fn frame_bytes(rows: &[String], prev_height: usize) -> String {
 /// Assemble the byte sequence to erase a `prev_height`-row frame, leaving the
 /// cursor at the start of its last (now blank) row — the block is gone and
 /// subsequent output continues on a fresh line below it. Mirrors
-/// [`frame_bytes`]'s per-row clear-then-descend shape; the cursor enters at
-/// the start of the frame's last row (where [`frame_bytes`] parks it).
-fn clear_frame_bytes(prev_height: usize) -> String {
+/// [`frame_bytes`]'s per-row clear-then-descend shape.
+///
+/// This is the stream's end, so it appends [`SHOW`] to restore the cursor when
+/// `cursor_hidden` — i.e. when the first frame's [`HIDE`] was emitted. Keying
+/// the restore on the renderer's explicit visibility flag (rather than on
+/// `prev_height`) is what makes every [`HIDE`] pair with exactly one [`SHOW`]:
+/// a zero-row frame that still hid the cursor restores it; a frame that was
+/// never painted (`cursor_hidden == false`) owes nothing. No leading [`HIDE`]:
+/// the caret is already hidden, so the clear traversal can't smear it.
+fn clear_frame_bytes(prev_height: usize, cursor_hidden: bool) -> String {
     let mut out = String::new();
     for _ in 0..prev_height.saturating_sub(1) {
         out.push_str(UP);
@@ -809,6 +846,9 @@ fn clear_frame_bytes(prev_height: usize) -> String {
         if i + 1 < prev_height {
             out.push_str(DOWN);
         }
+    }
+    if cursor_hidden {
+        out.push_str(SHOW);
     }
     out
 }
@@ -825,6 +865,7 @@ impl ReasoningRenderer {
             glyph: 0,
             prev_height: 0,
             active: false,
+            cursor_hidden: false,
         }
     }
 
@@ -844,6 +885,14 @@ impl ReasoningRenderer {
     /// escape sequence, then a flush. Pure byte assembly lives in
     /// [`frame_bytes`] so the anti-flicker interleaving is unit-testable.
     fn draw_rows(&mut self, rows: &[String]) {
+        let first_frame = self.prev_height == 0;
+        // Record the cursor-hidden state BEFORE the write: the flag mirrors
+        // exactly when frame_bytes emits HIDE (prev_height == 0), so finishing
+        // the in-memory tracking ahead of the side effect means a hidden cursor
+        // can never be stranded — even if a future insertion between here and
+        // the write panicked, Drop's finish would still see cursor_hidden and
+        // emit the owed SHOW.
+        self.cursor_hidden |= first_frame;
         let bytes = frame_bytes(rows, self.prev_height);
         let _ = self.term.write_str(&bytes);
         let _ = self.term.flush();
@@ -859,11 +908,12 @@ impl ReasoningRenderer {
         if !self.active {
             return;
         }
-        let bytes = clear_frame_bytes(self.prev_height);
+        let bytes = clear_frame_bytes(self.prev_height, self.cursor_hidden);
         let _ = self.term.write_str(&bytes);
         let _ = self.term.flush();
         self.prev_height = 0;
         self.active = false;
+        self.cursor_hidden = false;
     }
 }
 
@@ -1068,7 +1118,7 @@ mod tests {
     #[test]
     fn frame_bytes_first_frame_opens_on_fresh_line() {
         let out = frame_bytes(&["only".to_string()], 0);
-        assert_eq!(out, format!("\n\r{CLR_LINE}only"));
+        assert_eq!(out, format!("{HIDE}\n\r{CLR_LINE}only"));
     }
 
     /// The load-bearing anti-flicker property: a same-height repaint clears
@@ -1116,18 +1166,66 @@ mod tests {
     #[test]
     fn clear_frame_bytes_erases_every_row_and_ends_below() {
         // 2-row frame: cursor sits on the last row → one UP, then clear row 1,
-        // descend, clear row 2.
-        let out = clear_frame_bytes(2);
-        assert_eq!(out, format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}"));
+        // descend, clear row 2. The cursor was hidden → SHOW restores it.
+        let out = clear_frame_bytes(2, true);
+        assert_eq!(out, format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{SHOW}"));
         // 1-row frame needs no cursor movement: just clear the single row.
-        assert_eq!(clear_frame_bytes(1), format!("\r{CLR_LINE}"));
+        assert_eq!(clear_frame_bytes(1, true), format!("\r{CLR_LINE}{SHOW}"));
     }
 
-    /// A zero-height frame (nothing ever painted) is a no-op — keeps
-    /// [`ReasoningRenderer::finish`] trivially safe when no frame was drawn.
+    /// The cursor is hidden for the whole reasoning stream and restored only
+    /// when thinking ends — otherwise the caret would rest, row by row, at the
+    /// tail of each freshly written line (mid-row over the previous frame's
+    /// longer text) and read as "jumping between characters" during fast
+    /// streaming. The first frame hides it; mid-stream repaints leave it hidden
+    /// (no per-frame flicker); the final erase is the only thing that restores
+    /// it.
+    #[test]
+    fn cursor_hidden_for_whole_stream_restored_only_at_finish() {
+        // The first frame (prev_height 0) hides the cursor and never restores
+        // it — the caret is gone for the entire stream.
+        let first = frame_bytes(&["only".to_string()], 0);
+        assert!(first.starts_with(HIDE), "first frame must hide the cursor");
+        assert!(
+            !first.contains(SHOW),
+            "first frame must not restore mid-stream"
+        );
+
+        // A mid-stream repaint touches neither: the caret stays hidden, so its
+        // position during the traversal can't smear across the repainted rows.
+        let repaint = frame_bytes(&["a".to_string(), "b".to_string()], 2);
+        assert!(
+            !repaint.contains(HIDE) && !repaint.contains(SHOW),
+            "a mid-stream repaint must not touch cursor visibility"
+        );
+
+        // The cursor only comes back when the stream ends (clear_frame_bytes),
+        // keyed on the renderer's cursor-hidden flag — not on prev_height.
+        let erase = clear_frame_bytes(2, true);
+        assert!(erase.ends_with(SHOW), "finish must restore the cursor");
+        // A frame that hid no cursor owes no SHOW — geometry only, no restore.
+        assert_eq!(
+            clear_frame_bytes(2, false),
+            format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}")
+        );
+    }
+
+    /// A zero-height frame that was never painted (`cursor_hidden == false`)
+    /// is a no-op — keeps [`ReasoningRenderer::finish`] trivially safe when no
+    /// frame was drawn.
     #[test]
     fn clear_frame_bytes_noop_for_zero_rows() {
-        assert_eq!(clear_frame_bytes(0), "");
+        assert_eq!(clear_frame_bytes(0, false), "");
+    }
+
+    /// The `SHOW` owed is decided by `cursor_hidden`, not `prev_height`: a
+    /// zero-row frame whose first draw still hid the cursor must restore it,
+    /// even though there are no rows to erase. This is exactly the case that
+    /// inferring visibility from `prev_height` would leak — hiding with no
+    /// painted row, then finishing with `prev_height == 0` → no `SHOW`.
+    #[test]
+    fn clear_frame_bytes_restores_cursor_for_zero_row_hidden_frame() {
+        assert_eq!(clear_frame_bytes(0, true), SHOW);
     }
 
     // `console` reads the process-global `colors_enabled()` flag at format
