@@ -1,89 +1,51 @@
-use crate::retry::{RetryPolicy, RetryReason, retry};
+//! Retrying "no usable content" responses from reasoning models.
+//!
+//! Reasoning models (DeepSeek's `deepseek-v4-flash` included) intermittently
+//! spend their entire output budget on `reasoning_content` and come back with
+//! an empty `content`, or with content truncated mid-generation. rig surfaces
+//! those as [`StructuredOutputError::EmptyResponse`] and
+//! [`StructuredOutputError::DeserializationError`] respectively; either one
+//! previously aborted a whole multi-batch `aic` run on a single unlucky call.
+//! Retrying usually succeeds because the model re-rolls its reasoning path
+//! each attempt (verified against the DeepSeek API: 3 of 4 budget-starved
+//! calls recovered within 3 attempts). All retry seams share the
+//! [`crate::retry`] module: [`classify_retry`] is the single rig→reason
+//! mapping at this boundary, and every seam uses [`RetryPolicy::transient`]
+//! (budget 2, 300 ms linear backoff). Non-content errors are never retried.
+
+use crate::retry::{RetryPolicy, RetryReason, retry, should_retry};
 use anyhow::Result;
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::CompletionClient;
 use rig::completion::{Prompt, StructuredOutputError, TypedPrompt};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
-use std::time::Duration;
 
 pub const DEFAULT_PROVIDER: &str = "openai";
 
 /// Default endpoint for a locally-run Ollama server.
 pub const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434";
 
-/// Extra attempts a model call gets after it returns no usable content.
-///
-/// Reasoning models (DeepSeek's `deepseek-v4-flash` included) intermittently
-/// spend their entire output budget on `reasoning_content` and come back with
-/// an empty `content`, or with content truncated mid-generation. rig surfaces
-/// those as [`StructuredOutputError::EmptyResponse`] and
-/// [`StructuredOutputError::DeserializationError`] respectively; either one
-/// previously aborted a whole multi-batch `aic` run on a single unlucky call.
-/// Retrying usually succeeds because the model re-rolls its reasoning path
-/// each attempt (verified against the DeepSeek API: 3 of 4 budget-starved
-/// calls recovered within 3 attempts). Non-content errors are never retried —
-/// see [`is_retryable`].
-const RETRY_BUDGET: usize = 2;
-
-/// Base step (ms) of the linear backoff between retries. See [`retry_backoff`].
-const RETRY_BACKOFF_BASE_MS: u64 = 300;
-
-/// Whether `err` is a "model returned no usable content" failure worth
-/// retrying: rig's [`StructuredOutputError::EmptyResponse`] (no content at all)
-/// or [`StructuredOutputError::DeserializationError`] (content truncated
-/// mid-generation so it won't parse). Both are the common signature of a
-/// reasoning model blowing its output budget on `reasoning_content`. Any other
-/// error — a wrapped rig completion failure (auth, rate limit, network) or an
-/// unrelated error — is left alone.
-fn is_retryable(err: &anyhow::Error) -> bool {
-    matches!(
-        err.downcast_ref::<StructuredOutputError>(),
-        Some(StructuredOutputError::EmptyResponse | StructuredOutputError::DeserializationError(_))
-    )
-}
-
-/// Linear backoff between retries, so a budget-starved call gets a moment to
-/// recover before the next attempt: `RETRY_BACKOFF_BASE_MS`, then `2×`, …
-fn retry_backoff(attempt: usize) -> Duration {
-    Duration::from_millis(RETRY_BACKOFF_BASE_MS * attempt as u64)
-}
-
-/// The retry decision for the inline streaming loop in
-/// [`LLMAgent::stream_typed_with_reasoning`]: if `err` is a retryable "no
-/// usable content" failure (see [`is_retryable`]) and the budget tracked by
-/// `attempts` isn't spent, bump `attempts` and return the backoff to wait
-/// before the next attempt; otherwise return `None`, meaning the caller
-/// propagates `err`.
-///
-/// This mirrors [`crate::retry::should_retry`] for the streaming seam that is
-/// still inline (the reasoning callback is a borrowed `FnMut` an escaping
-/// async closure can't reborrow across attempts). The typed and untyped paths
-/// already use [`crate::retry::retry`] + [`RetryPolicy::transient`]; the
-/// streaming loop will adopt [`crate::retry::should_retry`] in a later slice,
-/// after which this helper and [`is_retryable`] are removed.
-fn retry_decision(err: &anyhow::Error, attempts: &mut usize) -> Option<Duration> {
-    if is_retryable(err) && *attempts < RETRY_BUDGET {
-        *attempts += 1;
-        Some(retry_backoff(*attempts))
-    } else {
-        None
-    }
-}
-
 /// The single rig→[`RetryReason`] mapping at the llm boundary: rig's
 /// [`StructuredOutputError::EmptyResponse`] (no content) and
 /// [`StructuredOutputError::DeserializationError`] (content truncated
-/// mid-generation) become retryable reasons; anything else — a wrapped rig
-/// completion failure (auth, rate limit, network) or an unrelated error —
-/// becomes [`RetryReason::Fatal`] and propagates unchanged. This is the only
-/// place the retry module touches a rig type.
-fn classify_retry(err: anyhow::Error) -> RetryReason {
+/// mid-generation) are the retryable "no usable content" failures; anything
+/// else — a wrapped rig completion failure (auth, rate limit, network) or an
+/// unrelated error — is `None`, so the caller propagates the original error
+/// unchanged. This is the only place the retry module touches a rig type.
+fn classify_retry(err: &anyhow::Error) -> Option<RetryReason> {
     match err.downcast_ref::<StructuredOutputError>() {
-        Some(StructuredOutputError::EmptyResponse) => RetryReason::Empty,
-        Some(StructuredOutputError::DeserializationError(_)) => RetryReason::Truncated,
-        _ => RetryReason::Fatal(err),
+        Some(StructuredOutputError::EmptyResponse) => Some(RetryReason::Empty),
+        Some(StructuredOutputError::DeserializationError(_)) => Some(RetryReason::Truncated),
+        _ => None,
     }
+}
+
+/// Consume `err` into a [`RetryReason`] for the [`retry`] closures: the
+/// retryable shapes from [`classify_retry`], anything else as
+/// [`RetryReason::Fatal`] carrying the error verbatim.
+fn classify_or_fatal(err: anyhow::Error) -> RetryReason {
+    classify_retry(&err).unwrap_or(RetryReason::Fatal(err))
 }
 
 /// Strip a surrounding ```…``` code fence if the model ignored the "no fences"
@@ -118,9 +80,9 @@ pub(crate) fn strip_code_fence(mut s: &str) -> &str {
 /// A parse failure is reported as
 /// [`StructuredOutputError::DeserializationError`] — the same classification
 /// rig uses for a truncated `prompt_typed` response — so the shared retry
-/// policy ([`is_retryable`]) treats tolerant-parse failures exactly like
+/// policy ([`classify_retry`]) treats tolerant-parse failures exactly like
 /// typed-path truncation. The raw text rides in an anyhow context (the
-/// downcast in `is_retryable` still finds the underlying error).
+/// downcast in `classify_retry` still finds the underlying error).
 fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     let body = strip_code_fence(raw);
     let start = body.find(['{', '[']).unwrap_or(0);
@@ -582,7 +544,7 @@ impl LLMAgent {
     /// One untyped-completion attempt via rig's `prompt`. Returns
     /// [`anyhow::Result`] so the provider-client `?`s inside [`with_agent!`]
     /// convert to `anyhow::Error`; the retry closure in [`Self::call`] maps
-    /// that to a [`RetryReason`] at the boundary via [`classify_retry`].
+    /// that to a [`RetryReason`] at the boundary via [`classify_or_fatal`].
     async fn prompt_once(&self, prompt: &str) -> anyhow::Result<String> {
         with_agent!(self, agent, Ok(agent.prompt(prompt).await?))
     }
@@ -603,7 +565,7 @@ impl LLMAgent {
                 let this = this.clone();
                 let prompt = prompt.clone();
                 async move {
-                    let text = this.prompt_once(&prompt).await.map_err(classify_retry)?;
+                    let text = this.prompt_once(&prompt).await.map_err(classify_or_fatal)?;
                     if text.trim().is_empty() {
                         Err(RetryReason::Empty)
                     } else {
@@ -664,15 +626,16 @@ impl LLMAgent {
     /// [`StructuredOutputError::DeserializationError`] — so the parse runs
     /// INSIDE the retry loop: empty output and parse failure both count as
     /// "no usable content" and get the same budget and backoff as
-    /// [`Self::schema`] (see [`is_retryable`]). A real stream error (auth,
-    /// rate limit, network) propagates immediately, never retried.
+    /// [`Self::schema`] via the shared [`crate::retry::should_retry`] +
+    /// [`RetryPolicy::transient`] (see [`classify_retry`]). A real stream
+    /// error (auth, rate limit, network) propagates immediately, never
+    /// retried.
     /// The loop is inline rather than [`crate::retry::retry`]: the reasoning
     /// callback is a borrowed `FnMut`, which an escaping async closure could
     /// not reborrow across attempts — the same constraint the old
-    /// `stream_with_reasoning` documented. The retry policy itself (budget,
-    /// backoff, classification) mirrors [`crate::retry::should_retry`] via the
-    /// local [`retry_decision`], keeping this seam aligned with the shared
-    /// module until it migrates onto it in a later slice.
+    /// `stream_with_reasoning` documented. The budget gate and backoff are
+    /// the shared module's, so this seam can't drift from the typed/untyped
+    /// paths.
     pub async fn stream_typed_with_reasoning<T>(
         &self,
         prompt: &str,
@@ -693,8 +656,13 @@ impl LLMAgent {
             };
             match parsed {
                 Ok(value) => return Ok(value),
-                Err(err) => match retry_decision(&err, &mut attempts) {
-                    Some(backoff) => tokio::time::sleep(backoff).await,
+                Err(err) => match classify_retry(&err) {
+                    Some(reason) => {
+                        match should_retry(&reason, &mut attempts, RetryPolicy::transient()) {
+                            Some(backoff) => tokio::time::sleep(backoff).await,
+                            None => return Err(err),
+                        }
+                    }
                     None => return Err(err),
                 },
             }
@@ -704,7 +672,7 @@ impl LLMAgent {
     /// One typed-completion attempt via rig's `prompt_typed`. Returns
     /// [`anyhow::Result`] so the provider-client `?`s inside [`with_agent!`]
     /// convert to `anyhow::Error`; the retry closure in [`Self::schema`] maps
-    /// that to a [`RetryReason`] at the boundary via [`classify_retry`].
+    /// that to a [`RetryReason`] at the boundary via [`classify_or_fatal`].
     async fn prompt_typed_once<T>(&self, prompt: &str) -> anyhow::Result<T>
     where
         T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,
@@ -731,7 +699,7 @@ impl LLMAgent {
                 async move {
                     this.prompt_typed_once::<T>(&prompt)
                         .await
-                        .map_err(classify_retry)
+                        .map_err(classify_or_fatal)
                 }
             },
             RetryPolicy::transient(),
@@ -831,47 +799,35 @@ mod tests {
         assert_eq!(Provider::Xai.env_key(), Some("XAI_API_KEY"));
     }
 
-    /// [`retry_decision`] is the budget gate for the inline streaming loop
-    /// (the one retry seam still on this helper): it must advance the attempt
-    /// counter and yield a backoff while the budget holds, then return `None`
-    /// exactly when the budget is spent — and never offer a retry for a
-    /// non-content error. The typed/untyped paths use [`retry`] instead; this
-    /// pins the boundary the streaming loop relies on until it migrates too.
+    /// [`classify_retry`] is the boundary mapping every retry seam relies on:
+    /// the two unusable-content shapes become retryable reasons — including
+    /// through the anyhow context `parse_json_response` adds — and anything
+    /// else is `None`, propagating unchanged.
     #[test]
-    fn retry_decision_advances_within_budget_then_stops() {
-        let retryable = anyhow::Error::new(StructuredOutputError::EmptyResponse);
-        let other = anyhow::anyhow!("network / auth / etc.");
-
-        let mut attempts = 0usize;
-        // First two retryable failures consume the budget (RETRY_BUDGET == 2),
-        // each advancing the counter and yielding a backoff.
-        assert!(retry_decision(&retryable, &mut attempts).is_some());
-        assert_eq!(attempts, 1);
-        assert!(retry_decision(&retryable, &mut attempts).is_some());
-        assert_eq!(attempts, RETRY_BUDGET);
-        // Budget spent: no more retries, counter unchanged.
-        assert!(retry_decision(&retryable, &mut attempts).is_none());
-        assert_eq!(attempts, RETRY_BUDGET);
-        // A non-content error is never retried, regardless of remaining budget.
-        let mut fresh = 0usize;
-        assert!(retry_decision(&other, &mut fresh).is_none());
-        assert_eq!(fresh, 0, "non-content errors must not consume the budget");
-    }
-
-    /// `is_retryable` classifies the two unusable-content shapes as retriable
-    /// and leaves everything else alone — the contract every retry path relies on.
-    #[test]
-    fn is_retryable_targets_unusable_content() {
-        assert!(is_retryable(&anyhow::Error::new(
-            StructuredOutputError::EmptyResponse
-        )));
+    fn classify_retry_maps_unusable_content() {
+        assert!(matches!(
+            classify_retry(&anyhow::Error::new(StructuredOutputError::EmptyResponse)),
+            Some(RetryReason::Empty)
+        ));
         let json_err = serde_json::from_str::<serde_json::Value>("not json")
             .expect_err("must be a parse error");
-        assert!(is_retryable(&anyhow::Error::new(
-            StructuredOutputError::DeserializationError(json_err)
-        )));
+        assert!(matches!(
+            classify_retry(&anyhow::Error::new(
+                StructuredOutputError::DeserializationError(json_err)
+            )),
+            Some(RetryReason::Truncated)
+        ));
+        // Context-wrapped, as parse_json_response produces it.
+        let wrapped = anyhow::Error::new(StructuredOutputError::DeserializationError(
+            serde_json::from_str::<serde_json::Value>("nope").expect_err("must be a parse error"),
+        ))
+        .context("failed to parse LLM JSON response");
+        assert!(matches!(
+            classify_retry(&wrapped),
+            Some(RetryReason::Truncated)
+        ));
         assert!(
-            !is_retryable(&anyhow::anyhow!("network / auth / etc.")),
+            classify_retry(&anyhow::anyhow!("network / auth / etc.")).is_none(),
             "non-content errors must not be retried"
         );
     }
@@ -905,14 +861,14 @@ mod tests {
     /// The contract that makes batch-plan truncation retryable: a
     /// tolerant-parse failure must surface as
     /// [`StructuredOutputError::DeserializationError`], the same class rig's
-    /// `prompt_typed` produces for truncated content — so `is_retryable`
+    /// `prompt_typed` produces for truncated content — so [`classify_retry`]
     /// retries it with the same policy as the typed path.
     #[test]
     fn parse_failure_is_classified_as_deserialization_error() {
         let err = parse_json_response::<crate::generator::BatchPlanOutput>("no json here")
             .expect_err("must fail");
         assert!(
-            is_retryable(&err),
+            matches!(classify_retry(&err), Some(RetryReason::Truncated)),
             "parse failures must be retried like typed-path truncation"
         );
         assert!(matches!(
