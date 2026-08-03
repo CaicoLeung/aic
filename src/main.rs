@@ -6,6 +6,7 @@ pub mod generator;
 pub mod git;
 pub mod llm;
 pub mod prompt;
+pub mod retry;
 pub mod staging;
 pub mod types;
 pub mod update;

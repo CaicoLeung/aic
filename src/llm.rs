@@ -1,3 +1,4 @@
+use crate::retry::{RetryPolicy, RetryReason, retry};
 use anyhow::Result;
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, Text};
@@ -48,14 +49,19 @@ fn retry_backoff(attempt: usize) -> Duration {
     Duration::from_millis(RETRY_BACKOFF_BASE_MS * attempt as u64)
 }
 
-/// The single retry decision shared by [`retry_model_call`] and the inline
-/// streaming loop in [`LLMAgent::stream_typed_with_reasoning`]: if `err` is a
-/// retryable "no usable content" failure (see [`is_retryable`]) and the budget
-/// tracked by `attempts` isn't spent, bump `attempts` and return the backoff
-/// to wait before the next attempt; otherwise return `None`, meaning the
-/// caller propagates `err`. Centralizing the budget gate + backoff here keeps
-/// the two retry seams from drifting — the exact class of bug
-/// [`is_retryable`]'s broadening closed for the batch-plan path.
+/// The retry decision for the inline streaming loop in
+/// [`LLMAgent::stream_typed_with_reasoning`]: if `err` is a retryable "no
+/// usable content" failure (see [`is_retryable`]) and the budget tracked by
+/// `attempts` isn't spent, bump `attempts` and return the backoff to wait
+/// before the next attempt; otherwise return `None`, meaning the caller
+/// propagates `err`.
+///
+/// This mirrors [`crate::retry::should_retry`] for the streaming seam that is
+/// still inline (the reasoning callback is a borrowed `FnMut` an escaping
+/// async closure can't reborrow across attempts). The typed and untyped paths
+/// already use [`crate::retry::retry`] + [`RetryPolicy::transient`]; the
+/// streaming loop will adopt [`crate::retry::should_retry`] in a later slice,
+/// after which this helper and [`is_retryable`] are removed.
 fn retry_decision(err: &anyhow::Error, attempts: &mut usize) -> Option<Duration> {
     if is_retryable(err) && *attempts < RETRY_BUDGET {
         *attempts += 1;
@@ -65,23 +71,18 @@ fn retry_decision(err: &anyhow::Error, attempts: &mut usize) -> Option<Duration>
     }
 }
 
-/// Run `op`, retrying it up to [`RETRY_BUDGET`] extra times when the model
-/// returns no usable content (see [`is_retryable`]), with a short linear
-/// backoff. Any other error propagates immediately.
-async fn retry_model_call<T, F, Fut>(mut op: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    let mut attempts = 0usize;
-    loop {
-        match op().await {
-            Ok(value) => return Ok(value),
-            Err(err) => match retry_decision(&err, &mut attempts) {
-                Some(backoff) => tokio::time::sleep(backoff).await,
-                None => return Err(err),
-            },
-        }
+/// The single rig→[`RetryReason`] mapping at the llm boundary: rig's
+/// [`StructuredOutputError::EmptyResponse`] (no content) and
+/// [`StructuredOutputError::DeserializationError`] (content truncated
+/// mid-generation) become retryable reasons; anything else — a wrapped rig
+/// completion failure (auth, rate limit, network) or an unrelated error —
+/// becomes [`RetryReason::Fatal`] and propagates unchanged. This is the only
+/// place the retry module touches a rig type.
+fn classify_retry(err: anyhow::Error) -> RetryReason {
+    match err.downcast_ref::<StructuredOutputError>() {
+        Some(StructuredOutputError::EmptyResponse) => RetryReason::Empty,
+        Some(StructuredOutputError::DeserializationError(_)) => RetryReason::Truncated,
+        _ => RetryReason::Fatal(err),
     }
 }
 
@@ -578,28 +579,41 @@ macro_rules! with_agent {
 }
 
 impl LLMAgent {
-    /// Untyped completion, routed through [`retry_model_call`]: rig's `prompt`
-    /// returns the raw assistant text, so an empty completion would surface
-    /// as `Ok("")` rather than an error. Without this guard that would
-    /// silently propagate (e.g. an empty file written as a conflict
-    /// resolution). Empty output is classified as
-    /// [`StructuredOutputError::EmptyResponse`] so the shared retry policy
-    /// treats it like any other budget-starved response.
+    /// One untyped-completion attempt via rig's `prompt`. Returns
+    /// [`anyhow::Result`] so the provider-client `?`s inside [`with_agent!`]
+    /// convert to `anyhow::Error`; the retry closure in [`Self::call`] maps
+    /// that to a [`RetryReason`] at the boundary via [`classify_retry`].
+    async fn prompt_once(&self, prompt: &str) -> anyhow::Result<String> {
+        with_agent!(self, agent, Ok(agent.prompt(prompt).await?))
+    }
+
+    /// Untyped completion, routed through [`retry`] with
+    /// [`RetryPolicy::transient`]: rig's `prompt` returns the raw assistant
+    /// text, so an empty completion would surface as `Ok("")` rather than an
+    /// error. Without this guard that would silently propagate (e.g. an empty
+    /// file written as a conflict resolution). Empty output is classified as
+    /// [`RetryReason::Empty`] so the shared retry policy treats it like any
+    /// other budget-starved response. A non-content failure maps to
+    /// [`RetryReason::Fatal`] and propagates immediately.
     pub async fn call(&self, prompt: &str) -> Result<String> {
         let this = self.clone();
         let prompt = prompt.to_string();
-        retry_model_call(move || {
-            let this = this.clone();
-            let prompt = prompt.clone();
-            async move {
-                match with_agent!(this, agent, Ok(agent.prompt(&prompt).await?)) {
-                    Ok(text) if !text.trim().is_empty() => Ok(text),
-                    Ok(_) => Err(anyhow::Error::new(StructuredOutputError::EmptyResponse)),
-                    Err(err) => Err(err),
+        Ok(retry(
+            move || {
+                let this = this.clone();
+                let prompt = prompt.clone();
+                async move {
+                    let text = this.prompt_once(&prompt).await.map_err(classify_retry)?;
+                    if text.trim().is_empty() {
+                        Err(RetryReason::Empty)
+                    } else {
+                        Ok(text)
+                    }
                 }
-            }
-        })
-        .await
+            },
+            RetryPolicy::transient(),
+        )
+        .await?)
     }
 
     /// One streaming attempt: routes the model's "thinking"/reasoning deltas
@@ -652,12 +666,13 @@ impl LLMAgent {
     /// "no usable content" and get the same budget and backoff as
     /// [`Self::schema`] (see [`is_retryable`]). A real stream error (auth,
     /// rate limit, network) propagates immediately, never retried.
-    /// The loop is inline rather than [`retry_model_call`]: the reasoning
+    /// The loop is inline rather than [`crate::retry::retry`]: the reasoning
     /// callback is a borrowed `FnMut`, which an escaping async closure could
     /// not reborrow across attempts — the same constraint the old
     /// `stream_with_reasoning` documented. The retry policy itself (budget,
-    /// backoff, classification) is the shared [`retry_decision`], so the two
-    /// seams can't drift.
+    /// backoff, classification) mirrors [`crate::retry::should_retry`] via the
+    /// local [`retry_decision`], keeping this seam aligned with the shared
+    /// module until it migrates onto it in a later slice.
     pub async fn stream_typed_with_reasoning<T>(
         &self,
         prompt: &str,
@@ -686,28 +701,48 @@ impl LLMAgent {
         }
     }
 
+    /// One typed-completion attempt via rig's `prompt_typed`. Returns
+    /// [`anyhow::Result`] so the provider-client `?`s inside [`with_agent!`]
+    /// convert to `anyhow::Error`; the retry closure in [`Self::schema`] maps
+    /// that to a [`RetryReason`] at the boundary via [`classify_retry`].
+    async fn prompt_typed_once<T>(&self, prompt: &str) -> anyhow::Result<T>
+    where
+        T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,
+    {
+        with_agent!(self, agent, Ok(agent.prompt_typed(prompt).await?))
+    }
+
+    /// Typed (JSON-schema) completion — the Drafted-Message (commit-message)
+    /// path. Routed through [`retry`] with [`RetryPolicy::transient`]: rig's
+    /// `prompt_typed` surfaces a budget-starved response as
+    /// [`StructuredOutputError::EmptyResponse`] / [`DeserializationError`],
+    /// which [`classify_retry`] maps to the retryable [`RetryReason::Empty`] /
+    /// [`RetryReason::Truncated`]. Any other failure propagates immediately.
     pub async fn schema<T>(&self, prompt: &str) -> Result<T>
     where
         T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,
     {
         let this = self.clone();
         let prompt = prompt.to_string();
-        retry_model_call(move || {
-            let this = this.clone();
-            let prompt = prompt.clone();
-            async move { with_agent!(this, agent, Ok(agent.prompt_typed(&prompt).await?)) }
-        })
-        .await
+        Ok(retry(
+            move || {
+                let this = this.clone();
+                let prompt = prompt.clone();
+                async move {
+                    this.prompt_typed_once::<T>(&prompt)
+                        .await
+                        .map_err(classify_retry)
+                }
+            },
+            RetryPolicy::transient(),
+        )
+        .await?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
 
     #[test]
     fn all_providers_have_a_registry_row() {
@@ -796,119 +831,12 @@ mod tests {
         assert_eq!(Provider::Xai.env_key(), Some("XAI_API_KEY"));
     }
 
-    /// The heart of the regression fix: a model call that returns an empty
-    /// response (DeepSeek reasoning models blowing their output budget) is
-    /// retried and the run succeeds — instead of aborting the whole multi-batch
-    /// commit run. Pins the retry count too, so a future change that, say,
-    /// makes retries infinite is caught.
-    #[tokio::test]
-    async fn retry_model_call_retries_then_succeeds() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = attempts.clone();
-        let result: anyhow::Result<&str> = retry_model_call(move || {
-            let counter = counter.clone();
-            async move {
-                let n = counter.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(anyhow::Error::new(StructuredOutputError::EmptyResponse))
-                } else {
-                    Ok("ok")
-                }
-            }
-        })
-        .await;
-        assert_eq!(result.expect("must succeed after retries"), "ok");
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            RETRY_BUDGET + 1,
-            "an empty response must be retried up to the configured budget"
-        );
-    }
-
-    /// Persistent empty responses exhaust the retry budget and surface the
-    /// original error — the run aborts with the actionable re-run message, it
-    /// does not hang or loop forever.
-    #[tokio::test]
-    async fn retry_model_call_gives_up_after_budget() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = attempts.clone();
-        let result: anyhow::Result<()> = retry_model_call(move || {
-            let counter = counter.clone();
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Err(anyhow::Error::new(StructuredOutputError::EmptyResponse))
-            }
-        })
-        .await;
-        let err = result.expect_err("must give up after the retry budget");
-        assert!(
-            is_retryable(&err),
-            "the surfaced error must still be the empty-response error: {err:#}"
-        );
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            RETRY_BUDGET + 1,
-            "must stop after the configured budget"
-        );
-    }
-
-    /// Non-empty errors are not retried — a genuine failure (auth, rate limit,
-    /// context overflow) should surface immediately, not be masked by retries.
-    #[tokio::test]
-    async fn retry_model_call_does_not_retry_other_errors() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = attempts.clone();
-        let result: anyhow::Result<()> = retry_model_call(move || {
-            let counter = counter.clone();
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Err(anyhow::anyhow!("boom"))
-            }
-        })
-        .await;
-        assert_eq!(
-            format!("{:#}", result.expect_err("must surface the error")),
-            "boom"
-        );
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            1,
-            "non-empty errors must not be retried"
-        );
-    }
-
-    /// Truncated content (`DeserializationError`) is retried too — a reasoning
-    /// model blowing its budget mid-generation produces either an empty or a
-    /// truncated response, and both should recover on retry. Locks in the
-    /// broadening of `is_retryable` beyond `EmptyResponse`.
-    #[tokio::test]
-    async fn retry_model_call_retries_deserialization_errors() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = attempts.clone();
-        let result: anyhow::Result<&str> = retry_model_call(move || {
-            let counter = counter.clone();
-            async move {
-                let n = counter.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
-                    let err = serde_json::from_str::<serde_json::Value>("not json")
-                        .expect_err("must be a parse error");
-                    Err(anyhow::Error::new(
-                        StructuredOutputError::DeserializationError(err),
-                    ))
-                } else {
-                    Ok("ok")
-                }
-            }
-        })
-        .await;
-        assert_eq!(result.expect("must succeed after one retry"), "ok");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    }
-
-    /// [`retry_decision`] is the shared backbone of both retry seams: it must
-    /// advance the attempt counter and yield a backoff while the budget holds,
-    /// then return `None` exactly when the budget is spent — and never offer a
-    /// retry for a non-content error. Pins the boundary both loops rely on.
+    /// [`retry_decision`] is the budget gate for the inline streaming loop
+    /// (the one retry seam still on this helper): it must advance the attempt
+    /// counter and yield a backoff while the budget holds, then return `None`
+    /// exactly when the budget is spent — and never offer a retry for a
+    /// non-content error. The typed/untyped paths use [`retry`] instead; this
+    /// pins the boundary the streaming loop relies on until it migrates too.
     #[test]
     fn retry_decision_advances_within_budget_then_stops() {
         let retryable = anyhow::Error::new(StructuredOutputError::EmptyResponse);
