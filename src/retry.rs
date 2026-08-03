@@ -126,7 +126,7 @@ impl std::error::Error for RetryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Exhausted(_) => None,
-            Self::Fatal(err) => err.source(),
+            Self::Fatal(err) => Some(err.as_ref()),
         }
     }
 }
