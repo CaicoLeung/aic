@@ -166,8 +166,13 @@ where
         match op().await {
             Ok(value) => return Ok(value),
             Err(reason) => match should_retry(&reason, &mut attempts, policy) {
-                Some(backoff) => tokio::time::sleep(backoff).await,
-                None => return Err(finish(reason, attempts)),
+                Some(backoff) => {
+                    // `once()` has no backoff — retry immediately, no timer.
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+                None => return Err(into_retry_error(reason, attempts)),
             },
         }
     }
@@ -176,7 +181,7 @@ where
 /// Map a terminal reason to its [`RetryError`]: a retryable reason (budget
 /// spent) becomes [`RetryError::Exhausted`]; a [`RetryReason::Fatal`] unwraps
 /// to [`RetryError::Fatal`], preserving the original error.
-fn finish(reason: RetryReason, attempts: usize) -> RetryError {
+fn into_retry_error(reason: RetryReason, attempts: usize) -> RetryError {
     match reason {
         RetryReason::Fatal(err) => RetryError::Fatal(err),
         retryable => RetryError::Exhausted(RetryExhausted {
