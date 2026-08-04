@@ -899,4 +899,24 @@ mod tests {
         let inner = "text before\n\n```rs\ncode\n```\n\ntext after";
         assert_eq!(strip_code_fence(inner), inner);
     }
+
+    #[test]
+    fn strip_fence_bare_opening_without_newline_is_left_alone() {
+        // A lone opening fence with no content line after it has nothing to
+        // strip — returned unchanged rather than producing a dangling slice.
+        assert_eq!(strip_code_fence("```"), "```");
+        assert_eq!(strip_code_fence("```rust"), "```rust");
+    }
+
+    #[test]
+    fn strip_fence_opening_with_unclean_closing_keeps_trailing_text() {
+        // A closing fence followed by trailing text is not a clean wrapper: the
+        // opening fence line is still dropped (so the body is exposed to the
+        // tolerant parser), but the trailing "``` text" stays in place — the
+        // fallthrough keeps whatever followed the opening fence.
+        assert_eq!(
+            strip_code_fence("```rust\nlet x = 1;\n``` trailing"),
+            "let x = 1;\n``` trailing"
+        );
+    }
 }
