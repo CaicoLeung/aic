@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.5] - 2026-08-04
+
+> 🎉 **0.4.5** — 4 changes · 1 contributor
+
+### Features
+
+- Interactive installer, drop generate-completion (#76)
+
+### Bug Fixes
+
+- Hide cursor for the whole reasoning stream (#77)
+- Skip sleep for zero backoff
+- Return underlying error as source
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.4.4] - 2026-08-02
 
 > 🎉 **0.4.4** — 2 changes · 1 contributor
