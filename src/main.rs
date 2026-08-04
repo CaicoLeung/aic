@@ -231,34 +231,61 @@ pub(crate) async fn run_resolve_workflow_impl(
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
 
-        let resolved = match display::with_spinner(
-            &format!("Resolving {}", f.path),
-            resolve(original.clone()),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                display.skipped(&f.path, &format!("LLM error: {e:#}"));
+        // Per-file resolution on the shared retry module (seam C, ADR-0005).
+        // The op folds the resolver's two failure shapes onto `RetryReason`:
+        // marker-laden output → `Markers` (retryable), and any underlying LLM
+        // error → `Fatal` (propagates immediately, never retried). Clean
+        // output is `Ok`. `RetryPolicy::once()` is the budget-1 / no-backoff
+        // auto-retry. The spinner label still distinguishes the first attempt
+        // from the retry so the live UX matches the old hand-written loop.
+        let mut first_attempt = true;
+        let path = f.path.clone();
+        // Capture the resolver by reference so the `async move` block copies the
+        // `&Resolver` (Copy) on each call instead of moving the owned `Box` —
+        // otherwise the closure would be `FnOnce` and `retry` needs `FnMut`.
+        let resolve_ref = &resolve;
+        let op = || {
+            let label = if std::mem::replace(&mut first_attempt, false) {
+                format!("Resolving {path}")
+            } else {
+                format!("Retrying {path}")
+            };
+            // `.to_string()` (not `.clone()`) because `original` is borrowed by
+            // the closure, so the bare name is a `&String` whose `.clone()` would
+            // copy the reference rather than the content.
+            let content = original.to_string();
+            async move {
+                match display::with_spinner(&label, resolve_ref(content)).await {
+                    Ok(resolved) if !git::has_conflict_markers(&resolved) => Ok(resolved),
+                    Ok(_markers) => Err(retry::RetryReason::Markers),
+                    Err(err) => Err(retry::RetryReason::Fatal(err)),
+                }
+            }
+        };
+        let resolved = match retry::retry(op, retry::RetryPolicy::once()).await {
+            Ok(content) => content,
+            // Budget spent with markers still present — the file can't be
+            // resolved; soft-skip it for a re-run.
+            Err(retry::RetryError::Exhausted(retry::RetryExhausted {
+                last_reason: retry::RetryReason::Markers,
+                ..
+            })) => {
+                display.skipped(&f.path, "markers remain after retry");
                 skipped_failed += 1;
                 continue;
             }
-        };
-
-        // Marker validation — auto-retry once (ADR 0005).
-        let resolved = if git::has_conflict_markers(&resolved) {
-            match display::with_spinner(&format!("Retrying {}", f.path), resolve(original.clone()))
-                .await
-            {
-                Ok(retry) if !git::has_conflict_markers(&retry) => retry,
-                _ => {
-                    display.skipped(&f.path, "markers remain after retry");
-                    skipped_failed += 1;
-                    continue;
-                }
+            // The LLM call errored (first attempt or retry) and propagated the
+            // original error verbatim.
+            Err(retry::RetryError::Fatal(err)) => {
+                display.skipped(&f.path, &format!("LLM error: {err:#}"));
+                skipped_failed += 1;
+                continue;
             }
-        } else {
-            resolved
+            // The op only ever yields Ok / Markers / Fatal, so an exhausted
+            // budget with any other `last_reason` is unreachable here.
+            Err(retry::RetryError::Exhausted(_)) => unreachable!(
+                "resolve op only yields Ok / Markers / Fatal, never Empty or Truncated"
+            ),
         };
 
         plans.push((f.path.clone(), original, resolved));

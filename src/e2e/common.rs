@@ -69,6 +69,37 @@ pub fn resolver_then(first: &str, then: &str) -> (Resolver, Arc<Mutex<u32>>) {
     (r, calls)
 }
 
+/// First call returns marker-laden `first`; every later call errors with
+/// `error`. Exercises the markers-then-error refinement (#83): the first
+/// attempt is retryable (`Markers`), but the retry-attempt failure must
+/// propagate as `Fatal` — the skip message reports the LLM error instead of
+/// masking it as "markers remain after retry". Includes a call counter.
+pub fn resolver_then_error(first: &str, error: &str) -> (Resolver, Arc<Mutex<u32>>) {
+    let calls = Arc::new(Mutex::new(0u32));
+    let calls2 = calls.clone();
+    let first = first.to_string();
+    let error = error.to_string();
+    let r: Resolver = Box::new(
+        move |_content: String| -> BoxFuture<anyhow::Result<String>> {
+            let n = {
+                let mut g = calls2.lock();
+                *g += 1;
+                *g
+            };
+            let first = first.clone();
+            let error = error.clone();
+            Box::pin(async move {
+                if n == 1 {
+                    Ok(first)
+                } else {
+                    Err(anyhow::anyhow!("{error}"))
+                }
+            })
+        },
+    );
+    (r, calls)
+}
+
 /// Resolver that records every input it was called with (for asserting the
 /// resolver was *not* reached on early-exit paths).
 pub fn resolver_recording() -> (Resolver, Arc<Mutex<Vec<String>>>) {

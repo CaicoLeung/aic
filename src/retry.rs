@@ -6,11 +6,11 @@
 //! rig→reason mapping lives at the [`crate::llm`] boundary
 //! ([`crate::llm::classify_retry`]); this module is provider-agnostic.
 //!
-//! Three retry seams share it: the Drafted-Message (`schema`) and
+//! Four retry seams share it: the Drafted-Message (`schema`) and
 //! untyped-completion (`call`) paths via [`retry`] + [`RetryPolicy::transient`],
-//! and the batch-plan streaming inline loop via [`should_retry`] +
-//! [`RetryPolicy::transient`]. The conflict-marker workflow retry will adopt
-//! [`RetryPolicy::once`] in a later slice.
+//! the batch-plan streaming inline loop via [`should_retry`] +
+//! [`RetryPolicy::transient`], and the resolve conflict-marker workflow via
+//! [`retry`] + [`RetryPolicy::once`].
 
 use std::time::Duration;
 
@@ -18,9 +18,10 @@ use std::time::Duration;
 ///
 /// `Empty` and `Truncated` are the two "model returned no usable content"
 /// shapes a budget-starved reasoning model produces; both are retryable.
-/// `Markers` is reserved for the conflict-marker workflow retry migrated in a
-/// later slice. [`RetryReason::Fatal`] is anything else — it propagates
-/// immediately, never retried, carrying the original error verbatim.
+/// `Markers` is the resolve workflow's re-roll: the resolver returned
+/// marker-laden output, which gets one retry via [`RetryPolicy::once`].
+/// [`RetryReason::Fatal`] is anything else — it propagates immediately, never
+/// retried, carrying the original error verbatim.
 #[derive(Debug)]
 pub enum RetryReason {
     /// The model returned no content at all (empty completion).
@@ -66,8 +67,8 @@ impl RetryPolicy {
         }
     }
 
-    /// Budget 1 with no backoff — for the conflict-marker workflow retry
-    /// migrated in a later slice.
+    /// Budget 1 with no backoff — the resolve workflow's conflict-marker
+    /// re-roll: marker-laden output gets exactly one retry, immediately.
     pub const fn once() -> Self {
         Self {
             budget: 1,

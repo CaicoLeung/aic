@@ -204,6 +204,55 @@ async fn resolve_gives_up_when_markers_persist() {
     );
 }
 
+/// Markers-then-error refinement (#83): the first attempt returns marker-laden
+/// output (retryable), but the retry itself fails with an LLM error. The file
+/// is still soft-skipped as `failed` and the workflow bails — but the emitted
+/// skip reason is the truthful "LLM error", not the old catch-all "markers
+/// remain after retry". The retry-attempt error must not be masked.
+#[tokio::test]
+async fn resolve_reports_llm_error_when_retry_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+
+    let (resolver, calls) = resolver_then_error(
+        "<<<<<<< HEAD\nbad\n=======\nworse\n>>>>>>> x\n",
+        "LLM unreachable on retry",
+    );
+    let git = Git::at(dir.path()).unwrap();
+
+    let buf = BufferWrite::default();
+    let display = Display::with(buf.clone());
+    let err = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![]), display)
+        .await
+        .expect_err("must bail when the only file's resolution fails");
+    assert!(
+        format!("{err:#}").contains("no files could be resolved"),
+        "expected bail, got: {err:#}"
+    );
+    assert_eq!(*calls.lock(), 2, "one attempt + one retry");
+
+    // The truthful reason: the retry failed, so markers do *not* remain.
+    let lines = buf.lines();
+    let skip = lines
+        .iter()
+        .find(|l| l.contains("skipped"))
+        .expect("expected a per-file skipped line");
+    assert!(
+        skip.contains("LLM error:") && skip.contains("LLM unreachable on retry"),
+        "skip must report the retry error, got: {skip:?}"
+    );
+    assert!(
+        !skip.contains("markers remain after retry"),
+        "retry error must not be masked as markers-remain, got: {skip:?}"
+    );
+
+    assert!(!is_clean(dir.path()), "merge must not be finalized");
+    assert!(
+        file_has_markers(dir.path(), "tracked.txt"),
+        "file left untouched after LLM error"
+    );
+}
+
 /// Conflicted state but the index has no unmerged entries (user resolved every
 /// file by hand): the workflow offers finalize, and on `yes` runs git's
 /// finalize. The resolver must not be invoked.
