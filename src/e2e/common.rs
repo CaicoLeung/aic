@@ -175,25 +175,6 @@ pub fn planner_fixed(plan: generator::BatchPlanOutput) -> BatchPlanner {
     )
 }
 
-/// Planner that records every diff it was called with, then returns a fixed
-/// plan. The fmt-before-diff e2e test (issue #27) needs to inspect the exact
-/// diff string the workflow handed the planner — that diff must reflect the
-/// *formatted* source, proving `format_rust_files` ran before capture.
-pub fn planner_recording(
-    plan: generator::BatchPlanOutput,
-) -> (BatchPlanner, Arc<Mutex<Vec<String>>>) {
-    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-    let seen2 = seen.clone();
-    let p: BatchPlanner = Box::new(
-        move |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
-            seen2.lock().push(diff);
-            let plan = plan.clone();
-            Box::pin(async move { Ok(plan) })
-        },
-    );
-    (p, seen)
-}
-
 /// A one-batch plan carrying hunk 1 of a single file — the whole change, in
 /// one commit. The hook e2e tests (issue #20) only need one commit, so the
 /// plan is trivially small; the split tests build their multi-batch plans
@@ -370,36 +351,6 @@ pub fn git_out(dir: &Path, args: &[&str]) -> String {
 pub fn merge_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     gh::make_content_conflict(dir);
-}
-
-/// Minimal cargo project on top of [`gh::init_test_repo`]: a dependency-free
-/// `Cargo.toml`, a formatted `src/main.rs`, and a `/target` `.gitignore`, all
-/// committed. `format_rust_files` runs `cargo fmt --all` in the repo's
-/// workdir (the `Git` handle pins it), which needs a manifest to operate on —
-/// impossible in a plain `init_test_repo` git repo. Used by the fmt-before-diff
-/// e2e test (issue #27).
-///
-/// The base `main.rs` has its two edit sites (lines 3 and 12) ≥8 lines apart,
-/// so the formatted diff splits into two hunks under git's default three-line
-/// context — the geometry the hunk-stability test relies on.
-pub fn init_cargo_repo(dir: &Path) {
-    gh::init_test_repo(dir);
-    std::fs::write(
-        dir.join("Cargo.toml"),
-        "[package]\nname = \"fmttest\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
-    )
-    .unwrap();
-    // `cargo fmt` may emit build metadata or a lockfile; keep both out of
-    // `Git::status` so only the Rust source under test appears as unstaged.
-    std::fs::write(dir.join(".gitignore"), "/target\nCargo.lock\n").unwrap();
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(
-        dir.join("src/main.rs"),
-        "fn main() {\n    // edit site 1\n    let value = 1;\n    // pad 0\n    // pad 1\n    // pad 2\n    // pad 3\n    // pad 4\n    // pad 5\n    // pad 6\n    // pad 7\n    let other = 2;\n}\n",
-    )
-    .unwrap();
-    git_in(dir, &["add", "Cargo.toml", ".gitignore", "src/main.rs"]);
-    git_in(dir, &["commit", "-m", "formatted base"]);
 }
 
 /// `init_test_repo` + two tracked files (`alpha.txt`, `beta.txt`) committed at

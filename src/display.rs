@@ -146,16 +146,6 @@ impl Display {
     // Public rendering entry points
     // ------------------------------------------------------------------
 
-    /// Compact notice after formatting Rust files.
-    pub fn formatted_notice(&self, count: usize) {
-        let word = if count == 1 { "file" } else { "files" };
-        let msg = self.styled(
-            &format!("Formatted {} Rust {}", count, word),
-            Style::new().dim(),
-        );
-        self.emit(&msg);
-    }
-
     /// Commit-completion line — shown after each commit.
     ///
     /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
@@ -430,9 +420,8 @@ impl Display {
     }
 
     /// Generic warning line, routed through the shared margin so ad-hoc
-    /// status failures (e.g. a non-fatal `rustfmt` exit) stay visually
-    /// consistent with the rest of the run's output instead of being dumped
-    /// flush to the edge via raw `eprintln!`.
+    /// status failures stay visually consistent with the rest of the run's
+    /// output instead of being dumped flush to the edge via raw `eprintln!`.
     pub fn warn(&self, msg: &str) {
         let yellow = Style::new().yellow().bold();
         self.emit(&format!("{} {msg}", self.styled("\u{26A0}", yellow)));
