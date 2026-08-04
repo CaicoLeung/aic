@@ -314,11 +314,6 @@ impl Git {
         })
     }
 
-    /// The working tree this handle operates on (`None` for bare repos).
-    pub fn workdir(&self) -> Option<&Path> {
-        self.repo.workdir()
-    }
-
     pub fn status(&self) -> anyhow::Result<Vec<FileStatus>> {
         let repo = &self.repo;
         let statuses = repo

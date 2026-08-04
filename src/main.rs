@@ -77,40 +77,6 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     result
 }
 
-fn format_rust_files(git: &Git, paths: &[String], display: &Display) {
-    let rust_files: Vec<&str> = paths
-        .iter()
-        .filter(|p| p.ends_with(".rs"))
-        .map(|s| s.as_str())
-        .collect();
-
-    if rust_files.is_empty() {
-        return;
-    }
-
-    // Use `cargo fmt --all` rather than bare `rustfmt`: bare rustfmt parses as
-    // edition 2015 (no let-chains; different import ordering / construct
-    // formatting), which diverges from CI's `cargo fmt --all -- --check` and
-    // made commits fail CI. cargo fmt reads the edition from the manifest.
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.args(["fmt", "--all"]);
-    // Run in the repo's workdir — never the process CWD.
-    if let Some(workdir) = git.workdir() {
-        cmd.current_dir(workdir);
-    }
-    match cmd.status() {
-        Ok(s) if s.success() => {
-            display.formatted_notice(rust_files.len());
-        }
-        Ok(s) => {
-            display.warn(&format!("rustfmt exited with {}", s));
-        }
-        Err(e) => {
-            display.warn(&format!("Failed to run rustfmt: {e}"));
-        }
-    }
-}
-
 async fn generate_and_commit(
     git: &Git,
     paths: &[String],
@@ -396,13 +362,6 @@ pub(crate) async fn run_commit_workflow_impl(
             display.nothing_to_commit();
             return Ok(());
         }
-        let all_unstaged: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
-
-        // Format Rust files FIRST, so the diff the model sees — and the hunk
-        // numbering we stage by — reflects the final formatted source. Doing it
-        // after capturing the diff (as before) would let `cargo fmt` shift
-        // hunks out from under the indices the model returned.
-        format_rust_files(git, &all_unstaged, &display);
 
         // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
         // feeds the two consumers that must agree on hunk numbering: the
@@ -458,7 +417,6 @@ pub(crate) async fn run_commit_workflow_impl(
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        format_rust_files(git, &paths, &display);
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         git.add(&refs)?;
         generate_and_commit(git, &paths, &display, "", &messenger).await?;

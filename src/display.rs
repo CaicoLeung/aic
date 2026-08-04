@@ -146,16 +146,6 @@ impl Display {
     // Public rendering entry points
     // ------------------------------------------------------------------
 
-    /// Compact notice after formatting Rust files.
-    pub fn formatted_notice(&self, count: usize) {
-        let word = if count == 1 { "file" } else { "files" };
-        let msg = self.styled(
-            &format!("Formatted {} Rust {}", count, word),
-            Style::new().dim(),
-        );
-        self.emit(&msg);
-    }
-
     /// Commit-completion line — shown after each commit.
     ///
     /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
