@@ -195,6 +195,7 @@ fn into_retry_error(reason: RetryReason, attempts: usize) -> RetryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -403,5 +404,49 @@ mod tests {
             should_retry(&RetryReason::Markers, &mut once, RetryPolicy::once()),
             None
         );
+    }
+
+    // --- RetryError: the error a retry loop surfaces ---
+
+    /// `RetryError::Exhausted` renders the retry count (singular/plural) and
+    /// the last retryable reason; `Fatal` renders the wrapped error verbatim.
+    /// This wording is user-facing (it is what surfaces when a batch run gives
+    /// up), so it is pinned here.
+    #[test]
+    fn retry_error_display_and_source() {
+        let exhausted = RetryError::Exhausted(RetryExhausted {
+            attempts: 1,
+            last_reason: RetryReason::Empty,
+        });
+        let msg = format!("{exhausted}");
+        assert!(
+            msg.contains("after 1 retry"),
+            "singular wording, got: {msg}"
+        );
+        assert!(msg.contains("Empty"), "last reason rendered, got: {msg}");
+
+        let exhausted = RetryError::Exhausted(RetryExhausted {
+            attempts: 2,
+            last_reason: RetryReason::Truncated,
+        });
+        assert!(
+            format!("{exhausted}").contains("after 2 retries"),
+            "plural wording"
+        );
+
+        // Fatal display delegates to the wrapped error's alternate formatting.
+        let fatal = RetryError::Fatal(anyhow::anyhow!("boom"));
+        assert_eq!(format!("{fatal}"), "boom");
+
+        // Exhausted carries no source.
+        assert!(exhausted.source().is_none());
+
+        // Fatal exposes the *boxed error itself* as source — regression for the
+        // fix that delegated to the inner error's source(), which skipped the
+        // boxed error and returned None for a plain anyhow error.
+        let src = fatal
+            .source()
+            .expect("Fatal must expose the underlying error");
+        assert_eq!(src.to_string(), "boom");
     }
 }
