@@ -824,9 +824,19 @@ fn frame_bytes(rows: &[String], prev_height: usize) -> String {
 }
 
 /// Assemble the byte sequence to erase a `prev_height`-row frame, leaving the
-/// cursor at the start of its last (now blank) row — the block is gone and
-/// subsequent output continues on a fresh line below it. Mirrors
-/// [`frame_bytes`]'s per-row clear-then-descend shape.
+/// cursor on the TOP row of the now-blank region — the block is gone and the
+/// next line of stderr overwrites the region from the top, so no blank gap is
+/// trapped between the output that preceded the block and the output that
+/// follows it. Mirrors [`frame_bytes`]'s per-row clear-then-descend shape,
+/// then walks back up to the top.
+///
+/// Parking the cursor on the BOTTOM row (the clear traversal's natural end)
+/// would leave `prev_height - 1` blank rows above whatever prints next — up to
+/// `REASONING_WINDOW` blank lines for a full window — which reads as an empty
+/// area lingering after thinking ends. Returning to the top collapses that
+/// gap: the region was the most recent thing on screen, so its blank rows sit
+/// below the next write (at the terminal's tail) where they cause no gap, and
+/// subsequent writes fill them in as the run continues.
 ///
 /// This is the stream's end, so it appends [`SHOW`] to restore the cursor when
 /// `cursor_hidden` — i.e. when the first frame's [`HIDE`] was emitted. Keying
@@ -846,6 +856,12 @@ fn clear_frame_bytes(prev_height: usize, cursor_hidden: bool) -> String {
         if i + 1 < prev_height {
             out.push_str(DOWN);
         }
+    }
+    // The traversal ends on the bottom row; walk back to the top so the next
+    // write lands on the region's first row instead of leaving blank rows
+    // above it. A 1-row frame never moved, so it owes no return-UP.
+    for _ in 0..prev_height.saturating_sub(1) {
+        out.push_str(UP);
     }
     if cursor_hidden {
         out.push_str(SHOW);
@@ -902,8 +918,10 @@ impl ReasoningRenderer {
 
     /// End the reasoning stream: erase the whole frame — spinner row and
     /// reasoning rows — so the block vanishes once thinking is done, and
-    /// leave the cursor below the cleared region for the rest of the run's
-    /// stderr. Idempotent; also the [`Drop`] backstop for an aborted stream.
+    /// parks the cursor on the TOP row of the cleared region so the rest of
+    /// the run's stderr overwrites it from the top (no blank gap trapped above
+    /// the next line). Idempotent; also the [`Drop`] backstop for an aborted
+    /// stream.
     pub(crate) fn finish(&mut self) {
         if !self.active {
             return;
@@ -1161,16 +1179,79 @@ mod tests {
     }
 
     /// Erasing a frame rises to its top, clears each row in place as it
-    /// descends, and ends at the start of the last (blank) row — the block is
-    /// gone and subsequent output continues on a fresh line below it.
+    /// descends, then returns the cursor to the TOP of the cleared region —
+    /// not the bottom — so the next line of stderr overwrites the blank region
+    /// from the top instead of leaving `height - 1` blank rows trapped between
+    /// the prior output and whatever prints next.
     #[test]
-    fn clear_frame_bytes_erases_every_row_and_ends_below() {
-        // 2-row frame: cursor sits on the last row → one UP, then clear row 1,
-        // descend, clear row 2. The cursor was hidden → SHOW restores it.
+    fn clear_frame_bytes_erases_every_row_and_returns_to_top() {
+        // 2-row frame: one UP to the top, clear row 1, descend, clear row 2,
+        // then one UP back to the top. The cursor was hidden → SHOW restores it.
         let out = clear_frame_bytes(2, true);
-        assert_eq!(out, format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{SHOW}"));
-        // 1-row frame needs no cursor movement: just clear the single row.
+        assert_eq!(out, format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}{SHOW}"));
+        // 1-row frame: nothing to traverse — just clear the single row; the
+        // cursor never leaves it, so no return-UP is needed.
         assert_eq!(clear_frame_bytes(1, true), format!("\r{CLR_LINE}{SHOW}"));
+    }
+
+    /// Regression: finishing a reasoning stream must leave NO blank gap between
+    /// the output that preceded the block and the output that follows it. The
+    /// frame is painted in place starting one line below the cursor (the first
+    /// frame's leading `\n`), so its top row is `start + 1`; after `finish`
+    /// erases it the cursor must sit back on that same top row, so the next
+    /// write overwrites the blank region from the top. Parking the cursor on
+    /// the BOTTOM row (the old behavior) left `height - 1` blank rows above the
+    /// next write — up to 12 blank lines for a full window, the "empty area"
+    /// that lingered after thinking ended.
+    #[test]
+    fn finish_leaves_no_blank_gap_above_next_output() {
+        /// Walk `bytes` from `start_row` and return the final cursor row,
+        /// honouring only the moves the renderer emits (`\n`, `\r`, UP, DOWN;
+        /// clears and cursor-visibility toggles don't move the row).
+        fn cursor_row_after(bytes: &str, start_row: i32) -> i32 {
+            let mut row = start_row;
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i..].starts_with('\n') {
+                    row += 1;
+                    i += 1;
+                } else if bytes[i..].starts_with('\r') {
+                    i += 1;
+                } else if bytes[i..].starts_with(UP) {
+                    row -= 1;
+                    i += UP.len();
+                } else if bytes[i..].starts_with(DOWN) {
+                    row += 1;
+                    i += DOWN.len();
+                } else if bytes[i..].starts_with(CLR_LINE) {
+                    i += CLR_LINE.len();
+                } else if bytes[i..].starts_with(HIDE) {
+                    i += HIDE.len();
+                } else if bytes[i..].starts_with(SHOW) {
+                    i += SHOW.len();
+                } else {
+                    i += 1;
+                }
+            }
+            row
+        }
+
+        for height in [1usize, 2, 3, REASONING_WINDOW, REASONING_WINDOW + 1] {
+            let rows: Vec<String> = (0..height).map(|_| "x".to_string()).collect();
+            // First frame opens with a leading `\n`, so the frame's top row is
+            // `start + 1` and the cursor ends on its bottom row after painting.
+            let after_paint = cursor_row_after(&frame_bytes(&rows, 0), 0);
+            assert_eq!(after_paint, height as i32, "paint height {height}");
+            // finish must return the cursor to the frame's TOP row (row 1), so
+            // the next write lands there — not `height` rows down past a gap.
+            let after_clear = cursor_row_after(&clear_frame_bytes(height, true), after_paint);
+            assert_eq!(
+                after_clear, 1,
+                "height {height}: cursor must return to frame top (row 1), \
+                 not the bottom (row {after_paint}); otherwise height-1 blank \
+                 rows linger above the next line of stderr"
+            );
+        }
     }
 
     /// The cursor is hidden for the whole reasoning stream and restored only
@@ -1203,10 +1284,11 @@ mod tests {
         // keyed on the renderer's cursor-hidden flag — not on prev_height.
         let erase = clear_frame_bytes(2, true);
         assert!(erase.ends_with(SHOW), "finish must restore the cursor");
-        // A frame that hid no cursor owes no SHOW — geometry only, no restore.
+        // A frame that hid no cursor owes no SHOW — geometry only (clear +
+        // return-to-top), no restore.
         assert_eq!(
             clear_frame_bytes(2, false),
-            format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}")
+            format!("{UP}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}")
         );
     }
 
