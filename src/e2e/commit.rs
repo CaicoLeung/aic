@@ -412,7 +412,7 @@ async fn commit_staged_files_in_one_commit() {
 
     // Modify a tracked file and stage it — the entry condition for the staged
     // single-commit path. A non-Rust file keeps this test focused on the
-    // commit shape; staged-Rust formatting is a separate coverage gap.
+    // commit shape.
     std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
 

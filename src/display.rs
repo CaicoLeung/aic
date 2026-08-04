@@ -420,9 +420,8 @@ impl Display {
     }
 
     /// Generic warning line, routed through the shared margin so ad-hoc
-    /// status failures (e.g. a non-fatal `rustfmt` exit) stay visually
-    /// consistent with the rest of the run's output instead of being dumped
-    /// flush to the edge via raw `eprintln!`.
+    /// status failures stay visually consistent with the rest of the run's
+    /// output instead of being dumped flush to the edge via raw `eprintln!`.
     pub fn warn(&self, msg: &str) {
         let yellow = Style::new().yellow().bold();
         self.emit(&format!("{} {msg}", self.styled("\u{26A0}", yellow)));
