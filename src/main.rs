@@ -735,6 +735,12 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+
+    // `detect_shell` reads the process-global `SHELL` env var, so tests that
+    // mutate it must be serialized against each other — same pattern as the
+    // color-env guard in display.rs.
+    static SHELL_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn write_completion_emits_nonempty_script_naming_aic_for_every_shell() {
@@ -852,5 +858,41 @@ mod tests {
         let body = std::fs::read_to_string(&target.path).expect("read installed script");
         assert!(!body.is_empty());
         assert!(body.contains("aic"));
+    }
+
+    /// `detect_shell` maps `$SHELL` (basename) to a supported shell; unknown
+    /// names and an unset variable yield `None`, so the completion prompt can
+    /// fall back to a manual pick.
+    #[test]
+    fn detect_shell_reads_shell_env() {
+        let _guard = SHELL_ENV.lock();
+        // SAFETY: guarded by SHELL_ENV, which serializes all SHELL mutation in
+        // this module against other tests in the same process.
+        unsafe {
+            std::env::set_var("SHELL", "/bin/zsh");
+        }
+        assert_eq!(detect_shell(), Some(Shell::Zsh));
+        unsafe {
+            std::env::set_var("SHELL", "/usr/bin/bash");
+        }
+        assert_eq!(detect_shell(), Some(Shell::Bash));
+        // Basename only — no path required.
+        unsafe {
+            std::env::set_var("SHELL", "fish");
+        }
+        assert_eq!(detect_shell(), Some(Shell::Fish));
+        unsafe {
+            std::env::set_var("SHELL", "nu");
+        }
+        assert_eq!(detect_shell(), Some(Shell::Nushell));
+        // Unknown shell and unset SHELL → None.
+        unsafe {
+            std::env::set_var("SHELL", "/bin/tcsh");
+        }
+        assert_eq!(detect_shell(), None);
+        unsafe {
+            std::env::remove_var("SHELL");
+        }
+        assert_eq!(detect_shell(), None);
     }
 }
