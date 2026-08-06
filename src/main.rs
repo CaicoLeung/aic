@@ -1097,24 +1097,29 @@ fn char_to_byte(line: &str, col: usize) -> usize {
         .unwrap_or(line.len())
 }
 
-/// Split `line` into display pieces of at most `w` characters, preserving
-/// char boundaries (a `w` of 0 — pathological terminal — returns the line
-/// whole). An empty line yields one empty piece so the editor's physical-row
-/// accounting always sees at least one row per logical line.
+/// Split `line` into display pieces of at most `w` terminal columns,
+/// preserving char boundaries and treating wide (CJK) chars as two columns. A
+/// `w` of 0 — pathological terminal — returns the line whole. An empty line
+/// yields one empty piece so the editor's physical-row accounting always sees
+/// at least one row per logical line.
 fn edit_wrap(line: &str, w: usize) -> Vec<String> {
-    let mut pieces = Vec::new();
-    let mut rest = line;
-    while rest.chars().count() > w && w > 0 {
-        let idx = rest
-            .char_indices()
-            .nth(w)
-            .map(|(i, _)| i)
-            .unwrap_or(rest.len());
-        pieces.push(rest[..idx].to_string());
-        rest = &rest[idx..];
+    if w == 0 {
+        return vec![line.to_string()];
     }
-    if !rest.is_empty() || pieces.is_empty() {
-        pieces.push(rest.to_string());
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in line.chars() {
+        let ch_width = console::measure_text_width(&ch.to_string());
+        if current_width + ch_width > w && !current.is_empty() {
+            pieces.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if !current.is_empty() || pieces.is_empty() {
+        pieces.push(current);
     }
     pieces
 }
