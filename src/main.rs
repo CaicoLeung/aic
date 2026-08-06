@@ -1576,12 +1576,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
-
-    // `detect_shell` reads the process-global `SHELL` env var, so tests that
-    // mutate it must be serialized against each other — same pattern as the
-    // color-env guard in display.rs.
-    static SHELL_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn write_completion_emits_nonempty_script_naming_aic_for_every_shell() {
@@ -1703,474 +1697,28 @@ mod tests {
 
     /// `detect_shell` maps `$SHELL` (basename) to a supported shell; unknown
     /// names and an unset variable yield `None`, so the completion prompt can
-    /// fall back to a manual pick.
+    /// fall back to a manual pick. Uses `temp_env` to avoid unsafe env
+    /// mutation racing other tests.
     #[test]
     fn detect_shell_reads_shell_env() {
-        let _guard = SHELL_ENV.lock();
-        // SAFETY: guarded by SHELL_ENV, which serializes all SHELL mutation in
-        // this module against other tests in the same process.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Zsh));
-        unsafe {
-            std::env::set_var("SHELL", "/usr/bin/bash");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Bash));
-        // Basename only — no path required.
-        unsafe {
-            std::env::set_var("SHELL", "fish");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Fish));
-        unsafe {
-            std::env::set_var("SHELL", "nu");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Nushell));
-        // Unknown shell and unset SHELL → None.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/tcsh");
-        }
-        assert_eq!(detect_shell(), None);
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
-        assert_eq!(detect_shell(), None);
-    }
-
-    // `edit_message_external` reads the process-global VISUAL/EDITOR env vars,
-    // so tests that mutate them must be serialized against each other — same
-    // pattern as the SHELL_ENV guard above.
-    static EDITOR_ENV: Mutex<()> = Mutex::new(());
-
-    /// The non-TTY editor path spawns `$VISUAL` on a temp file holding the
-    /// message and reads the edited content back: subject = first line,
-    /// body = the rest (leading blank lines collapsed, git-style).
-    #[cfg(unix)]
-    #[test]
-    fn edit_message_external_spawns_visual_editor_on_temp_file() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = EDITOR_ENV.lock();
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-editor.sh");
-        // A fake editor: rewrite the file in place, subject + blank + body.
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf 'feat: externally edited\\n\\nnew body\\n' > \"$1\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        // SAFETY: guarded by EDITOR_ENV, which serializes all VISUAL/EDITOR
-        // mutation in this module against other tests in the same process.
-        unsafe {
-            std::env::set_var("VISUAL", &script);
-        }
-        let (subject, body) = edit_message_external("feat: draft", Some("old body")).unwrap();
-        unsafe {
-            std::env::remove_var("VISUAL");
-        }
-        assert_eq!(subject, "feat: externally edited");
-        assert_eq!(body.as_deref(), Some("new body"));
-    }
-
-    /// `$EDITOR` is the fallback when `$VISUAL` is unset; a body-less message
-    /// stays body-less after an edit that only rewrites the subject line.
-    #[cfg(unix)]
-    #[test]
-    fn edit_message_external_falls_back_to_editor_and_keeps_single_line() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = EDITOR_ENV.lock();
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-editor.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nprintf 'fix: subject only\\n' > \"$1\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        // SAFETY: guarded by EDITOR_ENV, which serializes all VISUAL/EDITOR
-        // mutation in this module against other tests in the same process.
-        unsafe {
-            std::env::remove_var("VISUAL");
-            std::env::set_var("EDITOR", &script);
-        }
-        let (subject, body) = edit_message_external("feat: draft", None).unwrap();
-        unsafe {
-            std::env::remove_var("EDITOR");
-        }
-        assert_eq!(subject, "fix: subject only");
-        assert_eq!(body, None);
-    }
-
-    /// No editor configured at all is a clear error, not a silent no-op.
-    #[test]
-    fn edit_message_external_errors_without_editor_env() {
-        let _guard = EDITOR_ENV.lock();
-        // SAFETY: guarded by EDITOR_ENV.
-        unsafe {
-            std::env::remove_var("VISUAL");
-            std::env::remove_var("EDITOR");
-        }
-        let err = edit_message_external("feat: draft", None)
-            .expect_err("missing VISUAL/EDITOR must error");
-        assert!(
-            format!("{err:#}").contains("$VISUAL nor $EDITOR"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    /// `edit_wrap` splits on char boundaries and never drops a line: exact
-    /// multiples, leftovers, empty lines, zero-width terminals, and
-    /// multi-byte chars all render as the editor's physical-row accounting
-    /// expects.
-    #[test]
-    fn edit_wrap_splits_on_char_boundaries() {
-        assert_eq!(edit_wrap("abcd", 2), vec!["ab", "cd"]);
-        assert_eq!(edit_wrap("abc", 2), vec!["ab", "c"]);
-        assert_eq!(edit_wrap("", 2), vec![""]);
-        assert_eq!(edit_wrap("abc", 0), vec!["abc"]);
-        assert_eq!(edit_wrap("héllo", 3), vec!["hél", "lo"]);
-    }
-
-    /// `edit_wrap` is display-width aware: wide (CJK) chars count as two
-    /// columns, so a line wraps at the column budget, never mid-char.
-    #[test]
-    fn edit_wrap_splits_by_display_width() {
-        assert_eq!(edit_wrap("中文测试", 4), vec!["中文", "测试"]);
-        assert_eq!(edit_wrap("中文测试", 6), vec!["中文测", "试"]);
-        assert_eq!(edit_wrap("a中b", 3), vec!["a中", "b"]);
-        // A single char wider than the budget still becomes its own piece —
-        // a char can't be split.
-        assert_eq!(edit_wrap("中", 1), vec!["中"]);
-        assert_eq!(edit_wrap("中文", 0), vec!["中文"]);
-    }
-
-    /// Typing, Enter (split), Backspace (join), and Del behave on a simple
-    /// ASCII message, and the cursor tracks the edits.
-    #[test]
-    fn edit_buffer_types_splits_and_joins_lines() {
-        let mut b = EditBuffer::new("feat: draft", None, 80);
-        assert_eq!(b.key(Key::Char('!')), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["feat: draft!"]);
-
-        // Enter at end of line starts a new line.
-        assert_eq!(b.key(Key::Enter), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["feat: draft!", ""]);
-        assert_eq!((b.row, b.col), (1, 0));
-
-        // Del at the start of the new line joins it back (nothing to delete).
-        assert_eq!(b.key(Key::Del), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["feat: draft!", ""]);
-
-        // Type, then Backspace removes the char; Backspace at line start joins
-        // the previous line and parks the cursor at its end.
-        assert_eq!(b.key(Key::Char('x')), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["feat: draft!", "x"]);
-        assert_eq!(b.key(Key::Backspace), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["feat: draft!", ""]);
-        assert_eq!(b.key(Key::Backspace), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["feat: draft!"]);
-        assert_eq!((b.row, b.col), (0, 12));
-
-        // Home + Del deletes the first char.
-        assert_eq!(b.key(Key::Home), EditOutcome::Continue);
-        assert_eq!(b.key(Key::Del), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["eat: draft!"]);
-    }
-
-    /// Multi-byte chars insert/delete on char boundaries: the cursor is a
-    /// char index, and `String` ops convert to byte offsets, so CJK text
-    /// never gets split mid-codepoint.
-    #[test]
-    fn edit_buffer_handles_multibyte_chars() {
-        let mut b = EditBuffer::new("", None, 80);
-        b.key(Key::Char('中'));
-        b.key(Key::Char('文'));
-        assert_eq!(b.lines, vec!["中文"]);
-        assert_eq!((b.row, b.col), (0, 2));
-
-        // Backspace removes a whole char, not a byte.
-        b.key(Key::Backspace);
-        assert_eq!(b.lines, vec!["中"]);
-        assert_eq!(b.col, 1);
-
-        // Inserting between chars lands at the right byte offset.
-        b.key(Key::ArrowLeft);
-        b.key(Key::Char('a'));
-        assert_eq!(b.lines, vec!["a中"]);
-        assert_eq!(b.col, 1);
-
-        // Del removes the char at the cursor, again whole.
-        b.key(Key::ArrowRight);
-        b.key(Key::Home);
-        b.key(Key::Del);
-        assert_eq!(b.lines, vec!["中"]);
-    }
-
-    /// Arrow keys move the cursor, clamping at line edges and wrapping at
-    /// line boundaries; Home/End jump within the line.
-    #[test]
-    fn edit_buffer_navigates_with_arrows_home_end() {
-        let mut b = EditBuffer::new("ab\ncd", None, 80);
-        assert_eq!((b.row, b.col), (1, 2)); // starts at end of last line
-
-        b.key(Key::ArrowLeft);
-        assert_eq!((b.row, b.col), (1, 1));
-        b.key(Key::ArrowLeft);
-        assert_eq!((b.row, b.col), (1, 0));
-        // Left at line start moves to the previous line's end.
-        b.key(Key::ArrowLeft);
-        assert_eq!((b.row, b.col), (0, 2));
-
-        // Down from a shorter line clamps the column.
-        b.key(Key::ArrowDown);
-        assert_eq!((b.row, b.col), (1, 2));
-        b.key(Key::Home);
-        assert_eq!((b.row, b.col), (1, 0));
-        b.key(Key::End);
-        assert_eq!((b.row, b.col), (1, 2));
-        b.key(Key::ArrowUp);
-        assert_eq!((b.row, b.col), (0, 2));
-
-        // Movement at the very edges is a no-op, not a panic.
-        b.key(Key::ArrowUp);
-        b.key(Key::ArrowLeft);
-        assert_eq!((b.row, b.col), (0, 1));
-        b.key(Key::ArrowLeft);
-        b.key(Key::ArrowLeft);
-        assert_eq!((b.row, b.col), (0, 0));
-        b.key(Key::ArrowLeft);
-        b.key(Key::ArrowUp);
-        assert_eq!((b.row, b.col), (0, 0));
-    }
-
-    /// Up/Down follow *visual* (wrapped) rows, not logical lines: a line that
-    /// wraps to two rows is walked row by row instead of being skipped (the
-    /// old logical-line navigation made Up/Down no-ops on a single wrapped
-    /// line). The caret's visual row is what the textarea shows.
-    #[test]
-    fn edit_buffer_arrow_up_down_follow_wrapped_rows() {
-        // "abcdef" wraps to ["abc", "def"] at width 3.
-        let mut b = EditBuffer::new("abcdef", None, 3);
-        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (1, 3)); // end of line
-
-        // Up walks to the wrapped row above (keeping the column), then to the
-        // first row.
-        b.key(Key::ArrowUp);
-        assert_eq!((b.row, b.col), (0, 3));
-        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (1, 0)); // wrap boundary
-        b.key(Key::ArrowUp);
-        assert_eq!((b.row, b.col), (0, 0));
-        b.key(Key::ArrowUp);
-        assert_eq!((b.row, b.col), (0, 0)); // top edge: no-op
-
-        // Down walks back down through the wrapped rows.
-        b.key(Key::ArrowDown);
-        assert_eq!((b.row, b.col), (0, 3));
-        b.key(Key::ArrowDown);
-        assert_eq!((b.row, b.col), (0, 3)); // already on the last visual row
-        b.key(Key::ArrowDown);
-        assert_eq!((b.row, b.col), (0, 3)); // bottom edge: no-op
-    }
-
-    /// With a body line the visual stream is subject rows followed by body
-    /// rows; Up/Down cross the subject/body boundary one visual row at a time,
-    /// keeping the display column.
-    #[test]
-    fn edit_buffer_arrow_up_down_cross_subject_body_boundary() {
-        // lines ["abcdef", "x"]: subject wraps to 2 rows + body 1 row = 3.
-        let mut b = EditBuffer::new("abcdef", Some("x"), 3);
-        assert_eq!((b.row, b.col), (1, 1)); // body row
-
-        // Up: body -> subject's second wrapped row -> subject's first row.
-        b.key(Key::ArrowUp);
-        assert_eq!((b.row, b.col), (0, 4));
-        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (1, 1));
-        b.key(Key::ArrowUp);
-        assert_eq!((b.row, b.col), (0, 1));
-        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (0, 1));
-
-        // Down walks back to the body row.
-        b.key(Key::ArrowDown);
-        assert_eq!((b.row, b.col), (0, 4));
-        b.key(Key::ArrowDown);
-        assert_eq!((b.row, b.col), (1, 1));
-        b.key(Key::ArrowDown); // bottom edge: no-op
-        assert_eq!((b.row, b.col), (1, 1));
-    }
-
-    /// Up/Down across wide (CJK) chars keep the display column and never
-    /// split a char — the caret lands on a char boundary.
-    #[test]
-    fn edit_buffer_arrow_up_down_keeps_column_on_wide_chars() {
-        // "中文测试" wraps to ["中","文","测","试"] at width 3; body "x" is one
-        // row -> visual rows = 5.
-        let mut b = EditBuffer::new("中文测试", Some("x"), 3);
-        assert_eq!((b.row, b.col), (1, 1)); // visual row 4 (body)
-
-        b.key(Key::ArrowUp); // -> 试's row (char 3)
-        assert_eq!((b.row, b.col), (0, 3));
-        b.key(Key::ArrowUp); // -> 测's row (char 2)
-        assert_eq!((b.row, b.col), (0, 2));
-        b.key(Key::ArrowDown); // back to 试's row
-        assert_eq!((b.row, b.col), (0, 3));
-        b.key(Key::ArrowDown); // -> body row
-        assert_eq!((b.row, b.col), (1, 0));
-    }
-
-    /// The buffer round-trips the drafted (subject, body) exactly, and a
-    /// messy edit (blank lines around the body) collapses git-style — the
-    /// same normalization [`edit_message_external`] applies, so both editor
-    /// paths produce identical output for identical edits.
-    #[test]
-    fn edit_buffer_message_round_trips_and_collapses_blank_lines() {
-        let mut b = EditBuffer::new("feat: x", Some("  body  "), 80);
-        assert_eq!(
-            b.message(),
-            ("feat: x".to_string(), Some("body".to_string()))
-        );
-
-        // Surround the body with blank lines, then save: they collapse.
-        b.key(Key::End);
-        b.key(Key::Enter);
-        b.key(Key::ArrowUp);
-        b.key(Key::Home);
-        b.key(Key::Enter);
-        assert_eq!(
-            b.lines,
-            vec![
-                "feat: x".to_string(),
-                String::new(),
-                "body".to_string(),
-                String::new()
-            ]
-        );
-        assert_eq!(
-            b.message(),
-            ("feat: x".to_string(), Some("body".to_string()))
-        );
-
-        // A body edited down to nothing becomes None (the cursor starts at
-        // the end of the body line).
-        let mut b = EditBuffer::new("feat: x", Some("body"), 80);
-        for _ in 0..4 {
-            b.key(Key::Backspace);
-        }
-        assert_eq!(b.message(), ("feat: x".to_string(), None));
-    }
-
-    /// Ctrl-S saves, Esc/Ctrl-C cancel, and anything unrecognized continues.
-    #[test]
-    fn edit_buffer_save_and_cancel_outcomes() {
-        let mut b = EditBuffer::new("x", None, 80);
-        assert_eq!(b.key(Key::Char('\u{13}')), EditOutcome::Save);
-        let mut b = EditBuffer::new("x", None, 80);
-        assert_eq!(b.key(Key::Escape), EditOutcome::Cancel);
-        let mut b = EditBuffer::new("x", None, 80);
-        assert_eq!(b.key(Key::CtrlC), EditOutcome::Cancel);
-        let mut b = EditBuffer::new("x", None, 80);
-        assert_eq!(b.key(Key::Tab), EditOutcome::Continue);
-        assert_eq!(b.lines, vec!["x".to_string()]);
-    }
-
-    /// A simple frame: a bordered textarea with a "subject" header, the
-    /// message as the first content row, a footer, and the hint line; the
-    /// cursor sits in physical coordinates (margin + border + space + column).
-    #[test]
-    fn render_editor_ascii_block_cursor_and_region() {
-        let lines = vec!["feat: hello".to_string()];
-        let r = render_editor(&lines, 0, 5, 0, 10, 80);
-        assert!(r.block.starts_with("  ┌─ subject "), "got: {:?}", r.block);
-        assert!(r.block.contains("  │ feat: hello"), "got: {:?}", r.block);
-        assert!(r.block.contains("  └"), "footer missing: {:?}", r.block);
-        assert!(
-            r.block.ends_with("Ctrl-S = save · Esc/Ctrl-C = cancel\n"),
-            "hint missing: {:?}",
-            r.block
-        );
-        // Header row, then the subject row.
-        assert_eq!(r.cursor_row, 1);
-        // 2 (margin) + 1 (border) + 1 (space) + 5 (column).
-        assert_eq!(r.cursor_col, 9);
-        assert_eq!(r.region, 4);
-    }
-
-    /// An over-long ASCII line wraps inside the box; the cursor tracks the
-    /// wrapped row and column.
-    #[test]
-    fn render_editor_wraps_long_ascii_line() {
-        let lines = vec!["abcdef".to_string()];
-        let r = render_editor(&lines, 0, 3, 0, 10, 4);
-        assert!(r.block.contains("  │ abcd"), "got: {:?}", r.block);
-        assert!(r.block.contains("  │ ef"), "got: {:?}", r.block);
-        // col 3 ends the first wrapped piece ("abcd") -> row 1 (after header).
-        assert_eq!(r.cursor_row, 1);
-        assert_eq!(r.cursor_col, 7);
-        assert_eq!(r.region, 5);
-    }
-
-    /// Wide (CJK) chars wrap on display columns, not char counts, and the
-    /// cursor lands on the column the terminal will show (box borders add
-    /// 4 columns of offset: margin + border + space).
-    #[test]
-    fn render_editor_wide_chars_wrap_and_position_cursor() {
-        // Six CJK chars are 12 columns; at a 4-column budget they become
-        // three 2-char pieces.
-        let lines = vec!["中文测试一二".to_string()];
-        let r = render_editor(&lines, 0, 4, 0, 10, 4);
-        assert!(r.block.contains("  │ 中文"), "got: {:?}", r.block);
-        assert!(r.block.contains("  │ 测试"), "got: {:?}", r.block);
-        assert!(r.block.contains("  │ 一二"), "got: {:?}", r.block);
-        // col 4 == after 中文测试 (8 display cols) -> start of the 3rd piece.
-        assert_eq!(r.cursor_row, 3);
-        assert_eq!(r.cursor_col, 4);
-        assert_eq!(r.region, 6);
-
-        // col 3 == after 中文测 (6 cols) -> inside the 2nd piece at col 2.
-        let r = render_editor(&lines, 0, 3, 0, 10, 4);
-        assert_eq!(r.cursor_row, 2);
-        assert_eq!(r.cursor_col, 6);
-    }
-
-    /// The viewport slices by `top`/`window`; a scrolled-in view labels the
-    /// header "body" (the subject is off screen) and draws no divider.
-    #[test]
-    fn render_editor_scrolls_to_cursor_line() {
-        let lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let r = render_editor(&lines, 1, 0, 1, 1, 80);
-        assert!(r.block.starts_with("  ┌─ body "), "got: {:?}", r.block);
-        assert!(r.block.contains("  │ b"), "got: {:?}", r.block);
-        assert!(
-            !r.block.contains("├─ body"),
-            "no divider expected: {:?}",
-            r.block
-        );
-        assert_eq!(r.cursor_row, 1);
-        assert_eq!(r.cursor_col, 4);
-        assert_eq!(r.region, 4);
-    }
-
-    /// `$EDITOR` is parsed as a command line, not a single path, so the
-    /// common `EDITOR="code --wait"` form works without a shell.
-    #[test]
-    fn split_command_parses_editor_argv() {
-        assert_eq!(split_command("code --wait"), vec!["code", "--wait"]);
-        assert_eq!(split_command("vim -f"), vec!["vim", "-f"]);
-        assert_eq!(
-            split_command("\"/path with space/ed\" -w"),
-            vec!["/path with space/ed", "-w"]
-        );
-        assert_eq!(
-            split_command("sh -c 'printf ok'"),
-            vec!["sh", "-c", "printf ok"]
-        );
-        assert_eq!(split_command("a\\ b"), vec!["a b"]);
-        // Unterminated quote consumes the rest.
-        assert_eq!(split_command("ed'"), vec!["ed"]);
-        assert_eq!(split_command(""), Vec::<String>::new());
+        temp_env::with_var("SHELL", Some("/bin/zsh"), || {
+            assert_eq!(detect_shell(), Some(Shell::Zsh));
+        });
+        temp_env::with_var("SHELL", Some("/usr/bin/bash"), || {
+            assert_eq!(detect_shell(), Some(Shell::Bash));
+        });
+        temp_env::with_var("SHELL", Some("fish"), || {
+            assert_eq!(detect_shell(), Some(Shell::Fish));
+        });
+        temp_env::with_var("SHELL", Some("nu"), || {
+            assert_eq!(detect_shell(), Some(Shell::Nushell));
+        });
+        temp_env::with_var("SHELL", Some("/bin/tcsh"), || {
+            assert_eq!(detect_shell(), None);
+        });
+        temp_env::with_var("SHELL", None::<&str>, || {
+            assert_eq!(detect_shell(), None);
+        });
     }
 
     /// Confirmation off, or an interactive stdin, always passes; confirmation
@@ -2194,14 +1742,13 @@ mod tests {
         );
     }
 
-    /// The external editor receives extra `$EDITOR` arguments before the temp
-    /// file path (the `code --wait` case), and the temp file is cleaned up.
+    /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
+    /// the file path (the `code --wait` case). Verified with a fake editor.
     #[cfg(unix)]
     #[test]
-    fn edit_message_external_passes_editor_arguments() {
+    fn edit_message_honors_editor_arguments() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = EDITOR_ENV.lock();
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-editor.sh");
         // Fake editor: the file path is the last argument; rewrite it in place.
@@ -2212,17 +1759,14 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        // SAFETY: guarded by EDITOR_ENV, which serializes all VISUAL/EDITOR
-        // mutation in this module against other tests in the same process.
-        unsafe {
-            std::env::remove_var("VISUAL");
-            std::env::set_var("EDITOR", format!("{} --wait", script.display()));
-        }
-        let (subject, body) = edit_message_external("feat: draft", None).unwrap();
-        unsafe {
-            std::env::remove_var("EDITOR");
-        }
-        assert_eq!(subject, "fix: args");
-        assert_eq!(body, None);
+        let editor = format!("{} --wait", script.display());
+        temp_env::with_vars(
+            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
+            || {
+                let (subject, body) = edit_message("feat: draft", None).unwrap();
+                assert_eq!(subject, "fix: args");
+                assert_eq!(body, None);
+            },
+        );
     }
 }
