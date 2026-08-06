@@ -241,8 +241,18 @@ impl Display {
         }
         let files = if paths.len() == 1 {
             paths[0].clone()
-        } else {
+        } else if paths.len() <= 8 {
             format!("{} ({} files)", paths.join(", "), paths.len())
+        } else {
+            // Keep the preview line bounded: a huge batch must not print an
+            // unbounded file list.
+            let shown = &paths[..8];
+            format!(
+                "{}, … +{} more ({} files)",
+                shown.join(", "),
+                paths.len() - shown.len(),
+                paths.len()
+            )
         };
         self.emit(&self.styled(&format!("files: {files}"), dim));
         self.emit_blank();
@@ -1431,6 +1441,27 @@ mod tests {
         // Single file: no "(1 files)" suffix; no body line emitted.
         assert_eq!(got[2], "  files: Cargo.toml");
         assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
+    }
+
+    /// A batch with more than 8 files keeps the preview line bounded: the
+    /// first 8 are named, the rest are summarized.
+    #[test]
+    fn commit_preview_truncates_long_file_lists() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let paths: Vec<String> = (1..=10).map(|i| format!("src/f{i}.rs")).collect();
+        d.commit_preview("feat: big", None, &paths);
+        let got = lines.lock().clone();
+        assert!(
+            got.iter().any(|l| l.contains(
+                "files: src/f1.rs, src/f2.rs, src/f3.rs, src/f4.rs, src/f5.rs, \
+                 src/f6.rs, src/f7.rs, src/f8.rs, … +2 more (10 files)"
+            )),
+            "expected a truncated file list, got: {got:?}"
+        );
     }
 
     #[test]
