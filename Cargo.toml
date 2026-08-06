@@ -25,6 +25,7 @@ git2 = "0.21"
 indicatif = "0.17"
 console = "0.16"
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
+tempfile = "3"
 rig-core = "0.36"
 schemars = "1"
 similar = "2"
@@ -37,5 +38,4 @@ clap_complete = "4.6.8"
 clap_complete_nushell = "4.6.1"
 
 [dev-dependencies]
-tempfile = "3"
 parking_lot = "0.12"
