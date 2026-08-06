@@ -29,7 +29,7 @@ A Commit-confirmation menu action that re-runs the LLM on the same Batch diff to
 _Avoid_: retry, redo, re-roll
 
 **Message edit**:
-A Commit-confirmation menu action that lets the user modify the full Drafted Message (subject + body) before committing. When stdin is a TTY, editing is an inline multi-line editor in the current terminal; when stdin is not a TTY, it falls back to `$VISUAL`/`$EDITOR` on a temp file (git-style). Returns to the menu after editing so the result can be re-verified.
+A Commit-confirmation menu action that lets the user modify the full Drafted Message (subject + body) before committing. Opens `$VISUAL`/`$EDITOR` on a temp file (via the `edit` crate, which also falls back to nano/vim/vi/emacs when neither is set) — git-style. Returns to the menu after editing so the result can be re-verified.
 _Avoid_: message tweak, inline edit (overloaded), editor step
 
 **Provider**:

@@ -187,7 +187,7 @@ then offers a four-option menu before each commit:
 
 - **Commit** — land the commit as drafted
 - **Re-generate** — re-run the model on the same diff for a fresh draft
-- **Edit** — edit the full message (inline editor in a terminal; `$VISUAL`/`$EDITOR` on a temp file otherwise), then return to the menu
+- **Edit** — edit the full message in `$VISUAL`/`$EDITOR` (falls back to nano/vim/vi/emacs), then return to the menu
 - **Abort** — end the run; nothing further commits
 
 Abort in batch mode leaves already-committed batches in place and keeps the

@@ -182,7 +182,7 @@ confirm_before_commit = true
 
 - **Commit** — 按草稿提交
 - **Re-generate** — 对同一 diff 重新生成一份草稿
-- **Edit** — 编辑完整 message（终端内联编辑器；非 TTY 时用 `$VISUAL`/`$EDITOR` 打开临时文件），然后回到菜单
+- **Edit** — 编辑完整 message（用 `$VISUAL`/`$EDITOR` 打开临时文件；未设置时回退到 nano/vim/vi/emacs），然后回到菜单
 - **Abort** — 结束本次运行，不再提交
 
 Batch 模式下 Abort 后，已提交的 batch 保持不变，其余更改留在工作区，重新运行 `aic` 即可继续。
