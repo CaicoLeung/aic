@@ -183,10 +183,15 @@ confirm_before_commit = true
 
 in `~/.config/aic/config.toml`, or toggle it during `aic setup`. With it on,
 `aic` shows the drafted message (subject + body) and the files it would land,
-then asks `commit this message? [y/n]` before each commit. Enter/`y` commits
-normally; `n` aborts the run — in batch mode, batches already committed stay,
-and the declined batch plus any later batches stay in the working tree,
-recoverable by re-running `aic`.
+then offers a four-option menu before each commit:
+
+- **Commit** — land the commit as drafted
+- **Re-generate** — re-run the model on the same diff for a fresh draft
+- **Edit** — edit the full message (inline editor in a terminal; `$VISUAL`/`$EDITOR` on a temp file otherwise), then return to the menu
+- **Abort** — end the run; nothing further commits
+
+Abort in batch mode leaves already-committed batches in place and keeps the
+rest in the working tree, recoverable by re-running `aic`.
 
 ### Supported providers
 

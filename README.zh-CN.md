@@ -178,7 +178,14 @@ Provider 专属的 API key 环境变量（`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`
 confirm_before_commit = true
 ```
 
-写入 `~/.config/aic/config.toml`，或在 `aic setup` 中切换。开启后，`aic` 会在每次提交前展示草拟的 message（subject + body）以及将落地的文件，然后询问 `commit this message? [y/n]`。Enter/`y` 正常提交；`n` 中止本次运行——在 batch 模式下，已提交的 batch 保持不变，被拒绝的 batch 及其后的 batch 仍留在工作区，重新运行 `aic` 即可继续。
+写入 `~/.config/aic/config.toml`，或在 `aic setup` 中切换。开启后，`aic` 会在每次提交前展示草拟的 message（subject + body）以及将落地的文件，然后提供四个选项的菜单：
+
+- **Commit** — 按草稿提交
+- **Re-generate** — 对同一 diff 重新生成一份草稿
+- **Edit** — 编辑完整 message（终端内联编辑器；非 TTY 时用 `$VISUAL`/`$EDITOR` 打开临时文件），然后回到菜单
+- **Abort** — 结束本次运行，不再提交
+
+Batch 模式下 Abort 后，已提交的 batch 保持不变，其余更改留在工作区，重新运行 `aic` 即可继续。
 
 ### 支持的 provider
 

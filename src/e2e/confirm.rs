@@ -1,16 +1,18 @@
 //! Pre-commit confirmation (issue #78): with `confirm_before_commit` enabled,
-//! the workflow shows the drafted message + file list and asks the user (via
-//! the prompt seam) before each commit lands. A decline aborts — the current
-//! batch commits nothing, earlier batches stay committed, and the remaining
-//! changes stay recoverable (staged, exactly like a hook veto).
+//! the workflow shows the drafted message + file list, then offers a
+//! Commit / Re-generate / Edit / Abort menu (via the menu seam) before each
+//! commit lands. Abort ends the run — the current batch commits nothing,
+//! earlier batches stay committed, and the remaining changes stay recoverable
+//! (staged, exactly like a hook veto). Re-generate and Edit loop back to the
+//! menu; only the final Commit lands.
 
 use super::common::*;
 
-/// Staged single-commit path + decline: nothing commits, the abort message
+/// Staged single-commit path + Abort: nothing commits, the abort message
 /// names the outcome ("no commit made"), and the staged change survives so a
 /// re-run can retry.
 #[tokio::test]
-async fn commit_confirm_decline_aborts_staged_single_commit() {
+async fn commit_confirm_abort_aborts_staged_single_commit() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -23,14 +25,14 @@ async fn commit_confirm_decline_aborts_staged_single_commit() {
     let err = run_commit_workflow_impl(
         &git,
         unreachable_resolver(),
-        prompt_queue(vec![false]), // decline the confirmation
+        prompt_queue(vec![]),
         sink(),
         unreachable_planner(), // staged path must NOT plan
         messenger_fixed("feat: staged change"),
-        true,
+        Confirm::interactive(menu_queue(vec![ConfirmChoice::Abort]), unreachable_editor()),
     )
     .await
-    .expect_err("declining the confirmation must abort the Run");
+    .expect_err("aborting the confirmation must abort the Run");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("aborted — no commit made"),
@@ -41,23 +43,23 @@ async fn commit_confirm_decline_aborts_staged_single_commit() {
     assert_eq!(
         commit_count(dir.path()),
         before,
-        "a declined confirmation must not create a commit"
+        "an aborted confirmation must not create a commit"
     );
     // The change is still staged — re-running `aic` picks it up via the
     // staged single-commit path.
     assert_eq!(
         status_porcelain(dir.path()).trim(),
         "M  tracked.txt",
-        "the declined batch must stay staged, got: {:?}",
+        "the aborted batch must stay staged, got: {:?}",
         status_porcelain(dir.path())
     );
 }
 
-/// Staged single-commit path + accept: the confirmation shows the drafted
-/// message and file list, then yes commits normally and prints the post-commit
+/// Staged single-commit path + Commit: the confirmation shows the drafted
+/// message and file list, then commits normally and prints the post-commit
 /// line — output includes the preview block.
 #[tokio::test]
-async fn commit_confirm_accept_commits_staged_single_commit() {
+async fn commit_confirm_commit_commits_staged_single_commit() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -72,23 +74,26 @@ async fn commit_confirm_accept_commits_staged_single_commit() {
     let result = run_commit_workflow_impl(
         &git,
         unreachable_resolver(),
-        prompt_queue(vec![true]), // approve
+        prompt_queue(vec![]),
         display,
         unreachable_planner(),
         messenger_fixed("feat: staged change"),
-        true,
+        Confirm::interactive(
+            menu_queue(vec![ConfirmChoice::Commit]),
+            unreachable_editor(),
+        ),
     )
     .await;
     assert!(
         result.is_ok(),
-        "an approved confirmation should commit: {:?}",
+        "a confirmed commit should land: {:?}",
         result
     );
 
     assert_eq!(
         commit_count(dir.path()),
         before + 1,
-        "the approved staged commit must land"
+        "the confirmed staged commit must land"
     );
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
@@ -119,11 +124,161 @@ async fn commit_confirm_accept_commits_staged_single_commit() {
     );
 }
 
-/// Batch mode + decline on batch 2: batch 1 commits, batch 2's confirmation is
-/// declined, and the abort message names the batch boundary. Batch 2's hunk
+/// Re-generate → Commit: the messenger runs twice on the same diff, the menu
+/// shows after each draft, and the second draft is what lands.
+#[tokio::test]
+async fn commit_confirm_regenerate_then_commit_lands_new_message() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+
+    let before = commit_count(dir.path());
+    let buf = BufferWrite::default();
+    let display = Display::with(buf.clone());
+    let git = Git::at(dir.path()).unwrap();
+    let (messenger, calls) = messenger_sequence(&["feat: first draft", "feat: second draft"]);
+
+    let result = run_commit_workflow_impl(
+        &git,
+        unreachable_resolver(),
+        prompt_queue(vec![]),
+        display,
+        unreachable_planner(),
+        messenger,
+        Confirm::interactive(
+            menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
+            unreachable_editor(),
+        ),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "Regenerate then Commit should succeed: {:?}",
+        result
+    );
+
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "exactly one commit must land"
+    );
+    assert_eq!(*calls.lock(), 2, "the messenger must run once per draft");
+    assert_eq!(
+        git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
+        "feat: second draft",
+        "the regenerated message must be the one committed"
+    );
+    // Both drafts were previewed before the commit.
+    let lines = buf.lines();
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.contains("proposed commit:"))
+            .count()
+            == 2,
+        "each draft must get its own preview, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("feat: first draft")),
+        "first draft must be previewed, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("feat: second draft")),
+        "regenerated draft must be previewed, got: {lines:?}"
+    );
+}
+
+/// Edit → Commit: the editor rewrites the message, the edited version is what
+/// lands (subject + body).
+#[tokio::test]
+async fn commit_confirm_edit_then_commit_lands_edited_message() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let result = run_commit_workflow_impl(
+        &git,
+        unreachable_resolver(),
+        prompt_queue(vec![]),
+        sink(),
+        unreachable_planner(),
+        messenger_fixed("feat: draft"),
+        Confirm::interactive(
+            menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
+            editor_fixed("feat: edited", Some("edited body")),
+        ),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "Edit then Commit should succeed: {:?}",
+        result
+    );
+
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "the edited commit must land"
+    );
+    assert_eq!(
+        git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
+        "feat: edited\n\nedited body",
+        "the edited message must be the one committed"
+    );
+}
+
+/// Edit cancelled → Commit: the editor returns the draft untouched (the
+/// cancel path), so the original message is what lands.
+#[tokio::test]
+async fn commit_confirm_edit_cancel_keeps_original_message() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let result = run_commit_workflow_impl(
+        &git,
+        unreachable_resolver(),
+        prompt_queue(vec![]),
+        sink(),
+        unreachable_planner(),
+        messenger_fixed("feat: draft"),
+        Confirm::interactive(
+            menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
+            editor_cancel(),
+        ),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "a cancelled edit then Commit should succeed: {:?}",
+        result
+    );
+
+    assert_eq!(commit_count(dir.path()), before + 1, "the commit must land");
+    assert_eq!(
+        git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
+        "feat: draft",
+        "a cancelled edit must keep the drafted message"
+    );
+}
+
+/// Batch mode + Abort on batch 2: batch 1 commits, batch 2's confirmation is
+/// aborted, and the abort message names the batch boundary. Batch 2's hunk
 /// stays staged.
 #[tokio::test]
-async fn commit_confirm_decline_on_later_batch_keeps_earlier_commits() {
+async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -160,14 +315,17 @@ async fn commit_confirm_decline_on_later_batch_keeps_earlier_commits() {
     let err = run_commit_workflow_impl(
         &git,
         resolver_returning(""),
-        prompt_queue(vec![true, false]), // approve batch 1, decline batch 2
+        prompt_queue(vec![]),
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        true,
+        Confirm::interactive(
+            menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
+            unreachable_editor(),
+        ),
     )
     .await
-    .expect_err("declining batch 2 must abort the Run");
+    .expect_err("aborting batch 2 must abort the Run");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("aborted on batch 2 of 2"),
@@ -195,14 +353,14 @@ async fn commit_confirm_decline_on_later_batch_keeps_earlier_commits() {
     let staged = git.diff(Some("tracked.txt")).unwrap();
     assert!(
         staged.contains("c1"),
-        "the declined batch's hunk must stay staged, got:\n{staged}"
+        "the aborted batch's hunk must stay staged, got:\n{staged}"
     );
 }
 
-/// Batch mode + approve every batch: one confirmation per batch, all land, and
-/// the working tree ends clean.
+/// Batch mode + Commit on every batch: one menu per batch, all land, and the
+/// working tree ends clean.
 #[tokio::test]
-async fn commit_confirm_approves_every_batch() {
+async fn commit_confirm_commits_every_batch() {
     let dir = tempfile::tempdir().unwrap();
     two_file_unstaged_repo(dir.path());
 
@@ -231,23 +389,26 @@ async fn commit_confirm_approves_every_batch() {
     let result = run_commit_workflow_impl(
         &git,
         resolver_returning(""),
-        prompt_queue(vec![true, true]), // approve both batches
+        prompt_queue(vec![]),
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        true,
+        Confirm::interactive(
+            menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Commit]),
+            unreachable_editor(),
+        ),
     )
     .await;
     assert!(
         result.is_ok(),
-        "approving every batch should succeed: {:?}",
+        "confirming every batch should succeed: {:?}",
         result
     );
 
     assert_eq!(
         commit_count(dir.path()),
         before + 2,
-        "two approved batches must land two commits"
+        "two confirmed batches must land two commits"
     );
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "alpha.txt"),
@@ -262,10 +423,10 @@ async fn commit_confirm_approves_every_batch() {
     assert!(worktree_is_empty(dir.path()), "working tree must be clean");
 }
 
-/// Batch mode + decline on the FIRST batch: nothing commits at all, the abort
+/// Batch mode + Abort on the FIRST batch: nothing commits at all, the abort
 /// reports zero committed, and the declined hunk stays staged.
 #[tokio::test]
-async fn commit_confirm_decline_first_batch_commits_nothing() {
+async fn commit_confirm_abort_first_batch_commits_nothing() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
@@ -301,14 +462,14 @@ async fn commit_confirm_decline_first_batch_commits_nothing() {
     let err = run_commit_workflow_impl(
         &git,
         resolver_returning(""),
-        prompt_queue(vec![false]), // decline the first batch
+        prompt_queue(vec![]),
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        true,
+        Confirm::interactive(menu_queue(vec![ConfirmChoice::Abort]), unreachable_editor()),
     )
     .await
-    .expect_err("declining batch 1 must abort the Run");
+    .expect_err("aborting batch 1 must abort the Run");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("aborted on batch 1 of 2"),
@@ -322,6 +483,6 @@ async fn commit_confirm_decline_first_batch_commits_nothing() {
     assert_eq!(
         commit_count(dir.path()),
         before,
-        "a first-batch decline must not create any commit"
+        "a first-batch abort must not create any commit"
     );
 }

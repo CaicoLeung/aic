@@ -228,9 +228,10 @@ impl Display {
 
     /// Pre-commit confirmation preview (issue #78): the exact message that
     /// would be committed — subject styled exactly as the post-commit line,
-    /// body in gray — plus a one-line file list, before the y/n prompt fires.
-    /// Lets a user who signs commits (GPG) see what they are signing, or a
-    /// user on a weaker local model sanity-check the draft before it lands.
+    /// body in gray — plus a one-line file list, before the confirmation menu
+    /// fires. Lets a user who signs commits (GPG) see what they are signing,
+    /// or a user on a weaker local model sanity-check the draft before it
+    /// lands.
     pub fn commit_preview(&self, message: &str, body: Option<&str>, paths: &[String]) {
         let dim = Style::new().dim();
         self.emit(&self.styled("proposed commit:", dim.clone()));

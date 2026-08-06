@@ -45,6 +45,66 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
+/// One action the user can take on the pre-commit confirmation menu (issue
+/// #78). [`ConfirmMenu`] returns it; [`generate_and_commit`] translates it:
+/// Commit lands the commit, Regenerate and Edit loop back to the menu
+/// (re-showing the message), Abort ends the run with nothing further
+/// committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmChoice {
+    Commit,
+    Regenerate,
+    Edit,
+    Abort,
+}
+
+/// Erased confirmation menu: given the drafted subject, returns the user's
+/// choice. Boxed for the same reason as [`Resolver`] — production wires it to
+/// a terminal menu (issue #78), tests inject a scripted choice sequence.
+pub(crate) type ConfirmMenu = Box<dyn Fn(&str) -> anyhow::Result<ConfirmChoice>>;
+
+/// Erased message editor: takes the current (subject, body) and returns the
+/// edited (subject, body) — the prior values unchanged when the user cancels
+/// the edit. Boxed for the same reason as [`Resolver`] — production uses an
+/// inline TUI when stdin is a TTY and `$VISUAL`/`$EDITOR` otherwise, tests
+/// inject a stub.
+pub(crate) type CommitEditor =
+    Box<dyn Fn(&str, Option<&str>) -> anyhow::Result<(String, Option<String>)>>;
+
+/// Opt-in pre-commit confirmation (issue #78): the gate plus the menu and
+/// editor seams it needs, grouped so the workflow signatures stay within
+/// clippy's argument budget. [`Confirm::disabled`] is the default — no menu,
+/// generate-and-commit byte-for-byte as before the option existed.
+pub(crate) struct Confirm {
+    /// Gate: when `false`, `menu` and `editor` are never invoked.
+    enabled: bool,
+    /// Drafted subject → user choice (Commit / Re-generate / Edit / Abort).
+    menu: ConfirmMenu,
+    /// (subject, body) → edited (subject, body); unchanged when the user
+    /// cancels the edit.
+    editor: CommitEditor,
+}
+
+impl Confirm {
+    /// Confirmation off — the seams are placeholders that must never run.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            enabled: false,
+            menu: Box::new(|_| Ok(ConfirmChoice::Commit)),
+            editor: Box::new(|s, b| Ok((s.to_string(), b.map(|b| b.to_string())))),
+        }
+    }
+
+    /// Confirmation on, wired to the production menu and editor.
+    pub(crate) fn interactive(menu: ConfirmMenu, editor: CommitEditor) -> Self {
+        Self {
+            enabled: true,
+            menu,
+            editor,
+        }
+    }
+}
+
 /// Marker error for the user declining the pre-commit confirmation (issue
 /// #78). Distinct from ordinary failures so each call site can translate it
 /// into its own abort wording: the single-commit path reports "no commit
@@ -99,8 +159,7 @@ async fn generate_and_commit(
     display: &Display,
     prefix: &str,
     messenger: &CommitMessenger,
-    confirm: bool,
-    prompt: &Prompt,
+    confirm: &Confirm,
 ) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
@@ -111,22 +170,41 @@ async fn generate_and_commit(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
-    let result =
-        display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
 
-    // Opt-in confirmation (issue #78): show the exact message that would land
-    // plus the batch's file list, then ask. A decline aborts via the
+    // Opt-in confirmation (issue #78): after each draft, show the exact
+    // message that would land plus the batch's file list, then ask. Commit
+    // proceeds; Re-generate re-runs the messenger on the same diff; Edit opens
+    // the message in an editor and re-shows it; Abort propagates the
     // `CommitDeclined` marker so the caller translates it into its own abort
     // wording — nothing in this batch commits.
-    if confirm {
-        display.commit_preview(&result.message, result.body.as_deref(), paths);
-        if !prompt("commit this message?")? {
-            return Err(CommitDeclined.into());
-        }
-    }
+    let (message, body) = 'generate: loop {
+        let result =
+            display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
+        let mut message = result.message;
+        let mut body = result.body;
 
-    let hash = git.commit(result.message.clone(), result.body.clone())?;
-    display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
+        if !confirm.enabled {
+            break 'generate (message, body);
+        }
+
+        // Confirm loop: Commit lands the current draft; Regenerate falls
+        // through to a fresh draft; Edit rewrites the draft in place and
+        // re-shows it (the edit survives into the next preview).
+        loop {
+            display.commit_preview(&message, body.as_deref(), paths);
+            match (confirm.menu)(&message)? {
+                ConfirmChoice::Commit => break 'generate (message, body),
+                ConfirmChoice::Regenerate => continue 'generate,
+                ConfirmChoice::Edit => {
+                    (message, body) = (confirm.editor)(&message, body.as_deref())?;
+                }
+                ConfirmChoice::Abort => return Err(CommitDeclined.into()),
+            }
+        }
+    };
+
+    let hash = git.commit(message.clone(), body.clone())?;
+    display.commit_line(&hash, &message, body.as_deref(), prefix);
     Ok(())
 }
 
@@ -359,9 +437,10 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
 /// Default `aic` run. `resolve`/`prompt`/`display` are seams mirroring
 /// [`run_resolve_workflow_impl`]; they only matter on the conflicted-repo
 /// auto-detect branch, which hands off to the resolve workflow. `confirm`
-/// gates the opt-in pre-commit confirmation (issue #78): when true, every
-/// drafted message is shown (message + body + file list) and the `prompt`
-/// seam must approve it before the commit lands.
+/// gates the opt-in pre-commit confirmation (issue #78): when enabled, every
+/// drafted message is shown (message + body + file list) and its menu must
+/// approve it (Commit) — or Re-generate / Edit it, or Abort — before the
+/// commit lands.
 pub(crate) async fn run_commit_workflow_impl(
     git: &Git,
     resolve: Resolver,
@@ -369,7 +448,7 @@ pub(crate) async fn run_commit_workflow_impl(
     display: Display,
     planner: BatchPlanner,
     messenger: CommitMessenger,
-    confirm: bool,
+    confirm: Confirm,
 ) -> anyhow::Result<()> {
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
@@ -436,8 +515,7 @@ pub(crate) async fn run_commit_workflow_impl(
                     // batch or a pre-commit hook — nothing to commit.
                     return Ok(());
                 }
-                generate_and_commit(git, &paths, &display, &prefix, &messenger, confirm, &prompt)
-                    .await
+                generate_and_commit(git, &paths, &display, &prefix, &messenger, &confirm).await
             };
             if let Err(e) = outcome.await {
                 anyhow::bail!(
@@ -454,7 +532,7 @@ pub(crate) async fn run_commit_workflow_impl(
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         git.add(&refs)?;
-        match generate_and_commit(git, &paths, &display, "", &messenger, confirm, &prompt).await {
+        match generate_and_commit(git, &paths, &display, "", &messenger, &confirm).await {
             Ok(()) => {}
             // Declining the confirmation is a user choice, not an error: report
             // it as a clean abort naming the outcome — nothing committed.
@@ -469,7 +547,8 @@ pub(crate) async fn run_commit_workflow_impl(
 }
 
 /// Production entry point for the default `aic` run — wires the real LLM
-/// resolver and stdin y/n prompt into [`run_commit_workflow_impl`].
+/// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
+/// into [`run_commit_workflow_impl`].
 async fn run_commit_workflow() -> anyhow::Result<()> {
     let resolver: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
@@ -485,14 +564,21 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
+    let menu: ConfirmMenu = Box::new(confirm_menu);
+    let editor: CommitEditor = Box::new(edit_message);
     let git = Git::at(Path::new("."))?;
     // Absent/malformed config keeps the default (no confirmation) — same
     // tolerance `LLM::from_env` uses for the provider fields.
-    let confirm = config::Config::load()
+    let confirm = if config::Config::load()
         .ok()
         .flatten()
         .map(|c| c.confirm_before_commit())
-        .unwrap_or(false);
+        .unwrap_or(false)
+    {
+        Confirm::interactive(menu, editor)
+    } else {
+        Confirm::disabled()
+    };
     run_commit_workflow_impl(
         &git,
         resolver,
@@ -503,6 +589,333 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         confirm,
     )
     .await
+}
+
+/// Production confirmation menu (issue #78): a dialoguer `Select` over the
+/// four actions, matching the setup wizard's arrow-key UI. The drafted
+/// subject rides in the prompt so the menu is self-describing even if the
+/// preview above scrolled away. Esc (and `q`, dialoguer's quit key) abort —
+/// there is nothing to go back to once the commit is pending — and Ctrl-C
+/// ends the process the same way it does everywhere else in the wizard.
+fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
+    use dialoguer::{Select, theme::ColorfulTheme};
+
+    let items = ["Commit", "Re-generate", "Edit", "Abort"];
+    let mut subject: String = message.chars().take(40).collect();
+    if message.chars().count() > 40 {
+        subject.push('…');
+    }
+
+    let choice = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Commit this message?  ({subject})"))
+        .items(items)
+        .default(0)
+        .interact_opt()
+        .context("could not read terminal input")?;
+    Ok(match choice {
+        Some(0) => ConfirmChoice::Commit,
+        Some(1) => ConfirmChoice::Regenerate,
+        Some(2) => ConfirmChoice::Edit,
+        // Some(3) is Abort; None is Esc — both end the run.
+        _ => ConfirmChoice::Abort,
+    })
+}
+
+/// Production message editor (issue #78): an inline raw-mode editor when
+/// stdin is a TTY, `$VISUAL`/`$EDITOR` on a temp file otherwise (git-style).
+fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Option<String>)> {
+    if std::io::stdin().is_terminal() {
+        edit_message_inline(subject, body)
+    } else {
+        edit_message_external(subject, body)
+    }
+}
+
+/// The text an editor edits: the subject line, then the body (outer-whitespace
+/// trimmed) on following lines. Shared by both editor paths so what the user
+/// sees in the editor is exactly the (subject, body) pair that would commit.
+fn message_to_edit(subject: &str, body: Option<&str>) -> String {
+    let mut text = subject.to_string();
+    if let Some(b) = body {
+        let trimmed = b.trim();
+        if !trimmed.is_empty() {
+            text.push('\n');
+            text.push_str(trimmed);
+        }
+    }
+    text
+}
+
+/// Non-TTY fallback for [`edit_message`]: spawn `$VISUAL` (then `$EDITOR`,
+/// git's order) on a temp file containing the current message, and read the
+/// edited content back. The subject is the first line, the body the rest. An
+/// editor that fails to launch or exits non-zero is an error — a message the
+/// editor never saved must not silently commit — matching git's behavior of
+/// aborting on a broken editor. `$VISUAL`/`$EDITOR` are taken as plain
+/// executable paths, not shell command lines.
+fn edit_message_external(
+    subject: &str,
+    body: Option<&str>,
+) -> anyhow::Result<(String, Option<String>)> {
+    let editor = std::env::var_os("VISUAL")
+        .or_else(|| std::env::var_os("EDITOR"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "stdin is not a TTY and neither $VISUAL nor $EDITOR is set — \
+                 cannot open the commit message in an editor"
+            )
+        })?;
+
+    // Rebuild the message exactly as the messenger-shaped (subject, body)
+    // pair would commit, then give the editor a trailing newline to chew on.
+    let mut text = message_to_edit(subject, body);
+    text.push('\n');
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path =
+        std::env::temp_dir().join(format!("aic-commit-msg-{}-{nanos}.txt", std::process::id()));
+    std::fs::write(&path, &text).with_context(|| format!("could not write {}", path.display()))?;
+
+    let status = match std::process::Command::new(&editor).arg(&path).status() {
+        Ok(status) => status,
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(e).with_context(|| format!("failed to launch editor {:?}", editor));
+        }
+    };
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        anyhow::bail!("editor {:?} exited with {status}", editor);
+    }
+
+    let edited = std::fs::read_to_string(&path)
+        .with_context(|| format!("could not read back {}", path.display()))?;
+    let _ = std::fs::remove_file(&path);
+
+    let mut lines = edited.trim_end_matches('\n').splitn(2, '\n');
+    let new_subject = lines.next().unwrap_or("").to_string();
+    // Collapse leading blank lines git-style, so a canonical
+    // "subject\n\nbody" edit round-trips to the same (subject, body) pair.
+    let new_body = lines.next().map(|s| s.trim_start_matches('\n').to_string());
+    Ok((new_subject, new_body))
+}
+
+/// TTY path of [`edit_message`]: a raw-mode multi-line editor built on the
+/// same `console` primitives as the setup wizard's text inputs. The message
+/// renders as a scrollable block on stderr (the Display stream — stdout stays
+/// clean for piped output), the cursor stays visible, and the region redraws
+/// in place on every keystroke:
+///
+/// - printable chars insert at the cursor; Enter splits the line
+/// - Backspace / Del / arrow keys / Home / End move and delete as expected
+/// - **Ctrl-S** saves and returns the edited (subject, body)
+/// - **Esc / Ctrl-C** cancels and returns the prior message unchanged
+///
+/// Lines longer than the terminal wrap to the window width; the cursor row
+/// tracks the wrapped position, and the window scrolls to keep it visible.
+fn edit_message_inline(
+    subject: &str,
+    body: Option<&str>,
+) -> anyhow::Result<(String, Option<String>)> {
+    use console::{Key, Term};
+
+    let original = (subject.to_string(), body.map(|b| b.to_string()));
+    let mut lines: Vec<String> = message_to_edit(subject, body)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    let term = Term::stderr();
+    let width = term.size().1 as usize;
+    // Editing window: the terminal height minus the hint line, at least one
+    // row. The block is redrawn from its top on every key, so the region size
+    // only needs to be stable between renders — `drawn` below re-establishes
+    // it each pass.
+    let window = (term.size().0 as usize).saturating_sub(1).max(1);
+    let w = width.saturating_sub(1).max(1);
+    let mut row = lines.len() - 1;
+    let mut col = lines[row].chars().count();
+    let mut top = 0usize;
+    let mut drawn = 0usize;
+
+    let _ = term.hide_cursor();
+    let saved = loop {
+        // Keep the cursor row inside the window.
+        if row < top {
+            top = row;
+        } else if row >= top + window {
+            top = row + 1 - window;
+        }
+
+        // Build the redrawn block: each logical line wrapped to `w` columns,
+        // then the hint line. `cursor_row`/`cursor_col` are tracked in
+        // physical coordinates so the cursor can be parked on the character
+        // under edit after the write.
+        let mut block = String::new();
+        let mut cursor_row = 0usize;
+        let mut cursor_col = 0usize;
+        let mut phys = 0usize;
+        for (li, line) in lines.iter().enumerate().skip(top).take(window) {
+            let pieces = edit_wrap(line, w);
+            if li == row {
+                let piece = (col / w).min(pieces.len() - 1);
+                cursor_row = phys + piece;
+                cursor_col = (col - piece * w) + 2;
+            }
+            for piece in &pieces {
+                block.push_str(&format!("  {piece}\n"));
+                phys += 1;
+            }
+        }
+        block.push_str("  Ctrl-S = save · Esc/Ctrl-C = cancel\n");
+        let region = phys + 1;
+
+        // Clear the previous block, write the new one, and pad to the larger
+        // of the two so shrinking the message never strands stale rows below.
+        if drawn > 0 {
+            let _ = term.clear_last_lines(drawn);
+        }
+        let _ = term.write_str(&block);
+        for _ in region..drawn {
+            let _ = term.write_line("");
+        }
+        let _ = term.move_cursor_up(drawn.max(region) - cursor_row);
+        let _ = term.move_cursor_right(cursor_col);
+        drawn = drawn.max(region);
+
+        let key = match term.read_key_raw() {
+            Ok(key) => key,
+            Err(e) => {
+                // Leave the terminal as we found it — a hidden cursor would
+                // linger after the error propagates.
+                let _ = term.show_cursor();
+                return Err(e).context("could not read keypress");
+            }
+        };
+        match key {
+            // Ctrl-S saves (raw mode surfaces it as a control char, not a
+            // named key).
+            Key::Char('\u{13}') => break true,
+            Key::Escape | Key::CtrlC => break false,
+            Key::Char(c) if !c.is_control() => {
+                // `col` counts chars; `String::insert` is byte-indexed, so
+                // multi-byte chars need the offset converted (a naive `col +=
+                // 1` desyncs the cursor after the first non-ASCII char).
+                let b = char_to_byte(&lines[row], col);
+                lines[row].insert(b, c);
+                col += 1;
+            }
+            Key::Enter => {
+                let b = char_to_byte(&lines[row], col);
+                let rest = lines[row].split_off(b);
+                lines.insert(row + 1, rest);
+                row += 1;
+                col = 0;
+            }
+            Key::Backspace => {
+                if col > 0 {
+                    let b = char_to_byte(&lines[row], col - 1);
+                    lines[row].remove(b);
+                    col -= 1;
+                } else if row > 0 {
+                    let prev_len = lines[row - 1].chars().count();
+                    let tail = lines.remove(row);
+                    lines[row - 1].push_str(&tail);
+                    row -= 1;
+                    col = prev_len;
+                }
+            }
+            Key::Del => {
+                if col < lines[row].chars().count() {
+                    let b = char_to_byte(&lines[row], col);
+                    lines[row].remove(b);
+                } else if row + 1 < lines.len() {
+                    let tail = lines.remove(row + 1);
+                    lines[row].push_str(&tail);
+                }
+            }
+            Key::ArrowLeft => {
+                if col > 0 {
+                    col -= 1;
+                } else if row > 0 {
+                    row -= 1;
+                    col = lines[row].chars().count();
+                }
+            }
+            Key::ArrowRight => {
+                if col < lines[row].chars().count() {
+                    col += 1;
+                } else if row + 1 < lines.len() {
+                    row += 1;
+                    col = 0;
+                }
+            }
+            Key::ArrowUp => {
+                if row > 0 {
+                    row -= 1;
+                    col = col.min(lines[row].chars().count());
+                }
+            }
+            Key::ArrowDown => {
+                if row + 1 < lines.len() {
+                    row += 1;
+                    col = col.min(lines[row].chars().count());
+                }
+            }
+            Key::Home => col = 0,
+            Key::End => col = lines[row].chars().count(),
+            _ => {}
+        }
+    };
+    let _ = term.show_cursor();
+
+    if saved {
+        let text = lines.join("\n");
+        let mut lines_iter = text.splitn(2, '\n');
+        let new_subject = lines_iter.next().unwrap_or("").to_string();
+        let new_body = lines_iter.next().map(|s| s.to_string());
+        Ok((new_subject, new_body))
+    } else {
+        Ok(original)
+    }
+}
+
+/// Byte offset of the char at char-index `col` in `line` (or `line.len()` when
+/// `col` is past the end). The editor tracks the cursor as a char index and
+/// converts here for the byte-indexed `String` operations.
+fn char_to_byte(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len())
+}
+
+/// Split `line` into display pieces of at most `w` characters, preserving
+/// char boundaries (a `w` of 0 — pathological terminal — returns the line
+/// whole). An empty line yields one empty piece so the editor's physical-row
+/// accounting always sees at least one row per logical line.
+fn edit_wrap(line: &str, w: usize) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut rest = line;
+    while rest.chars().count() > w && w > 0 {
+        let idx = rest
+            .char_indices()
+            .nth(w)
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        pieces.push(rest[..idx].to_string());
+        rest = &rest[idx..];
+    }
+    if !rest.is_empty() || pieces.is_empty() {
+        pieces.push(rest.to_string());
+    }
+    pieces
 }
 
 /// Where a shell's completion script is installed, and whether the shell
@@ -911,5 +1324,103 @@ mod tests {
             std::env::remove_var("SHELL");
         }
         assert_eq!(detect_shell(), None);
+    }
+
+    // `edit_message_external` reads the process-global VISUAL/EDITOR env vars,
+    // so tests that mutate them must be serialized against each other — same
+    // pattern as the SHELL_ENV guard above.
+    static EDITOR_ENV: Mutex<()> = Mutex::new(());
+
+    /// The non-TTY editor path spawns `$VISUAL` on a temp file holding the
+    /// message and reads the edited content back: subject = first line,
+    /// body = the rest (leading blank lines collapsed, git-style).
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_external_spawns_visual_editor_on_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EDITOR_ENV.lock();
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-editor.sh");
+        // A fake editor: rewrite the file in place, subject + blank + body.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'feat: externally edited\\n\\nnew body\\n' > \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // SAFETY: guarded by EDITOR_ENV, which serializes all VISUAL/EDITOR
+        // mutation in this module against other tests in the same process.
+        unsafe {
+            std::env::set_var("VISUAL", &script);
+        }
+        let (subject, body) = edit_message_external("feat: draft", Some("old body")).unwrap();
+        unsafe {
+            std::env::remove_var("VISUAL");
+        }
+        assert_eq!(subject, "feat: externally edited");
+        assert_eq!(body.as_deref(), Some("new body"));
+    }
+
+    /// `$EDITOR` is the fallback when `$VISUAL` is unset; a body-less message
+    /// stays body-less after an edit that only rewrites the subject line.
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_external_falls_back_to_editor_and_keeps_single_line() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EDITOR_ENV.lock();
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-editor.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'fix: subject only\\n' > \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // SAFETY: guarded by EDITOR_ENV, which serializes all VISUAL/EDITOR
+        // mutation in this module against other tests in the same process.
+        unsafe {
+            std::env::remove_var("VISUAL");
+            std::env::set_var("EDITOR", &script);
+        }
+        let (subject, body) = edit_message_external("feat: draft", None).unwrap();
+        unsafe {
+            std::env::remove_var("EDITOR");
+        }
+        assert_eq!(subject, "fix: subject only");
+        assert_eq!(body, None);
+    }
+
+    /// No editor configured at all is a clear error, not a silent no-op.
+    #[test]
+    fn edit_message_external_errors_without_editor_env() {
+        let _guard = EDITOR_ENV.lock();
+        // SAFETY: guarded by EDITOR_ENV.
+        unsafe {
+            std::env::remove_var("VISUAL");
+            std::env::remove_var("EDITOR");
+        }
+        let err = edit_message_external("feat: draft", None)
+            .expect_err("missing VISUAL/EDITOR must error");
+        assert!(
+            format!("{err:#}").contains("$VISUAL nor $EDITOR"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// `edit_wrap` splits on char boundaries and never drops a line: exact
+    /// multiples, leftovers, empty lines, zero-width terminals, and
+    /// multi-byte chars all render as the editor's physical-row accounting
+    /// expects.
+    #[test]
+    fn edit_wrap_splits_on_char_boundaries() {
+        assert_eq!(edit_wrap("abcd", 2), vec!["ab", "cd"]);
+        assert_eq!(edit_wrap("abc", 2), vec!["ab", "c"]);
+        assert_eq!(edit_wrap("", 2), vec![""]);
+        assert_eq!(edit_wrap("abc", 0), vec!["abc"]);
+        assert_eq!(edit_wrap("héllo", 3), vec!["hél", "lo"]);
     }
 }

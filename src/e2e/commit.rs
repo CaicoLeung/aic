@@ -20,7 +20,7 @@ async fn commit_clean_repo_is_a_noop() {
         sink(),
         unreachable_planner(),
         unreachable_messenger(),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
@@ -49,7 +49,7 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
         sink(),
         unreachable_planner(),
         unreachable_messenger(),
-        false,
+        Confirm::disabled(),
     )
     .await
     .expect_err("must abort when user declines resolve");
@@ -81,7 +81,7 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
         sink(),
         unreachable_planner(),
         unreachable_messenger(),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -128,7 +128,7 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
         display,
         unreachable_planner(),
         unreachable_messenger(),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -209,7 +209,7 @@ async fn commit_splits_one_file_across_two_batches() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -283,7 +283,7 @@ async fn commit_splits_two_files_across_two_batches() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -368,7 +368,7 @@ async fn commit_batches_two_files_into_one_commit() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: both files"),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -433,7 +433,7 @@ async fn commit_staged_files_in_one_commit() {
         sink(),
         unreachable_planner(), // staged path must NOT plan
         messenger_fixed("feat: staged change"),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -516,7 +516,7 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
         sink(),
         planner_fixed(plan),
         messenger,
-        false,
+        Confirm::disabled(),
     )
     .await
     .expect_err("must abort when a later batch fails");
@@ -571,7 +571,7 @@ async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
         // returning Ok. Both would surface as a missing error here.
         planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
         unreachable_messenger(),
-        false,
+        Confirm::disabled(),
     )
     .await
     .expect_err("an empty batch plan must be rejected, not silently no-op'd");
@@ -679,7 +679,7 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
         sink(),
         planner_fixed(plan),
         messenger_fixed("feat: hook swallows the rest"),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -753,7 +753,7 @@ async fn commit_splits_one_file_across_three_batches() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(
@@ -841,7 +841,7 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("feat: same-file disjoint hunks"),
-        false,
+        Confirm::disabled(),
     )
     .await;
     assert!(

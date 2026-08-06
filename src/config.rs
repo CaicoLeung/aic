@@ -16,8 +16,9 @@ pub struct Config {
     pub model: Option<String>,
     pub base_url: Option<String>,
     /// When `true`, `aic` shows the drafted commit message and the files it
-    /// would land, then asks for a y/n confirmation before each commit. Absent
-    /// (or `false`) keeps the original generate-and-commit behavior.
+    /// would land, then offers a Commit / Re-generate / Edit / Abort menu
+    /// before each commit. Absent (or `false`) keeps the original
+    /// generate-and-commit behavior.
     pub confirm_before_commit: Option<bool>,
 }
 
@@ -246,7 +247,7 @@ struct Draft {
     api_key: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
-    /// Whether to require a y/n confirmation before each commit. `None` means
+    /// Whether to require confirmation before each commit. `None` means
     /// "not chosen yet" (finalize keeps it unset → config absent → default
     /// off); the wizard default shown to the user is `false`.
     confirm_before_commit: Option<bool>,
