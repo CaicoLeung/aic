@@ -546,9 +546,9 @@ pub(crate) async fn run_commit_workflow_impl(
             };
             if let Err(e) = outcome.await {
                 anyhow::bail!(
-                    "aborted on batch {} of {} after {} batch(es) committed. \
-                     The remaining changes are still staged in the index — re-run \
-                     `aic` to continue: {e:#}",
+                    "aborted on batch {} of {} after {} batch(es) committed.\n\
+                     The remaining changes are still staged in the index.\n\
+                     re-run `aic` to continue: {e:#}",
                     i + 1,
                     count,
                     i

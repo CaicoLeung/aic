@@ -329,6 +329,26 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
         msg.contains("re-run `aic` to continue"),
         "abort must point at re-running aic, got: {msg}"
     );
+    // The abort is three readable lines, not one wall of text.
+    let abort_lines: Vec<&str> = msg.lines().collect();
+    assert_eq!(
+        abort_lines.len(),
+        3,
+        "expected a 3-line abort message, got: {msg:?}"
+    );
+    assert_eq!(
+        abort_lines[0],
+        "aborted on batch 2 of 2 after 1 batch(es) committed."
+    );
+    assert_eq!(
+        abort_lines[1],
+        "The remaining changes are still staged in the index."
+    );
+    assert!(
+        abort_lines[2].starts_with("re-run `aic` to continue: commit declined"),
+        "unexpected third line: {}",
+        abort_lines[2]
+    );
 
     // Batch 1 committed (hunk 1 in HEAD); batch 2's hunk did not land.
     assert_eq!(
