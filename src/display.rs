@@ -234,35 +234,53 @@ impl Display {
     /// Emit a commit body — margin + greedy word-wrap to text_width, gray.
     /// Blank body lines stay blank (no trailing-whitespace margin). Shared by
     /// [`Display::commit_line`] and [`Display::commit_preview`].
-    fn emit_body(&self, body: &str) {
+    fn emit_body(&self, body: &str) -> usize {
         let gray = Style::new().true_color(138, 143, 159);
         let trimmed = body.trim();
+        let mut rows = 0;
         if !trimmed.is_empty() {
             let width = self.text_width();
             for src_line in trimmed.lines() {
                 if src_line.is_empty() {
                     self.emit_blank();
+                    rows += 1;
                     continue;
                 }
                 for piece in wrap_line(src_line, width) {
                     self.emit(&self.styled(&piece, gray.clone()));
+                    rows += 1;
                 }
             }
         }
+        rows
     }
 
     /// Pre-commit confirmation preview (issue #78): the exact message that
-    /// would be committed — subject styled exactly as the post-commit line,
-    /// body in gray — plus a one-line file list, before the confirmation menu
-    /// fires. Lets a user who signs commits (GPG) see what they are signing,
-    /// or a user on a weaker local model sanity-check the draft before it
-    /// lands.
-    pub fn commit_preview(&self, message: &str, body: Option<&str>, paths: &[String]) {
+    /// would be committed, framed as *pending* so it can't be mistaken for the
+    /// ✓ lines of already-landed batches — a yellow `?` marker on the header
+    /// and subject (the subject keeps its conventional-commit coloring, so the
+    /// draft previews the exact styling the ✓ line will use), gray body, dim
+    /// file list.
+    ///
+    /// Returns how many rows the preview occupies, so the caller can erase it
+    /// with [`Display::clear_last`] once the draft is confirmed or replaced —
+    /// a confirmed draft never lingers on screen.
+    pub fn commit_preview(&self, message: &str, body: Option<&str>, paths: &[String]) -> usize {
+        let pending = Style::new().yellow().bold();
         let dim = Style::new().dim();
-        self.emit(&self.styled("proposed commit:", dim.clone()));
-        self.emit(&self.styled_subject(message));
+        self.emit(&format!(
+            "{} {}",
+            self.styled("?", pending.clone()),
+            self.styled("proposed commit:", pending.clone())
+        ));
+        self.emit(&format!(
+            "{} {}",
+            self.styled("?", pending.clone()),
+            self.styled_subject(message)
+        ));
+        let mut rows = 2;
         if let Some(b) = body {
-            self.emit_body(b);
+            rows += self.emit_body(b);
         }
         let files = if paths.len() == 1 {
             paths[0].clone()
@@ -281,6 +299,7 @@ impl Display {
         };
         self.emit(&self.styled(&format!("files: {files}"), dim));
         self.emit_blank();
+        rows + 2
     }
 
     // ------------------------------------------------------------------
@@ -1439,22 +1458,25 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        d.commit_preview(
+        let rows = d.commit_preview(
             "feat(auth): add OAuth2 login support",
             Some("Allow users to sign in via Google and GitHub OAuth2 providers"),
             &["src/auth.rs".to_string(), "src/main.rs".to_string()],
         );
         let got = lines.lock().clone();
-        // Header, styled subject, body, and file list all sit at the shared
-        // margin; a trailing blank separates the preview from the y/n prompt.
-        assert_eq!(got[0], "  proposed commit:");
-        assert_eq!(got[1], "  feat(auth): add OAuth2 login support");
+        // Pending header + subject carry the `?` marker; body and file list
+        // sit at the shared margin; a trailing blank separates the preview
+        // from the confirmation menu. `rows` is the whole block, so the caller
+        // can erase it after the draft is confirmed.
+        assert_eq!(got[0], "  ? proposed commit:");
+        assert_eq!(got[1], "  ? feat(auth): add OAuth2 login support");
         assert_eq!(
             got[2],
             "  Allow users to sign in via Google and GitHub OAuth2 providers"
         );
         assert_eq!(got[3], "  files: src/auth.rs, src/main.rs (2 files)");
         assert_eq!(got[4], "");
+        assert_eq!(rows, 5, "header + subject + body + files + blank");
     }
 
     #[test]
@@ -1464,13 +1486,40 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        d.commit_preview("chore: bump dep", None, &["Cargo.toml".to_string()]);
+        let rows = d.commit_preview("chore: bump dep", None, &["Cargo.toml".to_string()]);
         let got = lines.lock().clone();
-        assert_eq!(got[0], "  proposed commit:");
-        assert_eq!(got[1], "  chore: bump dep");
+        assert_eq!(got[0], "  ? proposed commit:");
+        assert_eq!(got[1], "  ? chore: bump dep");
         // Single file: no "(1 files)" suffix; no body line emitted.
         assert_eq!(got[2], "  files: Cargo.toml");
         assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
+        assert_eq!(rows, 4, "header + subject + files + blank");
+    }
+
+    /// `clear_last` drops the most recent rows from the buffer (the in-memory
+    /// analogue of erasing a preview on a real terminal), and `0` is a no-op —
+    /// so the confirmed-draft erase never touches earlier commit lines.
+    #[test]
+    fn clear_last_erases_only_the_most_recent_rows() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.emit("keep me");
+        d.emit("preview line 1");
+        d.emit("preview line 2");
+        d.emit("preview line 3");
+        d.clear_last(3);
+        assert_eq!(lines.lock().clone(), vec!["  keep me".to_string()]);
+
+        // n == 0 is a no-op.
+        d.clear_last(0);
+        assert_eq!(lines.lock().clone(), vec!["  keep me".to_string()]);
+
+        // n larger than the buffer just empties it (no panic).
+        d.clear_last(99);
+        assert!(lines.lock().is_empty());
     }
 
     /// A batch with more than 8 files keeps the preview line bounded: the
@@ -1483,7 +1532,7 @@ mod tests {
             lines: lines.clone(),
         });
         let paths: Vec<String> = (1..=10).map(|i| format!("src/f{i}.rs")).collect();
-        d.commit_preview("feat: big", None, &paths);
+        let rows = d.commit_preview("feat: big", None, &paths);
         let got = lines.lock().clone();
         assert!(
             got.iter().any(|l| l.contains(
@@ -1492,6 +1541,7 @@ mod tests {
             )),
             "expected a truncated file list, got: {got:?}"
         );
+        assert_eq!(rows, 4, "header + subject + files + blank");
     }
 
     #[test]
