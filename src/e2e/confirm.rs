@@ -29,7 +29,10 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
         sink(),
         unreachable_planner(), // staged path must NOT plan
         messenger_fixed("feat: staged change"),
-        Confirm::interactive(menu_queue(vec![ConfirmChoice::Abort]), unreachable_editor()),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Abort]),
+            editor: unreachable_editor(),
+        },
     )
     .await
     .expect_err("aborting the confirmation must abort the Run");
@@ -78,10 +81,10 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
         display,
         unreachable_planner(),
         messenger_fixed("feat: staged change"),
-        Confirm::interactive(
-            menu_queue(vec![ConfirmChoice::Commit]),
-            unreachable_editor(),
-        ),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Commit]),
+            editor: unreachable_editor(),
+        },
     )
     .await;
     assert!(
@@ -142,10 +145,10 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
         display,
         unreachable_planner(),
         messenger,
-        Confirm::interactive(
-            menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
-            unreachable_editor(),
-        ),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
+            editor: unreachable_editor(),
+        },
     )
     .await;
     assert!(
@@ -200,10 +203,10 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
         sink(),
         unreachable_planner(),
         messenger_fixed("feat: draft"),
-        Confirm::interactive(
-            menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
-            editor_fixed("feat: edited", Some("edited body")),
-        ),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
+            editor: editor_fixed("feat: edited", Some("edited body")),
+        },
     )
     .await;
     assert!(
@@ -244,10 +247,10 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
         sink(),
         unreachable_planner(),
         messenger_fixed("feat: draft"),
-        Confirm::interactive(
-            menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
-            editor_cancel(),
-        ),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
+            editor: editor_cancel(),
+        },
     )
     .await;
     assert!(
@@ -309,10 +312,10 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        Confirm::interactive(
-            menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
-            unreachable_editor(),
-        ),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
+            editor: unreachable_editor(),
+        },
     )
     .await
     .expect_err("aborting batch 2 must abort the Run");
@@ -403,10 +406,10 @@ async fn commit_confirm_commits_every_batch() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        Confirm::interactive(
-            menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Commit]),
-            unreachable_editor(),
-        ),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Commit]),
+            editor: unreachable_editor(),
+        },
     )
     .await;
     assert!(
@@ -476,7 +479,10 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
         sink(),
         planner_fixed(plan),
         messenger_fixed("chore: stub"),
-        Confirm::interactive(menu_queue(vec![ConfirmChoice::Abort]), unreachable_editor()),
+        Confirm::Interactive {
+            menu: menu_queue(vec![ConfirmChoice::Abort]),
+            editor: unreachable_editor(),
+        },
     )
     .await
     .expect_err("aborting batch 1 must abort the Run");
