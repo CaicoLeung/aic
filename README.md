@@ -42,7 +42,7 @@ aic:          3 commits, one per logical change  ✅
 - **Hunk-level batch splitting** — one file, many concerns? aic splits per-hunk into atomic commits (`git add -p` style, fully non-interactive)
 - **Multi-provider** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, xAI, Mistral, OpenRouter, Perplexity, Together, Ollama, and any OpenAI-compatible server
 - **Conflict resolution** — mid-merge? `aic resolve` proposes per-file resolutions you review and approve, then finalizes the merge
-- **Interactive setup** — `aic setup` walks you through provider, API key, model, and an optional per-commit confirmation toggle
+- **Interactive setup** — `aic setup` is menu-driven: pick the AI provider (backend, API key, base URL, model) or the per-commit confirmation toggle in any order, then save
 - **Conventional Commits** — messages follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) spec
 - **Configurable** — config file, environment variables, or per-run override
 
@@ -115,7 +115,7 @@ aic
 | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `aic`         | Commit staged files with one message. If nothing is staged, batch-plan all unstaged changes into **hunk-level** atomic commits. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Proposes per-file resolutions to review, then finalizes the merge.            |
-| `aic setup`   | Interactive wizard to pick provider, enter API key, and select model; also toggles pre-commit confirmation.                 |
+| `aic setup`   | Menu-driven config: AI provider (backend, API key, base URL, model) and a pre-commit confirmation toggle, in any order.    |
 | `aic list`    | Show resolved config: provider, model, and where each value comes from (env / config / default).                       |
 | `aic update`  | Update aic to the latest version from GitHub Releases.                                                                 |
 
