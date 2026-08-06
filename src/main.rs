@@ -651,49 +651,66 @@ fn message_to_edit(subject: &str, body: Option<&str>) -> String {
 /// edited content back. The subject is the first line, the body the rest. An
 /// editor that fails to launch or exits non-zero is an error — a message the
 /// editor never saved must not silently commit — matching git's behavior of
-/// aborting on a broken editor. `$VISUAL`/`$EDITOR` are taken as plain
-/// executable paths, not shell command lines.
+/// aborting on a broken editor.
+///
+/// `$VISUAL`/`$EDITOR` are split shell-style ([`split_command`]) so the common
+/// `EDITOR="code --wait"` form works without invoking a shell, and the temp
+/// file is created with exclusive semantics ([`tempfile::NamedTempFile`]) so a
+/// file planted in the shared temp dir is never followed or overwritten, and
+/// it is removed on every exit path.
 fn edit_message_external(
     subject: &str,
     body: Option<&str>,
 ) -> anyhow::Result<(String, Option<String>)> {
-    let editor = std::env::var_os("VISUAL")
-        .or_else(|| std::env::var_os("EDITOR"))
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .or_else(|| std::env::var("EDITOR").ok())
+        .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "stdin is not a TTY and neither $VISUAL nor $EDITOR is set — \
                  cannot open the commit message in an editor"
             )
         })?;
+    let parts = split_command(&editor);
+    let (program, args) = parts
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("$VISUAL/$EDITOR is empty"))?;
 
     // Rebuild the message exactly as the messenger-shaped (subject, body)
     // pair would commit, then give the editor a trailing newline to chew on.
     let mut text = message_to_edit(subject, body);
     text.push('\n');
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let path =
-        std::env::temp_dir().join(format!("aic-commit-msg-{}-{nanos}.txt", std::process::id()));
-    std::fs::write(&path, &text).with_context(|| format!("could not write {}", path.display()))?;
+    // Exclusive-create (never follows a pre-planted symlink) and remove-on-
+    // drop, so a failed editor cannot strand a stale file in the temp dir.
+    let mut file = tempfile::Builder::new()
+        .prefix("aic-commit-msg-")
+        .suffix(".txt")
+        .tempfile()
+        .context("could not create a temp file for the commit message")?;
+    use std::io::Write as _;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("could not write {}", file.path().display()))?;
+    let path = file.path().to_path_buf();
 
-    let status = match std::process::Command::new(&editor).arg(&path).status() {
+    let status = match std::process::Command::new(program)
+        .args(args)
+        .arg(&path)
+        .status()
+    {
         Ok(status) => status,
-        Err(e) => {
-            let _ = std::fs::remove_file(&path);
-            return Err(e).with_context(|| format!("failed to launch editor {:?}", editor));
-        }
+        Err(e) => return Err(e).with_context(|| format!("failed to launch editor {:?}", program)),
     };
     if !status.success() {
-        let _ = std::fs::remove_file(&path);
-        anyhow::bail!("editor {:?} exited with {status}", editor);
+        anyhow::bail!("editor {:?} exited with {status}", program);
     }
 
+    // Read by path: an editor that replaces the file via rename (vim-style)
+    // leaves the new content at `path`, which is what we want to commit.
     let edited = std::fs::read_to_string(&path)
         .with_context(|| format!("could not read back {}", path.display()))?;
-    let _ = std::fs::remove_file(&path);
+    // Dropping `file` removes the temp file (even the renamed replacement).
 
     let mut lines = edited.trim_end_matches('\n').splitn(2, '\n');
     let new_subject = lines.next().unwrap_or("").to_string();
@@ -703,184 +720,368 @@ fn edit_message_external(
     Ok((new_subject, new_body))
 }
 
+/// Split a `$VISUAL`/`$EDITOR` command line into program + arguments without
+/// invoking a shell: whitespace separates tokens, single/double quotes group
+/// tokens (the quotes are removed), and a backslash escapes the next
+/// character — literal inside single quotes, as in POSIX shells. An
+/// unterminated quote consumes the rest of the string. This makes the common
+/// `EDITOR="code --wait"` and quoted paths work while keeping the editor a
+/// plain argv, never a shell string.
+fn split_command(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('\'') => current.push(c),
+            Some(_) => {
+                // Double-quoted: backslash escapes the next char.
+                if c == '\\' {
+                    match chars.peek() {
+                        Some(&next) => {
+                            current.push(next);
+                            chars.next();
+                        }
+                        None => current.push('\\'),
+                    }
+                } else {
+                    current.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '\\' => match chars.peek() {
+                    Some(&next) => {
+                        current.push(next);
+                        chars.next();
+                    }
+                    None => current.push('\\'),
+                },
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        args.push(std::mem::take(&mut current));
+                    }
+                }
+                c => current.push(c),
+            },
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+/// What a keypress did to an [`EditBuffer`]: ended the session (saved or
+/// cancelled) or kept editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditOutcome {
+    Save,
+    Cancel,
+    Continue,
+}
+
+/// The pure, I/O-free state of one inline editing session: the message lines
+/// plus the cursor (line index, char index within the line). Kept separate
+/// from the terminal rendering ([`render_editor`]) so every key transition is
+/// unit-testable without a TTY (issue #78 review).
+struct EditBuffer {
+    lines: Vec<String>,
+    row: usize,
+    col: usize,
+}
+
+impl EditBuffer {
+    /// Start editing the drafted message with the cursor at the end of the
+    /// last line.
+    fn new(subject: &str, body: Option<&str>) -> Self {
+        let mut lines: Vec<String> = message_to_edit(subject, body)
+            .lines()
+            .map(|l| l.to_string())
+            .collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        let row = lines.len() - 1;
+        let col = lines[row].chars().count();
+        EditBuffer { lines, row, col }
+    }
+
+    /// Apply one key. Returns `Save`/`Cancel` for the keys that end the
+    /// session; everything else mutates the buffer and returns `Continue`.
+    fn key(&mut self, key: Key) -> EditOutcome {
+        match key {
+            // Ctrl-S saves (raw mode surfaces it as a control char, not a
+            // named key).
+            Key::Char('\u{13}') => EditOutcome::Save,
+            Key::Escape | Key::CtrlC => EditOutcome::Cancel,
+            Key::Char(c) if !c.is_control() => {
+                // `col` counts chars; `String::insert` is byte-indexed, so
+                // multi-byte chars need the offset converted (a naive `col +=
+                // 1` desyncs the cursor after the first non-ASCII char).
+                let b = char_to_byte(&self.lines[self.row], self.col);
+                self.lines[self.row].insert(b, c);
+                self.col += 1;
+                EditOutcome::Continue
+            }
+            Key::Enter => {
+                let b = char_to_byte(&self.lines[self.row], self.col);
+                let rest = self.lines[self.row].split_off(b);
+                self.row += 1;
+                self.lines.insert(self.row, rest);
+                self.col = 0;
+                EditOutcome::Continue
+            }
+            Key::Backspace => {
+                if self.col > 0 {
+                    let b = char_to_byte(&self.lines[self.row], self.col - 1);
+                    self.lines[self.row].remove(b);
+                    self.col -= 1;
+                } else if self.row > 0 {
+                    let prev_len = self.lines[self.row - 1].chars().count();
+                    let tail = self.lines.remove(self.row);
+                    self.row -= 1;
+                    self.lines[self.row].push_str(&tail);
+                    self.col = prev_len;
+                }
+                EditOutcome::Continue
+            }
+            Key::Del => {
+                if self.col < self.lines[self.row].chars().count() {
+                    let b = char_to_byte(&self.lines[self.row], self.col);
+                    self.lines[self.row].remove(b);
+                } else if self.row + 1 < self.lines.len() {
+                    let tail = self.lines.remove(self.row + 1);
+                    self.lines[self.row].push_str(&tail);
+                }
+                EditOutcome::Continue
+            }
+            Key::ArrowLeft => {
+                if self.col > 0 {
+                    self.col -= 1;
+                } else if self.row > 0 {
+                    self.row -= 1;
+                    self.col = self.lines[self.row].chars().count();
+                }
+                EditOutcome::Continue
+            }
+            Key::ArrowRight => {
+                if self.col < self.lines[self.row].chars().count() {
+                    self.col += 1;
+                } else if self.row + 1 < self.lines.len() {
+                    self.row += 1;
+                    self.col = 0;
+                }
+                EditOutcome::Continue
+            }
+            Key::ArrowUp => {
+                if self.row > 0 {
+                    self.row -= 1;
+                    self.col = self.col.min(self.lines[self.row].chars().count());
+                }
+                EditOutcome::Continue
+            }
+            Key::ArrowDown => {
+                if self.row + 1 < self.lines.len() {
+                    self.row += 1;
+                    self.col = self.col.min(self.lines[self.row].chars().count());
+                }
+                EditOutcome::Continue
+            }
+            Key::Home => {
+                self.col = 0;
+                EditOutcome::Continue
+            }
+            Key::End => {
+                self.col = self.lines[self.row].chars().count();
+                EditOutcome::Continue
+            }
+            _ => EditOutcome::Continue,
+        }
+    }
+
+    /// The (subject, body) the buffer holds right now: first line is the
+    /// subject, the rest the body. Leading and trailing blank body lines are
+    /// collapsed git-style, matching [`edit_message_external`] so both editor
+    /// paths round-trip to the same pair.
+    fn message(&self) -> (String, Option<String>) {
+        let subject = self.lines.first().cloned().unwrap_or_default();
+        let body = self.lines[1..].join("\n");
+        let body = body.trim_matches('\n').to_string();
+        if body.is_empty() {
+            (subject, None)
+        } else {
+            (subject, Some(body))
+        }
+    }
+}
+
+/// One frame of the inline editor: the text to write to the terminal, the
+/// physical cursor position within that text, and how many rows the frame
+/// occupies. Pure — built from the buffer and viewport without any terminal
+/// I/O — so layout (including wide-char wrapping) is testable.
+struct EditorRender {
+    block: String,
+    cursor_row: usize,
+    cursor_col: usize,
+    region: usize,
+}
+
+/// Lay out the visible slice of the buffer: `top` is the first logical line
+/// shown, `window` how many logical lines fit, and `width` the terminal
+/// column budget for a line. Wrapping is display-width aware ([`edit_wrap`]),
+/// so CJK text wraps and the cursor lands on the correct column.
+fn render_editor(
+    lines: &[String],
+    row: usize,
+    col: usize,
+    top: usize,
+    window: usize,
+    width: usize,
+) -> EditorRender {
+    let mut block = String::new();
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+    let mut phys = 0usize;
+
+    for (li, line) in lines.iter().enumerate().skip(top).take(window) {
+        let pieces = edit_wrap(line, width);
+        if li == row {
+            // The wrapped piece holding the cursor, plus the display width
+            // before it — so the cursor column is right even when the line
+            // wraps mid-text or contains wide (CJK) characters.
+            let mut consumed = 0usize;
+            let mut width_before = 0usize;
+            let mut piece = pieces.len().saturating_sub(1);
+            for (pi, p) in pieces.iter().enumerate() {
+                if col < consumed + p.chars().count() {
+                    piece = pi;
+                    break;
+                }
+                consumed += p.chars().count();
+                width_before += console::measure_text_width(p);
+            }
+            cursor_row = phys + piece;
+            cursor_col = 2 + char_prefix_width(line, col).saturating_sub(width_before);
+        }
+        for p in &pieces {
+            block.push_str(&format!("  {p}\n"));
+            phys += 1;
+        }
+    }
+    block.push_str("  Ctrl-S = save · Esc/Ctrl-C = cancel\n");
+    EditorRender {
+        block,
+        cursor_row,
+        cursor_col,
+        region: phys + 1,
+    }
+}
+
+/// Display width (terminal columns) of the first `col` chars of `line` —
+/// wide (CJK) characters count as two columns, so the cursor column tracks
+/// the terminal, not the char count.
+fn char_prefix_width(line: &str, col: usize) -> usize {
+    line.chars()
+        .take(col)
+        .map(|c| console::measure_text_width(&c.to_string()))
+        .sum()
+}
+
 /// TTY path of [`edit_message`]: a raw-mode multi-line editor built on the
 /// same `console` primitives as the setup wizard's text inputs. The message
 /// renders as a scrollable block on stderr (the Display stream — stdout stays
-/// clean for piped output), the cursor stays visible, and the region redraws
-/// in place on every keystroke:
+/// clean for piped output), and the region redraws in place on every
+/// keystroke:
 ///
 /// - printable chars insert at the cursor; Enter splits the line
 /// - Backspace / Del / arrow keys / Home / End move and delete as expected
 /// - **Ctrl-S** saves and returns the edited (subject, body)
 /// - **Esc / Ctrl-C** cancels and returns the prior message unchanged
 ///
-/// Lines longer than the terminal wrap to the window width; the cursor row
-/// tracks the wrapped position, and the window scrolls to keep it visible.
+/// Lines longer than the terminal wrap to the window width (display-width
+/// aware, so CJK text wraps correctly); the cursor tracks the wrapped
+/// position, and the window scrolls to keep it visible. The edit logic lives
+/// in [`EditBuffer`] and the layout in [`render_editor`] — both pure — so this
+/// function only shuttles frames between the terminal and the state machine.
 fn edit_message_inline(
     subject: &str,
     body: Option<&str>,
 ) -> anyhow::Result<(String, Option<String>)> {
-    use console::{Key, Term};
+    use console::Term;
 
     let original = (subject.to_string(), body.map(|b| b.to_string()));
-    let mut lines: Vec<String> = message_to_edit(subject, body)
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
+    let mut buf = EditBuffer::new(subject, body);
 
     let term = Term::stderr();
     let width = term.size().1 as usize;
     // Editing window: the terminal height minus the hint line, at least one
-    // row. The block is redrawn from its top on every key, so the region size
-    // only needs to be stable between renders — `drawn` below re-establishes
-    // it each pass.
+    // row.
     let window = (term.size().0 as usize).saturating_sub(1).max(1);
     let w = width.saturating_sub(1).max(1);
-    let mut row = lines.len() - 1;
-    let mut col = lines[row].chars().count();
+
+    // Viewport state: which logical line the window starts at, how many rows
+    // have been drawn so far (only grows, so a shrinking message never
+    // strands stale rows below), and where the caret was parked after the
+    // last frame — needed to return to the bottom of the drawn block before
+    // clearing it.
     let mut top = 0usize;
     let mut drawn = 0usize;
+    let mut parked_row = 0usize;
 
-    let _ = term.hide_cursor();
     let saved = loop {
-        // Keep the cursor row inside the window.
-        if row < top {
-            top = row;
-        } else if row >= top + window {
-            top = row + 1 - window;
+        // Keep the cursor row inside the window, scrolling the view as it
+        // crosses an edge.
+        if buf.row < top {
+            top = buf.row;
+        } else if buf.row >= top + window {
+            top = buf.row + 1 - window;
         }
 
-        // Build the redrawn block: each logical line wrapped to `w` columns,
-        // then the hint line. `cursor_row`/`cursor_col` are tracked in
-        // physical coordinates so the cursor can be parked on the character
-        // under edit after the write.
-        let mut block = String::new();
-        let mut cursor_row = 0usize;
-        let mut cursor_col = 0usize;
-        let mut phys = 0usize;
-        for (li, line) in lines.iter().enumerate().skip(top).take(window) {
-            let pieces = edit_wrap(line, w);
-            if li == row {
-                let piece = (col / w).min(pieces.len() - 1);
-                cursor_row = phys + piece;
-                cursor_col = (col - piece * w) + 2;
-            }
-            for piece in &pieces {
-                block.push_str(&format!("  {piece}\n"));
-                phys += 1;
-            }
-        }
-        block.push_str("  Ctrl-S = save · Esc/Ctrl-C = cancel\n");
-        let region = phys + 1;
+        let r = render_editor(&buf.lines, buf.row, buf.col, top, window, w);
 
-        // Clear the previous block, write the new one, and pad to the larger
-        // of the two so shrinking the message never strands stale rows below.
+        // Redraw: hide the caret, return to the bottom of the previously
+        // drawn block and clear upward from there (`clear_last_lines` erases
+        // the n lines above the cursor, so starting at the block's bottom
+        // erases exactly the block — never the preview above it), then write
+        // the new frame and park the caret on the edit position.
+        let _ = term.hide_cursor();
         if drawn > 0 {
+            let _ = term.move_cursor_down(drawn.saturating_sub(parked_row));
             let _ = term.clear_last_lines(drawn);
         }
-        let _ = term.write_str(&block);
-        for _ in region..drawn {
+        let _ = term.write_str(&r.block);
+        for _ in r.region..drawn {
             let _ = term.write_line("");
         }
-        let _ = term.move_cursor_up(drawn.max(region) - cursor_row);
-        let _ = term.move_cursor_right(cursor_col);
-        drawn = drawn.max(region);
+        drawn = drawn.max(r.region);
+
+        let _ = term.move_cursor_up(drawn - r.cursor_row);
+        let _ = term.move_cursor_right(r.cursor_col);
+        parked_row = r.cursor_row;
+        let _ = term.show_cursor();
 
         let key = match term.read_key_raw() {
             Ok(key) => key,
             Err(e) => {
-                // Leave the terminal as we found it — a hidden cursor would
+                // Leave the terminal as we found it — a hidden caret would
                 // linger after the error propagates.
                 let _ = term.show_cursor();
                 return Err(e).context("could not read keypress");
             }
         };
-        match key {
-            // Ctrl-S saves (raw mode surfaces it as a control char, not a
-            // named key).
-            Key::Char('\u{13}') => break true,
-            Key::Escape | Key::CtrlC => break false,
-            Key::Char(c) if !c.is_control() => {
-                // `col` counts chars; `String::insert` is byte-indexed, so
-                // multi-byte chars need the offset converted (a naive `col +=
-                // 1` desyncs the cursor after the first non-ASCII char).
-                let b = char_to_byte(&lines[row], col);
-                lines[row].insert(b, c);
-                col += 1;
-            }
-            Key::Enter => {
-                let b = char_to_byte(&lines[row], col);
-                let rest = lines[row].split_off(b);
-                lines.insert(row + 1, rest);
-                row += 1;
-                col = 0;
-            }
-            Key::Backspace => {
-                if col > 0 {
-                    let b = char_to_byte(&lines[row], col - 1);
-                    lines[row].remove(b);
-                    col -= 1;
-                } else if row > 0 {
-                    let prev_len = lines[row - 1].chars().count();
-                    let tail = lines.remove(row);
-                    lines[row - 1].push_str(&tail);
-                    row -= 1;
-                    col = prev_len;
-                }
-            }
-            Key::Del => {
-                if col < lines[row].chars().count() {
-                    let b = char_to_byte(&lines[row], col);
-                    lines[row].remove(b);
-                } else if row + 1 < lines.len() {
-                    let tail = lines.remove(row + 1);
-                    lines[row].push_str(&tail);
-                }
-            }
-            Key::ArrowLeft => {
-                if col > 0 {
-                    col -= 1;
-                } else if row > 0 {
-                    row -= 1;
-                    col = lines[row].chars().count();
-                }
-            }
-            Key::ArrowRight => {
-                if col < lines[row].chars().count() {
-                    col += 1;
-                } else if row + 1 < lines.len() {
-                    row += 1;
-                    col = 0;
-                }
-            }
-            Key::ArrowUp => {
-                if row > 0 {
-                    row -= 1;
-                    col = col.min(lines[row].chars().count());
-                }
-            }
-            Key::ArrowDown => {
-                if row + 1 < lines.len() {
-                    row += 1;
-                    col = col.min(lines[row].chars().count());
-                }
-            }
-            Key::Home => col = 0,
-            Key::End => col = lines[row].chars().count(),
-            _ => {}
+        match buf.key(key) {
+            EditOutcome::Save => break true,
+            EditOutcome::Cancel => break false,
+            EditOutcome::Continue => {}
         }
     };
     let _ = term.show_cursor();
 
     if saved {
-        let text = lines.join("\n");
-        let mut lines_iter = text.splitn(2, '\n');
-        let new_subject = lines_iter.next().unwrap_or("").to_string();
-        let new_body = lines_iter.next().map(|s| s.to_string());
-        Ok((new_subject, new_body))
+        Ok(buf.message())
     } else {
         Ok(original)
     }
@@ -1422,5 +1623,310 @@ mod tests {
         assert_eq!(edit_wrap("", 2), vec![""]);
         assert_eq!(edit_wrap("abc", 0), vec!["abc"]);
         assert_eq!(edit_wrap("héllo", 3), vec!["hél", "lo"]);
+    }
+
+    /// `edit_wrap` is display-width aware: wide (CJK) chars count as two
+    /// columns, so a line wraps at the column budget, never mid-char.
+    #[test]
+    fn edit_wrap_splits_by_display_width() {
+        assert_eq!(edit_wrap("中文测试", 4), vec!["中文", "测试"]);
+        assert_eq!(edit_wrap("中文测试", 6), vec!["中文测", "试"]);
+        assert_eq!(edit_wrap("a中b", 3), vec!["a中", "b"]);
+        // A single char wider than the budget still becomes its own piece —
+        // a char can't be split.
+        assert_eq!(edit_wrap("中", 1), vec!["中"]);
+        assert_eq!(edit_wrap("中文", 0), vec!["中文"]);
+    }
+
+    /// Typing, Enter (split), Backspace (join), and Del behave on a simple
+    /// ASCII message, and the cursor tracks the edits.
+    #[test]
+    fn edit_buffer_types_splits_and_joins_lines() {
+        let mut b = EditBuffer::new("feat: draft", None);
+        assert_eq!(b.key(Key::Char('!')), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["feat: draft!"]);
+
+        // Enter at end of line starts a new line.
+        assert_eq!(b.key(Key::Enter), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["feat: draft!", ""]);
+        assert_eq!((b.row, b.col), (1, 0));
+
+        // Del at the start of the new line joins it back (nothing to delete).
+        assert_eq!(b.key(Key::Del), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["feat: draft!", ""]);
+
+        // Type, then Backspace removes the char; Backspace at line start joins
+        // the previous line and parks the cursor at its end.
+        assert_eq!(b.key(Key::Char('x')), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["feat: draft!", "x"]);
+        assert_eq!(b.key(Key::Backspace), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["feat: draft!", ""]);
+        assert_eq!(b.key(Key::Backspace), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["feat: draft!"]);
+        assert_eq!((b.row, b.col), (0, 12));
+
+        // Home + Del deletes the first char.
+        assert_eq!(b.key(Key::Home), EditOutcome::Continue);
+        assert_eq!(b.key(Key::Del), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["eat: draft!"]);
+    }
+
+    /// Multi-byte chars insert/delete on char boundaries: the cursor is a
+    /// char index, and `String` ops convert to byte offsets, so CJK text
+    /// never gets split mid-codepoint.
+    #[test]
+    fn edit_buffer_handles_multibyte_chars() {
+        let mut b = EditBuffer::new("", None);
+        b.key(Key::Char('中'));
+        b.key(Key::Char('文'));
+        assert_eq!(b.lines, vec!["中文"]);
+        assert_eq!((b.row, b.col), (0, 2));
+
+        // Backspace removes a whole char, not a byte.
+        b.key(Key::Backspace);
+        assert_eq!(b.lines, vec!["中"]);
+        assert_eq!(b.col, 1);
+
+        // Inserting between chars lands at the right byte offset.
+        b.key(Key::ArrowLeft);
+        b.key(Key::Char('a'));
+        assert_eq!(b.lines, vec!["a中"]);
+        assert_eq!(b.col, 1);
+
+        // Del removes the char at the cursor, again whole.
+        b.key(Key::ArrowRight);
+        b.key(Key::Home);
+        b.key(Key::Del);
+        assert_eq!(b.lines, vec!["中"]);
+    }
+
+    /// Arrow keys move the cursor, clamping at line edges and wrapping at
+    /// line boundaries; Home/End jump within the line.
+    #[test]
+    fn edit_buffer_navigates_with_arrows_home_end() {
+        let mut b = EditBuffer::new("ab\ncd", None);
+        assert_eq!((b.row, b.col), (1, 2)); // starts at end of last line
+
+        b.key(Key::ArrowLeft);
+        assert_eq!((b.row, b.col), (1, 1));
+        b.key(Key::ArrowLeft);
+        assert_eq!((b.row, b.col), (1, 0));
+        // Left at line start moves to the previous line's end.
+        b.key(Key::ArrowLeft);
+        assert_eq!((b.row, b.col), (0, 2));
+
+        // Down from a shorter line clamps the column.
+        b.key(Key::ArrowDown);
+        assert_eq!((b.row, b.col), (1, 2));
+        b.key(Key::Home);
+        assert_eq!((b.row, b.col), (1, 0));
+        b.key(Key::End);
+        assert_eq!((b.row, b.col), (1, 2));
+        b.key(Key::ArrowUp);
+        assert_eq!((b.row, b.col), (0, 2));
+
+        // Movement at the very edges is a no-op, not a panic.
+        b.key(Key::ArrowUp);
+        b.key(Key::ArrowLeft);
+        assert_eq!((b.row, b.col), (0, 1));
+        b.key(Key::ArrowLeft);
+        b.key(Key::ArrowLeft);
+        assert_eq!((b.row, b.col), (0, 0));
+        b.key(Key::ArrowLeft);
+        b.key(Key::ArrowUp);
+        assert_eq!((b.row, b.col), (0, 0));
+    }
+
+    /// The buffer round-trips the drafted (subject, body) exactly, and a
+    /// messy edit (blank lines around the body) collapses git-style — the
+    /// same normalization [`edit_message_external`] applies, so both editor
+    /// paths produce identical output for identical edits.
+    #[test]
+    fn edit_buffer_message_round_trips_and_collapses_blank_lines() {
+        let mut b = EditBuffer::new("feat: x", Some("  body  "));
+        assert_eq!(
+            b.message(),
+            ("feat: x".to_string(), Some("body".to_string()))
+        );
+
+        // Surround the body with blank lines, then save: they collapse.
+        b.key(Key::End);
+        b.key(Key::Enter);
+        b.key(Key::ArrowUp);
+        b.key(Key::Home);
+        b.key(Key::Enter);
+        assert_eq!(
+            b.lines,
+            vec![
+                "feat: x".to_string(),
+                String::new(),
+                "body".to_string(),
+                String::new()
+            ]
+        );
+        assert_eq!(
+            b.message(),
+            ("feat: x".to_string(), Some("body".to_string()))
+        );
+
+        // A body edited down to nothing becomes None (the cursor starts at
+        // the end of the body line).
+        let mut b = EditBuffer::new("feat: x", Some("body"));
+        for _ in 0..4 {
+            b.key(Key::Backspace);
+        }
+        assert_eq!(b.message(), ("feat: x".to_string(), None));
+    }
+
+    /// Ctrl-S saves, Esc/Ctrl-C cancel, and anything unrecognized continues.
+    #[test]
+    fn edit_buffer_save_and_cancel_outcomes() {
+        let mut b = EditBuffer::new("x", None);
+        assert_eq!(b.key(Key::Char('\u{13}')), EditOutcome::Save);
+        let mut b = EditBuffer::new("x", None);
+        assert_eq!(b.key(Key::Escape), EditOutcome::Cancel);
+        let mut b = EditBuffer::new("x", None);
+        assert_eq!(b.key(Key::CtrlC), EditOutcome::Cancel);
+        let mut b = EditBuffer::new("x", None);
+        assert_eq!(b.key(Key::Tab), EditOutcome::Continue);
+        assert_eq!(b.lines, vec!["x".to_string()]);
+    }
+
+    /// A simple frame: margin, message line, hint line; cursor in physical
+    /// coordinates (margin + char column).
+    #[test]
+    fn render_editor_ascii_block_cursor_and_region() {
+        let lines = vec!["feat: hello".to_string()];
+        let r = render_editor(&lines, 0, 5, 0, 10, 80);
+        assert_eq!(
+            r.block,
+            "  feat: hello\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n"
+        );
+        assert_eq!(r.cursor_row, 0);
+        assert_eq!(r.cursor_col, 7);
+        assert_eq!(r.region, 2);
+    }
+
+    /// An over-long ASCII line wraps at the column budget and the cursor
+    /// tracks the wrapped row.
+    #[test]
+    fn render_editor_wraps_long_ascii_line() {
+        let lines = vec!["abcdef".to_string()];
+        let r = render_editor(&lines, 0, 3, 0, 10, 4);
+        assert_eq!(
+            r.block,
+            "  abcd\n  ef\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n"
+        );
+        assert_eq!(r.cursor_row, 0);
+        assert_eq!(r.cursor_col, 5);
+        assert_eq!(r.region, 3);
+    }
+
+    /// Wide (CJK) chars wrap on display columns, not char counts, and the
+    /// cursor lands on the column the terminal will show.
+    #[test]
+    fn render_editor_wide_chars_wrap_and_position_cursor() {
+        // Six CJK chars are 12 columns; at a 4-column budget they become
+        // three 2-char pieces.
+        let lines = vec!["中文测试一二".to_string()];
+        let r = render_editor(&lines, 0, 4, 0, 10, 4);
+        assert_eq!(
+            r.block,
+            "  中文\n  测试\n  一二\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n"
+        );
+        // col 4 == after 中文测试 (8 display cols) -> start of the 3rd piece.
+        assert_eq!(r.cursor_row, 2);
+        assert_eq!(r.cursor_col, 2);
+        assert_eq!(r.region, 4);
+
+        // col 3 == after 中文测 (6 cols) -> inside the 2nd piece at col 4.
+        let r = render_editor(&lines, 0, 3, 0, 10, 4);
+        assert_eq!(r.cursor_row, 1);
+        assert_eq!(r.cursor_col, 4);
+    }
+
+    /// The viewport slices by `top`/`window`, so scrolling is purely a matter
+    /// of choosing `top` before rendering.
+    #[test]
+    fn render_editor_scrolls_to_cursor_line() {
+        let lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let r = render_editor(&lines, 1, 0, 1, 1, 80);
+        assert_eq!(r.block, "  b\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n");
+        assert_eq!(r.cursor_row, 0);
+        assert_eq!(r.cursor_col, 2);
+        assert_eq!(r.region, 2);
+    }
+
+    /// `$EDITOR` is parsed as a command line, not a single path, so the
+    /// common `EDITOR="code --wait"` form works without a shell.
+    #[test]
+    fn split_command_parses_editor_argv() {
+        assert_eq!(split_command("code --wait"), vec!["code", "--wait"]);
+        assert_eq!(split_command("vim -f"), vec!["vim", "-f"]);
+        assert_eq!(
+            split_command("\"/path with space/ed\" -w"),
+            vec!["/path with space/ed", "-w"]
+        );
+        assert_eq!(
+            split_command("sh -c 'printf ok'"),
+            vec!["sh", "-c", "printf ok"]
+        );
+        assert_eq!(split_command("a\\ b"), vec!["a b"]);
+        // Unterminated quote consumes the rest.
+        assert_eq!(split_command("ed'"), vec!["ed"]);
+        assert_eq!(split_command(""), Vec::<String>::new());
+    }
+
+    /// Confirmation off, or an interactive stdin, always passes; confirmation
+    /// on with a non-TTY stdin fails fast with a message naming the fix —
+    /// before any planning or staging happens.
+    #[test]
+    fn ensure_confirm_terminal_guards_non_tty_stdin() {
+        assert!(ensure_confirm_terminal(false, false).is_ok());
+        assert!(ensure_confirm_terminal(false, true).is_ok());
+        assert!(ensure_confirm_terminal(true, true).is_ok());
+
+        let err = ensure_confirm_terminal(true, false).expect_err("must refuse non-TTY stdin");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("stdin is not a terminal"),
+            "expected a clear non-TTY error, got: {msg}"
+        );
+        assert!(
+            msg.contains("run `aic` from a terminal"),
+            "expected the fix to be named, got: {msg}"
+        );
+    }
+
+    /// The external editor receives extra `$EDITOR` arguments before the temp
+    /// file path (the `code --wait` case), and the temp file is cleaned up.
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_external_passes_editor_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = EDITOR_ENV.lock();
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-editor.sh");
+        // Fake editor: the file path is the last argument; rewrite it in place.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nfor last; do :; done\nprintf 'fix: args\\n' > \"$last\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // SAFETY: guarded by EDITOR_ENV, which serializes all VISUAL/EDITOR
+        // mutation in this module against other tests in the same process.
+        unsafe {
+            std::env::remove_var("VISUAL");
+            std::env::set_var("EDITOR", format!("{} --wait", script.display()));
+        }
+        let (subject, body) = edit_message_external("feat: draft", None).unwrap();
+        unsafe {
+            std::env::remove_var("EDITOR");
+        }
+        assert_eq!(subject, "fix: args");
+        assert_eq!(body, None);
     }
 }
