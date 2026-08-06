@@ -824,15 +824,24 @@ enum EditOutcome {
 /// from the terminal rendering ([`render_editor`]) so every key transition is
 /// unit-testable without a TTY (issue #78 review).
 struct EditBuffer {
+    /// Logical lines of the message being edited (subject first, then body).
     lines: Vec<String>,
+    /// 0-based index of the logical line the cursor is on.
     row: usize,
+    /// Char index of the cursor within `lines[row]` (byte offsets are derived
+    /// at edit time so multi-byte chars never split).
     col: usize,
+    /// Display-column wrap budget for one wrapped piece — Up/Down navigation
+    /// moves across *visual* (wrapped) rows, so it needs the same budget the
+    /// renderer wraps with.
+    width: usize,
 }
 
 impl EditBuffer {
     /// Start editing the drafted message with the cursor at the end of the
-    /// last line.
-    fn new(subject: &str, body: Option<&str>) -> Self {
+    /// last line. `width` is the display-column wrap budget used both to lay
+    /// out the textarea and to navigate it.
+    fn new(subject: &str, body: Option<&str>, width: usize) -> Self {
         let mut lines: Vec<String> = message_to_edit(subject, body)
             .lines()
             .map(|l| l.to_string())
@@ -842,11 +851,22 @@ impl EditBuffer {
         }
         let row = lines.len() - 1;
         let col = lines[row].chars().count();
-        EditBuffer { lines, row, col }
+        EditBuffer {
+            lines,
+            row,
+            col,
+            width,
+        }
     }
 
     /// Apply one key. Returns `Save`/`Cancel` for the keys that end the
     /// session; everything else mutates the buffer and returns `Continue`.
+    ///
+    /// Up/Down move across *visual* (wrapped) rows and keep the display
+    /// column — a long subject line that wraps to two rows is walked row by
+    /// row, not skipped as one jump. Left/Right/Home/End stay char-level
+    /// (they already cross wrap boundaries correctly, and the caret renders
+    /// on the right visual row).
     fn key(&mut self, key: Key) -> EditOutcome {
         match key {
             // Ctrl-S saves (raw mode surfaces it as a control char, not a
@@ -913,16 +933,16 @@ impl EditBuffer {
                 EditOutcome::Continue
             }
             Key::ArrowUp => {
-                if self.row > 0 {
-                    self.row -= 1;
-                    self.col = self.col.min(self.lines[self.row].chars().count());
+                let (vr, vc) = visual_pos(&self.lines, self.row, self.col, self.width);
+                if vr > 0 {
+                    (self.row, self.col) = from_visual(&self.lines, vr - 1, vc, self.width);
                 }
                 EditOutcome::Continue
             }
             Key::ArrowDown => {
-                if self.row + 1 < self.lines.len() {
-                    self.row += 1;
-                    self.col = self.col.min(self.lines[self.row].chars().count());
+                let (vr, vc) = visual_pos(&self.lines, self.row, self.col, self.width);
+                if vr + 1 < total_visual_rows(&self.lines, self.width) {
+                    (self.row, self.col) = from_visual(&self.lines, vr + 1, vc, self.width);
                 }
                 EditOutcome::Continue
             }
@@ -965,82 +985,214 @@ struct EditorRender {
     region: usize,
 }
 
-/// Lay out the visible slice of the buffer: `top` is the first logical line
-/// shown, `window` how many logical lines fit, and `width` the terminal
-/// column budget for a line. Wrapping is display-width aware ([`edit_wrap`]),
-/// so CJK text wraps and the cursor lands on the correct column.
+/// Lay out the visible slice of the buffer as a bordered textarea with the
+/// subject and body in separate labeled sections:
+///
+/// ```text
+///   ┌─ subject ───────────────────────┐
+///   │  feat: add oauth                │
+///   ├─ body ──────────────────────────┤
+///   │  detailed description           │
+///   └─────────────────────────────────┘
+///   Ctrl-S = save · Esc/Ctrl-C = cancel
+/// ```
+///
+/// `top`/`window` slice which logical lines are visible (scrolling), `pw` is
+/// the display-column budget for one wrapped piece (the box interior is
+/// `pw + 1` columns). The cursor is reported in physical coordinates inside
+/// the returned block.
 fn render_editor(
     lines: &[String],
     row: usize,
     col: usize,
     top: usize,
     window: usize,
-    width: usize,
+    pw: usize,
 ) -> EditorRender {
+    let inner = pw + 1; // box interior between the borders
     let mut block = String::new();
     let mut cursor_row = 0usize;
     let mut cursor_col = 0usize;
     let mut phys = 0usize;
 
-    for (li, line) in lines.iter().enumerate().skip(top).take(window) {
-        let pieces = edit_wrap(line, width);
+    // Top border labels the visible section: "subject" while the first line
+    // is on screen, "body" once the subject scrolled off.
+    let header_label = if top == 0 { "subject" } else { "body" };
+    block.push_str(&format!(
+        "  ┌─ {header_label} {}┐\n",
+        "─".repeat(inner.saturating_sub(header_label.len() + 3))
+    ));
+    phys += 1;
+
+    let mut divider = false;
+    for (li, line) in lines.iter().enumerate() {
+        if li < top || li >= top + window {
+            continue;
+        }
+        let pieces = edit_wrap(line, pw);
+        // Divider before the first visible body line — only when the subject
+        // is still on screen (top == 0); a scrolled-in view of just the body
+        // doesn't need a second "body" label.
+        if top == 0 && li >= 1 && !divider {
+            block.push_str(&format!(
+                "  ├─ body {}┤\n",
+                "─".repeat(inner.saturating_sub(7))
+            ));
+            phys += 1;
+            divider = true;
+        }
         if li == row {
             // The wrapped piece holding the cursor, plus the display width
             // before it — so the cursor column is right even when the line
-            // wraps mid-text or contains wide (CJK) characters.
-            let mut consumed = 0usize;
-            let mut width_before = 0usize;
-            let mut piece = pieces.len().saturating_sub(1);
-            for (pi, p) in pieces.iter().enumerate() {
-                if col < consumed + p.chars().count() {
-                    piece = pi;
-                    break;
-                }
-                consumed += p.chars().count();
-                width_before += console::measure_text_width(p);
-            }
+            // wraps mid-text or contains wide (CJK) characters. The box adds
+            // margin(2) + border(1) + leading space(1) before the piece.
+            let (piece, _, vc) = piece_containing(line, col, pw);
             cursor_row = phys + piece;
-            cursor_col = 2 + char_prefix_width(line, col).saturating_sub(width_before);
+            cursor_col = 4 + vc;
         }
         for p in &pieces {
-            block.push_str(&format!("  {p}\n"));
+            block.push_str(&format!("  │ {p}"));
+            block.push_str(&" ".repeat(pw.saturating_sub(console::measure_text_width(p))));
+            block.push_str("│\n");
             phys += 1;
         }
     }
+
+    block.push_str(&format!("  └{}┘\n", "─".repeat(inner)));
+    phys += 1;
     block.push_str("  Ctrl-S = save · Esc/Ctrl-C = cancel\n");
+    phys += 1;
+
     EditorRender {
         block,
         cursor_row,
         cursor_col,
-        region: phys + 1,
+        region: phys,
     }
+}
+
+/// Display width of a single char (wide CJK chars count as two columns).
+fn char_width(c: char) -> usize {
+    console::measure_text_width(&c.to_string())
 }
 
 /// Display width (terminal columns) of the first `col` chars of `line` —
 /// wide (CJK) characters count as two columns, so the cursor column tracks
 /// the terminal, not the char count.
 fn char_prefix_width(line: &str, col: usize) -> usize {
-    line.chars()
-        .take(col)
-        .map(|c| console::measure_text_width(&c.to_string()))
-        .sum()
+    line.chars().take(col).map(char_width).sum()
+}
+
+/// Char index whose boundary sits at or before display column `target` —
+/// the inverse of [`char_prefix_width`], clamped to the line end. Used to
+/// land the cursor at the column requested by an Up/Down arrow.
+fn chars_up_to_width(line: &str, target: usize) -> usize {
+    let mut width = 0usize;
+    let mut count = 0usize;
+    for ch in line.chars() {
+        let w = char_width(ch);
+        if width + w > target {
+            break;
+        }
+        width += w;
+        count += 1;
+    }
+    count
+}
+
+/// Visual (wrapped) position of `(row, col)`: `vr` counts wrapped pieces
+/// across every line, `vc` is the display column within that piece.
+fn visual_pos(lines: &[String], row: usize, col: usize, width: usize) -> (usize, usize) {
+    let mut vr = 0usize;
+    for (li, line) in lines.iter().enumerate() {
+        let pieces = edit_wrap(line, width);
+        if li == row {
+            let (piece, _, vc) = piece_containing(line, col, width);
+            return (vr + piece, vc);
+        }
+        vr += pieces.len();
+    }
+    // `row` is always in range; defensive fallback to the last line.
+    let last = lines.len().saturating_sub(1);
+    (
+        vr.saturating_sub(1),
+        lines.get(last).map(|l| l.chars().count()).unwrap_or(0),
+    )
+}
+
+/// The wrapped piece of `line` containing char `col`, the display width
+/// before that piece, and the display column of `col` within it. A boundary
+/// (`col ==` a piece's end) belongs to the *next* piece — so a caret between
+/// two wrapped rows renders at the start of the lower row — except at the
+/// line end, where it belongs to the last piece at its full width.
+fn piece_containing(line: &str, col: usize, width: usize) -> (usize, usize, usize) {
+    let pieces = edit_wrap(line, width);
+    let mut piece = pieces.len().saturating_sub(1);
+    let mut width_before = 0usize;
+    let mut consumed = 0usize;
+    for (pi, p) in pieces.iter().enumerate() {
+        let end = consumed + p.chars().count();
+        if col < end {
+            piece = pi;
+            break;
+        }
+        if pi + 1 == pieces.len() {
+            piece = pi;
+            break;
+        }
+        consumed = end;
+        width_before += console::measure_text_width(p);
+    }
+    let vc = char_prefix_width(line, col).saturating_sub(width_before);
+    (piece, width_before, vc)
+}
+
+/// `(row, col)` at visual position `(vr, vc)`. `vc` is clamped to the target
+/// row's width — a too-large `vc` (e.g. `usize::MAX` for "end of row") lands
+/// at the row's end.
+fn from_visual(lines: &[String], vr: usize, vc: usize, width: usize) -> (usize, usize) {
+    let mut accum = 0usize;
+    for (li, line) in lines.iter().enumerate() {
+        let pieces = edit_wrap(line, width);
+        if vr < accum + pieces.len() {
+            let piece = vr - accum;
+            let width_before: usize = pieces[..piece]
+                .iter()
+                .map(|p| console::measure_text_width(p))
+                .sum();
+            return (li, chars_up_to_width(line, width_before + vc));
+        }
+        accum += pieces.len();
+    }
+    // `vr` is always in range; defensive fallback to the last line's end.
+    let last = lines.len().saturating_sub(1);
+    (
+        last,
+        lines.get(last).map(|l| l.chars().count()).unwrap_or(0),
+    )
+}
+
+/// Total visual (wrapped) rows across every line.
+fn total_visual_rows(lines: &[String], width: usize) -> usize {
+    lines.iter().map(|l| edit_wrap(l, width).len()).sum()
 }
 
 /// TTY path of [`edit_message`]: a raw-mode multi-line editor built on the
 /// same `console` primitives as the setup wizard's text inputs. The message
-/// renders as a scrollable block on stderr (the Display stream — stdout stays
-/// clean for piped output), and the region redraws in place on every
-/// keystroke:
+/// renders as a bordered textarea on stderr (the Display stream — stdout stays
+/// clean for piped output) with the subject and body in separate labeled
+/// sections, and the region redraws in place on every keystroke:
 ///
 /// - printable chars insert at the cursor; Enter splits the line
 /// - Backspace / Del / arrow keys / Home / End move and delete as expected
+///   (Up/Down walk visual rows, so wrapped lines are traversed row by row)
 /// - **Ctrl-S** saves and returns the edited (subject, body)
 /// - **Esc / Ctrl-C** cancels and returns the prior message unchanged
 ///
-/// Lines longer than the terminal wrap to the window width (display-width
-/// aware, so CJK text wraps correctly); the cursor tracks the wrapped
-/// position, and the window scrolls to keep it visible. The edit logic lives
-/// in [`EditBuffer`] and the layout in [`render_editor`] — both pure — so this
+/// Lines longer than the terminal wrap to the box width (display-width aware,
+/// so CJK text wraps correctly); the caret tracks the wrapped position, and
+/// the window scrolls to keep it visible. The edit logic lives in
+/// [`EditBuffer`] and the layout in [`render_editor`] — both pure — so this
 /// function only shuttles frames between the terminal and the state machine.
 fn edit_message_inline(
     subject: &str,
@@ -1049,14 +1201,16 @@ fn edit_message_inline(
     use console::Term;
 
     let original = (subject.to_string(), body.map(|b| b.to_string()));
-    let mut buf = EditBuffer::new(subject, body);
 
     let term = Term::stderr();
-    let width = term.size().1 as usize;
-    // Editing window: the terminal height minus the hint line, at least one
-    // row.
-    let window = (term.size().0 as usize).saturating_sub(1).max(1);
-    let w = width.saturating_sub(1).max(1);
+    let (rows, cols) = term.size();
+    let (rows, cols) = (rows as usize, cols as usize);
+    // Box interior budget: margin(2) + left border(1) + leading space(1) +
+    // piece(pw) + right border(1) must fit the terminal width.
+    let pw = cols.saturating_sub(5).max(1);
+    // Editing window: terminal height minus the header/footer/hint rows.
+    let window = rows.saturating_sub(3).max(1);
+    let mut buf = EditBuffer::new(subject, body, pw);
 
     // Viewport state: which logical line the window starts at, how many rows
     // have been drawn so far (only grows, so a shrinking message never
@@ -1076,7 +1230,7 @@ fn edit_message_inline(
             top = buf.row + 1 - window;
         }
 
-        let r = render_editor(&buf.lines, buf.row, buf.col, top, window, w);
+        let r = render_editor(&buf.lines, buf.row, buf.col, top, window, pw);
 
         // Redraw: hide the caret, return to the bottom of the previously
         // drawn block and clear upward from there (`clear_last_lines` erases
@@ -1686,7 +1840,7 @@ mod tests {
     /// ASCII message, and the cursor tracks the edits.
     #[test]
     fn edit_buffer_types_splits_and_joins_lines() {
-        let mut b = EditBuffer::new("feat: draft", None);
+        let mut b = EditBuffer::new("feat: draft", None, 80);
         assert_eq!(b.key(Key::Char('!')), EditOutcome::Continue);
         assert_eq!(b.lines, vec!["feat: draft!"]);
 
@@ -1720,7 +1874,7 @@ mod tests {
     /// never gets split mid-codepoint.
     #[test]
     fn edit_buffer_handles_multibyte_chars() {
-        let mut b = EditBuffer::new("", None);
+        let mut b = EditBuffer::new("", None, 80);
         b.key(Key::Char('中'));
         b.key(Key::Char('文'));
         assert_eq!(b.lines, vec!["中文"]);
@@ -1748,7 +1902,7 @@ mod tests {
     /// line boundaries; Home/End jump within the line.
     #[test]
     fn edit_buffer_navigates_with_arrows_home_end() {
-        let mut b = EditBuffer::new("ab\ncd", None);
+        let mut b = EditBuffer::new("ab\ncd", None, 80);
         assert_eq!((b.row, b.col), (1, 2)); // starts at end of last line
 
         b.key(Key::ArrowLeft);
@@ -1781,13 +1935,87 @@ mod tests {
         assert_eq!((b.row, b.col), (0, 0));
     }
 
+    /// Up/Down follow *visual* (wrapped) rows, not logical lines: a line that
+    /// wraps to two rows is walked row by row instead of being skipped (the
+    /// old logical-line navigation made Up/Down no-ops on a single wrapped
+    /// line). The caret's visual row is what the textarea shows.
+    #[test]
+    fn edit_buffer_arrow_up_down_follow_wrapped_rows() {
+        // "abcdef" wraps to ["abc", "def"] at width 3.
+        let mut b = EditBuffer::new("abcdef", None, 3);
+        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (1, 3)); // end of line
+
+        // Up walks to the wrapped row above (keeping the column), then to the
+        // first row.
+        b.key(Key::ArrowUp);
+        assert_eq!((b.row, b.col), (0, 3));
+        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (1, 0)); // wrap boundary
+        b.key(Key::ArrowUp);
+        assert_eq!((b.row, b.col), (0, 0));
+        b.key(Key::ArrowUp);
+        assert_eq!((b.row, b.col), (0, 0)); // top edge: no-op
+
+        // Down walks back down through the wrapped rows.
+        b.key(Key::ArrowDown);
+        assert_eq!((b.row, b.col), (0, 3));
+        b.key(Key::ArrowDown);
+        assert_eq!((b.row, b.col), (0, 3)); // already on the last visual row
+        b.key(Key::ArrowDown);
+        assert_eq!((b.row, b.col), (0, 3)); // bottom edge: no-op
+    }
+
+    /// With a body line the visual stream is subject rows followed by body
+    /// rows; Up/Down cross the subject/body boundary one visual row at a time,
+    /// keeping the display column.
+    #[test]
+    fn edit_buffer_arrow_up_down_cross_subject_body_boundary() {
+        // lines ["abcdef", "x"]: subject wraps to 2 rows + body 1 row = 3.
+        let mut b = EditBuffer::new("abcdef", Some("x"), 3);
+        assert_eq!((b.row, b.col), (1, 1)); // body row
+
+        // Up: body -> subject's second wrapped row -> subject's first row.
+        b.key(Key::ArrowUp);
+        assert_eq!((b.row, b.col), (0, 4));
+        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (1, 1));
+        b.key(Key::ArrowUp);
+        assert_eq!((b.row, b.col), (0, 1));
+        assert_eq!(visual_pos(&b.lines, b.row, b.col, 3), (0, 1));
+
+        // Down walks back to the body row.
+        b.key(Key::ArrowDown);
+        assert_eq!((b.row, b.col), (0, 4));
+        b.key(Key::ArrowDown);
+        assert_eq!((b.row, b.col), (1, 1));
+        b.key(Key::ArrowDown); // bottom edge: no-op
+        assert_eq!((b.row, b.col), (1, 1));
+    }
+
+    /// Up/Down across wide (CJK) chars keep the display column and never
+    /// split a char — the caret lands on a char boundary.
+    #[test]
+    fn edit_buffer_arrow_up_down_keeps_column_on_wide_chars() {
+        // "中文测试" wraps to ["中","文","测","试"] at width 3; body "x" is one
+        // row -> visual rows = 5.
+        let mut b = EditBuffer::new("中文测试", Some("x"), 3);
+        assert_eq!((b.row, b.col), (1, 1)); // visual row 4 (body)
+
+        b.key(Key::ArrowUp); // -> 试's row (char 3)
+        assert_eq!((b.row, b.col), (0, 3));
+        b.key(Key::ArrowUp); // -> 测's row (char 2)
+        assert_eq!((b.row, b.col), (0, 2));
+        b.key(Key::ArrowDown); // back to 试's row
+        assert_eq!((b.row, b.col), (0, 3));
+        b.key(Key::ArrowDown); // -> body row
+        assert_eq!((b.row, b.col), (1, 0));
+    }
+
     /// The buffer round-trips the drafted (subject, body) exactly, and a
     /// messy edit (blank lines around the body) collapses git-style — the
     /// same normalization [`edit_message_external`] applies, so both editor
     /// paths produce identical output for identical edits.
     #[test]
     fn edit_buffer_message_round_trips_and_collapses_blank_lines() {
-        let mut b = EditBuffer::new("feat: x", Some("  body  "));
+        let mut b = EditBuffer::new("feat: x", Some("  body  "), 80);
         assert_eq!(
             b.message(),
             ("feat: x".to_string(), Some("body".to_string()))
@@ -1815,7 +2043,7 @@ mod tests {
 
         // A body edited down to nothing becomes None (the cursor starts at
         // the end of the body line).
-        let mut b = EditBuffer::new("feat: x", Some("body"));
+        let mut b = EditBuffer::new("feat: x", Some("body"), 80);
         for _ in 0..4 {
             b.key(Key::Backspace);
         }
@@ -1825,80 +2053,92 @@ mod tests {
     /// Ctrl-S saves, Esc/Ctrl-C cancel, and anything unrecognized continues.
     #[test]
     fn edit_buffer_save_and_cancel_outcomes() {
-        let mut b = EditBuffer::new("x", None);
+        let mut b = EditBuffer::new("x", None, 80);
         assert_eq!(b.key(Key::Char('\u{13}')), EditOutcome::Save);
-        let mut b = EditBuffer::new("x", None);
+        let mut b = EditBuffer::new("x", None, 80);
         assert_eq!(b.key(Key::Escape), EditOutcome::Cancel);
-        let mut b = EditBuffer::new("x", None);
+        let mut b = EditBuffer::new("x", None, 80);
         assert_eq!(b.key(Key::CtrlC), EditOutcome::Cancel);
-        let mut b = EditBuffer::new("x", None);
+        let mut b = EditBuffer::new("x", None, 80);
         assert_eq!(b.key(Key::Tab), EditOutcome::Continue);
         assert_eq!(b.lines, vec!["x".to_string()]);
     }
 
-    /// A simple frame: margin, message line, hint line; cursor in physical
-    /// coordinates (margin + char column).
+    /// A simple frame: a bordered textarea with a "subject" header, the
+    /// message as the first content row, a footer, and the hint line; the
+    /// cursor sits in physical coordinates (margin + border + space + column).
     #[test]
     fn render_editor_ascii_block_cursor_and_region() {
         let lines = vec!["feat: hello".to_string()];
         let r = render_editor(&lines, 0, 5, 0, 10, 80);
-        assert_eq!(
-            r.block,
-            "  feat: hello\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n"
+        assert!(r.block.starts_with("  ┌─ subject "), "got: {:?}", r.block);
+        assert!(r.block.contains("  │ feat: hello"), "got: {:?}", r.block);
+        assert!(r.block.contains("  └"), "footer missing: {:?}", r.block);
+        assert!(
+            r.block.ends_with("Ctrl-S = save · Esc/Ctrl-C = cancel\n"),
+            "hint missing: {:?}",
+            r.block
         );
-        assert_eq!(r.cursor_row, 0);
-        assert_eq!(r.cursor_col, 7);
-        assert_eq!(r.region, 2);
+        // Header row, then the subject row.
+        assert_eq!(r.cursor_row, 1);
+        // 2 (margin) + 1 (border) + 1 (space) + 5 (column).
+        assert_eq!(r.cursor_col, 9);
+        assert_eq!(r.region, 4);
     }
 
-    /// An over-long ASCII line wraps at the column budget and the cursor
-    /// tracks the wrapped row.
+    /// An over-long ASCII line wraps inside the box; the cursor tracks the
+    /// wrapped row and column.
     #[test]
     fn render_editor_wraps_long_ascii_line() {
         let lines = vec!["abcdef".to_string()];
         let r = render_editor(&lines, 0, 3, 0, 10, 4);
-        assert_eq!(
-            r.block,
-            "  abcd\n  ef\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n"
-        );
-        assert_eq!(r.cursor_row, 0);
-        assert_eq!(r.cursor_col, 5);
-        assert_eq!(r.region, 3);
+        assert!(r.block.contains("  │ abcd"), "got: {:?}", r.block);
+        assert!(r.block.contains("  │ ef"), "got: {:?}", r.block);
+        // col 3 ends the first wrapped piece ("abcd") -> row 1 (after header).
+        assert_eq!(r.cursor_row, 1);
+        assert_eq!(r.cursor_col, 7);
+        assert_eq!(r.region, 5);
     }
 
     /// Wide (CJK) chars wrap on display columns, not char counts, and the
-    /// cursor lands on the column the terminal will show.
+    /// cursor lands on the column the terminal will show (box borders add
+    /// 4 columns of offset: margin + border + space).
     #[test]
     fn render_editor_wide_chars_wrap_and_position_cursor() {
         // Six CJK chars are 12 columns; at a 4-column budget they become
         // three 2-char pieces.
         let lines = vec!["中文测试一二".to_string()];
         let r = render_editor(&lines, 0, 4, 0, 10, 4);
-        assert_eq!(
-            r.block,
-            "  中文\n  测试\n  一二\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n"
-        );
+        assert!(r.block.contains("  │ 中文"), "got: {:?}", r.block);
+        assert!(r.block.contains("  │ 测试"), "got: {:?}", r.block);
+        assert!(r.block.contains("  │ 一二"), "got: {:?}", r.block);
         // col 4 == after 中文测试 (8 display cols) -> start of the 3rd piece.
-        assert_eq!(r.cursor_row, 2);
-        assert_eq!(r.cursor_col, 2);
-        assert_eq!(r.region, 4);
-
-        // col 3 == after 中文测 (6 cols) -> inside the 2nd piece at col 4.
-        let r = render_editor(&lines, 0, 3, 0, 10, 4);
-        assert_eq!(r.cursor_row, 1);
+        assert_eq!(r.cursor_row, 3);
         assert_eq!(r.cursor_col, 4);
+        assert_eq!(r.region, 6);
+
+        // col 3 == after 中文测 (6 cols) -> inside the 2nd piece at col 2.
+        let r = render_editor(&lines, 0, 3, 0, 10, 4);
+        assert_eq!(r.cursor_row, 2);
+        assert_eq!(r.cursor_col, 6);
     }
 
-    /// The viewport slices by `top`/`window`, so scrolling is purely a matter
-    /// of choosing `top` before rendering.
+    /// The viewport slices by `top`/`window`; a scrolled-in view labels the
+    /// header "body" (the subject is off screen) and draws no divider.
     #[test]
     fn render_editor_scrolls_to_cursor_line() {
         let lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let r = render_editor(&lines, 1, 0, 1, 1, 80);
-        assert_eq!(r.block, "  b\n  Ctrl-S = save · Esc/Ctrl-C = cancel\n");
-        assert_eq!(r.cursor_row, 0);
-        assert_eq!(r.cursor_col, 2);
-        assert_eq!(r.region, 2);
+        assert!(r.block.starts_with("  ┌─ body "), "got: {:?}", r.block);
+        assert!(r.block.contains("  │ b"), "got: {:?}", r.block);
+        assert!(
+            !r.block.contains("├─ body"),
+            "no divider expected: {:?}",
+            r.block
+        );
+        assert_eq!(r.cursor_row, 1);
+        assert_eq!(r.cursor_col, 4);
+        assert_eq!(r.region, 4);
     }
 
     /// `$EDITOR` is parsed as a command line, not a single path, so the
