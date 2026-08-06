@@ -170,6 +170,44 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     result
 }
 
+/// Run the confirmation loop for a drafted message. Returns the confirmed
+/// (message, body, preview_rows) after the user approves or edits it. The
+/// preview is shown after each edit/regeneration, and each preview is erased
+/// before being replaced so superseded drafts never accumulate on screen.
+async fn confirm_draft(
+    draft: (String, Option<String>),
+    paths: &[String],
+    display: &Display,
+    confirm: &Confirm,
+    messenger: &CommitMessenger,
+    diff: String,
+) -> anyhow::Result<(String, Option<String>, usize)> {
+    let (mut message, mut body) = draft;
+
+    if !confirm.enabled {
+        return Ok((message, body, 0));
+    }
+
+    loop {
+        let rows = display.commit_preview(&message, body.as_deref(), paths);
+        match (confirm.menu)(&message)? {
+            ConfirmChoice::Commit => return Ok((message, body, rows)),
+            ConfirmChoice::Regenerate => {
+                display.clear_last(rows);
+                let result =
+                    display::with_spinner("Regenerating message", messenger(diff.clone())).await?;
+                message = result.message;
+                body = result.body;
+            }
+            ConfirmChoice::Edit => {
+                display.clear_last(rows);
+                (message, body) = (confirm.editor)(&message, body.as_deref())?;
+            }
+            ConfirmChoice::Abort => return Err(CommitDeclined.into()),
+        }
+    }
+}
+
 async fn generate_and_commit(
     git: &Git,
     paths: &[String],
@@ -187,48 +225,22 @@ async fn generate_and_commit(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
+    let diff_str = diff.to_string();
 
-    // Opt-in confirmation (issue #78): after each draft, show the exact
-    // message that would land plus the batch's file list, then ask. Commit
-    // proceeds; Re-generate re-runs the messenger on the same diff; Edit opens
-    // the message in an editor and re-shows it; Abort propagates the
-    // `CommitDeclined` marker so the caller translates it into its own abort
-    // wording — nothing in this batch commits.
-    let (message, body, preview_rows) = 'generate: loop {
-        let result =
-            display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
-        let mut message = result.message;
-        let mut body = result.body;
+    // Generate initial draft, then run confirmation loop if enabled.
+    let result =
+        display::with_spinner("Generating commit message", messenger(diff_str.clone())).await?;
+    let (message, body, preview_rows) = confirm_draft(
+        (result.message, result.body),
+        paths,
+        display,
+        confirm,
+        messenger,
+        diff_str,
+    )
+    .await?;
 
-        if !confirm.enabled {
-            break 'generate (message, body, 0);
-        }
-
-        // Confirm loop: Commit lands the current draft; Regenerate falls
-        // through to a fresh draft; Edit rewrites the draft in place and
-        // re-shows it. Each preview is erased before it is replaced, so
-        // superseded drafts never accumulate on screen.
-        loop {
-            let rows = display.commit_preview(&message, body.as_deref(), paths);
-            match (confirm.menu)(&message)? {
-                ConfirmChoice::Commit => break 'generate (message, body, rows),
-                ConfirmChoice::Regenerate => {
-                    display.clear_last(rows);
-                    continue 'generate;
-                }
-                ConfirmChoice::Edit => {
-                    display.clear_last(rows);
-                    (message, body) = (confirm.editor)(&message, body.as_deref())?;
-                }
-                ConfirmChoice::Abort => return Err(CommitDeclined.into()),
-            }
-        }
-    };
-
-    // The confirmed draft is consumed: erase it before (and independently of)
-    // the commit landing, so the screen ends with only the ✓ line — never a
-    // stale copy of what was just committed. `preview_rows == 0` when
-    // confirmation is disabled, and `clear_last(0)` is a no-op.
+    // Erase the confirmed preview and commit.
     display.clear_last(preview_rows);
     let hash = git.commit(message.clone(), body.clone())?;
     display.commit_line(&hash, &message, body.as_deref(), prefix);
