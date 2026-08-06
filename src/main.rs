@@ -194,25 +194,30 @@ async fn generate_and_commit(
     // the message in an editor and re-shows it; Abort propagates the
     // `CommitDeclined` marker so the caller translates it into its own abort
     // wording — nothing in this batch commits.
-    let (message, body) = 'generate: loop {
+    let (message, body, preview_rows) = 'generate: loop {
         let result =
             display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
         let mut message = result.message;
         let mut body = result.body;
 
         if !confirm.enabled {
-            break 'generate (message, body);
+            break 'generate (message, body, 0);
         }
 
         // Confirm loop: Commit lands the current draft; Regenerate falls
         // through to a fresh draft; Edit rewrites the draft in place and
-        // re-shows it (the edit survives into the next preview).
+        // re-shows it. Each preview is erased before it is replaced, so
+        // superseded drafts never accumulate on screen.
         loop {
-            display.commit_preview(&message, body.as_deref(), paths);
+            let rows = display.commit_preview(&message, body.as_deref(), paths);
             match (confirm.menu)(&message)? {
-                ConfirmChoice::Commit => break 'generate (message, body),
-                ConfirmChoice::Regenerate => continue 'generate,
+                ConfirmChoice::Commit => break 'generate (message, body, rows),
+                ConfirmChoice::Regenerate => {
+                    display.clear_last(rows);
+                    continue 'generate;
+                }
                 ConfirmChoice::Edit => {
+                    display.clear_last(rows);
                     (message, body) = (confirm.editor)(&message, body.as_deref())?;
                 }
                 ConfirmChoice::Abort => return Err(CommitDeclined.into()),
@@ -220,6 +225,11 @@ async fn generate_and_commit(
         }
     };
 
+    // The confirmed draft is consumed: erase it before (and independently of)
+    // the commit landing, so the screen ends with only the ✓ line — never a
+    // stale copy of what was just committed. `preview_rows == 0` when
+    // confirmation is disabled, and `clear_last(0)` is a no-op.
+    display.clear_last(preview_rows);
     let hash = git.commit(message.clone(), body.clone())?;
     display.commit_line(&hash, &message, body.as_deref(), prefix);
     Ok(())
@@ -632,6 +642,10 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
         .with_prompt(format!("Commit this message?  ({subject})"))
         .items(items)
         .default(0)
+        // No `✔ ...` echo line after the choice: the preview above is erased
+        // by the caller after a commit, and a leftover selection line would
+        // make that erase imprecise (and linger as residue).
+        .report(false)
         .interact_opt()
         .context("could not read terminal input")?;
     Ok(match choice {
@@ -1101,6 +1115,9 @@ fn edit_message_inline(
         }
     };
     let _ = term.show_cursor();
+    // Clear the editor's own frame so a saved/cancelled edit never leaves a
+    // stale block behind — the re-preview (or next output) starts clean.
+    let _ = term.clear_last_lines(drawn);
 
     if saved {
         Ok(buf.message())
