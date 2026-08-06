@@ -73,36 +73,24 @@ pub(crate) type CommitEditor =
 
 /// Opt-in pre-commit confirmation (issue #78): the gate plus the menu and
 /// editor seams it needs, grouped so the workflow signatures stay within
-/// clippy's argument budget. [`Confirm::disabled`] is the default — no menu,
+/// clippy's argument budget. [`Confirm::Disabled`] is the default — no menu,
 /// generate-and-commit byte-for-byte as before the option existed.
-pub(crate) struct Confirm {
-    /// Gate: when `false`, `menu` and `editor` are never invoked.
-    enabled: bool,
-    /// Drafted subject → user choice (Commit / Re-generate / Edit / Abort).
-    menu: ConfirmMenu,
-    /// (subject, body) → edited (subject, body); unchanged when the user
-    /// cancels the edit.
-    editor: CommitEditor,
-}
-
-impl Confirm {
-    /// Confirmation off — the seams are placeholders that must never run.
-    pub(crate) fn disabled() -> Self {
-        Self {
-            enabled: false,
-            menu: Box::new(|_| Ok(ConfirmChoice::Commit)),
-            editor: Box::new(|s, b| Ok((s.to_string(), b.map(|b| b.to_string())))),
-        }
-    }
-
+///
+/// Modeled as an enum, not a struct-with-a-gate, so the disabled variant
+/// carries no dead closures — the menu and editor exist only when they can
+/// actually run.
+pub(crate) enum Confirm {
+    /// Confirmation off — generate-and-commit is unchanged. Carries no menu
+    /// or editor, so the disabled path can't accidentally invoke them.
+    Disabled,
     /// Confirmation on, wired to the production menu and editor.
-    pub(crate) fn interactive(menu: ConfirmMenu, editor: CommitEditor) -> Self {
-        Self {
-            enabled: true,
-            menu,
-            editor,
-        }
-    }
+    Interactive {
+        /// Drafted subject → user choice (Commit / Re-generate / Edit / Abort).
+        menu: ConfirmMenu,
+        /// (subject, body) → edited (subject, body); unchanged when the user
+        /// cancels the edit.
+        editor: CommitEditor,
+    },
 }
 
 /// The pre-commit confirmation requires an interactive stdin: the menu
@@ -183,13 +171,15 @@ async fn confirm_draft(
 ) -> anyhow::Result<(String, Option<String>, usize)> {
     let (mut message, mut body) = draft;
 
-    if !confirm.enabled {
+    // Nothing to confirm when the gate is off — no menu/editor wired, so the
+    // drafted message is final.
+    let Confirm::Interactive { menu, editor } = confirm else {
         return Ok((message, body, 0));
-    }
+    };
 
     loop {
         let rows = display.commit_preview(&message, body.as_deref(), paths);
-        match (confirm.menu)(&message)? {
+        match menu(&message)? {
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
@@ -200,7 +190,7 @@ async fn confirm_draft(
             }
             ConfirmChoice::Edit => {
                 display.clear_last(rows);
-                (message, body) = (confirm.editor)(&message, body.as_deref())?;
+                (message, body) = editor(&message, body.as_deref())?;
             }
             ConfirmChoice::Abort => return Err(CommitDeclined.into()),
         }
@@ -634,9 +624,9 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     // Refuse to start rather than abort halfway.
     ensure_confirm_terminal(confirm_enabled, std::io::stdin().is_terminal())?;
     let confirm = if confirm_enabled {
-        Confirm::interactive(menu, editor)
+        Confirm::Interactive { menu, editor }
     } else {
-        Confirm::disabled()
+        Confirm::Disabled
     };
     run_commit_workflow_impl(
         &git,
