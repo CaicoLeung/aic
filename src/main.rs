@@ -45,6 +45,22 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
+/// Marker error for the user declining the pre-commit confirmation (issue
+/// #78). Distinct from ordinary failures so each call site can translate it
+/// into its own abort wording: the single-commit path reports "no commit
+/// made", the batch loop reports how many batches already committed and that
+/// the rest is recoverable.
+#[derive(Debug)]
+pub(crate) struct CommitDeclined;
+
+impl std::fmt::Display for CommitDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "commit declined by user")
+    }
+}
+
+impl std::error::Error for CommitDeclined {}
+
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling
 /// [`display::REASONING_WINDOW`]-row block that redraws in place as the
@@ -83,6 +99,8 @@ async fn generate_and_commit(
     display: &Display,
     prefix: &str,
     messenger: &CommitMessenger,
+    confirm: bool,
+    prompt: &Prompt,
 ) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
@@ -95,6 +113,18 @@ async fn generate_and_commit(
     let diff = serde_json::json!({ "staged_files": files });
     let result =
         display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
+
+    // Opt-in confirmation (issue #78): show the exact message that would land
+    // plus the batch's file list, then ask. A decline aborts via the
+    // `CommitDeclined` marker so the caller translates it into its own abort
+    // wording — nothing in this batch commits.
+    if confirm {
+        display.commit_preview(&result.message, result.body.as_deref(), paths);
+        if !prompt("commit this message?")? {
+            return Err(CommitDeclined.into());
+        }
+    }
+
     let hash = git.commit(result.message.clone(), result.body.clone())?;
     display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
     Ok(())
@@ -328,7 +358,10 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
 
 /// Default `aic` run. `resolve`/`prompt`/`display` are seams mirroring
 /// [`run_resolve_workflow_impl`]; they only matter on the conflicted-repo
-/// auto-detect branch, which hands off to the resolve workflow.
+/// auto-detect branch, which hands off to the resolve workflow. `confirm`
+/// gates the opt-in pre-commit confirmation (issue #78): when true, every
+/// drafted message is shown (message + body + file list) and the `prompt`
+/// seam must approve it before the commit lands.
 pub(crate) async fn run_commit_workflow_impl(
     git: &Git,
     resolve: Resolver,
@@ -336,6 +369,7 @@ pub(crate) async fn run_commit_workflow_impl(
     display: Display,
     planner: BatchPlanner,
     messenger: CommitMessenger,
+    confirm: bool,
 ) -> anyhow::Result<()> {
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
@@ -402,7 +436,8 @@ pub(crate) async fn run_commit_workflow_impl(
                     // batch or a pre-commit hook — nothing to commit.
                     return Ok(());
                 }
-                generate_and_commit(git, &paths, &display, &prefix, &messenger).await
+                generate_and_commit(git, &paths, &display, &prefix, &messenger, confirm, &prompt)
+                    .await
             };
             if let Err(e) = outcome.await {
                 anyhow::bail!(
@@ -419,7 +454,15 @@ pub(crate) async fn run_commit_workflow_impl(
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         git.add(&refs)?;
-        generate_and_commit(git, &paths, &display, "", &messenger).await?;
+        match generate_and_commit(git, &paths, &display, "", &messenger, confirm, &prompt).await {
+            Ok(()) => {}
+            // Declining the confirmation is a user choice, not an error: report
+            // it as a clean abort naming the outcome — nothing committed.
+            Err(e) if e.downcast_ref::<CommitDeclined>().is_some() => {
+                anyhow::bail!("aborted — no commit made");
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     Ok(())
@@ -443,7 +486,23 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         },
     );
     let git = Git::at(Path::new("."))?;
-    run_commit_workflow_impl(&git, resolver, prompt, Display::new(), planner, messenger).await
+    // Absent/malformed config keeps the default (no confirmation) — same
+    // tolerance `LLM::from_env` uses for the provider fields.
+    let confirm = config::Config::load()
+        .ok()
+        .flatten()
+        .map(|c| c.confirm_before_commit())
+        .unwrap_or(false);
+    run_commit_workflow_impl(
+        &git,
+        resolver,
+        prompt,
+        Display::new(),
+        planner,
+        messenger,
+        confirm,
+    )
+    .await
 }
 
 /// Where a shell's completion script is installed, and whether the shell

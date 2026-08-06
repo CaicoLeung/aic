@@ -42,7 +42,7 @@ aic:       3 个 commit，每个对应一处逻辑改动      ✅
 - **Hunk 级别的批量拆分** —— 一个文件、多种 concern？aic 按 hunk 拆成多个 atomic commit（`git add -p` 风格，完全非交互）
 - **Multi-provider** —— OpenAI、Anthropic、Gemini、DeepSeek、Groq、xAI、Mistral、OpenRouter、Perplexity、Together、Ollama，以及任何 OpenAI-compatible server
 - **Conflict resolution** —— 正处于 merge 中？`aic resolve` 会逐文件给出解决方案供你 review 和批准，然后完成 merge
-- **Interactive setup** —— `aic setup` 引导你完成 provider、API key 和 model 的选择
+- **Interactive setup** —— `aic setup` 引导你完成 provider、API key、model 的选择，并可开启提交前确认开关
 - **Conventional Commits** —— message 遵循 [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) 规范
 - **可配置** —— config 文件、环境变量，或单次运行 override
 
@@ -115,7 +115,7 @@ aic
 | -------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `aic`          | 用一条 message commit 已 stage 的文件。若没有 stage 任何内容，则把所有未 stage 的改动批量规划为 **hunk 级别**的 atomic commit。 |
 | `aic resolve`  | 通过 LLM 解决 git merge conflict。逐文件给出方案供 review，然后完成 merge。                                            |
-| `aic setup`    | Interactive 向导，选择 provider、输入 API key、选择 model。                                                            |
+| `aic setup`    | Interactive 向导，选择 provider、输入 API key、选择 model；也可切换提交前确认。                                          |
 | `aic list`     | 展示已 resolve 的 config：provider、model，以及每个值来自哪里（env / config / default）。                              |
 | `aic update`   | 从 GitHub Releases 把 aic 更新到最新版本。                                                                             |
 
@@ -169,6 +169,16 @@ Provider 专属的 API key 环境变量（`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`
 2. Provider 专属环境变量（仅 API key）
 3. Config 文件（`~/.config/aic/config.toml`）
 4. Built-in default
+
+### 提交前确认
+
+默认情况下 `aic` 生成 message 后立即提交——你只能在提交*之后*看到 message。如果你用 GPG 签名提交（签名弹窗在你能看到要签什么之前就会触发），或者你本地跑的是较弱模型、大提交的草稿需要人工检查，可以开启该选项：
+
+```toml
+confirm_before_commit = true
+```
+
+写入 `~/.config/aic/config.toml`，或在 `aic setup` 中切换。开启后，`aic` 会在每次提交前展示草拟的 message（subject + body）以及将落地的文件，然后询问 `commit this message? [y/n]`。Enter/`y` 正常提交；`n` 中止本次运行——在 batch 模式下，已提交的 batch 保持不变，被拒绝的 batch 及其后的 batch 仍留在工作区，重新运行 `aic` 即可继续。
 
 ### 支持的 provider
 

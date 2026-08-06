@@ -163,10 +163,35 @@ impl Display {
         // Main line: [prefix] ✓ <hash> <message>
         let check = self.styled("\u{2713}", Style::new().green().bold());
         let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
+        let pre = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", self.styled(prefix, gray.clone()))
+        };
+        // Subject: margin only, never wrapped (title line).
+        self.emit(&format!(
+            "{pre}{check} {hash_styled} {}",
+            self.styled_subject(message)
+        ));
 
-        // Decompose the subject once on CommitType, then style the parts.
+        // Optional body — margin + greedy word-wrap to text_width, gray.
+        // The body's old ad-hoc `  ` indent is subsumed by the shared margin so
+        // the whole block sits at one uniform inset.
+        if let Some(b) = body {
+            self.emit_body(b);
+        }
+    }
+
+    /// Style a conventional-commit subject line the same way in every
+    /// renderer: typed `type` in its palette color, gray `(scope)`, bold
+    /// description. Unknown/colon-less messages fall back to the full message
+    /// in the type palette color. Shared by [`Display::commit_line`] (post-commit)
+    /// and [`Display::commit_preview`] (pre-commit confirmation) so what the
+    /// user confirms is byte-for-byte what the completed line will show.
+    fn styled_subject(&self, message: &str) -> String {
+        let gray = Style::new().true_color(138, 143, 159);
         let parsed = CommitType::parse_message(message);
-        let msg_styled = match parsed.description {
+        match parsed.description {
             Some(desc) => {
                 let colored_type = self.styled(parsed.type_name, parsed.commit_type.color());
                 let scope = match parsed.scope {
@@ -178,35 +203,48 @@ impl Display {
             }
             // No colon — unknown type; color the whole message via the type palette.
             None => self.styled(message, parsed.commit_type.color()),
-        };
+        }
+    }
 
-        let pre = if prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", self.styled(prefix, gray.clone()))
-        };
-        // Subject: margin only, never wrapped (title line).
-        self.emit(&format!("{pre}{check} {hash_styled} {msg_styled}"));
-
-        // Optional body — margin + greedy word-wrap to text_width, gray.
-        // The body's old ad-hoc `  ` indent is subsumed by the shared margin so
-        // the whole block sits at one uniform inset.
-        if let Some(b) = body {
-            let trimmed = b.trim();
-            if !trimmed.is_empty() {
-                let width = self.text_width();
-                for src_line in trimmed.lines() {
-                    if src_line.is_empty() {
-                        // Blank line: no trailing-whitespace margin.
-                        self.emit_blank();
-                        continue;
-                    }
-                    for piece in wrap_line(src_line, width) {
-                        self.emit(&self.styled(&piece, gray.clone()));
-                    }
+    /// Emit a commit body — margin + greedy word-wrap to text_width, gray.
+    /// Blank body lines stay blank (no trailing-whitespace margin). Shared by
+    /// [`Display::commit_line`] and [`Display::commit_preview`].
+    fn emit_body(&self, body: &str) {
+        let gray = Style::new().true_color(138, 143, 159);
+        let trimmed = body.trim();
+        if !trimmed.is_empty() {
+            let width = self.text_width();
+            for src_line in trimmed.lines() {
+                if src_line.is_empty() {
+                    self.emit_blank();
+                    continue;
+                }
+                for piece in wrap_line(src_line, width) {
+                    self.emit(&self.styled(&piece, gray.clone()));
                 }
             }
         }
+    }
+
+    /// Pre-commit confirmation preview (issue #78): the exact message that
+    /// would be committed — subject styled exactly as the post-commit line,
+    /// body in gray — plus a one-line file list, before the y/n prompt fires.
+    /// Lets a user who signs commits (GPG) see what they are signing, or a
+    /// user on a weaker local model sanity-check the draft before it lands.
+    pub fn commit_preview(&self, message: &str, body: Option<&str>, paths: &[String]) {
+        let dim = Style::new().dim();
+        self.emit(&self.styled("proposed commit:", dim.clone()));
+        self.emit(&self.styled_subject(message));
+        if let Some(b) = body {
+            self.emit_body(b);
+        }
+        let files = if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            format!("{} ({} files)", paths.join(", "), paths.len())
+        };
+        self.emit(&self.styled(&format!("files: {files}"), dim));
+        self.emit_blank();
     }
 
     // ------------------------------------------------------------------
@@ -1351,6 +1389,47 @@ mod tests {
         fn colors_enabled(&self) -> bool {
             self.colors
         }
+    }
+
+    #[test]
+    fn commit_preview_renders_message_body_and_file_list() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_preview(
+            "feat(auth): add OAuth2 login support",
+            Some("Allow users to sign in via Google and GitHub OAuth2 providers"),
+            &["src/auth.rs".to_string(), "src/main.rs".to_string()],
+        );
+        let got = lines.lock().clone();
+        // Header, styled subject, body, and file list all sit at the shared
+        // margin; a trailing blank separates the preview from the y/n prompt.
+        assert_eq!(got[0], "  proposed commit:");
+        assert_eq!(got[1], "  feat(auth): add OAuth2 login support");
+        assert_eq!(
+            got[2],
+            "  Allow users to sign in via Google and GitHub OAuth2 providers"
+        );
+        assert_eq!(got[3], "  files: src/auth.rs, src/main.rs (2 files)");
+        assert_eq!(got[4], "");
+    }
+
+    #[test]
+    fn commit_preview_singleton_file_list_omits_count() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_preview("chore: bump dep", None, &["Cargo.toml".to_string()]);
+        let got = lines.lock().clone();
+        assert_eq!(got[0], "  proposed commit:");
+        assert_eq!(got[1], "  chore: bump dep");
+        // Single file: no "(1 files)" suffix; no body line emitted.
+        assert_eq!(got[2], "  files: Cargo.toml");
+        assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
     }
 
     #[test]

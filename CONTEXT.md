@@ -20,6 +20,10 @@ _Avoid_: suggestion, proposal, generated text
 The phase of a Run that maps a Batch's planned hunks onto the current index→workdir diff and stages them, tracking which original (plan-time) hunk indices have already landed. Staging re-reads the current diff rather than the plan-time snapshot, so a pre-commit hook that restages whole files (lint-staged/prettier) cannot desync later Batches of the same Run.
 _Avoid_: group staging, chunk staging, add -p
 
+**Commit confirmation**:
+An opt-in phase (gated by the `confirm_before_commit` config option) that interrupts the commit path after the Drafted Message is produced and before the commit lands: the full Drafted Message plus the Batch's file list are shown, then the user is prompted to proceed. A decline aborts the Run — nothing in the current Batch commits, already-committed Batches stay, and remaining work stays recoverable in the working tree. Does not apply to the Finalize step, which uses git's default message.
+_Avoid_: review prompt, pre-commit check, confirmation gate
+
 **Provider**:
 A named LLM backend the user can route a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from env, then config, then default.
 _Avoid_: backend, engine
