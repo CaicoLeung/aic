@@ -19,6 +19,7 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::{CommandFactory, Parser};
+use console::Key;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -103,6 +104,22 @@ impl Confirm {
             editor,
         }
     }
+}
+
+/// The pre-commit confirmation requires an interactive stdin: the menu
+/// ([`confirm_menu`]) renders on stderr but reads keys from stdin, so a
+/// non-TTY stdin leaves the menu unanswerable. Returns an error naming the
+/// fix when confirmation is enabled but stdin is not a terminal — the guard
+/// runs before any planning or staging, so the run fails cleanly instead of
+/// aborting after the first batch is already staged (issue #78).
+fn ensure_confirm_terminal(confirm_enabled: bool, stdin_tty: bool) -> anyhow::Result<()> {
+    if confirm_enabled && !stdin_tty {
+        anyhow::bail!(
+            "confirm_before_commit is enabled but stdin is not a terminal — \
+             run `aic` from a terminal, or turn the option off"
+        );
+    }
+    Ok(())
 }
 
 /// Marker error for the user declining the pre-commit confirmation (issue
@@ -520,7 +537,7 @@ pub(crate) async fn run_commit_workflow_impl(
             if let Err(e) = outcome.await {
                 anyhow::bail!(
                     "aborted on batch {} of {} after {} batch(es) committed. \
-                     Remaining changes are still in the working tree — re-run \
+                     The remaining changes are still staged in the index — re-run \
                      `aic` to continue: {e:#}",
                     i + 1,
                     count,
@@ -569,12 +586,17 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     let git = Git::at(Path::new("."))?;
     // Absent/malformed config keeps the default (no confirmation) — same
     // tolerance `LLM::from_env` uses for the provider fields.
-    let confirm = if config::Config::load()
+    let confirm_enabled = config::Config::load()
         .ok()
         .flatten()
         .map(|c| c.confirm_before_commit())
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    // The confirmation menu renders on stderr but reads keys from stdin, so a
+    // non-interactive stdin makes it unanswerable — and the failure would
+    // otherwise surface mid-run, after the first batch is already staged.
+    // Refuse to start rather than abort halfway.
+    ensure_confirm_terminal(confirm_enabled, std::io::stdin().is_terminal())?;
+    let confirm = if confirm_enabled {
         Confirm::interactive(menu, editor)
     } else {
         Confirm::disabled()
