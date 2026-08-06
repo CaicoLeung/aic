@@ -24,6 +24,14 @@ pub trait DisplayWrite: Send + Sync {
     /// write failures never propagate (status output, never load-bearing).
     fn write_line(&self, line: &str);
 
+    /// Erase the last `n` emitted rows. Terminal sinks emit the ANSI erase
+    /// sequence for the rows above the cursor (and end with the cursor at the
+    /// top of the cleared region); in-memory sinks drop the lines from their
+    /// buffer so `lines()` keeps reflecting the visible screen. `n == 0` is a
+    /// no-op. Used to remove a confirmed or replaced commit preview so no
+    /// draft residue stays next to the ✓ lines of landed commits.
+    fn clear_last(&self, n: usize);
+
     /// Whether the sink can render ANSI color. Terminal sinks override this
     /// to report real color support; non-terminal sinks inherit the `false`
     /// default. `Display` caches the value once at construction.
@@ -57,6 +65,15 @@ struct TermWrite(Term);
 impl DisplayWrite for TermWrite {
     fn write_line(&self, line: &str) {
         let _ = self.0.write_line(line);
+    }
+
+    fn clear_last(&self, n: usize) {
+        // `clear_last_lines` erases the n rows above the cursor and parks the
+        // cursor at the top of the cleared region — exactly "this preview is
+        // gone, keep writing from here".
+        if n > 0 {
+            let _ = self.0.clear_last_lines(n);
+        }
     }
 
     // Colors are a property of where lines land: this sink writes to stderr,
@@ -131,6 +148,14 @@ impl Display {
     /// whitespace.
     fn emit_blank(&self) {
         self.out.write_line("");
+    }
+
+    /// Erase the last `n` emitted rows — removes a confirmed or replaced
+    /// commit preview ([`Display::commit_preview`]) so the draft doesn't
+    /// linger next to the ✓ lines of landed batches. `n == 0` (e.g.
+    /// confirmation disabled) is a no-op.
+    pub fn clear_last(&self, n: usize) {
+        self.out.clear_last(n);
     }
 
     /// Effective text width for wrapped output: the shared width resolution
@@ -1396,6 +1421,11 @@ mod tests {
     impl DisplayWrite for Buf {
         fn write_line(&self, line: &str) {
             self.lines.lock().push(line.to_string());
+        }
+        fn clear_last(&self, n: usize) {
+            let mut lines = self.lines.lock();
+            let keep = lines.len().saturating_sub(n);
+            lines.truncate(keep);
         }
         fn colors_enabled(&self) -> bool {
             self.colors

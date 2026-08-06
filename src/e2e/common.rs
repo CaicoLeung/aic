@@ -350,6 +350,12 @@ impl DisplayWrite for BufferWrite {
     fn write_line(&self, line: &str) {
         self.0.lock().push(line.to_string());
     }
+
+    fn clear_last(&self, n: usize) {
+        let mut lines = self.0.lock();
+        let keep = lines.len().saturating_sub(n);
+        lines.truncate(keep);
+    }
 }
 
 /// A `Display` backed by a fresh, discarded [`BufferWrite`] — a quiet sink for
