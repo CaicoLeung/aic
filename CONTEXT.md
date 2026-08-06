@@ -20,6 +20,18 @@ _Avoid_: suggestion, proposal, generated text
 The phase of a Run that maps a Batch's planned hunks onto the current index→workdir diff and stages them, tracking which original (plan-time) hunk indices have already landed. Staging re-reads the current diff rather than the plan-time snapshot, so a pre-commit hook that restages whole files (lint-staged/prettier) cannot desync later Batches of the same Run.
 _Avoid_: group staging, chunk staging, add -p
 
+**Commit confirmation**:
+An opt-in phase (gated by the `confirm_before_commit` config option) that interrupts the commit path after the Drafted Message is produced and before the commit lands. The full Drafted Message plus the Batch's file list are shown, then a four-option menu is offered: **Commit**, **Re-generate**, **Edit**, **Abort**. Re-generate and Edit loop back to the same menu (re-showing the message); Commit proceeds to commit; Abort ends the Run with nothing further committed. Does not apply to the Finalize step, which uses git's default message.
+_Avoid_: review prompt, pre-commit check, confirmation gate
+
+**Re-generate**:
+A Commit-confirmation menu action that re-runs the LLM on the same Batch diff to produce a fresh Drafted Message, then returns to the menu. A plain re-run — it does not feed critique back to the model.
+_Avoid_: retry, redo, re-roll
+
+**Message edit**:
+A Commit-confirmation menu action that lets the user modify the full Drafted Message (subject + body) before committing. Opens `$VISUAL`/`$EDITOR` on a temp file (via the `edit` crate, which also falls back to nano/vim/vi/emacs when neither is set) — git-style. Returns to the menu after editing so the result can be re-verified.
+_Avoid_: message tweak, inline edit (overloaded), editor step
+
 **Provider**:
 A named LLM backend the user can route a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from env, then config, then default.
 _Avoid_: backend, engine

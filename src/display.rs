@@ -24,6 +24,14 @@ pub trait DisplayWrite: Send + Sync {
     /// write failures never propagate (status output, never load-bearing).
     fn write_line(&self, line: &str);
 
+    /// Erase the last `n` emitted rows. Terminal sinks emit the ANSI erase
+    /// sequence for the rows above the cursor (and end with the cursor at the
+    /// top of the cleared region); in-memory sinks drop the lines from their
+    /// buffer so `lines()` keeps reflecting the visible screen. `n == 0` is a
+    /// no-op. Used to remove a confirmed or replaced commit preview so no
+    /// draft residue stays next to the ✓ lines of landed commits.
+    fn clear_last(&self, n: usize);
+
     /// Whether the sink can render ANSI color. Terminal sinks override this
     /// to report real color support; non-terminal sinks inherit the `false`
     /// default. `Display` caches the value once at construction.
@@ -57,6 +65,15 @@ struct TermWrite(Term);
 impl DisplayWrite for TermWrite {
     fn write_line(&self, line: &str) {
         let _ = self.0.write_line(line);
+    }
+
+    fn clear_last(&self, n: usize) {
+        // `clear_last_lines` erases the n rows above the cursor and parks the
+        // cursor at the top of the cleared region — exactly "this preview is
+        // gone, keep writing from here".
+        if n > 0 {
+            let _ = self.0.clear_last_lines(n);
+        }
     }
 
     // Colors are a property of where lines land: this sink writes to stderr,
@@ -133,6 +150,14 @@ impl Display {
         self.out.write_line("");
     }
 
+    /// Erase the last `n` emitted rows — removes a confirmed or replaced
+    /// commit preview ([`Display::commit_preview`]) so the draft doesn't
+    /// linger next to the ✓ lines of landed batches. `n == 0` (e.g.
+    /// confirmation disabled) is a no-op.
+    pub fn clear_last(&self, n: usize) {
+        self.out.clear_last(n);
+    }
+
     /// Effective text width for wrapped output: the shared width resolution
     /// ([`resolve_cols`] — fallback + [`HARD_CAP`] cap), minus both margins.
     /// A sub-margin reported width saturates down to `0`, which [`wrap_line`]
@@ -163,10 +188,35 @@ impl Display {
         // Main line: [prefix] ✓ <hash> <message>
         let check = self.styled("\u{2713}", Style::new().green().bold());
         let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
+        let pre = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", self.styled(prefix, gray.clone()))
+        };
+        // Subject: margin only, never wrapped (title line).
+        self.emit(&format!(
+            "{pre}{check} {hash_styled} {}",
+            self.styled_subject(message)
+        ));
 
-        // Decompose the subject once on CommitType, then style the parts.
+        // Optional body — margin + greedy word-wrap to text_width, gray.
+        // The body's old ad-hoc `  ` indent is subsumed by the shared margin so
+        // the whole block sits at one uniform inset.
+        if let Some(b) = body {
+            self.emit_body(b);
+        }
+    }
+
+    /// Style a conventional-commit subject line the same way in every
+    /// renderer: typed `type` in its palette color, gray `(scope)`, bold
+    /// description. Unknown/colon-less messages fall back to the full message
+    /// in the type palette color. Shared by [`Display::commit_line`] (post-commit)
+    /// and [`Display::commit_preview`] (pre-commit confirmation) so what the
+    /// user confirms is byte-for-byte what the completed line will show.
+    fn styled_subject(&self, message: &str) -> String {
+        let gray = Style::new().true_color(138, 143, 159);
         let parsed = CommitType::parse_message(message);
-        let msg_styled = match parsed.description {
+        match parsed.description {
             Some(desc) => {
                 let colored_type = self.styled(parsed.type_name, parsed.commit_type.color());
                 let scope = match parsed.scope {
@@ -178,35 +228,78 @@ impl Display {
             }
             // No colon — unknown type; color the whole message via the type palette.
             None => self.styled(message, parsed.commit_type.color()),
-        };
+        }
+    }
 
-        let pre = if prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", self.styled(prefix, gray.clone()))
-        };
-        // Subject: margin only, never wrapped (title line).
-        self.emit(&format!("{pre}{check} {hash_styled} {msg_styled}"));
-
-        // Optional body — margin + greedy word-wrap to text_width, gray.
-        // The body's old ad-hoc `  ` indent is subsumed by the shared margin so
-        // the whole block sits at one uniform inset.
-        if let Some(b) = body {
-            let trimmed = b.trim();
-            if !trimmed.is_empty() {
-                let width = self.text_width();
-                for src_line in trimmed.lines() {
-                    if src_line.is_empty() {
-                        // Blank line: no trailing-whitespace margin.
-                        self.emit_blank();
-                        continue;
-                    }
-                    for piece in wrap_line(src_line, width) {
-                        self.emit(&self.styled(&piece, gray.clone()));
-                    }
+    /// Emit a commit body — margin + greedy word-wrap to text_width, gray.
+    /// Blank body lines stay blank (no trailing-whitespace margin). Shared by
+    /// [`Display::commit_line`] and [`Display::commit_preview`].
+    fn emit_body(&self, body: &str) -> usize {
+        let gray = Style::new().true_color(138, 143, 159);
+        let trimmed = body.trim();
+        let mut rows = 0;
+        if !trimmed.is_empty() {
+            let width = self.text_width();
+            for src_line in trimmed.lines() {
+                if src_line.is_empty() {
+                    self.emit_blank();
+                    rows += 1;
+                    continue;
+                }
+                for piece in wrap_line(src_line, width) {
+                    self.emit(&self.styled(&piece, gray.clone()));
+                    rows += 1;
                 }
             }
         }
+        rows
+    }
+
+    /// Pre-commit confirmation preview (issue #78): the exact message that
+    /// would be committed, framed as *pending* so it can't be mistaken for the
+    /// ✓ lines of already-landed batches — a yellow `?` marker on the header
+    /// and subject (the subject keeps its conventional-commit coloring, so the
+    /// draft previews the exact styling the ✓ line will use), gray body, dim
+    /// file list.
+    ///
+    /// Returns how many rows the preview occupies, so the caller can erase it
+    /// with [`Display::clear_last`] once the draft is confirmed or replaced —
+    /// a confirmed draft never lingers on screen.
+    pub fn commit_preview(&self, message: &str, body: Option<&str>, paths: &[String]) -> usize {
+        let pending = Style::new().yellow().bold();
+        let dim = Style::new().dim();
+        self.emit(&format!(
+            "{} {}",
+            self.styled("?", pending.clone()),
+            self.styled("proposed commit:", pending.clone())
+        ));
+        self.emit(&format!(
+            "{} {}",
+            self.styled("?", pending.clone()),
+            self.styled_subject(message)
+        ));
+        let mut rows = 2;
+        if let Some(b) = body {
+            rows += self.emit_body(b);
+        }
+        let files = if paths.len() == 1 {
+            paths[0].clone()
+        } else if paths.len() <= 8 {
+            format!("{} ({} files)", paths.join(", "), paths.len())
+        } else {
+            // Keep the preview line bounded: a huge batch must not print an
+            // unbounded file list.
+            let shown = &paths[..8];
+            format!(
+                "{}, … +{} more ({} files)",
+                shown.join(", "),
+                paths.len() - shown.len(),
+                paths.len()
+            )
+        };
+        self.emit(&self.styled(&format!("files: {files}"), dim));
+        self.emit_blank();
+        rows + 2
     }
 
     // ------------------------------------------------------------------
@@ -1348,9 +1441,107 @@ mod tests {
         fn write_line(&self, line: &str) {
             self.lines.lock().push(line.to_string());
         }
+        fn clear_last(&self, n: usize) {
+            let mut lines = self.lines.lock();
+            let keep = lines.len().saturating_sub(n);
+            lines.truncate(keep);
+        }
         fn colors_enabled(&self) -> bool {
             self.colors
         }
+    }
+
+    #[test]
+    fn commit_preview_renders_message_body_and_file_list() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.commit_preview(
+            "feat(auth): add OAuth2 login support",
+            Some("Allow users to sign in via Google and GitHub OAuth2 providers"),
+            &["src/auth.rs".to_string(), "src/main.rs".to_string()],
+        );
+        let got = lines.lock().clone();
+        // Pending header + subject carry the `?` marker; body and file list
+        // sit at the shared margin; a trailing blank separates the preview
+        // from the confirmation menu. `rows` is the whole block, so the caller
+        // can erase it after the draft is confirmed.
+        assert_eq!(got[0], "  ? proposed commit:");
+        assert_eq!(got[1], "  ? feat(auth): add OAuth2 login support");
+        assert_eq!(
+            got[2],
+            "  Allow users to sign in via Google and GitHub OAuth2 providers"
+        );
+        assert_eq!(got[3], "  files: src/auth.rs, src/main.rs (2 files)");
+        assert_eq!(got[4], "");
+        assert_eq!(rows, 5, "header + subject + body + files + blank");
+    }
+
+    #[test]
+    fn commit_preview_singleton_file_list_omits_count() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.commit_preview("chore: bump dep", None, &["Cargo.toml".to_string()]);
+        let got = lines.lock().clone();
+        assert_eq!(got[0], "  ? proposed commit:");
+        assert_eq!(got[1], "  ? chore: bump dep");
+        // Single file: no "(1 files)" suffix; no body line emitted.
+        assert_eq!(got[2], "  files: Cargo.toml");
+        assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
+        assert_eq!(rows, 4, "header + subject + files + blank");
+    }
+
+    /// `clear_last` drops the most recent rows from the buffer (the in-memory
+    /// analogue of erasing a preview on a real terminal), and `0` is a no-op —
+    /// so the confirmed-draft erase never touches earlier commit lines.
+    #[test]
+    fn clear_last_erases_only_the_most_recent_rows() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.emit("keep me");
+        d.emit("preview line 1");
+        d.emit("preview line 2");
+        d.emit("preview line 3");
+        d.clear_last(3);
+        assert_eq!(lines.lock().clone(), vec!["  keep me".to_string()]);
+
+        // n == 0 is a no-op.
+        d.clear_last(0);
+        assert_eq!(lines.lock().clone(), vec!["  keep me".to_string()]);
+
+        // n larger than the buffer just empties it (no panic).
+        d.clear_last(99);
+        assert!(lines.lock().is_empty());
+    }
+
+    /// A batch with more than 8 files keeps the preview line bounded: the
+    /// first 8 are named, the rest are summarized.
+    #[test]
+    fn commit_preview_truncates_long_file_lists() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let paths: Vec<String> = (1..=10).map(|i| format!("src/f{i}.rs")).collect();
+        let rows = d.commit_preview("feat: big", None, &paths);
+        let got = lines.lock().clone();
+        assert!(
+            got.iter().any(|l| l.contains(
+                "files: src/f1.rs, src/f2.rs, src/f3.rs, src/f4.rs, src/f5.rs, \
+                 src/f6.rs, src/f7.rs, src/f8.rs, … +2 more (10 files)"
+            )),
+            "expected a truncated file list, got: {got:?}"
+        );
+        assert_eq!(rows, 4, "header + subject + files + blank");
     }
 
     #[test]

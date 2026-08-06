@@ -24,5 +24,6 @@
 
 mod commit;
 mod common;
+mod confirm;
 mod hooks;
 mod resolve;

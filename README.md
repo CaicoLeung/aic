@@ -170,6 +170,29 @@ For each of `backend`, `api_key`, `model`, and `base_url`:
 3. Config file (`~/.config/aic/config.toml`)
 4. Built-in default
 
+### Pre-commit confirmation
+
+By default `aic` drafts a message and commits immediately — you only see the
+message *after* it lands. If you sign commits (GPG, the signing popup fires
+before you see what you're signing) or run a local model whose drafts on large
+commits need a human check, opt in:
+
+```toml
+confirm_before_commit = true
+```
+
+in `~/.config/aic/config.toml`, or toggle it during `aic setup`. With it on,
+`aic` shows the drafted message (subject + body) and the files it would land,
+then offers a four-option menu before each commit:
+
+- **Commit** — land the commit as drafted
+- **Re-generate** — re-run the model on the same diff for a fresh draft
+- **Edit** — edit the full message in `$VISUAL`/`$EDITOR` (falls back to nano/vim/vi/emacs), then return to the menu
+- **Abort** — end the run; nothing further commits
+
+Abort in batch mode leaves already-committed batches in place and keeps the
+rest in the working tree, recoverable by re-running `aic`.
+
 ### Supported providers
 
 | Provider          | Default model                              | Env key                                                       |

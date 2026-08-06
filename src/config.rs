@@ -15,6 +15,11 @@ pub struct Config {
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    /// When `true`, `aic` shows the drafted commit message and the files it
+    /// would land, then offers a Commit / Re-generate / Edit / Abort menu
+    /// before each commit. Absent (or `false`) keeps the original
+    /// generate-and-commit behavior.
+    pub confirm_before_commit: Option<bool>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -37,6 +42,12 @@ impl Config {
         let config: Config = toml::from_str(&content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         Ok(Some(config))
+    }
+
+    /// Whether each drafted commit must be confirmed before it lands.
+    /// Absent or `false` → commit immediately, as before this option existed.
+    pub fn confirm_before_commit(&self) -> bool {
+        self.confirm_before_commit.unwrap_or(false)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -86,6 +97,7 @@ impl ResolvedConfig {
             api_key: None,
             model: None,
             base_url: None,
+            confirm_before_commit: None,
         });
 
         let (backend, backend_source) =
@@ -194,7 +206,7 @@ pub fn run_setup() -> Result<()> {
         eprintln!("aic setup needs an interactive terminal, but stdin is not a TTY.");
         eprintln!("To configure non-interactively you can either:");
         eprintln!(
-            "  • write the config file at {path} (TOML keys: backend, api_key, model, base_url), or"
+            "  • write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit), or"
         );
         eprintln!(
             "  • set environment variables: LLM_BACKEND, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL"
@@ -235,6 +247,10 @@ struct Draft {
     api_key: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
+    /// Whether to require confirmation before each commit. `None` means
+    /// "not chosen yet" (finalize keeps it unset → config absent → default
+    /// off); the wizard default shown to the user is `false`.
+    confirm_before_commit: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +259,7 @@ enum Step {
     ApiKey,
     BaseUrl,
     Model,
+    ConfirmCommit,
     Confirm,
 }
 
@@ -264,6 +281,7 @@ fn wizard(theme: &ColorfulTheme) -> Result<Option<Config>> {
             Step::ApiKey => step_api_key(&existing, existing_provider, &mut draft)?,
             Step::BaseUrl => step_base_url(&existing, existing_provider, &mut draft)?,
             Step::Model => step_model(theme, &existing, existing_provider, &mut draft)?,
+            Step::ConfirmCommit => step_confirm_commit(theme, &existing, &mut draft)?,
             Step::Confirm => step_confirm(theme, &draft)?,
         };
         // Recompute after the step runs: `step_provider` may change the provider
@@ -316,6 +334,7 @@ fn applicable_steps(p: Provider) -> Vec<Step> {
         steps.push(Step::BaseUrl);
     }
     steps.push(Step::Model);
+    steps.push(Step::ConfirmCommit);
     steps.push(Step::Confirm);
     steps
 }
@@ -327,6 +346,7 @@ fn finalize(draft: Draft) -> Config {
         api_key: draft.api_key,
         model: draft.model,
         base_url: draft.base_url,
+        confirm_before_commit: draft.confirm_before_commit,
     }
 }
 
@@ -583,6 +603,42 @@ fn step_model(
     }
 }
 
+/// Initial value for the confirmation toggle: the in-session draft choice
+/// first, then the existing config's value, else `false` (default off). Not
+/// provider-dependent, so no `field_initial`-style provider guard is needed.
+fn confirm_initial(draft: &Draft, existing: &Option<Config>) -> bool {
+    draft
+        .confirm_before_commit
+        .or_else(|| existing.as_ref().and_then(|c| c.confirm_before_commit))
+        .unwrap_or(false)
+}
+
+/// Yes/No toggle for requiring confirmation before each commit (issue #78).
+/// Unlike the provider-scoped steps, this one is not provider-dependent: the
+/// initial value is the in-session draft choice, else the existing config's
+/// value, else `false` (the default — behavior unchanged until the user opts
+/// in).
+fn step_confirm_commit(
+    theme: &ColorfulTheme,
+    existing: &Option<Config>,
+    draft: &mut Draft,
+) -> Result<Nav> {
+    let initial = confirm_initial(draft, existing);
+    match opt_nav(
+        Confirm::with_theme(theme)
+            .with_prompt("Require confirmation before each commit?")
+            .default(initial)
+            .interact_opt(),
+    )? {
+        OptNav::Value(v) => {
+            draft.confirm_before_commit = Some(v);
+            Ok(Nav::Next)
+        }
+        OptNav::Back => Ok(Nav::Back),
+        OptNav::Cancel => Ok(Nav::Cancel),
+    }
+}
+
 fn step_confirm(theme: &ColorfulTheme, draft: &Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before confirm");
     let default_model = provider.default_model();
@@ -607,6 +663,14 @@ fn step_confirm(theme: &ColorfulTheme, draft: &Draft) -> Result<Nav> {
                 default_model
             });
     println!("  model:    {model_display}");
+    println!(
+        "  confirm:  {}",
+        if draft.confirm_before_commit.unwrap_or(false) {
+            "yes — before each commit"
+        } else {
+            "no"
+        }
+    );
     match &draft.api_key {
         Some(k) if !k.is_empty() => println!("  api key:  {}", mask_key(k)),
         _ => match provider.env_key() {
@@ -775,6 +839,7 @@ mod tests {
             api_key: api_key.map(String::from),
             model: model.map(String::from),
             base_url: base_url.map(String::from),
+            confirm_before_commit: None,
         }
     }
 
@@ -789,6 +854,7 @@ mod tests {
             api_key: api_key.map(String::from),
             model: model.map(String::from),
             base_url: base_url.map(String::from),
+            confirm_before_commit: None,
         }
     }
 
@@ -810,12 +876,24 @@ mod tests {
         // OpenAI has a key but no base URL -> ApiKey present, BaseUrl absent.
         assert_eq!(
             applicable_steps(Provider::OpenAI),
-            vec![Step::Provider, Step::ApiKey, Step::Model, Step::Confirm]
+            vec![
+                Step::Provider,
+                Step::ApiKey,
+                Step::Model,
+                Step::ConfirmCommit,
+                Step::Confirm
+            ]
         );
         // Ollama has no key but a base URL -> BaseUrl present, ApiKey absent.
         assert_eq!(
             applicable_steps(Provider::Ollama),
-            vec![Step::Provider, Step::BaseUrl, Step::Model, Step::Confirm]
+            vec![
+                Step::Provider,
+                Step::BaseUrl,
+                Step::Model,
+                Step::ConfirmCommit,
+                Step::Confirm
+            ]
         );
         // OpenAI-compatible needs both.
         assert_eq!(
@@ -825,6 +903,7 @@ mod tests {
                 Step::ApiKey,
                 Step::BaseUrl,
                 Step::Model,
+                Step::ConfirmCommit,
                 Step::Confirm,
             ]
         );
@@ -844,6 +923,10 @@ mod tests {
             );
             assert_eq!(steps.last(), Some(&Step::Confirm), "{p:?} missing Confirm");
             assert!(steps.contains(&Step::Model), "{p:?} missing Model");
+            assert!(
+                steps.contains(&Step::ConfirmCommit),
+                "{p:?} missing ConfirmCommit"
+            );
             assert_eq!(
                 steps.iter().filter(|s| **s == Step::Provider).count(),
                 1,
@@ -903,5 +986,57 @@ mod tests {
         ));
         assert_eq!(out.backend.as_deref(), Some("ollama"));
         assert_eq!(out.base_url.as_deref(), Some("http://host:11434"));
+    }
+
+    #[test]
+    fn confirm_before_commit_defaults_off_and_respects_value() {
+        assert!(!cfg("openai", None, None, None).confirm_before_commit());
+        let on = Config {
+            backend: None,
+            api_key: None,
+            model: None,
+            base_url: None,
+            confirm_before_commit: Some(true),
+        };
+        assert!(on.confirm_before_commit());
+    }
+
+    #[test]
+    fn finalize_carries_confirm_before_commit() {
+        // Untouched (None) when the user never visited the step — config stays
+        // absent, so the runtime default remains off.
+        let out = finalize(draft(Some(Provider::OpenAI), None, None, None));
+        assert_eq!(out.confirm_before_commit, None);
+
+        // Explicit choice round-trips into the written config.
+        let mut d = draft(Some(Provider::OpenAI), None, None, None);
+        d.confirm_before_commit = Some(true);
+        let out = finalize(d);
+        assert_eq!(out.confirm_before_commit, Some(true));
+    }
+
+    #[test]
+    fn confirm_initial_prefers_draft_then_existing_then_false() {
+        let existing: Option<Config> = Some(Config {
+            backend: None,
+            api_key: None,
+            model: None,
+            base_url: None,
+            confirm_before_commit: Some(true),
+        });
+
+        // No draft, existing true -> true.
+        let d = draft(Some(Provider::OpenAI), None, None, None);
+        assert!(confirm_initial(&d, &existing));
+
+        // No draft, no existing -> false (default off).
+        assert!(!confirm_initial(&d, &None));
+
+        // Draft choice wins over existing.
+        let mut d = draft(Some(Provider::OpenAI), None, None, None);
+        d.confirm_before_commit = Some(false);
+        assert!(!confirm_initial(&d, &existing));
+        d.confirm_before_commit = Some(true);
+        assert!(confirm_initial(&d, &None));
     }
 }
