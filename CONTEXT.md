@@ -21,8 +21,16 @@ The phase of a Run that maps a Batch's planned hunks onto the current index→wo
 _Avoid_: group staging, chunk staging, add -p
 
 **Commit confirmation**:
-An opt-in phase (gated by the `confirm_before_commit` config option) that interrupts the commit path after the Drafted Message is produced and before the commit lands: the full Drafted Message plus the Batch's file list are shown, then the user is prompted to proceed. A decline aborts the Run — nothing in the current Batch commits, already-committed Batches stay, and remaining work stays recoverable in the working tree. Does not apply to the Finalize step, which uses git's default message.
+An opt-in phase (gated by the `confirm_before_commit` config option) that interrupts the commit path after the Drafted Message is produced and before the commit lands. The full Drafted Message plus the Batch's file list are shown, then a four-option menu is offered: **Commit**, **Re-generate**, **Edit**, **Abort**. Re-generate and Edit loop back to the same menu (re-showing the message); Commit proceeds to commit; Abort ends the Run with nothing further committed. Does not apply to the Finalize step, which uses git's default message.
 _Avoid_: review prompt, pre-commit check, confirmation gate
+
+**Re-generate**:
+A Commit-confirmation menu action that re-runs the LLM on the same Batch diff to produce a fresh Drafted Message, then returns to the menu. A plain re-run — it does not feed critique back to the model.
+_Avoid_: retry, redo, re-roll
+
+**Message edit**:
+A Commit-confirmation menu action that lets the user modify the full Drafted Message (subject + body) before committing. When stdin is a TTY, editing is an inline multi-line editor in the current terminal; when stdin is not a TTY, it falls back to `$VISUAL`/`$EDITOR` on a temp file (git-style). Returns to the menu after editing so the result can be re-verified.
+_Avoid_: message tweak, inline edit (overloaded), editor step
 
 **Provider**:
 A named LLM backend the user can route a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from env, then config, then default.
