@@ -6,6 +6,7 @@ pub mod diff;
 pub mod display;
 pub mod generator;
 pub mod git;
+pub mod grouping;
 pub mod llm;
 pub mod prompt;
 pub mod retry;

@@ -17,6 +17,10 @@ use anyhow::{Context, Result};
 pub struct DiffBlock {
     pub header: String,
     pub old_start: u32,
+    /// How many old-side lines the hunk spans (context included). Paired with
+    /// [`DiffBlock::old_start`] so callers (notably the grouping engine) can
+    /// compute inter-hunk gaps without re-parsing the `@@` header.
+    pub old_count: u32,
     pub new_start: u32,
     pub new_count: u32,
     pub lines: Vec<String>,
@@ -53,13 +57,13 @@ pub fn parse_diff_blocks(diff: &str) -> Vec<DiffBlock> {
     let mut blocks: Vec<DiffBlock> = Vec::new();
 
     for line in diff.lines() {
-        if let Some((old_start, _old_count, new_start, new_count, context)) =
-            parse_hunk_header(line)
+        if let Some((old_start, old_count, new_start, new_count, context)) = parse_hunk_header(line)
         {
             let header = context.unwrap_or("(top-level)").to_string();
             blocks.push(DiffBlock {
                 header,
                 old_start,
+                old_count,
                 new_start,
                 new_count,
                 lines: Vec::new(),
