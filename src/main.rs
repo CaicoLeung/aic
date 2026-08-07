@@ -64,12 +64,12 @@ pub(crate) enum ConfirmChoice {
 pub(crate) type ConfirmMenu = Box<dyn Fn(&str) -> anyhow::Result<ConfirmChoice>>;
 
 /// Erased message editor: takes the current (subject, body) and returns the
-/// edited (subject, body) — the prior values unchanged when the user cancels
-/// the edit. Boxed for the same reason as [`Resolver`] — production opens
-/// `$VISUAL`/`$EDITOR` on a temp file via the `edit` crate, tests inject a
-/// stub.
+/// edited message as a [`generator::CommitOutput`] — the prior values unchanged
+/// when the user cancels the edit. Boxed for the same reason as [`Resolver`] —
+/// production opens `$VISUAL`/`$EDITOR` on a temp file via the `edit` crate,
+/// tests inject a stub.
 pub(crate) type CommitEditor =
-    Box<dyn Fn(&str, Option<&str>) -> anyhow::Result<(String, Option<String>)>>;
+    Box<dyn Fn(&str, Option<&str>) -> anyhow::Result<generator::CommitOutput>>;
 
 /// Opt-in pre-commit confirmation (issue #78): the gate plus the menu and
 /// editor seams it needs, grouped so the workflow signatures stay within
@@ -158,29 +158,33 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
 }
 
 /// Run the confirmation loop for a drafted message. Returns the confirmed
-/// (message, body, preview_rows) after the user approves or edits it. The
-/// preview is shown after each edit/regeneration, and each preview is erased
-/// before being replaced so superseded drafts never accumulate on screen.
+/// message (a [`generator::CommitOutput`]) plus how many preview rows it
+/// occupied, after the user approves or edits it. The preview is shown after
+/// each edit/regeneration, and each preview is erased before being replaced so
+/// superseded drafts never accumulate on screen.
 async fn confirm_draft(
-    draft: (String, Option<String>),
+    draft: generator::CommitOutput,
     paths: &[String],
     display: &Display,
     confirm: &Confirm,
     messenger: &CommitMessenger,
     diff: String,
-) -> anyhow::Result<(String, Option<String>, usize)> {
-    let (mut message, mut body) = draft;
+) -> anyhow::Result<(generator::CommitOutput, usize)> {
+    let mut message = draft.message;
+    let mut body = draft.body;
 
     // Nothing to confirm when the gate is off — no menu/editor wired, so the
     // drafted message is final.
     let Confirm::Interactive { menu, editor } = confirm else {
-        return Ok((message, body, 0));
+        return Ok((generator::CommitOutput { message, body }, 0));
     };
 
     loop {
         let rows = display.commit_preview(&message, body.as_deref(), paths);
         match menu(&message)? {
-            ConfirmChoice::Commit => return Ok((message, body, rows)),
+            ConfirmChoice::Commit => {
+                return Ok((generator::CommitOutput { message, body }, rows));
+            }
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
                 let result =
@@ -190,7 +194,9 @@ async fn confirm_draft(
             }
             ConfirmChoice::Edit => {
                 display.clear_last(rows);
-                (message, body) = editor(&message, body.as_deref())?;
+                let edited = editor(&message, body.as_deref())?;
+                message = edited.message;
+                body = edited.body;
             }
             ConfirmChoice::Abort => return Err(CommitDeclined.into()),
         }
@@ -219,20 +225,13 @@ async fn generate_and_commit(
     // Generate initial draft, then run confirmation loop if enabled.
     let result =
         display::with_spinner("Generating commit message", messenger(diff_str.clone())).await?;
-    let (message, body, preview_rows) = confirm_draft(
-        (result.message, result.body),
-        paths,
-        display,
-        confirm,
-        messenger,
-        diff_str,
-    )
-    .await?;
+    let (confirmed, preview_rows) =
+        confirm_draft(result, paths, display, confirm, messenger, diff_str).await?;
 
     // Erase the confirmed preview and commit.
     display.clear_last(preview_rows);
-    let hash = git.commit(message.clone(), body.clone())?;
-    display.commit_line(&hash, &message, body.as_deref(), prefix);
+    let hash = git.commit(confirmed.message.clone(), confirmed.body.clone())?;
+    display.commit_line(&hash, &confirmed.message, confirmed.body.as_deref(), prefix);
     Ok(())
 }
 
@@ -663,9 +662,9 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
 
 /// Production message editor (issue #78): opens the drafted message in the
 /// user's `$VISUAL`/`$EDITOR` on a temp file via the `edit` crate, and reads
-/// the edited content back as a (subject, body) pair. The subject is the
-/// first line, the body the rest (leading blank lines collapsed, git-style).
-fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Option<String>)> {
+/// the edited content back as a [`generator::CommitOutput`]. The subject is
+/// the first line, the body the rest (leading blank lines collapsed, git-style).
+fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<generator::CommitOutput> {
     let text = message_to_edit(subject, body);
 
     let edited = edit::edit(&text).context("editor failed or was cancelled")?;
@@ -676,10 +675,16 @@ fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Op
     // confusing error; treat a cleared subject like a cancel and keep the
     // draft so the user can re-edit or Abort from the menu.
     if new_subject.trim().is_empty() {
-        return Ok((subject.to_string(), body.map(String::from)));
+        return Ok(generator::CommitOutput {
+            message: subject.to_string(),
+            body: body.map(String::from),
+        });
     }
     let new_body = lines.next().map(|s| s.trim_start().to_string());
-    Ok((new_subject, new_body))
+    Ok(generator::CommitOutput {
+        message: new_subject,
+        body: new_body,
+    })
 }
 
 /// The text an editor edits: the subject line, then the body (outer-whitespace
@@ -1131,9 +1136,9 @@ mod tests {
         temp_env::with_vars(
             [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
             || {
-                let (subject, body) = edit_message("feat: draft", None).unwrap();
-                assert_eq!(subject, "fix: args");
-                assert_eq!(body, None);
+                let edited = edit_message("feat: draft", None).unwrap();
+                assert_eq!(edited.message, "fix: args");
+                assert_eq!(edited.body, None);
             },
         );
     }
@@ -1155,13 +1160,13 @@ mod tests {
         temp_env::with_vars(
             [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
             || {
-                let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
+                let edited = edit_message("feat: draft", Some("draft body")).unwrap();
                 assert_eq!(
-                    subject, "feat: draft",
+                    edited.message, "feat: draft",
                     "an empty edit must keep the draft subject"
                 );
                 assert_eq!(
-                    body.as_deref(),
+                    edited.body.as_deref(),
                     Some("draft body"),
                     "an empty edit must keep the draft body"
                 );

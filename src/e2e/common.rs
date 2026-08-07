@@ -281,14 +281,22 @@ pub fn menu_queue(choices: Vec<ConfirmChoice>) -> ConfirmMenu {
 pub fn editor_fixed(subject: &str, body: Option<&str>) -> CommitEditor {
     let subject = subject.to_string();
     let body = body.map(|b| b.to_string());
-    Box::new(move |_s: &str, _b: Option<&str>| Ok((subject.clone(), body.clone())))
+    Box::new(move |_s: &str, _b: Option<&str>| {
+        Ok(generator::CommitOutput {
+            message: subject.clone(),
+            body: body.clone(),
+        })
+    })
 }
 
 /// Editor that returns its inputs unchanged — the "user cancelled the edit"
 /// path.
 pub fn editor_cancel() -> CommitEditor {
     Box::new(|subject: &str, body: Option<&str>| {
-        Ok((subject.to_string(), body.map(|b| b.to_string())))
+        Ok(generator::CommitOutput {
+            message: subject.to_string(),
+            body: body.map(|b| b.to_string()),
+        })
     })
 }
 
@@ -297,7 +305,7 @@ pub fn editor_cancel() -> CommitEditor {
 /// if a regression reaches it.
 pub fn unreachable_editor() -> CommitEditor {
     Box::new(
-        |_s: &str, _b: Option<&str>| -> anyhow::Result<(String, Option<String>)> {
+        |_s: &str, _b: Option<&str>| -> anyhow::Result<generator::CommitOutput> {
             panic!("CommitEditor reached on a path that must not edit")
         },
     )
