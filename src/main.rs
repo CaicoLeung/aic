@@ -93,20 +93,20 @@ pub(crate) enum Confirm {
     },
 }
 
-/// The pre-commit confirmation requires an interactive stdin: the menu
-/// ([`confirm_menu`]) renders on stderr but reads keys from stdin, so a
-/// non-TTY stdin leaves the menu unanswerable. Returns an error naming the
-/// fix when confirmation is enabled but stdin is not a terminal — the guard
-/// runs before any planning or staging, so the run fails cleanly instead of
-/// aborting after the first batch is already staged (issue #78).
-fn ensure_confirm_terminal(confirm_enabled: bool, stdin_tty: bool) -> anyhow::Result<()> {
+/// Decide whether the pre-commit confirmation can run, given whether stdin is
+/// interactive. The menu ([`confirm_menu`]) renders on stderr but reads keys
+/// from stdin, so a non-TTY stdin leaves it unanswerable. Rather than fail the
+/// whole run (which would break scripted/CI/editor invocations that can't
+/// answer a menu anyway), confirmation is skipped and the caller is told to
+/// warn — the run proceeds and commits directly, matching the behavior before
+/// the option existed. Returns `(enabled, warn)`; `warn` is set when the
+/// option was requested but could not be honored.
+fn resolve_confirm(confirm_enabled: bool, stdin_tty: bool) -> (bool, bool) {
     if confirm_enabled && !stdin_tty {
-        anyhow::bail!(
-            "confirm_before_commit is enabled but stdin is not a terminal — \
-             run `aic` from a terminal, or turn the option off"
-        );
+        (false, true)
+    } else {
+        (confirm_enabled, false)
     }
-    Ok(())
 }
 
 /// Marker error for the user declining the pre-commit confirmation (issue
@@ -596,16 +596,21 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     let git = Git::at(Path::new("."))?;
     // Absent/malformed config keeps the default (no confirmation) — same
     // tolerance `LLM::from_env` uses for the provider fields.
-    let confirm_enabled = config::Config::load()
+    let requested = config::Config::load()
         .ok()
         .flatten()
         .map(|c| c.confirm_before_commit())
         .unwrap_or(false);
-    // The confirmation menu renders on stderr but reads keys from stdin, so a
-    // non-interactive stdin makes it unanswerable — and the failure would
-    // otherwise surface mid-run, after the first batch is already staged.
-    // Refuse to start rather than abort halfway.
-    ensure_confirm_terminal(confirm_enabled, std::io::stdin().is_terminal())?;
+    // Confirmation needs an interactive stdin (the menu reads keys from it);
+    // on a non-TTY stdin it's skipped with a warning rather than failing the
+    // run, so scripted/CI/editor invocations keep working.
+    let (confirm_enabled, warn) = resolve_confirm(requested, std::io::stdin().is_terminal());
+    if warn {
+        eprintln!(
+            "warning: confirm_before_commit is enabled but stdin is not a terminal — \
+             skipping the confirmation menu"
+        );
+    }
     let confirm = if confirm_enabled {
         Confirm::Interactive { menu, editor }
     } else {
@@ -1094,25 +1099,16 @@ mod tests {
         });
     }
 
-    /// Confirmation off, or an interactive stdin, always passes; confirmation
-    /// on with a non-TTY stdin fails fast with a message naming the fix —
-    /// before any planning or staging happens.
+    /// Confirmation off, or an interactive stdin, runs as requested; a
+    /// non-TTY stdin skips confirmation (the menu would be unanswerable) and
+    /// flags a warning so the caller can say so — the run still proceeds.
     #[test]
-    fn ensure_confirm_terminal_guards_non_tty_stdin() {
-        assert!(ensure_confirm_terminal(false, false).is_ok());
-        assert!(ensure_confirm_terminal(false, true).is_ok());
-        assert!(ensure_confirm_terminal(true, true).is_ok());
-
-        let err = ensure_confirm_terminal(true, false).expect_err("must refuse non-TTY stdin");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("stdin is not a terminal"),
-            "expected a clear non-TTY error, got: {msg}"
-        );
-        assert!(
-            msg.contains("run `aic` from a terminal"),
-            "expected the fix to be named, got: {msg}"
-        );
+    fn resolve_confirm_skips_non_tty_stdin_with_warning() {
+        assert_eq!(resolve_confirm(false, false), (false, false));
+        assert_eq!(resolve_confirm(false, true), (false, false));
+        assert_eq!(resolve_confirm(true, true), (true, false));
+        // Confirm requested but stdin isn't interactive: skip + warn.
+        assert_eq!(resolve_confirm(true, false), (false, true));
     }
 
     /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
