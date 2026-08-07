@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use console::Term;
-use dialoguer::{Select, theme::ColorfulTheme};
+use inquire::list_option::ListOption;
 use inquire::validator::Validation;
-use inquire::{InquireError, Password, Text};
+use inquire::{InquireError, Password, Select, Text};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -216,8 +216,7 @@ pub fn run_setup() -> Result<()> {
         anyhow::bail!("cannot run interactive setup without a TTY");
     }
 
-    let theme = ColorfulTheme::default();
-    match wizard(&theme)? {
+    match wizard()? {
         Some(config) => {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
@@ -293,7 +292,7 @@ enum MenuChoice {
 /// model) and the pre-commit confirmation toggle — plus `Save & exit`. Each
 /// entry configures only its own fields and returns to the menu, so e.g. the
 /// confirmation toggle is reachable without ever touching the provider path.
-fn wizard(theme: &ColorfulTheme) -> Result<Option<Config>> {
+fn wizard() -> Result<Option<Config>> {
     let existing = Config::load().unwrap_or(None);
     let existing_provider = existing
         .as_ref()
@@ -309,15 +308,15 @@ fn wizard(theme: &ColorfulTheme) -> Result<Option<Config>> {
     // 1 = confirmation).
     let mut highlight = 0;
     loop {
-        match step_menu(theme, &draft, highlight)? {
+        match step_menu(&draft, highlight)? {
             MenuChoice::Provider => {
-                if run_provider_flow(theme, &existing, existing_provider, &mut draft)? {
+                if run_provider_flow(&existing, existing_provider, &mut draft)? {
                     return Ok(None); // Ctrl-C inside the provider path
                 }
                 highlight = 0;
             }
             MenuChoice::Confirm => {
-                if run_confirm_flow(theme, &existing, &mut draft)? {
+                if run_confirm_flow(&existing, &mut draft)? {
                     return Ok(None); // Ctrl-C on the confirmation toggle
                 }
                 highlight = 1;
@@ -500,20 +499,14 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
 /// sub-flow; `Save & exit` finalizes; `Esc`/Ctrl-C cancels the whole setup.
 /// `default_idx` is the row highlighted when the menu opens (persisted from
 /// the entry the user just finished).
-fn step_menu(theme: &ColorfulTheme, draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
+fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
     show_screen()?;
     let items = vec![
         format!("AI provider — {}", provider_label(draft)),
         format!("Confirm before commit — {}", confirm_label(draft)),
         "Save & exit".to_string(),
     ];
-    match opt_nav(
-        Select::with_theme(theme)
-            .with_prompt("What would you like to configure?")
-            .items(&items)
-            .default(default_idx)
-            .interact_opt(),
-    )? {
+    match opt_nav("What would you like to configure?", &items, default_idx)? {
         OptNav::Value(0) => Ok(MenuChoice::Provider),
         OptNav::Value(1) => Ok(MenuChoice::Confirm),
         OptNav::Value(2) => Ok(MenuChoice::Save),
@@ -532,7 +525,6 @@ fn step_menu(theme: &ColorfulTheme, draft: &Draft, default_idx: usize) -> Result
 /// provider choice returns to the main menu. Returns `true` on Ctrl-C (cancel
 /// the whole setup); `false` returns to the main menu.
 fn run_provider_flow(
-    theme: &ColorfulTheme,
     existing: &Option<Config>,
     existing_provider: Option<Provider>,
     draft: &mut Draft,
@@ -540,7 +532,7 @@ fn run_provider_flow(
     loop {
         // Screen 1: choose the provider. Switching clears key/url/model
         // (step_provider), which changes which sub-menu entries apply.
-        match step_provider(theme, existing_provider, draft)? {
+        match step_provider(existing_provider, draft)? {
             Nav::Next => {}
             Nav::Back => return Ok(false), // Esc on the provider choice -> main menu
             Nav::Cancel => return Ok(true),
@@ -549,22 +541,14 @@ fn run_provider_flow(
         loop {
             show_screen()?;
             let (entries, labels) = provider_submenu_items(draft);
-            match opt_nav(
-                Select::with_theme(theme)
-                    .with_prompt("Configure AI provider")
-                    .items(&labels)
-                    .default(0)
-                    .interact_opt(),
-            )? {
+            match opt_nav("Configure AI provider", &labels, 0)? {
                 OptNav::Value(i) => {
                     let nav = match entries[i] {
-                        ProviderEntry::ApiKey => step_api_key(theme, draft)?,
+                        ProviderEntry::ApiKey => step_api_key(draft)?,
                         ProviderEntry::BaseUrl => {
-                            step_base_url(theme, existing, existing_provider, draft)?
+                            step_base_url(existing, existing_provider, draft)?
                         }
-                        ProviderEntry::Model => {
-                            step_model(theme, existing, existing_provider, draft)?
-                        }
+                        ProviderEntry::Model => step_model(existing, existing_provider, draft)?,
                         ProviderEntry::Done => return Ok(false),
                     };
                     // Any non-cancel outcome returns to the sub-menu; the field
@@ -583,12 +567,8 @@ fn run_provider_flow(
 
 /// Run the confirmation-toggle sub-flow (a single Yes/No step). Returns `true`
 /// on Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
-fn run_confirm_flow(
-    theme: &ColorfulTheme,
-    existing: &Option<Config>,
-    draft: &mut Draft,
-) -> Result<bool> {
-    match step_confirm_commit(theme, existing, draft)? {
+fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
+    match step_confirm_commit(existing, draft)? {
         Nav::Next | Nav::Back => Ok(false),
         Nav::Cancel => Ok(true),
     }
@@ -626,11 +606,7 @@ fn field_initial(
     None
 }
 
-fn step_provider(
-    theme: &ColorfulTheme,
-    existing_provider: Option<Provider>,
-    draft: &mut Draft,
-) -> Result<Nav> {
+fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Result<Nav> {
     show_screen()?;
     let providers = Provider::all();
     let items: Vec<String> = providers
@@ -646,13 +622,7 @@ fn step_provider(
         .and_then(|ep| providers.iter().position(|p| *p == ep))
         .unwrap_or(0);
 
-    match opt_nav(
-        Select::with_theme(theme)
-            .with_prompt("Choose your AI provider")
-            .items(&items)
-            .default(default_idx)
-            .interact_opt(),
-    )? {
+    match opt_nav("Choose your AI provider", &items, default_idx)? {
         OptNav::Value(i) => {
             let chosen = providers[i];
             // Switching provider invalidates previously entered key/url/model.
@@ -669,7 +639,7 @@ fn step_provider(
     }
 }
 
-fn step_api_key(theme: &ColorfulTheme, draft: &mut Draft) -> Result<Nav> {
+fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
     // Effective key for editing: the in-session draft wins (it is what setup
     // writes), env is the fallback so a key supplied via LLM_API_KEY or the
@@ -687,16 +657,13 @@ fn step_api_key(theme: &ColorfulTheme, draft: &mut Draft) -> Result<Nav> {
                 // The replace path is a sub-mode: Esc there returns to the
                 // keep/replace choice.
                 let masked = mask_key(&key);
-                let items = ["Keep current key", "Enter a new key…"];
+                let items = vec![
+                    "Keep current key".to_string(),
+                    "Enter a new key…".to_string(),
+                ];
                 loop {
                     show_screen()?;
-                    match opt_nav(
-                        Select::with_theme(theme)
-                            .with_prompt(format!("API key (current: {masked})"))
-                            .items(items)
-                            .default(0)
-                            .interact_opt(),
-                    )? {
+                    match opt_nav(&format!("API key (current: {masked})"), &items, 0)? {
                         OptNav::Value(0) => return Ok(Nav::Next),
                         OptNav::Value(1) => {
                             show_screen()?;
@@ -757,13 +724,7 @@ fn step_api_key(theme: &ColorfulTheme, draft: &mut Draft) -> Result<Nav> {
             let enter_idx = 1;
             loop {
                 show_screen()?;
-                match opt_nav(
-                    Select::with_theme(theme)
-                        .with_prompt("API key")
-                        .items(&items)
-                        .default(0)
-                        .interact_opt(),
-                )? {
+                match opt_nav("API key", &items, 0)? {
                     OptNav::Value(i) if i == no_key_idx => {
                         draft.api_key = None;
                         return Ok(Nav::Next);
@@ -795,7 +756,6 @@ fn step_api_key(theme: &ColorfulTheme, draft: &mut Draft) -> Result<Nav> {
 }
 
 fn step_base_url(
-    theme: &ColorfulTheme,
     existing: &Option<Config>,
     ep: Option<Provider>,
     draft: &mut Draft,
@@ -849,13 +809,7 @@ fn step_base_url(
             let custom_idx = if has_url { 2 } else { 1 };
             loop {
                 show_screen()?;
-                match opt_nav(
-                    Select::with_theme(theme)
-                        .with_prompt("Base URL")
-                        .items(&items)
-                        .default(0)
-                        .interact_opt(),
-                )? {
+                match opt_nav("Base URL", &items, 0)? {
                     OptNav::Value(i) if i == use_default_idx => {
                         draft.base_url = None;
                         return Ok(Nav::Next);
@@ -888,12 +842,7 @@ fn step_base_url(
     }
 }
 
-fn step_model(
-    theme: &ColorfulTheme,
-    existing: &Option<Config>,
-    ep: Option<Provider>,
-    draft: &mut Draft,
-) -> Result<Nav> {
+fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before model");
     let default_model = provider.default_model();
     let models = provider.models();
@@ -936,13 +885,7 @@ fn step_model(
 
     loop {
         show_screen()?;
-        match opt_nav(
-            Select::with_theme(theme)
-                .with_prompt("Model")
-                .items(&items)
-                .default(highlight)
-                .interact_opt(),
-        )? {
+        match opt_nav("Model", &items, highlight)? {
             OptNav::Value(i) if i == custom_idx => {
                 show_screen()?;
                 match prompt_text("Custom model", false, None, false, "model cannot be empty")? {
@@ -990,23 +933,17 @@ fn confirm_initial(draft: &Draft, existing: &Option<Config>) -> bool {
 /// initial value is the in-session draft choice, else the existing config's
 /// value, else `false` (the default — behavior unchanged until the user opts
 /// in).
-fn step_confirm_commit(
-    theme: &ColorfulTheme,
-    existing: &Option<Config>,
-    draft: &mut Draft,
-) -> Result<Nav> {
+fn step_confirm_commit(existing: &Option<Config>, draft: &mut Draft) -> Result<Nav> {
     show_screen()?;
     let initial = confirm_initial(draft, existing);
     // A yes/no option list driven by arrow keys + Enter — never typed input,
     // so the user keeps their hands off the keyboard.
-    let items = ["yes", "no"];
+    let items = vec!["yes".to_string(), "no".to_string()];
     let default_idx = if initial { 0 } else { 1 };
     match opt_nav(
-        Select::with_theme(theme)
-            .with_prompt("Require confirmation before each commit?")
-            .items(items)
-            .default(default_idx)
-            .interact_opt(),
+        "Require confirmation before each commit?",
+        &items,
+        default_idx,
     )? {
         OptNav::Value(0) => {
             draft.confirm_before_commit = Some(true);
@@ -1031,19 +968,35 @@ fn mask_key(k: &str) -> String {
     "•".repeat(k.len().min(12))
 }
 
-/// Map a dialoguer `interact_opt()` result onto the wizard's nav: a value is
-/// `Next`-bound, `None` (Esc) is `Back`, and Ctrl-C / EOF is `Cancel`.
-enum OptNav<T> {
-    Value(T),
+/// Outcome of a single-choice menu ([`opt_nav`]): the chosen row index, or
+/// Esc (back) / Ctrl-C (cancel). inquire models Esc and Ctrl-C as error
+/// variants ([`InquireError::OperationCanceled`] /
+/// [`InquireError::OperationInterrupted`]); this normalizes them into the
+/// wizard's nav vocabulary so every menu dispatches identically.
+enum OptNav {
+    Value(usize),
     Back,
     Cancel,
 }
 
-fn opt_nav<T>(res: std::result::Result<Option<T>, dialoguer::Error>) -> Result<OptNav<T>> {
-    match res {
-        Ok(Some(v)) => Ok(OptNav::Value(v)),
-        Ok(None) => Ok(OptNav::Back),
-        Err(dialoguer::Error::IO(e))
+/// Render an `inquire::Select` menu over `options` and map its three outcomes
+/// — choose (index), Esc (back), Ctrl-C (cancel) — onto [`OptNav`]. `default`
+/// is the row highlighted when the menu opens (inquire's `starting_cursor`).
+/// Uses `raw_prompt` so the chosen **index** is recoverable (inquire's plain
+/// `prompt` returns only the value), which keeps the wizard's index-based
+/// dispatch untouched. `inquire::Select` owns its options, so this is the one
+/// spot that builds the `Vec` — every call site stays declarative.
+fn opt_nav(prompt: &str, options: &[String], default: usize) -> Result<OptNav> {
+    match Select::new(prompt, options.to_vec())
+        .with_starting_cursor(default)
+        .raw_prompt()
+    {
+        Ok(ListOption { index, .. }) => Ok(OptNav::Value(index)),
+        Err(InquireError::OperationCanceled) => Ok(OptNav::Back),
+        // Ctrl-C, or a closed/EOF stdin (surfaced by inquire as an `IO`
+        // error) — both cancel the wizard.
+        Err(InquireError::OperationInterrupted) => Ok(OptNav::Cancel),
+        Err(InquireError::IO(e))
             if matches!(
                 e.kind(),
                 io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
@@ -1051,7 +1004,7 @@ fn opt_nav<T>(res: std::result::Result<Option<T>, dialoguer::Error>) -> Result<O
         {
             Ok(OptNav::Cancel)
         }
-        Err(e) => Err::<OptNav<T>, dialoguer::Error>(e).context("could not read terminal input"),
+        Err(e) => Err(e).context("could not read terminal input"),
     }
 }
 
@@ -1063,11 +1016,11 @@ enum TextAct {
 }
 
 /// Read a line of text via the `inquire` crate, which intercepts Esc (back)
-/// and Ctrl-C (cancel) natively — unlike dialoguer's `Input`/`Password`.
-/// `masked` hides each typed char (for secrets). `initial` is offered as the
-/// kept value when the user submits an empty line. `allow_empty` admits an
-/// empty submit; otherwise `empty_hint` is shown (via inquire's validator) and
-/// the prompt retries until non-empty.
+/// and Ctrl-C (cancel) natively as error variants. `masked` hides each typed
+/// char (for secrets). `initial` is offered as the kept value when the user
+/// submits an empty line. `allow_empty` admits an empty submit; otherwise
+/// `empty_hint` is shown (via inquire's validator) and the prompt retries until
+/// non-empty.
 fn prompt_text(
     prompt: &str,
     masked: bool,
