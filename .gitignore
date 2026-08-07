@@ -3,6 +3,11 @@
 .omc
 CLAUDE.md
 docs/drawio
+.claude
 
 # zipsign private key — NEVER commit. Only keys/zipsign.pub is tracked.
 keys/*.key
+
+# python bytecode
+__pycache__/
+*.pyc
