@@ -147,12 +147,12 @@ async fn resolve_skips_binary_and_stages_text() {
     assert!(is_unmerged(dir.path(), "binary.bin"));
 
     // And classify confirms it was seen as Binary.
-    let files = git.conflicted_files().unwrap();
+    let files = git.conflict().conflicted_files().unwrap();
     let binary = files
         .iter()
         .find(|f| f.path == "binary.bin")
         .expect("binary.bin should be a conflicted file");
-    assert_eq!(binary.kind, git::ConflictKind::Binary);
+    assert_eq!(binary.kind, conflict::ConflictKind::Binary);
 }
 
 /// Marker validation auto-retry (ADR 0005): the LLM returns markers on the
@@ -308,12 +308,12 @@ async fn resolve_declines_finalize_when_all_manual() {
     // but nothing unmerged in the index. (`Git::state` / `conflicted_files`
     // read the process CWD, so the guard must already be held.)
     assert_eq!(
-        git.state().unwrap(),
-        git::RepoState::Merge,
+        git.conflict().state().unwrap(),
+        conflict::RepoState::Merge,
         "setup must leave the repo mid-merge"
     );
     assert!(
-        git.conflicted_files().unwrap().is_empty(),
+        git.conflict().conflicted_files().unwrap().is_empty(),
         "setup must leave no unmerged entries"
     );
 
@@ -329,8 +329,8 @@ async fn resolve_declines_finalize_when_all_manual() {
 
     // No finalize ran: the repo is still mid-merge, and no commit landed.
     assert_eq!(
-        git.state().unwrap(),
-        git::RepoState::Merge,
+        git.conflict().state().unwrap(),
+        conflict::RepoState::Merge,
         "repo must stay mid-merge when finalize is declined"
     );
     assert!(!is_clean(dir.path()), "decline must not finalize the merge");
@@ -371,10 +371,10 @@ async fn resolve_declines_finalize_when_all_manual() {
 /// finalize that committed the resolution but left a stray staged or untracked
 /// entry would still pass it, so the strict `worktree_is_empty` guarantee is
 /// pinned too.
-async fn resolve_finalizes_clean(dir: &Path, expected: git::RepoState) {
+async fn resolve_finalizes_clean(dir: &Path, expected: conflict::RepoState) {
     let git = Git::at(dir).unwrap();
     assert_eq!(
-        git.state().unwrap(),
+        git.conflict().state().unwrap(),
         expected,
         "setup must leave the repo in the expected conflict state"
     );
@@ -404,7 +404,7 @@ async fn resolve_finalizes_clean(dir: &Path, expected: git::RepoState) {
 async fn resolve_finalizes_cherry_pick() {
     let dir = tempfile::tempdir().unwrap();
     cherry_pick_conflict(dir.path());
-    resolve_finalizes_clean(dir.path(), git::RepoState::CherryPick).await;
+    resolve_finalizes_clean(dir.path(), conflict::RepoState::CherryPick).await;
 }
 
 /// Revert conflict finalized end-to-end (ADR 0005): `git revert --continue`
@@ -413,7 +413,7 @@ async fn resolve_finalizes_cherry_pick() {
 async fn resolve_finalizes_revert() {
     let dir = tempfile::tempdir().unwrap();
     revert_conflict(dir.path());
-    resolve_finalizes_clean(dir.path(), git::RepoState::Revert).await;
+    resolve_finalizes_clean(dir.path(), conflict::RepoState::Revert).await;
 }
 
 /// Cherry-pick *sequence* finalize (issue #29): a multi-commit `git cherry-pick
@@ -426,7 +426,7 @@ async fn resolve_finalizes_revert() {
 async fn resolve_finalizes_cherry_pick_sequence() {
     let dir = tempfile::tempdir().unwrap();
     cherry_pick_sequence_conflict(dir.path());
-    resolve_finalizes_clean(dir.path(), git::RepoState::CherryPickSequence).await;
+    resolve_finalizes_clean(dir.path(), conflict::RepoState::CherryPickSequence).await;
     // The clean first commit (adding extra.txt) must land before the second
     // hits its conflict — its presence proves the sequence advanced past A.
     assert_eq!(read_file(dir.path(), "extra.txt"), "feature\n");
@@ -442,7 +442,7 @@ async fn resolve_finalizes_cherry_pick_sequence() {
 async fn resolve_finalizes_revert_sequence() {
     let dir = tempfile::tempdir().unwrap();
     revert_sequence_conflict(dir.path());
-    resolve_finalizes_clean(dir.path(), git::RepoState::RevertSequence).await;
+    resolve_finalizes_clean(dir.path(), conflict::RepoState::RevertSequence).await;
     // The clean first revert (removing fileP.txt) must land before the second
     // hits its conflict — its absence proves the sequence advanced past P.
     assert!(!dir.path().join("fileP.txt").exists());
@@ -460,10 +460,10 @@ async fn resolve_skips_delete_modify_conflict() {
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
 
-    let files = git.conflicted_files().unwrap();
+    let files = git.conflict().conflicted_files().unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].path, "tracked.txt");
-    assert_eq!(files[0].kind, git::ConflictKind::DeleteModify);
+    assert_eq!(files[0].kind, conflict::ConflictKind::DeleteModify);
 
     let err = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![]), sink())
         .await
@@ -505,13 +505,13 @@ async fn resolve_skips_oversized_and_stages_text() {
     assert!(!staged_blob_has_markers(dir.path(), "tracked.txt"));
 
     // Big file classified Oversized, still unmerged.
-    let files = git.conflicted_files().unwrap();
+    let files = git.conflict().conflicted_files().unwrap();
     let big = files
         .iter()
         .find(|f| f.path == "big.txt")
         .expect("big.txt should be conflicted");
     assert!(
-        matches!(big.kind, git::ConflictKind::Oversized { .. }),
+        matches!(big.kind, conflict::ConflictKind::Oversized { .. }),
         "expected Oversized, got {:?}",
         big.kind
     );

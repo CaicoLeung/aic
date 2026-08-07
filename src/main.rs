@@ -1,5 +1,7 @@
 pub mod cli;
 pub mod config;
+pub mod confirm;
+pub mod conflict;
 pub mod diff;
 pub mod display;
 pub mod generator;
@@ -15,6 +17,9 @@ pub mod update;
 mod e2e;
 
 use crate::cli::Commands;
+use crate::confirm::{
+    CommitDeclined, Confirm, confirm_draft, ensure_confirm_terminal, inquire_opt,
+};
 use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
@@ -44,86 +49,6 @@ pub(crate) type BatchPlanner =
 /// its Conventional-Commits message + body. Boxed for the same reason.
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
-
-/// One action the user can take on the pre-commit confirmation menu (issue
-/// #78). [`ConfirmMenu`] returns it; [`generate_and_commit`] translates it:
-/// Commit lands the commit, Regenerate and Edit loop back to the menu
-/// (re-showing the message), Abort ends the run with nothing further
-/// committed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfirmChoice {
-    Commit,
-    Regenerate,
-    Edit,
-    Abort,
-}
-
-/// Erased confirmation menu: given the drafted subject, returns the user's
-/// choice. Boxed for the same reason as [`Resolver`] — production wires it to
-/// a terminal menu (issue #78), tests inject a scripted choice sequence.
-pub(crate) type ConfirmMenu = Box<dyn Fn(&str) -> anyhow::Result<ConfirmChoice>>;
-
-/// Erased message editor: takes the current (subject, body) and returns the
-/// edited (subject, body) — the prior values unchanged when the user cancels
-/// the edit. Boxed for the same reason as [`Resolver`] — production opens
-/// `$VISUAL`/`$EDITOR` on a temp file via the `edit` crate, tests inject a
-/// stub.
-pub(crate) type CommitEditor =
-    Box<dyn Fn(&str, Option<&str>) -> anyhow::Result<(String, Option<String>)>>;
-
-/// Opt-in pre-commit confirmation (issue #78): the gate plus the menu and
-/// editor seams it needs, grouped so the workflow signatures stay within
-/// clippy's argument budget. [`Confirm::Disabled`] is the default — no menu,
-/// generate-and-commit byte-for-byte as before the option existed.
-///
-/// Modeled as an enum, not a struct-with-a-gate, so the disabled variant
-/// carries no dead closures — the menu and editor exist only when they can
-/// actually run.
-pub(crate) enum Confirm {
-    /// Confirmation off — generate-and-commit is unchanged. Carries no menu
-    /// or editor, so the disabled path can't accidentally invoke them.
-    Disabled,
-    /// Confirmation on, wired to the production menu and editor.
-    Interactive {
-        /// Drafted subject → user choice (Commit / Re-generate / Edit / Abort).
-        menu: ConfirmMenu,
-        /// (subject, body) → edited (subject, body); unchanged when the user
-        /// cancels the edit.
-        editor: CommitEditor,
-    },
-}
-
-/// The pre-commit confirmation requires an interactive stdin: the menu
-/// ([`confirm_menu`]) renders on stderr but reads keys from stdin, so a
-/// non-TTY stdin leaves the menu unanswerable. Returns an error naming the
-/// fix when confirmation is enabled but stdin is not a terminal — the guard
-/// runs before any planning or staging, so the run fails cleanly instead of
-/// aborting after the first batch is already staged (issue #78).
-fn ensure_confirm_terminal(confirm_enabled: bool, stdin_tty: bool) -> anyhow::Result<()> {
-    if confirm_enabled && !stdin_tty {
-        anyhow::bail!(
-            "confirm_before_commit is enabled but stdin is not a terminal — \
-             run `aic` from a terminal, or turn the option off"
-        );
-    }
-    Ok(())
-}
-
-/// Marker error for the user declining the pre-commit confirmation (issue
-/// #78). Distinct from ordinary failures so each call site can translate it
-/// into its own abort wording: the single-commit path reports "no commit
-/// made", the batch loop reports how many batches already committed and that
-/// the rest is recoverable.
-#[derive(Debug)]
-pub(crate) struct CommitDeclined;
-
-impl std::fmt::Display for CommitDeclined {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "commit declined by user")
-    }
-}
-
-impl std::error::Error for CommitDeclined {}
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling
@@ -155,46 +80,6 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // it. The renderer's Drop is a backstop if the stream aborted first.
     renderer.finish();
     result
-}
-
-/// Run the confirmation loop for a drafted message. Returns the confirmed
-/// (message, body, preview_rows) after the user approves or edits it. The
-/// preview is shown after each edit/regeneration, and each preview is erased
-/// before being replaced so superseded drafts never accumulate on screen.
-async fn confirm_draft(
-    draft: (String, Option<String>),
-    paths: &[String],
-    display: &Display,
-    confirm: &Confirm,
-    messenger: &CommitMessenger,
-    diff: String,
-) -> anyhow::Result<(String, Option<String>, usize)> {
-    let (mut message, mut body) = draft;
-
-    // Nothing to confirm when the gate is off — no menu/editor wired, so the
-    // drafted message is final.
-    let Confirm::Interactive { menu, editor } = confirm else {
-        return Ok((message, body, 0));
-    };
-
-    loop {
-        let rows = display.commit_preview(&message, body.as_deref(), paths);
-        match menu(&message)? {
-            ConfirmChoice::Commit => return Ok((message, body, rows)),
-            ConfirmChoice::Regenerate => {
-                display.clear_last(rows);
-                let result =
-                    display::with_spinner("Regenerating message", messenger(diff.clone())).await?;
-                message = result.message;
-                body = result.body;
-            }
-            ConfirmChoice::Edit => {
-                display.clear_last(rows);
-                (message, body) = editor(&message, body.as_deref())?;
-            }
-            ConfirmChoice::Abort => return Err(CommitDeclined.into()),
-        }
-    }
 }
 
 async fn generate_and_commit(
@@ -287,7 +172,8 @@ pub(crate) async fn run_resolve_workflow_impl(
     prompt: Prompt,
     display: Display,
 ) -> anyhow::Result<()> {
-    let state = git.state()?;
+    let conflict = git.conflict();
+    let state = conflict.state()?;
 
     if !state.is_conflicted() {
         display.no_conflicts();
@@ -299,13 +185,13 @@ pub(crate) async fn run_resolve_workflow_impl(
         anyhow::bail!("aic cannot resolve a {} state in v1", state.label());
     }
 
-    let files = git.conflicted_files()?;
+    let files = conflict.conflicted_files()?;
     if files.is_empty() {
         // Conflicted state but no unmerged index entries — the user resolved
         // every file by hand and only the finalize step remains.
         display.all_resolved_offer_finalize(state);
         if prompt("finalize now?")? {
-            git.finalize(state)?;
+            conflict.finalize(state)?;
             display.finalize_done(state);
         }
         return Ok(());
@@ -329,7 +215,7 @@ pub(crate) async fn run_resolve_workflow_impl(
             skipped_unresolvable += 1;
             continue;
         }
-        let original_bytes = git.read_worktree(&f.path)?;
+        let original_bytes = conflict.read_worktree(&f.path)?;
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
 
@@ -358,7 +244,7 @@ pub(crate) async fn run_resolve_workflow_impl(
             let content = original.to_string();
             async move {
                 match display::with_spinner(&label, resolve_ref(content)).await {
-                    Ok(resolved) if !git::has_conflict_markers(&resolved) => Ok(resolved),
+                    Ok(resolved) if !conflict::has_conflict_markers(&resolved) => Ok(resolved),
                     Ok(_markers) => Err(retry::RetryReason::Markers),
                     Err(err) => Err(retry::RetryReason::Fatal(err)),
                 }
@@ -415,7 +301,7 @@ pub(crate) async fn run_resolve_workflow_impl(
     let mut rejected = 0usize;
     for (path, _original, resolved) in &plans {
         if prompt(&format!("apply {path}?"))? {
-            git.write_worktree(path, resolved)?;
+            conflict.write_worktree(path, resolved)?;
             git.add(&[path.as_str()])?;
             display.resolved(path);
             approved += 1;
@@ -436,7 +322,7 @@ pub(crate) async fn run_resolve_workflow_impl(
     // lands in exactly one of: skipped_unresolvable, skipped_failed, plans).
     let needs_manual = rejected + skipped_failed + skipped_unresolvable;
     if needs_manual == 0 {
-        git.finalize(state)?;
+        conflict.finalize(state)?;
         display.finalize_done(state);
     } else {
         display.handoff(
@@ -481,7 +367,7 @@ pub(crate) async fn run_commit_workflow_impl(
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
     // deeper net; this prompt is the friendly front door.
-    let state = git.state()?;
+    let state = git.conflict().state()?;
     if state.is_conflicted() {
         display.resolve_prompt(state);
         if prompt("resolve now?")? {
@@ -608,8 +494,6 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
-    let menu: ConfirmMenu = Box::new(confirm_menu);
-    let editor: CommitEditor = Box::new(edit_message);
     let git = Git::at(Path::new("."))?;
     // Absent/malformed config keeps the default (no confirmation) — same
     // tolerance `LLM::from_env` uses for the provider fields.
@@ -624,7 +508,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     // Refuse to start rather than abort halfway.
     ensure_confirm_terminal(confirm_enabled, std::io::stdin().is_terminal())?;
     let confirm = if confirm_enabled {
-        Confirm::Interactive { menu, editor }
+        Confirm::interactive()
     } else {
         Confirm::Disabled
     };
@@ -638,107 +522,6 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         confirm,
     )
     .await
-}
-
-/// Whether an inquire error is a graceful user-initiated cancel (Esc,
-/// Ctrl-C, or a closed/EOF stdin) rather than an unexpected I/O failure.
-/// Esc/Ctrl-C are inquire's own cancel variants; a dropped stdin surfaces as
-/// an `IO` error with an `Interrupted`/`UnexpectedEof` kind, so detect those
-/// too and treat them as cancels (matching the setup wizard's handling).
-fn is_graceful_cancel(e: &inquire::InquireError) -> bool {
-    // Esc (OperationCanceled) plus the hard cancels shared with the wizard's
-    // `opt_nav` (Ctrl-C / closed stdin) — see `config::is_io_cancel`.
-    matches!(e, inquire::InquireError::OperationCanceled) || config::is_io_cancel(e)
-}
-
-/// Production confirmation menu (issue #78): an `inquire::Select` over the
-/// four actions, matching the setup wizard's arrow-key UI. The drafted
-/// subject rides in the prompt so the menu is self-describing even if the
-/// preview above scrolled away. Esc and Ctrl-C both abort — there is nothing
-/// to go back to once the commit is pending — matching the wizard's
-/// graceful-cancel handling (Ctrl-C is not an error here, same as in
-/// `opt_nav`).
-fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
-    use inquire::Select;
-    use inquire::list_option::ListOption;
-
-    // Truncate to 40 chars in one pass: take 40, then check whether a 41st
-    // existed (avoids walking the string twice).
-    let mut chars = message.chars();
-    let mut subject: String = chars.by_ref().take(40).collect();
-    if chars.next().is_some() {
-        subject.push('…');
-    }
-
-    let items = vec![
-        "Commit".to_string(),
-        "Re-generate".to_string(),
-        "Edit".to_string(),
-        "Abort".to_string(),
-    ];
-
-    // inquire's final frame redraws the menu's full footprint (the answer on
-    // top, the option rows below blanked) plus a trailing blank line. That
-    // residue would break the caller's exact `clear_last(rows)` preview erase,
-    // so restore the cursor to where the menu began and clear everything the
-    // prompt drew before returning. Save/restore is height-independent, so it
-    // stays correct no matter how many rows the menu spanned (Esc/Ctrl-C
-    // paths too) — the zero-residue contract the caller relies on is preserved.
-    let term = console::Term::stderr();
-    let _ = term.write_str("\x1b7"); // DECSC: save cursor at the menu's start
-    let choice = Select::new(&format!("Commit this message?  ({subject})"), items)
-        .with_starting_cursor(0)
-        .without_filtering() // match the wizard: no type-to-filter line
-        .raw_prompt();
-    let _ = term.write_str("\x1b8"); // DECRC: back to the menu's start
-    let _ = term.clear_to_end_of_screen(); // erase the menu's footprint
-
-    Ok(match choice {
-        Ok(ListOption { index: 0, .. }) => ConfirmChoice::Commit,
-        Ok(ListOption { index: 1, .. }) => ConfirmChoice::Regenerate,
-        Ok(ListOption { index: 2, .. }) => ConfirmChoice::Edit,
-        // index 3 is Abort; Esc / Ctrl-C / a closed stdin all end the run —
-        // there's nothing to go back to once the commit is pending.
-        Ok(_) => ConfirmChoice::Abort,
-        Err(e) if is_graceful_cancel(&e) => ConfirmChoice::Abort,
-        Err(e) => return Err(e).context("could not read terminal input"),
-    })
-}
-
-/// Production message editor (issue #78): opens the drafted message in the
-/// user's `$VISUAL`/`$EDITOR` on a temp file via the `edit` crate, and reads
-/// the edited content back as a (subject, body) pair. The subject is the
-/// first line, the body the rest (leading blank lines collapsed, git-style).
-fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Option<String>)> {
-    let text = message_to_edit(subject, body);
-
-    let edited = edit::edit(&text).context("editor failed or was cancelled")?;
-
-    let mut lines = edited.trim_end().splitn(2, '\n');
-    let new_subject = lines.next().unwrap_or("").to_string();
-    // An empty/whitespace-only subject would fail at `git commit` with a
-    // confusing error; treat a cleared subject like a cancel and keep the
-    // draft so the user can re-edit or Abort from the menu.
-    if new_subject.trim().is_empty() {
-        return Ok((subject.to_string(), body.map(String::from)));
-    }
-    let new_body = lines.next().map(|s| s.trim_start().to_string());
-    Ok((new_subject, new_body))
-}
-
-/// The text an editor edits: the subject line, then the body (outer-whitespace
-/// trimmed) on following lines. Shared by both editor paths so what the user
-/// sees in the editor is exactly the (subject, body) pair that would commit.
-fn message_to_edit(subject: &str, body: Option<&str>) -> String {
-    let mut text = subject.to_string();
-    if let Some(b) = body {
-        let trimmed = b.trim();
-        if !trimmed.is_empty() {
-            text.push('\n');
-            text.push_str(trimmed);
-        }
-    }
-    text
 }
 
 /// Where a shell's completion script is installed, and whether the shell
@@ -946,13 +729,8 @@ fn prompt_shell(default: Option<Shell>) -> anyhow::Result<Option<Shell>> {
 
     let selection = Select::new("Install completions for which shell?", labels)
         .with_starting_cursor(highlight)
-        .without_filtering() // match the wizard: no type-to-filter line
         .raw_prompt();
-    Ok(match selection {
-        Ok(ListOption { index, .. }) => Some(Shell::ALL[index]),
-        Err(e) if is_graceful_cancel(&e) => None,
-        Err(e) => return Err(e).context("could not read terminal input"),
-    })
+    Ok(inquire_opt(selection)?.map(|ListOption { index, .. }| Shell::ALL[index]))
 }
 
 #[tokio::main]
@@ -1135,85 +913,5 @@ mod tests {
         temp_env::with_var("SHELL", None::<&str>, || {
             assert_eq!(detect_shell(), None);
         });
-    }
-
-    /// Confirmation off, or an interactive stdin, always passes; confirmation
-    /// on with a non-TTY stdin fails fast with a message naming the fix —
-    /// before any planning or staging happens.
-    #[test]
-    fn ensure_confirm_terminal_guards_non_tty_stdin() {
-        assert!(ensure_confirm_terminal(false, false).is_ok());
-        assert!(ensure_confirm_terminal(false, true).is_ok());
-        assert!(ensure_confirm_terminal(true, true).is_ok());
-
-        let err = ensure_confirm_terminal(true, false).expect_err("must refuse non-TTY stdin");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("stdin is not a terminal"),
-            "expected a clear non-TTY error, got: {msg}"
-        );
-        assert!(
-            msg.contains("run `aic` from a terminal"),
-            "expected the fix to be named, got: {msg}"
-        );
-    }
-
-    /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
-    /// the file path (the `code --wait` case). Verified with a fake editor.
-    #[cfg(unix)]
-    #[test]
-    fn edit_message_honors_editor_arguments() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-editor.sh");
-        // Fake editor: the file path is the last argument; rewrite it in place.
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nfor last; do :; done\nprintf 'fix: args\\n' > \"$last\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let editor = format!("{} --wait", script.display());
-        temp_env::with_vars(
-            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
-            || {
-                let (subject, body) = edit_message("feat: draft", None).unwrap();
-                assert_eq!(subject, "fix: args");
-                assert_eq!(body, None);
-            },
-        );
-    }
-
-    /// A cleared editor (empty or whitespace-only subject) keeps the draft
-    /// instead of letting an empty subject reach `git commit`.
-    #[cfg(unix)]
-    #[test]
-    fn edit_message_empty_edit_keeps_original() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-editor.sh");
-        // Fake editor: blanks the file (subject becomes empty).
-        std::fs::write(&script, "#!/bin/sh\nfor last; do :; done\n: > \"$last\"\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let editor = format!("{} --wait", script.display());
-        temp_env::with_vars(
-            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
-            || {
-                let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
-                assert_eq!(
-                    subject, "feat: draft",
-                    "an empty edit must keep the draft subject"
-                );
-                assert_eq!(
-                    body.as_deref(),
-                    Some("draft body"),
-                    "an empty edit must keep the draft body"
-                );
-            },
-        );
     }
 }

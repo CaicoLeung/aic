@@ -61,3 +61,7 @@ _Avoid_: fix, merged file, resolved content
 **Finalize**:
 The git operation that ends a Conflict after all its Resolutions are approved: `git commit` for a Merge, `git cherry-pick --continue` for a CherryPick, `git revert --continue` for a Revert. aic finalizes with git's default message — it does not call the LLM for a Finalize message.
 _Avoid_: complete, finish, commit (overloaded — see Run, Drafted Message)
+
+**Conflict module**:
+The module (`src/conflict.rs`, reached as `Git::conflict() -> Conflict<'_>`) that owns conflict detection, classification, worktree I/O for conflicted files, and Finalize. Owns the `RepoState`, `ConflictKind`, `ConflictedFile` types and `has_conflict_markers`. The commit guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git` and call across this seam; `Git` keeps the repo handle, `run_git`, and the libgit2/CLI commit path.
+_Avoid_: resolve module, merge module, conflict service

@@ -1,4 +1,4 @@
-# ADR 0006: Unify interactive menus on `inquire`, drop `dialoguer`
+# ADR 0007: Unify interactive menus on `inquire`, drop `dialoguer`
 
 - **Status:** Accepted
 - **Date:** 2026-08-07
@@ -44,11 +44,17 @@ terminal stream.
 framing):** migrating to inquire carries three deltas that cannot be fully
 restored without forking the crate:
 
-1. **Type-to-filter is disabled.** inquire's `Select` filters the option list
-   as the user types (`filter_input_enabled` defaults to `true`), which would
-   add an unfamiliar filter input line and re-bind letter keys. Every
-   `Select::new` is built `.without_filtering()` so typing a letter is a clean
-   no-op, matching the dialoguer behavior this replaced.
+1. **Type-to-filter is enabled (inquire default).** inquire 0.7.5's `Select`
+   renders the prompt and the first option on the *same* line when filtering is
+   off: the no-filter path (`render_select_prompt` -> `print_prompt`) omits the
+   newline after the prompt, so `option[0]` is drawn inline (`? prompt  opt0`),
+   while the filter path (`print_prompt_with_input`) ends the prompt line with a
+   newline. `.without_filtering()` — originally added here for dialoguer parity
+   (no filter input line, no letter-key rebind) — therefore regressed the layout
+   on every `Select` menu, so it has been removed. The trade is a filter input
+   line on the prompt and type-to-filter narrowing the list; accepted, and the
+   hint line (`[↑↓ to move, enter to select, type to filter]`) is now accurate
+   rather than misleading.
 2. **Menu output moved stdout → stderr.** `dialoguer::Select` wrote to stdout;
    inquire 0.7.5 hardcodes `Term::stderr()` in its (private) `terminal` module
    with no public override. On a single TTY this is invisible; it only matters
