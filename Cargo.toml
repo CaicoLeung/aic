@@ -25,7 +25,6 @@ git2 = "0.21"
 indicatif = "0.17"
 console = "0.16"
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
-tempfile = "3"
 rig-core = "0.36"
 schemars = "1"
 similar = "2"
@@ -41,3 +40,4 @@ edit = "0.1"
 [dev-dependencies]
 parking_lot = "0.12"
 temp-env = "0.3"
+tempfile = "3"
