@@ -73,36 +73,24 @@ pub(crate) type CommitEditor =
 
 /// Opt-in pre-commit confirmation (issue #78): the gate plus the menu and
 /// editor seams it needs, grouped so the workflow signatures stay within
-/// clippy's argument budget. [`Confirm::disabled`] is the default — no menu,
+/// clippy's argument budget. [`Confirm::Disabled`] is the default — no menu,
 /// generate-and-commit byte-for-byte as before the option existed.
-pub(crate) struct Confirm {
-    /// Gate: when `false`, `menu` and `editor` are never invoked.
-    enabled: bool,
-    /// Drafted subject → user choice (Commit / Re-generate / Edit / Abort).
-    menu: ConfirmMenu,
-    /// (subject, body) → edited (subject, body); unchanged when the user
-    /// cancels the edit.
-    editor: CommitEditor,
-}
-
-impl Confirm {
-    /// Confirmation off — the seams are placeholders that must never run.
-    pub(crate) fn disabled() -> Self {
-        Self {
-            enabled: false,
-            menu: Box::new(|_| Ok(ConfirmChoice::Commit)),
-            editor: Box::new(|s, b| Ok((s.to_string(), b.map(|b| b.to_string())))),
-        }
-    }
-
+///
+/// Modeled as an enum, not a struct-with-a-gate, so the disabled variant
+/// carries no dead closures — the menu and editor exist only when they can
+/// actually run.
+pub(crate) enum Confirm {
+    /// Confirmation off — generate-and-commit is unchanged. Carries no menu
+    /// or editor, so the disabled path can't accidentally invoke them.
+    Disabled,
     /// Confirmation on, wired to the production menu and editor.
-    pub(crate) fn interactive(menu: ConfirmMenu, editor: CommitEditor) -> Self {
-        Self {
-            enabled: true,
-            menu,
-            editor,
-        }
-    }
+    Interactive {
+        /// Drafted subject → user choice (Commit / Re-generate / Edit / Abort).
+        menu: ConfirmMenu,
+        /// (subject, body) → edited (subject, body); unchanged when the user
+        /// cancels the edit.
+        editor: CommitEditor,
+    },
 }
 
 /// The pre-commit confirmation requires an interactive stdin: the menu
@@ -183,13 +171,15 @@ async fn confirm_draft(
 ) -> anyhow::Result<(String, Option<String>, usize)> {
     let (mut message, mut body) = draft;
 
-    if !confirm.enabled {
+    // Nothing to confirm when the gate is off — no menu/editor wired, so the
+    // drafted message is final.
+    let Confirm::Interactive { menu, editor } = confirm else {
         return Ok((message, body, 0));
-    }
+    };
 
     loop {
         let rows = display.commit_preview(&message, body.as_deref(), paths);
-        match (confirm.menu)(&message)? {
+        match menu(&message)? {
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
@@ -200,7 +190,7 @@ async fn confirm_draft(
             }
             ConfirmChoice::Edit => {
                 display.clear_last(rows);
-                (message, body) = (confirm.editor)(&message, body.as_deref())?;
+                (message, body) = editor(&message, body.as_deref())?;
             }
             ConfirmChoice::Abort => return Err(CommitDeclined.into()),
         }
@@ -634,9 +624,9 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     // Refuse to start rather than abort halfway.
     ensure_confirm_terminal(confirm_enabled, std::io::stdin().is_terminal())?;
     let confirm = if confirm_enabled {
-        Confirm::interactive(menu, editor)
+        Confirm::Interactive { menu, editor }
     } else {
-        Confirm::disabled()
+        Confirm::Disabled
     };
     run_commit_workflow_impl(
         &git,
@@ -661,8 +651,11 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
     use dialoguer::{Select, theme::ColorfulTheme};
 
     let items = ["Commit", "Re-generate", "Edit", "Abort"];
-    let mut subject: String = message.chars().take(40).collect();
-    if message.chars().count() > 40 {
+    // Truncate to 40 chars in one pass: take 40, then check whether a 41st
+    // existed (avoids walking the string twice).
+    let mut chars = message.chars();
+    let mut subject: String = chars.by_ref().take(40).collect();
+    if chars.next().is_some() {
         subject.push('…');
     }
 
@@ -705,6 +698,12 @@ fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Op
 
     let mut lines = edited.trim_end().splitn(2, '\n');
     let new_subject = lines.next().unwrap_or("").to_string();
+    // An empty/whitespace-only subject would fail at `git commit` with a
+    // confusing error; treat a cleared subject like a cancel and keep the
+    // draft so the user can re-edit or Abort from the menu.
+    if new_subject.trim().is_empty() {
+        return Ok((subject.to_string(), body.map(String::from)));
+    }
     let new_body = lines.next().map(|s| s.trim_start().to_string());
     Ok((new_subject, new_body))
 }
@@ -1161,6 +1160,37 @@ mod tests {
                 let (subject, body) = edit_message("feat: draft", None).unwrap();
                 assert_eq!(subject, "fix: args");
                 assert_eq!(body, None);
+            },
+        );
+    }
+
+    /// A cleared editor (empty or whitespace-only subject) keeps the draft
+    /// instead of letting an empty subject reach `git commit`.
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_empty_edit_keeps_original() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-editor.sh");
+        // Fake editor: blanks the file (subject becomes empty).
+        std::fs::write(&script, "#!/bin/sh\nfor last; do :; done\n: > \"$last\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let editor = format!("{} --wait", script.display());
+        temp_env::with_vars(
+            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
+            || {
+                let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
+                assert_eq!(
+                    subject, "feat: draft",
+                    "an empty edit must keep the draft subject"
+                );
+                assert_eq!(
+                    body.as_deref(),
+                    Some("draft body"),
+                    "an empty edit must keep the draft body"
+                );
             },
         );
     }
