@@ -546,8 +546,8 @@ pub(crate) async fn run_commit_workflow_impl(
             };
             if let Err(e) = outcome.await {
                 anyhow::bail!(
-                    "aborted on batch {} of {} after {} batch(es) committed.\n\
-                     The remaining changes are still staged in the index.\n\
+                    "aborted on batch {} of {} after {} batch(es) committed.\n  \
+                     The remaining changes are still staged in the index.\n  \
                      re-run `aic` to continue: {e:#}",
                     i + 1,
                     count,
@@ -634,20 +634,12 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 /// preview above scrolled away. Esc (and `q`, dialoguer's quit key) abort —
 /// there is nothing to go back to once the commit is pending — and Ctrl-C
 /// ends the process the same way it does everywhere else in the wizard.
-fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
+fn confirm_menu(_message: &str) -> anyhow::Result<ConfirmChoice> {
     use dialoguer::{Select, theme::ColorfulTheme};
 
     let items = ["Commit", "Re-generate", "Edit", "Abort"];
-    // Truncate to 40 chars in one pass: take 40, then check whether a 41st
-    // existed (avoids walking the string twice).
-    let mut chars = message.chars();
-    let mut subject: String = chars.by_ref().take(40).collect();
-    if chars.next().is_some() {
-        subject.push('…');
-    }
 
     let choice = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Commit this message?  ({subject})"))
         .items(items)
         .default(0)
         // No `✔ ...` echo line after the choice: the preview above is erased
