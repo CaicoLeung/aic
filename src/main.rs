@@ -640,17 +640,28 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     .await
 }
 
-/// Production confirmation menu (issue #78): a dialoguer `Select` over the
+/// Whether an inquire error is a graceful user-initiated cancel (Esc,
+/// Ctrl-C, or a closed/EOF stdin) rather than an unexpected I/O failure.
+/// Esc/Ctrl-C are inquire's own cancel variants; a dropped stdin surfaces as
+/// an `IO` error with an `Interrupted`/`UnexpectedEof` kind, so detect those
+/// too and treat them as cancels (matching the setup wizard's handling).
+fn is_graceful_cancel(e: &inquire::InquireError) -> bool {
+    // Esc (OperationCanceled) plus the hard cancels shared with the wizard's
+    // `opt_nav` (Ctrl-C / closed stdin) — see `config::is_io_cancel`.
+    matches!(e, inquire::InquireError::OperationCanceled) || config::is_io_cancel(e)
+}
+
+/// Production confirmation menu (issue #78): an `inquire::Select` over the
 /// four actions, matching the setup wizard's arrow-key UI. The drafted
 /// subject rides in the prompt so the menu is self-describing even if the
-/// preview above scrolled away. Esc (and `q`, dialoguer's quit key) and
-/// Ctrl-C both abort — there is nothing to go back to once the commit is
-/// pending — matching the wizard's graceful-cancel handling (Ctrl-C is not
-/// an error here, same as in `opt_nav`).
+/// preview above scrolled away. Esc and Ctrl-C both abort — there is nothing
+/// to go back to once the commit is pending — matching the wizard's
+/// graceful-cancel handling (Ctrl-C is not an error here, same as in
+/// `opt_nav`).
 fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
-    use dialoguer::{Select, theme::ColorfulTheme};
+    use inquire::Select;
+    use inquire::list_option::ListOption;
 
-    let items = ["Commit", "Re-generate", "Edit", "Abort"];
     // Truncate to 40 chars in one pass: take 40, then check whether a 41st
     // existed (avoids walking the string twice).
     let mut chars = message.chars();
@@ -659,30 +670,37 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
         subject.push('…');
     }
 
-    let choice = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Commit this message?  ({subject})"))
-        .items(items)
-        .default(0)
-        // No `✔ ...` echo line after the choice: the preview above is erased
-        // by the caller after a commit, and a leftover selection line would
-        // make that erase imprecise (and linger as residue).
-        .report(false)
-        .interact_opt();
+    let items = vec![
+        "Commit".to_string(),
+        "Re-generate".to_string(),
+        "Edit".to_string(),
+        "Abort".to_string(),
+    ];
+
+    // inquire's final frame redraws the menu's full footprint (the answer on
+    // top, the option rows below blanked) plus a trailing blank line. That
+    // residue would break the caller's exact `clear_last(rows)` preview erase,
+    // so restore the cursor to where the menu began and clear everything the
+    // prompt drew before returning. Save/restore is height-independent, so it
+    // stays correct no matter how many rows the menu spanned (Esc/Ctrl-C
+    // paths too) — the zero-residue contract the caller relies on is preserved.
+    let term = console::Term::stderr();
+    let _ = term.write_str("\x1b7"); // DECSC: save cursor at the menu's start
+    let choice = Select::new(&format!("Commit this message?  ({subject})"), items)
+        .with_starting_cursor(0)
+        .without_filtering() // match the wizard: no type-to-filter line
+        .raw_prompt();
+    let _ = term.write_str("\x1b8"); // DECRC: back to the menu's start
+    let _ = term.clear_to_end_of_screen(); // erase the menu's footprint
+
     Ok(match choice {
-        Ok(Some(0)) => ConfirmChoice::Commit,
-        Ok(Some(1)) => ConfirmChoice::Regenerate,
-        Ok(Some(2)) => ConfirmChoice::Edit,
-        // Some(3) is Abort; None is Esc — both end the run.
-        Ok(Some(_) | None) => ConfirmChoice::Abort,
-        // Ctrl-C / EOF: graceful abort, same as the setup wizard's `opt_nav`.
-        Err(dialoguer::Error::IO(e))
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::Interrupted | std::io::ErrorKind::UnexpectedEof
-            ) =>
-        {
-            ConfirmChoice::Abort
-        }
+        Ok(ListOption { index: 0, .. }) => ConfirmChoice::Commit,
+        Ok(ListOption { index: 1, .. }) => ConfirmChoice::Regenerate,
+        Ok(ListOption { index: 2, .. }) => ConfirmChoice::Edit,
+        // index 3 is Abort; Esc / Ctrl-C / a closed stdin all end the run —
+        // there's nothing to go back to once the commit is pending.
+        Ok(_) => ConfirmChoice::Abort,
+        Err(e) if is_graceful_cancel(&e) => ConfirmChoice::Abort,
         Err(e) => return Err(e).context("could not read terminal input"),
     })
 }
@@ -918,19 +936,23 @@ fn install_completion(shell: Shell) -> anyhow::Result<()> {
 /// highlight to `default` (usually the detected login shell). Returns `None`
 /// when the user cancels (Esc / Ctrl-C).
 fn prompt_shell(default: Option<Shell>) -> anyhow::Result<Option<Shell>> {
-    use dialoguer::{Select, theme::ColorfulTheme};
+    use inquire::Select;
+    use inquire::list_option::ListOption;
 
-    let labels = Shell::ALL.map(Shell::name);
+    let labels: Vec<&'static str> = Shell::ALL.iter().map(|s| Shell::name(*s)).collect();
     let highlight = default
         .and_then(|d| Shell::ALL.iter().position(|&s| s == d))
         .unwrap_or(0);
 
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Install completions for which shell?")
-        .items(labels)
-        .default(highlight)
-        .interact_opt()?;
-    Ok(selection.map(|i| Shell::ALL[i]))
+    let selection = Select::new("Install completions for which shell?", labels)
+        .with_starting_cursor(highlight)
+        .without_filtering() // match the wizard: no type-to-filter line
+        .raw_prompt();
+    Ok(match selection {
+        Ok(ListOption { index, .. }) => Some(Shell::ALL[index]),
+        Err(e) if is_graceful_cancel(&e) => None,
+        Err(e) => return Err(e).context("could not read terminal input"),
+    })
 }
 
 #[tokio::main]
