@@ -244,7 +244,6 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
     let _ = term.write_str("\x1b7"); // DECSC: save cursor at the menu's start
     let choice = Select::new(&format!("Commit this message?  ({subject})"), labels)
         .with_starting_cursor(0)
-        .without_filtering() // match the wizard: no type-to-filter line
         .raw_prompt();
     let _ = term.write_str("\x1b8"); // DECRC: back to the menu's start
     let _ = term.clear_to_end_of_screen(); // erase the menu's footprint

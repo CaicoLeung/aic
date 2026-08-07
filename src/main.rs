@@ -729,7 +729,6 @@ fn prompt_shell(default: Option<Shell>) -> anyhow::Result<Option<Shell>> {
 
     let selection = Select::new("Install completions for which shell?", labels)
         .with_starting_cursor(highlight)
-        .without_filtering() // match the wizard: no type-to-filter line
         .raw_prompt();
     Ok(inquire_opt(selection)?.map(|ListOption { index, .. }| Shell::ALL[index]))
 }

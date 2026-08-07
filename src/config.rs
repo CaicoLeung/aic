@@ -1007,14 +1007,15 @@ pub(crate) fn is_io_cancel(e: &InquireError) -> bool {
 /// `options` is borrowed (`&[String]`) and cloned once here
 /// (`options.to_vec()`) because `inquire::Select` owns its list — borrowing
 /// lets call sites keep one reusable `Vec` across loop iterations without a
-/// per-iteration clone. The menu is built `.without_filtering()` so typing a
-/// letter is a clean no-op, matching the dialoguer behavior this replaced
-/// (inquire's default is filter-on-type, which would add an unfamiliar input
-/// line and re-bind letter keys); see ADR-0007.
+/// per-iteration clone. Filtering stays ON (inquire's default): in 0.7.5 the
+/// no-filter path (`render_select_prompt` -> `print_prompt`) omits the newline
+/// after the prompt and glues the first option to it (`? prompt  opt0`),
+/// whereas the filter path ends the prompt line with a newline. So
+/// `.without_filtering()` is deliberately NOT used — it regresses the layout.
+/// The cost is a filter input line + type-to-filter narrowing; see ADR-0007.
 fn opt_nav(prompt: &str, options: &[String], default: usize) -> Result<OptNav> {
     match Select::new(prompt, options.to_vec())
         .with_starting_cursor(default)
-        .without_filtering()
         .raw_prompt()
     {
         Ok(ListOption { index, .. }) => Ok(OptNav::Value(index)),
