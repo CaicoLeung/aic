@@ -298,8 +298,7 @@ impl Display {
             )
         };
         self.emit(&self.styled(&format!("files: {files}"), dim));
-        self.emit_blank();
-        rows + 2
+        rows + 1
     }
 
     // ------------------------------------------------------------------
@@ -1465,8 +1464,7 @@ mod tests {
         );
         let got = lines.lock().clone();
         // Pending header + subject carry the `?` marker; body and file list
-        // sit at the shared margin; a trailing blank separates the preview
-        // from the confirmation menu. `rows` is the whole block, so the caller
+        // sit at the shared margin. `rows` is the whole block, so the caller
         // can erase it after the draft is confirmed.
         assert_eq!(got[0], "  ? proposed commit:");
         assert_eq!(got[1], "  ? feat(auth): add OAuth2 login support");
@@ -1475,8 +1473,8 @@ mod tests {
             "  Allow users to sign in via Google and GitHub OAuth2 providers"
         );
         assert_eq!(got[3], "  files: src/auth.rs, src/main.rs (2 files)");
-        assert_eq!(got[4], "");
-        assert_eq!(rows, 5, "header + subject + body + files + blank");
+        assert_eq!(got.len(), 4, "header + subject + body + files");
+        assert_eq!(rows, 4, "header + subject + body + files");
     }
 
     #[test]
@@ -1492,8 +1490,8 @@ mod tests {
         assert_eq!(got[1], "  ? chore: bump dep");
         // Single file: no "(1 files)" suffix; no body line emitted.
         assert_eq!(got[2], "  files: Cargo.toml");
-        assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
-        assert_eq!(rows, 4, "header + subject + files + blank");
+        assert_eq!(got.len(), 3, "no body or blank line expected, got: {got:?}");
+        assert_eq!(rows, 3, "header + subject + files");
     }
 
     /// `clear_last` drops the most recent rows from the buffer (the in-memory
@@ -1541,7 +1539,7 @@ mod tests {
             )),
             "expected a truncated file list, got: {got:?}"
         );
-        assert_eq!(rows, 4, "header + subject + files + blank");
+        assert_eq!(rows, 3, "header + subject + files");
     }
 
     #[test]

@@ -345,10 +345,10 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     );
     assert_eq!(
         abort_lines[1],
-        "The remaining changes are still staged in the index."
+        "  The remaining changes are still staged in the index."
     );
     assert!(
-        abort_lines[2].starts_with("re-run `aic` to continue: commit declined"),
+        abort_lines[2].starts_with("  re-run `aic` to continue: commit declined"),
         "unexpected third line: {}",
         abort_lines[2]
     );
