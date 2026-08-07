@@ -651,8 +651,11 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
     use dialoguer::{Select, theme::ColorfulTheme};
 
     let items = ["Commit", "Re-generate", "Edit", "Abort"];
-    let mut subject: String = message.chars().take(40).collect();
-    if message.chars().count() > 40 {
+    // Truncate to 40 chars in one pass: take 40, then check whether a 41st
+    // existed (avoids walking the string twice).
+    let mut chars = message.chars();
+    let mut subject: String = chars.by_ref().take(40).collect();
+    if chars.next().is_some() {
         subject.push('…');
     }
 
@@ -695,6 +698,12 @@ fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Op
 
     let mut lines = edited.trim_end().splitn(2, '\n');
     let new_subject = lines.next().unwrap_or("").to_string();
+    // An empty/whitespace-only subject would fail at `git commit` with a
+    // confusing error; treat a cleared subject like a cancel and keep the
+    // draft so the user can re-edit or Abort from the menu.
+    if new_subject.trim().is_empty() {
+        return Ok((subject.to_string(), body.map(String::from)));
+    }
     let new_body = lines.next().map(|s| s.trim_start().to_string());
     Ok((new_subject, new_body))
 }
@@ -1151,6 +1160,37 @@ mod tests {
                 let (subject, body) = edit_message("feat: draft", None).unwrap();
                 assert_eq!(subject, "fix: args");
                 assert_eq!(body, None);
+            },
+        );
+    }
+
+    /// A cleared editor (empty or whitespace-only subject) keeps the draft
+    /// instead of letting an empty subject reach `git commit`.
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_empty_edit_keeps_original() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-editor.sh");
+        // Fake editor: blanks the file (subject becomes empty).
+        std::fs::write(&script, "#!/bin/sh\nfor last; do :; done\n: > \"$last\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let editor = format!("{} --wait", script.display());
+        temp_env::with_vars(
+            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
+            || {
+                let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
+                assert_eq!(
+                    subject, "feat: draft",
+                    "an empty edit must keep the draft subject"
+                );
+                assert_eq!(
+                    body.as_deref(),
+                    Some("draft body"),
+                    "an empty edit must keep the draft body"
+                );
             },
         );
     }
