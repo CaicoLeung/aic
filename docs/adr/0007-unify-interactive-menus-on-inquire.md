@@ -1,4 +1,4 @@
-# ADR 0006: Unify interactive menus on `inquire`, drop `dialoguer`
+# ADR 0007: Unify interactive menus on `inquire`, drop `dialoguer`
 
 - **Status:** Accepted
 - **Date:** 2026-08-07

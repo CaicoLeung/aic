@@ -1010,7 +1010,7 @@ pub(crate) fn is_io_cancel(e: &InquireError) -> bool {
 /// per-iteration clone. The menu is built `.without_filtering()` so typing a
 /// letter is a clean no-op, matching the dialoguer behavior this replaced
 /// (inquire's default is filter-on-type, which would add an unfamiliar input
-/// line and re-bind letter keys); see ADR-0006.
+/// line and re-bind letter keys); see ADR-0007.
 fn opt_nav(prompt: &str, options: &[String], default: usize) -> Result<OptNav> {
     match Select::new(prompt, options.to_vec())
         .with_starting_cursor(default)

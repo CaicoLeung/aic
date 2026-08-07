@@ -4,10 +4,13 @@
 //!
 //! Reached as [`Git::conflict`] → [`Conflict`], which borrows the repo handle
 //! `Git` owns (`run_git`, `index`, and the `Repository` itself). The commit
-//! guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git` and call
-//! across this seam — they are commit-time *policy*; this module owns the
-//! conflict *detection* they act on. See CONTEXT.md "Conflict module" and
-//! ADR-0006 for why `Git` itself is not split further.
+//! guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git`: they
+//! cross this seam for *conflict detection* (`state()`,
+//! `has_conflict_markers`) but keep their own git2 blob/tree scans on `Git`
+//! via its `pub(crate) repo()` — so the seam moves detection, not every git2
+//! call. They are commit-time *policy*; this module owns the *detection* they
+//! act on. See CONTEXT.md "Conflict module" and ADR-0006 for why `Git` itself
+//! is not split further.
 
 use anyhow::Context;
 use git2::Repository;
