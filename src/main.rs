@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod conflict;
 pub mod diff;
 pub mod display;
 pub mod generator;
@@ -287,7 +288,8 @@ pub(crate) async fn run_resolve_workflow_impl(
     prompt: Prompt,
     display: Display,
 ) -> anyhow::Result<()> {
-    let state = git.state()?;
+    let cf = git.conflict();
+    let state = cf.state()?;
 
     if !state.is_conflicted() {
         display.no_conflicts();
@@ -299,13 +301,13 @@ pub(crate) async fn run_resolve_workflow_impl(
         anyhow::bail!("aic cannot resolve a {} state in v1", state.label());
     }
 
-    let files = git.conflicted_files()?;
+    let files = cf.conflicted_files()?;
     if files.is_empty() {
         // Conflicted state but no unmerged index entries — the user resolved
         // every file by hand and only the finalize step remains.
         display.all_resolved_offer_finalize(state);
         if prompt("finalize now?")? {
-            git.finalize(state)?;
+            cf.finalize(state)?;
             display.finalize_done(state);
         }
         return Ok(());
@@ -329,7 +331,7 @@ pub(crate) async fn run_resolve_workflow_impl(
             skipped_unresolvable += 1;
             continue;
         }
-        let original_bytes = git.read_worktree(&f.path)?;
+        let original_bytes = cf.read_worktree(&f.path)?;
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
 
@@ -358,7 +360,7 @@ pub(crate) async fn run_resolve_workflow_impl(
             let content = original.to_string();
             async move {
                 match display::with_spinner(&label, resolve_ref(content)).await {
-                    Ok(resolved) if !git::has_conflict_markers(&resolved) => Ok(resolved),
+                    Ok(resolved) if !conflict::has_conflict_markers(&resolved) => Ok(resolved),
                     Ok(_markers) => Err(retry::RetryReason::Markers),
                     Err(err) => Err(retry::RetryReason::Fatal(err)),
                 }
@@ -415,7 +417,7 @@ pub(crate) async fn run_resolve_workflow_impl(
     let mut rejected = 0usize;
     for (path, _original, resolved) in &plans {
         if prompt(&format!("apply {path}?"))? {
-            git.write_worktree(path, resolved)?;
+            cf.write_worktree(path, resolved)?;
             git.add(&[path.as_str()])?;
             display.resolved(path);
             approved += 1;
@@ -436,7 +438,7 @@ pub(crate) async fn run_resolve_workflow_impl(
     // lands in exactly one of: skipped_unresolvable, skipped_failed, plans).
     let needs_manual = rejected + skipped_failed + skipped_unresolvable;
     if needs_manual == 0 {
-        git.finalize(state)?;
+        cf.finalize(state)?;
         display.finalize_done(state);
     } else {
         display.handoff(
@@ -481,7 +483,7 @@ pub(crate) async fn run_commit_workflow_impl(
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
     // deeper net; this prompt is the friendly front door.
-    let state = git.state()?;
+    let state = git.conflict().state()?;
     if state.is_conflicted() {
         display.resolve_prompt(state);
         if prompt("resolve now?")? {

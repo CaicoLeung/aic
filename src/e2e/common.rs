@@ -2,8 +2,9 @@
 // All `pub` so the per-feature test modules can pull them in via
 // `use super::common::*;`.
 
+pub(super) use crate::conflict;
+pub(super) use crate::conflict::tests as cf;
 pub(super) use crate::display::{Display, DisplayWrite};
-pub(super) use crate::git;
 pub(super) use crate::git::Git;
 pub(super) use crate::git::tests as gh;
 pub(super) use crate::{
@@ -423,7 +424,7 @@ pub fn git_out(dir: &Path, args: &[&str]) -> String {
 /// callers always run `init_test_repo` first), so we do too.
 pub fn merge_conflict(dir: &Path) {
     gh::init_test_repo(dir);
-    gh::make_content_conflict(dir);
+    cf::make_content_conflict(dir);
 }
 
 /// `init_test_repo` + two tracked files (`alpha.txt`, `beta.txt`) committed at
@@ -726,7 +727,7 @@ pub fn read_file(dir: &Path, rel: &str) -> String {
 }
 
 pub fn file_has_markers(dir: &Path, rel: &str) -> bool {
-    git::has_conflict_markers(&read_file(dir, rel))
+    conflict::has_conflict_markers(&read_file(dir, rel))
 }
 
 /// Does the index still hold an unmerged entry for `rel`?
@@ -750,7 +751,7 @@ pub fn staged_blob_has_markers(dir: &Path, rel: &str) -> bool {
         return false;
     };
     let blob = repo.find_blob(e.id).unwrap();
-    git::has_conflict_markers(&String::from_utf8_lossy(blob.content()))
+    conflict::has_conflict_markers(&String::from_utf8_lossy(blob.content()))
 }
 
 /// `true` if the repo is clean (no merge/rebase/… in progress) — i.e. finalize

@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Duration;
 
-use crate::git::{ConflictedFile, RepoState};
+use crate::conflict::{ConflictedFile, RepoState};
 use crate::types::CommitType;
 
 /// Line-based write seam behind [`Display`].
