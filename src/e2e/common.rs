@@ -177,6 +177,17 @@ pub fn planner_fixed(plan: generator::BatchPlanOutput) -> BatchPlanner {
     )
 }
 
+/// Planner that always fails — drives the deterministic fallback path
+/// (AIC-10): the Run must catch the planner error and continue on the
+/// block-grouping engine instead of aborting.
+pub fn planner_error() -> BatchPlanner {
+    Box::new(
+        |_diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+            Box::pin(async { Err(anyhow::anyhow!("LLM unreachable (stub)")) })
+        },
+    )
+}
+
 /// A one-batch plan carrying hunk 1 of a single file — the whole change, in
 /// one commit. The hook e2e tests (issue #20) only need one commit, so the
 /// plan is trivially small; the split tests build their multi-batch plans

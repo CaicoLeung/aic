@@ -519,6 +519,23 @@ impl Display {
         let yellow = Style::new().yellow().bold();
         self.emit(&format!("{} {msg}", self.styled("\u{26A0}", yellow)));
     }
+
+    /// The LLM batch planner failed and the Run is continuing on the
+    /// deterministic block-grouping engine instead (AIC-10). `heuristics` are
+    /// each batch's Block heuristic, so a fallback-driven Run is visibly
+    /// heuristic-based — the batches were joined by `BlockHeuristic` reasons,
+    /// not by the model.
+    pub fn fallback_notice(&self, reason: &str, heuristics: &[String]) {
+        let yellow = Style::new().yellow().bold();
+        self.emit(&format!(
+            "{} LLM planner failed ({reason}); using deterministic block grouping",
+            self.styled("\u{26A0}", yellow),
+        ));
+        self.emit(&format!(
+            "  batches by block heuristic: {}",
+            heuristics.join(", ")
+        ));
+    }
 }
 
 impl Default for Display {

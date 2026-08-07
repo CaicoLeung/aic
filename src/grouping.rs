@@ -8,7 +8,8 @@
 //! remains the production splitter; this module is the deterministic
 //! foundation underneath it — a predictable, testable baseline that can later
 //! serve as a fallback (no API key) or a pre-grouper. v1 delivers the engine,
-//! its heuristics, and tests; wiring it into the live Run is a follow-up.
+//! its heuristics, and tests; the live Run falls back to it when the LLM
+//! planner fails (error, timeout, or no key).
 //!
 //! # The two v1 heuristics
 //!

@@ -398,19 +398,41 @@ pub(crate) async fn run_commit_workflow_impl(
         // module re-reads a fresh diff per batch (so the Run survives
         // pre-commit hooks that re-stage whole files) and remaps the plan-time
         // indices onto the current diff via its internal `committed_hunks`.
+        // The raw diff text is also retained: the deterministic fallback
+        // (AIC-10) parses it into the grouping engine's hunk view.
         let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
+        let mut raw_diffs: Vec<(String, String)> = Vec::new();
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
             .map(|f| {
                 let diff = git.diff_workdir(Some(f.path.as_str()))?;
                 let hunk_count = diff::parse_file_patch(&diff).hunk_count();
                 file_hunk_counts.push((f.path.clone(), hunk_count));
+                raw_diffs.push((f.path.clone(), diff.clone()));
                 let scoped = diff::format_diff_scoped(&diff, &f.path);
                 Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });
-        let result = planner(diff.to_string()).await?;
+        // LLM-first: the streaming planner drives the Run. When it fails
+        // (error / timeout / no key), the deterministic block-grouping engine
+        // takes over with the same contract — a validated `BatchPlanOutput` —
+        // so the staging loop below never knows which side planned. The
+        // fallback notice is observable (AIC-10): it names the deterministic
+        // path and each batch's Block heuristic.
+        let result = match planner(diff.to_string()).await {
+            Ok(plan) => plan,
+            Err(err) => {
+                let plan = deterministic_plan(&raw_diffs);
+                let reasons: Vec<String> = plan
+                    .batches
+                    .iter()
+                    .filter_map(|b| b.reason.clone())
+                    .collect();
+                display.fallback_notice(&format!("{err:#}"), &reasons);
+                plan
+            }
+        };
 
         generator::validate_batch_plan(&result, &file_hunk_counts)
             .context("batch plan validation failed")?;
@@ -475,6 +497,21 @@ pub(crate) async fn run_commit_workflow_impl(
     }
 
     Ok(())
+}
+
+/// Deterministic fallback plan (AIC-10): parse each file's raw workdir diff
+/// into the grouping engine's hunk view, group every hunk into atomic blocks
+/// under the conservative default config, and convert to an LLM-style plan.
+/// Each batch carries its Block heuristic as the `reason`. Used when the LLM
+/// planner fails — the output feeds the exact same validation + staging path
+/// as an LLM plan, so Batch/Staging contracts are unchanged.
+fn deterministic_plan(raw_diffs: &[(String, String)]) -> generator::BatchPlanOutput {
+    let files: Vec<grouping::GroupFile> = raw_diffs
+        .iter()
+        .map(|(path, diff)| grouping::GroupFile::from_diff(path, diff))
+        .collect();
+    let blocks = grouping::group(&files, &grouping::GroupingConfig::default());
+    grouping::blocks_to_plan(&blocks)
 }
 
 /// Production entry point for the default `aic` run — wires the real LLM

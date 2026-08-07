@@ -867,3 +867,76 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
         "working tree must be clean after the Run"
     );
 }
+
+/// AIC-10: when the LLM batch planner fails (error / timeout / no key), the
+/// Run must NOT abort — it falls back to the deterministic block-grouping
+/// engine. The fallback plan is a valid hunk partition carrying each batch's
+/// Block heuristic as its `reason`, so the exact same validate → stage →
+/// commit loop runs unchanged: one commit per block, working tree clean, and
+/// the fallback is observable in the emitted notice (the batches were joined
+/// by a Block heuristic, not by the model).
+#[tokio::test]
+async fn commit_falls_back_to_deterministic_grouping_when_planner_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two files, one hunk each, both at root scope: with the conservative
+    // default config (cross-file off, root files never merge) the engine
+    // yields exactly two `Single` blocks → two commits.
+    two_file_unstaged_repo(dir.path());
+
+    let buf = BufferWrite::default();
+    let display = Display::with(buf.clone());
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let result = run_commit_workflow_impl(
+        &git,
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        display,
+        planner_error(),
+        messenger_fixed("chore: fallback"),
+        Confirm::Disabled,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "the Run must complete via the deterministic fallback: {:?}",
+        result
+    );
+
+    // One commit per block — two blocks, two commits; tree left clean.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 2,
+        "two blocks must land two commits, one per block"
+    );
+    assert!(
+        worktree_is_empty(dir.path()),
+        "working tree must be clean after the fallback Run"
+    );
+    // Each commit carries exactly its file's change, in block order.
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD~1", "alpha.txt"),
+        "a1\n",
+        "first block must commit alpha.txt"
+    );
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "beta.txt"),
+        "b1\n",
+        "second block must commit beta.txt"
+    );
+
+    // The fallback is observable: the notice names the deterministic path and
+    // surfaces the Block heuristics that joined each batch.
+    let lines = buf.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("deterministic block grouping")),
+        "expected a fallback notice, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("single hunk")),
+        "expected Block heuristics in the notice, got: {lines:?}"
+    );
+}
