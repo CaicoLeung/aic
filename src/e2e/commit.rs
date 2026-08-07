@@ -527,7 +527,7 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
         "expected batch-2 abort, got: {msg}"
     );
     assert!(
-        msg.contains("1 batch(es) committed"),
+        msg.contains("1 batch committed"),
         "expected 1 committed, got: {msg}"
     );
     assert_eq!(*calls.lock(), 2, "messenger called once per batch");

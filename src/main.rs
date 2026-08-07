@@ -556,8 +556,24 @@ pub(crate) async fn run_commit_workflow_impl(
                 generate_and_commit(git, &paths, &display, &prefix, &messenger, &confirm).await
             };
             if let Err(e) = outcome.await {
+                let batch_word = if i == 1 { "batch" } else { "batches" };
+                // Declining the confirmation is a user choice, not an error:
+                // report it as a clean abort naming how far the run got and
+                // that the rest is recoverable — same shape as the single-
+                // commit path's "no commit made". Other failures keep the
+                // underlying cause in the message.
+                if e.downcast_ref::<CommitDeclined>().is_some() {
+                    anyhow::bail!(
+                        "declined on batch {} of {} after {} {batch_word} committed.\n\
+                         The remaining changes are still staged in the index.\n\
+                         re-run `aic` to continue.",
+                        i + 1,
+                        count,
+                        i
+                    );
+                }
                 anyhow::bail!(
-                    "aborted on batch {} of {} after {} batch(es) committed.\n\
+                    "aborted on batch {} of {} after {} {batch_word} committed.\n\
                      The remaining changes are still staged in the index.\n\
                      re-run `aic` to continue: {e:#}",
                     i + 1,
@@ -637,9 +653,10 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 /// Production confirmation menu (issue #78): a dialoguer `Select` over the
 /// four actions, matching the setup wizard's arrow-key UI. The drafted
 /// subject rides in the prompt so the menu is self-describing even if the
-/// preview above scrolled away. Esc (and `q`, dialoguer's quit key) abort —
-/// there is nothing to go back to once the commit is pending — and Ctrl-C
-/// ends the process the same way it does everywhere else in the wizard.
+/// preview above scrolled away. Esc (and `q`, dialoguer's quit key) and
+/// Ctrl-C both abort — there is nothing to go back to once the commit is
+/// pending — matching the wizard's graceful-cancel handling (Ctrl-C is not
+/// an error here, same as in `opt_nav`).
 fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
     use dialoguer::{Select, theme::ColorfulTheme};
 
@@ -657,14 +674,23 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
         // by the caller after a commit, and a leftover selection line would
         // make that erase imprecise (and linger as residue).
         .report(false)
-        .interact_opt()
-        .context("could not read terminal input")?;
+        .interact_opt();
     Ok(match choice {
-        Some(0) => ConfirmChoice::Commit,
-        Some(1) => ConfirmChoice::Regenerate,
-        Some(2) => ConfirmChoice::Edit,
+        Ok(Some(0)) => ConfirmChoice::Commit,
+        Ok(Some(1)) => ConfirmChoice::Regenerate,
+        Ok(Some(2)) => ConfirmChoice::Edit,
         // Some(3) is Abort; None is Esc — both end the run.
-        _ => ConfirmChoice::Abort,
+        Ok(Some(_) | None) => ConfirmChoice::Abort,
+        // Ctrl-C / EOF: graceful abort, same as the setup wizard's `opt_nav`.
+        Err(dialoguer::Error::IO(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            ConfirmChoice::Abort
+        }
+        Err(e) => return Err(e).context("could not read terminal input"),
     })
 }
 

@@ -318,34 +318,34 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     .expect_err("aborting batch 2 must abort the Run");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("aborted on batch 2 of 2"),
-        "expected batch-2 abort, got: {msg}"
+        msg.contains("declined on batch 2 of 2"),
+        "expected batch-2 decline, got: {msg}"
     );
     assert!(
-        msg.contains("1 batch(es) committed"),
+        msg.contains("1 batch committed"),
         "expected 1 committed, got: {msg}"
     );
     assert!(
         msg.contains("re-run `aic` to continue"),
-        "abort must point at re-running aic, got: {msg}"
+        "decline must point at re-running aic, got: {msg}"
     );
-    // The abort is three readable lines, not one wall of text.
+    // The decline is three readable lines, not one wall of text.
     let abort_lines: Vec<&str> = msg.lines().collect();
     assert_eq!(
         abort_lines.len(),
         3,
-        "expected a 3-line abort message, got: {msg:?}"
+        "expected a 3-line decline message, got: {msg:?}"
     );
     assert_eq!(
         abort_lines[0],
-        "aborted on batch 2 of 2 after 1 batch(es) committed."
+        "declined on batch 2 of 2 after 1 batch committed."
     );
     assert_eq!(
         abort_lines[1],
         "The remaining changes are still staged in the index."
     );
-    assert!(
-        abort_lines[2].starts_with("re-run `aic` to continue: commit declined"),
+    assert_eq!(
+        abort_lines[2], "re-run `aic` to continue.",
         "unexpected third line: {}",
         abort_lines[2]
     );
@@ -482,11 +482,11 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     .expect_err("aborting batch 1 must abort the Run");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("aborted on batch 1 of 2"),
-        "expected batch-1 abort, got: {msg}"
+        msg.contains("declined on batch 1 of 2"),
+        "expected batch-1 decline, got: {msg}"
     );
     assert!(
-        msg.contains("0 batch(es) committed"),
+        msg.contains("0 batches committed"),
         "expected 0 committed, got: {msg}"
     );
 
