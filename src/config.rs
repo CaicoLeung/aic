@@ -337,9 +337,9 @@ fn base_url_applies(p: Provider) -> bool {
 /// Ordered provider-scoped steps that actually apply to `p`. Steps that would
 /// be a no-op — an API key for local Ollama, a base URL for a cloud provider —
 /// are absent, so forward/back never lands on one. `Provider` always starts
-/// the list and `Model` always ends it. `ConfirmCommit` is a top-level menu
-/// entry, not part of the provider path, so it never appears here. Navigation
-/// is just index ±1 off this list (see [`run_provider_flow`]).
+/// the list and `Model` always ends it. `MenuChoice::Confirm` is a top-level
+/// menu entry, not part of the provider path, so it never appears here.
+/// Navigation is just index ±1 off this list (see [`run_provider_flow`]).
 fn applicable_steps(p: Provider) -> Vec<Step> {
     let mut steps = vec![Step::Provider];
     if key_applies(p) {
