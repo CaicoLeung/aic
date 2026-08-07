@@ -646,10 +646,9 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 /// an `IO` error with an `Interrupted`/`UnexpectedEof` kind, so detect those
 /// too and treat them as cancels (matching the setup wizard's handling).
 fn is_graceful_cancel(e: &inquire::InquireError) -> bool {
-    use std::io::ErrorKind;
-    matches!(e, inquire::InquireError::OperationCanceled)
-        || matches!(e, inquire::InquireError::OperationInterrupted)
-        || matches!(e, inquire::InquireError::IO(io) if matches!(io.kind(), ErrorKind::Interrupted | ErrorKind::UnexpectedEof))
+    // Esc (OperationCanceled) plus the hard cancels shared with the wizard's
+    // `opt_nav` (Ctrl-C / closed stdin) — see `config::is_io_cancel`.
+    matches!(e, inquire::InquireError::OperationCanceled) || config::is_io_cancel(e)
 }
 
 /// Production confirmation menu (issue #78): an `inquire::Select` over the
@@ -689,6 +688,7 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
     let _ = term.write_str("\x1b7"); // DECSC: save cursor at the menu's start
     let choice = Select::new(&format!("Commit this message?  ({subject})"), items)
         .with_starting_cursor(0)
+        .without_filtering() // match the wizard: no type-to-filter line
         .raw_prompt();
     let _ = term.write_str("\x1b8"); // DECRC: back to the menu's start
     let _ = term.clear_to_end_of_screen(); // erase the menu's footprint
@@ -946,6 +946,7 @@ fn prompt_shell(default: Option<Shell>) -> anyhow::Result<Option<Shell>> {
 
     let selection = Select::new("Install completions for which shell?", labels)
         .with_starting_cursor(highlight)
+        .without_filtering() // match the wizard: no type-to-filter line
         .raw_prompt();
     Ok(match selection {
         Ok(ListOption { index, .. }) => Some(Shell::ALL[index]),

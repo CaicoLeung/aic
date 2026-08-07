@@ -979,31 +979,49 @@ enum OptNav {
     Cancel,
 }
 
+/// Whether an inquire error is a hard cancel — Ctrl-C
+/// ([`InquireError::OperationInterrupted`]) or a closed/EOF stdin (surfaced as
+/// an [`InquireError::IO`] error of kind `Interrupted`/`UnexpectedEof`). Esc
+/// ([`InquireError::OperationCanceled`]) is deliberately excluded: the wizard
+/// treats Esc as *back* while the production menus treat every cancel alike,
+/// so each caller decides where Esc falls. Shared with `is_graceful_cancel`
+/// in `main.rs` so the IO-kind sub-clause isn't duplicated.
+pub(crate) fn is_io_cancel(e: &InquireError) -> bool {
+    matches!(e, InquireError::OperationInterrupted)
+        || matches!(
+            e,
+            InquireError::IO(err) if matches!(
+                err.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
+            )
+        )
+}
+
 /// Render an `inquire::Select` menu over `options` and map its three outcomes
-/// — choose (index), Esc (back), Ctrl-C (cancel) — onto [`OptNav`]. `default`
-/// is the row highlighted when the menu opens (inquire's `starting_cursor`).
-/// Uses `raw_prompt` so the chosen **index** is recoverable (inquire's plain
-/// `prompt` returns only the value), which keeps the wizard's index-based
-/// dispatch untouched. `inquire::Select` owns its options, so this is the one
-/// spot that builds the `Vec` — every call site stays declarative.
+/// — choose (index), Esc (back), Ctrl-C/closed-stdin (cancel) — onto
+/// [`OptNav`]. `default` is the row highlighted when the menu opens (inquire's
+/// `starting_cursor`). Uses `raw_prompt` so the chosen **index** is recoverable
+/// (inquire's plain `prompt` returns only the value), which keeps the wizard's
+/// index-based dispatch untouched.
+///
+/// `options` is borrowed (`&[String]`) and cloned once here
+/// (`options.to_vec()`) because `inquire::Select` owns its list — borrowing
+/// lets call sites keep one reusable `Vec` across loop iterations without a
+/// per-iteration clone. The menu is built `.without_filtering()` so typing a
+/// letter is a clean no-op, matching the dialoguer behavior this replaced
+/// (inquire's default is filter-on-type, which would add an unfamiliar input
+/// line and re-bind letter keys); see ADR-0006.
 fn opt_nav(prompt: &str, options: &[String], default: usize) -> Result<OptNav> {
     match Select::new(prompt, options.to_vec())
         .with_starting_cursor(default)
+        .without_filtering()
         .raw_prompt()
     {
         Ok(ListOption { index, .. }) => Ok(OptNav::Value(index)),
         Err(InquireError::OperationCanceled) => Ok(OptNav::Back),
-        // Ctrl-C, or a closed/EOF stdin (surfaced by inquire as an `IO`
-        // error) — both cancel the wizard.
-        Err(InquireError::OperationInterrupted) => Ok(OptNav::Cancel),
-        Err(InquireError::IO(e))
-            if matches!(
-                e.kind(),
-                io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
-            ) =>
-        {
-            Ok(OptNav::Cancel)
-        }
+        // Ctrl-C or a closed/EOF stdin — both cancel the wizard. Esc is
+        // handled above as Back.
+        Err(e) if is_io_cancel(&e) => Ok(OptNav::Cancel),
         Err(e) => Err(e).context("could not read terminal input"),
     }
 }
