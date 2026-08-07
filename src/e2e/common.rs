@@ -2,14 +2,15 @@
 // All `pub` so the per-feature test modules can pull them in via
 // `use super::common::*;`.
 
+pub(super) use crate::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
 pub(super) use crate::conflict;
 pub(super) use crate::conflict::tests as cf;
 pub(super) use crate::display::{Display, DisplayWrite};
 pub(super) use crate::git::Git;
 pub(super) use crate::git::tests as gh;
 pub(super) use crate::{
-    BatchPlanner, BoxFuture, CommitEditor, CommitMessenger, Confirm, ConfirmChoice, ConfirmMenu,
-    Prompt, Resolver, generator, run_commit_workflow_impl, run_resolve_workflow_impl,
+    BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver, generator,
+    run_commit_workflow_impl, run_resolve_workflow_impl,
 };
 pub(super) use git2::Repository;
 pub(super) use parking_lot::Mutex;
