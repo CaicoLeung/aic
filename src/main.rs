@@ -45,6 +45,98 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
+/// One action the user can take on the pre-commit confirmation menu (issue
+/// #78). [`ConfirmMenu`] returns it; [`generate_and_commit`] translates it:
+/// Commit lands the commit, Regenerate and Edit loop back to the menu
+/// (re-showing the message), Abort ends the run with nothing further
+/// committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmChoice {
+    Commit,
+    Regenerate,
+    Edit,
+    Abort,
+}
+
+/// Erased confirmation menu: given the drafted subject, returns the user's
+/// choice. Boxed for the same reason as [`Resolver`] — production wires it to
+/// a terminal menu (issue #78), tests inject a scripted choice sequence.
+pub(crate) type ConfirmMenu = Box<dyn Fn(&str) -> anyhow::Result<ConfirmChoice>>;
+
+/// Erased message editor: takes the current (subject, body) and returns the
+/// edited (subject, body) — the prior values unchanged when the user cancels
+/// the edit. Boxed for the same reason as [`Resolver`] — production opens
+/// `$VISUAL`/`$EDITOR` on a temp file via the `edit` crate, tests inject a
+/// stub.
+pub(crate) type CommitEditor =
+    Box<dyn Fn(&str, Option<&str>) -> anyhow::Result<(String, Option<String>)>>;
+
+/// Opt-in pre-commit confirmation (issue #78): the gate plus the menu and
+/// editor seams it needs, grouped so the workflow signatures stay within
+/// clippy's argument budget. [`Confirm::disabled`] is the default — no menu,
+/// generate-and-commit byte-for-byte as before the option existed.
+pub(crate) struct Confirm {
+    /// Gate: when `false`, `menu` and `editor` are never invoked.
+    enabled: bool,
+    /// Drafted subject → user choice (Commit / Re-generate / Edit / Abort).
+    menu: ConfirmMenu,
+    /// (subject, body) → edited (subject, body); unchanged when the user
+    /// cancels the edit.
+    editor: CommitEditor,
+}
+
+impl Confirm {
+    /// Confirmation off — the seams are placeholders that must never run.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            enabled: false,
+            menu: Box::new(|_| Ok(ConfirmChoice::Commit)),
+            editor: Box::new(|s, b| Ok((s.to_string(), b.map(|b| b.to_string())))),
+        }
+    }
+
+    /// Confirmation on, wired to the production menu and editor.
+    pub(crate) fn interactive(menu: ConfirmMenu, editor: CommitEditor) -> Self {
+        Self {
+            enabled: true,
+            menu,
+            editor,
+        }
+    }
+}
+
+/// The pre-commit confirmation requires an interactive stdin: the menu
+/// ([`confirm_menu`]) renders on stderr but reads keys from stdin, so a
+/// non-TTY stdin leaves the menu unanswerable. Returns an error naming the
+/// fix when confirmation is enabled but stdin is not a terminal — the guard
+/// runs before any planning or staging, so the run fails cleanly instead of
+/// aborting after the first batch is already staged (issue #78).
+fn ensure_confirm_terminal(confirm_enabled: bool, stdin_tty: bool) -> anyhow::Result<()> {
+    if confirm_enabled && !stdin_tty {
+        anyhow::bail!(
+            "confirm_before_commit is enabled but stdin is not a terminal — \
+             run `aic` from a terminal, or turn the option off"
+        );
+    }
+    Ok(())
+}
+
+/// Marker error for the user declining the pre-commit confirmation (issue
+/// #78). Distinct from ordinary failures so each call site can translate it
+/// into its own abort wording: the single-commit path reports "no commit
+/// made", the batch loop reports how many batches already committed and that
+/// the rest is recoverable.
+#[derive(Debug)]
+pub(crate) struct CommitDeclined;
+
+impl std::fmt::Display for CommitDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "commit declined by user")
+    }
+}
+
+impl std::error::Error for CommitDeclined {}
+
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling
 /// [`display::REASONING_WINDOW`]-row block that redraws in place as the
@@ -77,12 +169,51 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     result
 }
 
+/// Run the confirmation loop for a drafted message. Returns the confirmed
+/// (message, body, preview_rows) after the user approves or edits it. The
+/// preview is shown after each edit/regeneration, and each preview is erased
+/// before being replaced so superseded drafts never accumulate on screen.
+async fn confirm_draft(
+    draft: (String, Option<String>),
+    paths: &[String],
+    display: &Display,
+    confirm: &Confirm,
+    messenger: &CommitMessenger,
+    diff: String,
+) -> anyhow::Result<(String, Option<String>, usize)> {
+    let (mut message, mut body) = draft;
+
+    if !confirm.enabled {
+        return Ok((message, body, 0));
+    }
+
+    loop {
+        let rows = display.commit_preview(&message, body.as_deref(), paths);
+        match (confirm.menu)(&message)? {
+            ConfirmChoice::Commit => return Ok((message, body, rows)),
+            ConfirmChoice::Regenerate => {
+                display.clear_last(rows);
+                let result =
+                    display::with_spinner("Regenerating message", messenger(diff.clone())).await?;
+                message = result.message;
+                body = result.body;
+            }
+            ConfirmChoice::Edit => {
+                display.clear_last(rows);
+                (message, body) = (confirm.editor)(&message, body.as_deref())?;
+            }
+            ConfirmChoice::Abort => return Err(CommitDeclined.into()),
+        }
+    }
+}
+
 async fn generate_and_commit(
     git: &Git,
     paths: &[String],
     display: &Display,
     prefix: &str,
     messenger: &CommitMessenger,
+    confirm: &Confirm,
 ) -> anyhow::Result<()> {
     let files: Vec<serde_json::Value> = paths
         .iter()
@@ -93,10 +224,25 @@ async fn generate_and_commit(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let diff = serde_json::json!({ "staged_files": files });
+    let diff_str = diff.to_string();
+
+    // Generate initial draft, then run confirmation loop if enabled.
     let result =
-        display::with_spinner("Generating commit message", messenger(diff.to_string())).await?;
-    let hash = git.commit(result.message.clone(), result.body.clone())?;
-    display.commit_line(&hash, &result.message, result.body.as_deref(), prefix);
+        display::with_spinner("Generating commit message", messenger(diff_str.clone())).await?;
+    let (message, body, preview_rows) = confirm_draft(
+        (result.message, result.body),
+        paths,
+        display,
+        confirm,
+        messenger,
+        diff_str,
+    )
+    .await?;
+
+    // Erase the confirmed preview and commit.
+    display.clear_last(preview_rows);
+    let hash = git.commit(message.clone(), body.clone())?;
+    display.commit_line(&hash, &message, body.as_deref(), prefix);
     Ok(())
 }
 
@@ -328,7 +474,11 @@ async fn run_resolve_workflow() -> anyhow::Result<()> {
 
 /// Default `aic` run. `resolve`/`prompt`/`display` are seams mirroring
 /// [`run_resolve_workflow_impl`]; they only matter on the conflicted-repo
-/// auto-detect branch, which hands off to the resolve workflow.
+/// auto-detect branch, which hands off to the resolve workflow. `confirm`
+/// gates the opt-in pre-commit confirmation (issue #78): when enabled, every
+/// drafted message is shown (message + body + file list) and its menu must
+/// approve it (Commit) — or Re-generate / Edit it, or Abort — before the
+/// commit lands.
 pub(crate) async fn run_commit_workflow_impl(
     git: &Git,
     resolve: Resolver,
@@ -336,6 +486,7 @@ pub(crate) async fn run_commit_workflow_impl(
     display: Display,
     planner: BatchPlanner,
     messenger: CommitMessenger,
+    confirm: Confirm,
 ) -> anyhow::Result<()> {
     // Auto-detect a conflicted repo and offer `aic resolve` before the normal
     // stage+commit flow (ADR 0005). The commit guard in `Git::commit` is the
@@ -402,13 +553,29 @@ pub(crate) async fn run_commit_workflow_impl(
                     // batch or a pre-commit hook — nothing to commit.
                     return Ok(());
                 }
-                generate_and_commit(git, &paths, &display, &prefix, &messenger).await
+                generate_and_commit(git, &paths, &display, &prefix, &messenger, &confirm).await
             };
             if let Err(e) = outcome.await {
+                let batch_word = if i == 1 { "batch" } else { "batches" };
+                // Declining the confirmation is a user choice, not an error:
+                // report it as a clean abort naming how far the run got and
+                // that the rest is recoverable — same shape as the single-
+                // commit path's "no commit made". Other failures keep the
+                // underlying cause in the message.
+                if e.downcast_ref::<CommitDeclined>().is_some() {
+                    anyhow::bail!(
+                        "declined on batch {} of {} after {} {batch_word} committed.\n\
+                         The remaining changes are still staged in the index.\n\
+                         re-run `aic` to continue.",
+                        i + 1,
+                        count,
+                        i
+                    );
+                }
                 anyhow::bail!(
-                    "aborted on batch {} of {} after {} batch(es) committed. \
-                     Remaining changes are still in the working tree — re-run \
-                     `aic` to continue: {e:#}",
+                    "aborted on batch {} of {} after {} {batch_word} committed.\n\
+                     The remaining changes are still staged in the index.\n\
+                     re-run `aic` to continue: {e:#}",
                     i + 1,
                     count,
                     i
@@ -419,14 +586,23 @@ pub(crate) async fn run_commit_workflow_impl(
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         git.add(&refs)?;
-        generate_and_commit(git, &paths, &display, "", &messenger).await?;
+        match generate_and_commit(git, &paths, &display, "", &messenger, &confirm).await {
+            Ok(()) => {}
+            // Declining the confirmation is a user choice, not an error: report
+            // it as a clean abort naming the outcome — nothing committed.
+            Err(e) if e.downcast_ref::<CommitDeclined>().is_some() => {
+                anyhow::bail!("aborted — no commit made");
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     Ok(())
 }
 
 /// Production entry point for the default `aic` run — wires the real LLM
-/// resolver and stdin y/n prompt into [`run_commit_workflow_impl`].
+/// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
+/// into [`run_commit_workflow_impl`].
 async fn run_commit_workflow() -> anyhow::Result<()> {
     let resolver: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
@@ -442,8 +618,110 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
+    let menu: ConfirmMenu = Box::new(confirm_menu);
+    let editor: CommitEditor = Box::new(edit_message);
     let git = Git::at(Path::new("."))?;
-    run_commit_workflow_impl(&git, resolver, prompt, Display::new(), planner, messenger).await
+    // Absent/malformed config keeps the default (no confirmation) — same
+    // tolerance `LLM::from_env` uses for the provider fields.
+    let confirm_enabled = config::Config::load()
+        .ok()
+        .flatten()
+        .map(|c| c.confirm_before_commit())
+        .unwrap_or(false);
+    // The confirmation menu renders on stderr but reads keys from stdin, so a
+    // non-interactive stdin makes it unanswerable — and the failure would
+    // otherwise surface mid-run, after the first batch is already staged.
+    // Refuse to start rather than abort halfway.
+    ensure_confirm_terminal(confirm_enabled, std::io::stdin().is_terminal())?;
+    let confirm = if confirm_enabled {
+        Confirm::interactive(menu, editor)
+    } else {
+        Confirm::disabled()
+    };
+    run_commit_workflow_impl(
+        &git,
+        resolver,
+        prompt,
+        Display::new(),
+        planner,
+        messenger,
+        confirm,
+    )
+    .await
+}
+
+/// Production confirmation menu (issue #78): a dialoguer `Select` over the
+/// four actions, matching the setup wizard's arrow-key UI. The drafted
+/// subject rides in the prompt so the menu is self-describing even if the
+/// preview above scrolled away. Esc (and `q`, dialoguer's quit key) and
+/// Ctrl-C both abort — there is nothing to go back to once the commit is
+/// pending — matching the wizard's graceful-cancel handling (Ctrl-C is not
+/// an error here, same as in `opt_nav`).
+fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
+    use dialoguer::{Select, theme::ColorfulTheme};
+
+    let items = ["Commit", "Re-generate", "Edit", "Abort"];
+    let mut subject: String = message.chars().take(40).collect();
+    if message.chars().count() > 40 {
+        subject.push('…');
+    }
+
+    let choice = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Commit this message?  ({subject})"))
+        .items(items)
+        .default(0)
+        // No `✔ ...` echo line after the choice: the preview above is erased
+        // by the caller after a commit, and a leftover selection line would
+        // make that erase imprecise (and linger as residue).
+        .report(false)
+        .interact_opt();
+    Ok(match choice {
+        Ok(Some(0)) => ConfirmChoice::Commit,
+        Ok(Some(1)) => ConfirmChoice::Regenerate,
+        Ok(Some(2)) => ConfirmChoice::Edit,
+        // Some(3) is Abort; None is Esc — both end the run.
+        Ok(Some(_) | None) => ConfirmChoice::Abort,
+        // Ctrl-C / EOF: graceful abort, same as the setup wizard's `opt_nav`.
+        Err(dialoguer::Error::IO(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            ConfirmChoice::Abort
+        }
+        Err(e) => return Err(e).context("could not read terminal input"),
+    })
+}
+
+/// Production message editor (issue #78): opens the drafted message in the
+/// user's `$VISUAL`/`$EDITOR` on a temp file via the `edit` crate, and reads
+/// the edited content back as a (subject, body) pair. The subject is the
+/// first line, the body the rest (leading blank lines collapsed, git-style).
+fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Option<String>)> {
+    let text = message_to_edit(subject, body);
+
+    let edited = edit::edit(&text).context("editor failed or was cancelled")?;
+
+    let mut lines = edited.trim_end().splitn(2, '\n');
+    let new_subject = lines.next().unwrap_or("").to_string();
+    let new_body = lines.next().map(|s| s.trim_start().to_string());
+    Ok((new_subject, new_body))
+}
+
+/// The text an editor edits: the subject line, then the body (outer-whitespace
+/// trimmed) on following lines. Shared by both editor paths so what the user
+/// sees in the editor is exactly the (subject, body) pair that would commit.
+fn message_to_edit(subject: &str, body: Option<&str>) -> String {
+    let mut text = subject.to_string();
+    if let Some(b) = body {
+        let trimmed = b.trim();
+        if !trimmed.is_empty() {
+            text.push('\n');
+            text.push_str(trimmed);
+        }
+    }
+    text
 }
 
 /// Where a shell's completion script is installed, and whether the shell
@@ -693,12 +971,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
-
-    // `detect_shell` reads the process-global `SHELL` env var, so tests that
-    // mutate it must be serialized against each other — same pattern as the
-    // color-env guard in display.rs.
-    static SHELL_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn write_completion_emits_nonempty_script_naming_aic_for_every_shell() {
@@ -820,37 +1092,76 @@ mod tests {
 
     /// `detect_shell` maps `$SHELL` (basename) to a supported shell; unknown
     /// names and an unset variable yield `None`, so the completion prompt can
-    /// fall back to a manual pick.
+    /// fall back to a manual pick. Uses `temp_env` to avoid unsafe env
+    /// mutation racing other tests.
     #[test]
     fn detect_shell_reads_shell_env() {
-        let _guard = SHELL_ENV.lock();
-        // SAFETY: guarded by SHELL_ENV, which serializes all SHELL mutation in
-        // this module against other tests in the same process.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Zsh));
-        unsafe {
-            std::env::set_var("SHELL", "/usr/bin/bash");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Bash));
-        // Basename only — no path required.
-        unsafe {
-            std::env::set_var("SHELL", "fish");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Fish));
-        unsafe {
-            std::env::set_var("SHELL", "nu");
-        }
-        assert_eq!(detect_shell(), Some(Shell::Nushell));
-        // Unknown shell and unset SHELL → None.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/tcsh");
-        }
-        assert_eq!(detect_shell(), None);
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
-        assert_eq!(detect_shell(), None);
+        temp_env::with_var("SHELL", Some("/bin/zsh"), || {
+            assert_eq!(detect_shell(), Some(Shell::Zsh));
+        });
+        temp_env::with_var("SHELL", Some("/usr/bin/bash"), || {
+            assert_eq!(detect_shell(), Some(Shell::Bash));
+        });
+        temp_env::with_var("SHELL", Some("fish"), || {
+            assert_eq!(detect_shell(), Some(Shell::Fish));
+        });
+        temp_env::with_var("SHELL", Some("nu"), || {
+            assert_eq!(detect_shell(), Some(Shell::Nushell));
+        });
+        temp_env::with_var("SHELL", Some("/bin/tcsh"), || {
+            assert_eq!(detect_shell(), None);
+        });
+        temp_env::with_var("SHELL", None::<&str>, || {
+            assert_eq!(detect_shell(), None);
+        });
+    }
+
+    /// Confirmation off, or an interactive stdin, always passes; confirmation
+    /// on with a non-TTY stdin fails fast with a message naming the fix —
+    /// before any planning or staging happens.
+    #[test]
+    fn ensure_confirm_terminal_guards_non_tty_stdin() {
+        assert!(ensure_confirm_terminal(false, false).is_ok());
+        assert!(ensure_confirm_terminal(false, true).is_ok());
+        assert!(ensure_confirm_terminal(true, true).is_ok());
+
+        let err = ensure_confirm_terminal(true, false).expect_err("must refuse non-TTY stdin");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("stdin is not a terminal"),
+            "expected a clear non-TTY error, got: {msg}"
+        );
+        assert!(
+            msg.contains("run `aic` from a terminal"),
+            "expected the fix to be named, got: {msg}"
+        );
+    }
+
+    /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
+    /// the file path (the `code --wait` case). Verified with a fake editor.
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_honors_editor_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-editor.sh");
+        // Fake editor: the file path is the last argument; rewrite it in place.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nfor last; do :; done\nprintf 'fix: args\\n' > \"$last\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let editor = format!("{} --wait", script.display());
+        temp_env::with_vars(
+            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
+            || {
+                let (subject, body) = edit_message("feat: draft", None).unwrap();
+                assert_eq!(subject, "fix: args");
+                assert_eq!(body, None);
+            },
+        );
     }
 }

@@ -7,8 +7,8 @@ pub(super) use crate::git;
 pub(super) use crate::git::Git;
 pub(super) use crate::git::tests as gh;
 pub(super) use crate::{
-    BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver, generator,
-    run_commit_workflow_impl, run_resolve_workflow_impl,
+    BatchPlanner, BoxFuture, CommitEditor, CommitMessenger, Confirm, ConfirmChoice, ConfirmMenu,
+    Prompt, Resolver, generator, run_commit_workflow_impl, run_resolve_workflow_impl,
 };
 pub(super) use git2::Repository;
 pub(super) use parking_lot::Mutex;
@@ -236,6 +236,73 @@ pub fn messenger_then_error(ok_for: usize) -> (CommitMessenger, Arc<Mutex<u32>>)
     (m, calls)
 }
 
+/// Messenger that returns each successive message in `messages`, with a call
+/// counter. Drives the Re-generate action: the second call must yield the
+/// message that actually lands.
+pub fn messenger_sequence(messages: &[&str]) -> (CommitMessenger, Arc<Mutex<u32>>) {
+    let msgs: Vec<String> = messages.iter().map(|m| m.to_string()).collect();
+    let calls = Arc::new(Mutex::new(0u32));
+    let calls2 = calls.clone();
+    let m: CommitMessenger = Box::new(
+        move |_diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
+            let n = {
+                let mut g = calls2.lock();
+                *g += 1;
+                *g as usize
+            };
+            let msg = msgs
+                .get(n - 1)
+                .cloned()
+                .unwrap_or_else(|| panic!("messenger_sequence exhausted after {n} calls"));
+            Box::pin(async move {
+                Ok(generator::CommitOutput {
+                    message: msg,
+                    body: None,
+                })
+            })
+        },
+    );
+    (m, calls)
+}
+
+/// Menu that pops choices from a queue; panics when exhausted so an
+/// under-specified test fails loudly instead of silently defaulting.
+pub fn menu_queue(choices: Vec<ConfirmChoice>) -> ConfirmMenu {
+    let q = Arc::new(Mutex::new(VecDeque::from(choices)));
+    Box::new(move |_message: &str| {
+        q.lock()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("confirmation menu queue exhausted"))
+    })
+}
+
+/// Editor that returns a predetermined (subject, body) on every call —
+/// the "user edited the message" path.
+pub fn editor_fixed(subject: &str, body: Option<&str>) -> CommitEditor {
+    let subject = subject.to_string();
+    let body = body.map(|b| b.to_string());
+    Box::new(move |_s: &str, _b: Option<&str>| Ok((subject.clone(), body.clone())))
+}
+
+/// Editor that returns its inputs unchanged — the "user cancelled the edit"
+/// path.
+pub fn editor_cancel() -> CommitEditor {
+    Box::new(|subject: &str, body: Option<&str>| {
+        Ok((subject.to_string(), body.map(|b| b.to_string())))
+    })
+}
+
+/// Editor stub that panics if called — same purpose as [`unreachable_planner`]
+/// for the editor: a test whose path must never open an editor fails loudly
+/// if a regression reaches it.
+pub fn unreachable_editor() -> CommitEditor {
+    Box::new(
+        |_s: &str, _b: Option<&str>| -> anyhow::Result<(String, Option<String>)> {
+            panic!("CommitEditor reached on a path that must not edit")
+        },
+    )
+}
+
 /// Planner stub that panics if called — for tests whose path exits before the
 /// batch-plan step, so a regression that reaches the LLM fails loudly instead
 /// of silently hitting the network.
@@ -282,6 +349,12 @@ impl BufferWrite {
 impl DisplayWrite for BufferWrite {
     fn write_line(&self, line: &str) {
         self.0.lock().push(line.to_string());
+    }
+
+    fn clear_last(&self, n: usize) {
+        let mut lines = self.0.lock();
+        let keep = lines.len().saturating_sub(n);
+        lines.truncate(keep);
     }
 }
 

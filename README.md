@@ -42,7 +42,7 @@ aic:          3 commits, one per logical change  ✅
 - **Hunk-level batch splitting** — one file, many concerns? aic splits per-hunk into atomic commits (`git add -p` style, fully non-interactive)
 - **Multi-provider** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, xAI, Mistral, OpenRouter, Perplexity, Together, Ollama, and any OpenAI-compatible server
 - **Conflict resolution** — mid-merge? `aic resolve` proposes per-file resolutions you review and approve, then finalizes the merge
-- **Interactive setup** — `aic setup` walks you through provider, API key, and model selection
+- **Interactive setup** — `aic setup` is menu-driven: pick the AI provider (backend, API key, base URL, model) or the per-commit confirmation toggle in any order, then save
 - **Conventional Commits** — messages follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) spec
 - **Configurable** — config file, environment variables, or per-run override
 
@@ -115,7 +115,7 @@ aic
 | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `aic`         | Commit staged files with one message. If nothing is staged, batch-plan all unstaged changes into **hunk-level** atomic commits. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Proposes per-file resolutions to review, then finalizes the merge.            |
-| `aic setup`   | Interactive wizard to pick provider, enter API key, and select model.                                                  |
+| `aic setup`   | Menu-driven config: AI provider (backend, API key, base URL, model) and a pre-commit confirmation toggle, in any order.    |
 | `aic list`    | Show resolved config: provider, model, and where each value comes from (env / config / default).                       |
 | `aic update`  | Update aic to the latest version from GitHub Releases.                                                                 |
 
@@ -169,6 +169,29 @@ For each of `backend`, `api_key`, `model`, and `base_url`:
 2. Provider-specific env var (API key only)
 3. Config file (`~/.config/aic/config.toml`)
 4. Built-in default
+
+### Pre-commit confirmation
+
+By default `aic` drafts a message and commits immediately — you only see the
+message *after* it lands. If you sign commits (GPG, the signing popup fires
+before you see what you're signing) or run a local model whose drafts on large
+commits need a human check, opt in:
+
+```toml
+confirm_before_commit = true
+```
+
+in `~/.config/aic/config.toml`, or toggle it during `aic setup`. With it on,
+`aic` shows the drafted message (subject + body) and the files it would land,
+then offers a four-option menu before each commit:
+
+- **Commit** — land the commit as drafted
+- **Re-generate** — re-run the model on the same diff for a fresh draft
+- **Edit** — edit the full message in `$VISUAL`/`$EDITOR` (falls back to nano/vim/vi/emacs), then return to the menu
+- **Abort** — end the run; nothing further commits
+
+Abort in batch mode leaves already-committed batches in place and keeps the
+rest in the working tree, recoverable by re-running `aic`.
 
 ### Supported providers
 
