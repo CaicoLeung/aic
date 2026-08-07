@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
-use console::{Key, Term};
+use console::Term;
 use dialoguer::{Select, theme::ColorfulTheme};
+use inquire::validator::Validation;
+use inquire::{InquireError, Password, Text};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -1060,10 +1062,12 @@ enum TextAct {
     Cancel,
 }
 
-/// Read a line of text in raw mode so we can intercept Esc (back) and Ctrl-C
-/// (cancel) — which dialoguer's `Input`/`Password` can't do. `masked` hides
-/// each typed char (for secrets). `initial` is offered as the kept value when
-/// the user presses Enter on an empty line.
+/// Read a line of text via the `inquire` crate, which intercepts Esc (back)
+/// and Ctrl-C (cancel) natively — unlike dialoguer's `Input`/`Password`.
+/// `masked` hides each typed char (for secrets). `initial` is offered as the
+/// kept value when the user submits an empty line. `allow_empty` admits an
+/// empty submit; otherwise `empty_hint` is shown (via inquire's validator) and
+/// the prompt retries until non-empty.
 fn prompt_text(
     prompt: &str,
     masked: bool,
@@ -1071,58 +1075,67 @@ fn prompt_text(
     allow_empty: bool,
     empty_hint: &str,
 ) -> Result<TextAct> {
-    // stdout (not stderr) so this stays in lock-step with dialoguer's
-    // Select/Confirm rendering — prompts and menus never interleave when the
-    // streams are split.
-    let term = Term::stdout();
-    let init_hint = match (initial, masked) {
-        (Some(_), true) => "  [current: ••••]".to_string(),
-        (Some(d), false) => format!("  [current: {d}]"),
-        _ => String::new(),
+    // Show the current value as a help line; an empty submit keeps it.
+    let help = match (initial, masked) {
+        (Some(_), true) => Some("current: •••• (leave blank to keep)".to_string()),
+        (Some(d), false) => Some(format!("current: {d} (leave blank to keep)")),
+        _ => None,
     };
-    term.write_line(&format!("{prompt}{init_hint}"))?;
-    term.write_line("  Enter = confirm · Esc = back · Ctrl-C = cancel")?;
 
-    // `read_key_raw` puts the terminal in raw mode for each keypress (console
-    // restores cooked mode automatically) and returns `Key::CtrlC` on Ctrl-C
-    // instead of raising SIGINT, so we can treat it as a graceful cancel.
-    let mut buf = String::new();
-    loop {
-        let key = term.read_key_raw().context("could not read keypress")?;
-        match key {
-            Key::Enter => {
-                let _ = term.write_str("\r\n");
-                let trimmed = buf.trim().to_string();
-                if trimmed.is_empty() {
-                    if let Some(d) = initial {
-                        return Ok(TextAct::Value(d.to_string()));
-                    }
-                    if allow_empty {
-                        return Ok(TextAct::Value(String::new()));
-                    }
-                    // Required + empty: flash the hint and keep reading.
-                    let _ = term.write_str(&format!("  {empty_hint} — try again: "));
-                    continue;
-                }
-                return Ok(TextAct::Value(trimmed));
-            }
-            Key::Escape => return Ok(TextAct::Back),
-            Key::CtrlC => return Ok(TextAct::Cancel),
-            Key::Backspace => {
-                if buf.pop().is_some() {
-                    let _ = term.write_str("\u{8} \u{8}");
-                }
-            }
-            Key::Char(c) if !c.is_control() => {
-                buf.push(c);
-                if masked {
-                    let _ = term.write_str("•");
-                } else {
-                    let _ = term.write_str(&c.to_string());
-                }
-            }
-            _ => {}
+    let prompt_result = if masked {
+        let mut p = Password::new(prompt);
+        if let Some(h) = help.as_deref() {
+            p = p.with_help_message(h);
         }
+        if !allow_empty {
+            let hint = empty_hint.to_string();
+            p = p.with_validator(move |v: &str| {
+                if v.trim().is_empty() {
+                    Ok(Validation::Invalid(hint.clone().into()))
+                } else {
+                    Ok(Validation::Valid)
+                }
+            });
+        }
+        p.prompt()
+    } else {
+        let mut t = Text::new(prompt);
+        if let Some(h) = help.as_deref() {
+            t = t.with_help_message(h);
+        }
+        if !allow_empty {
+            let hint = empty_hint.to_string();
+            t = t.with_validator(move |v: &str| {
+                if v.trim().is_empty() {
+                    Ok(Validation::Invalid(hint.clone().into()))
+                } else {
+                    Ok(Validation::Valid)
+                }
+            });
+        }
+        t.prompt()
+    };
+
+    match prompt_result {
+        Ok(v) => {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                // Empty submit: keep the initial when present, else honor
+                // allow_empty (the validator already enforced `required`).
+                if let Some(d) = initial {
+                    return Ok(TextAct::Value(d.to_string()));
+                }
+                if allow_empty {
+                    return Ok(TextAct::Value(String::new()));
+                }
+            }
+            Ok(TextAct::Value(trimmed))
+        }
+        // Esc — back out of this step.
+        Err(InquireError::OperationCanceled) => Ok(TextAct::Back),
+        // Ctrl-C — cancel the whole setup, same as everywhere in the wizard.
+        Err(InquireError::OperationInterrupted) => Ok(TextAct::Cancel),
+        Err(e) => Err(e).context("could not read terminal input"),
     }
 }
 
