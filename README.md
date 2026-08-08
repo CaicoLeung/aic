@@ -212,6 +212,8 @@ rest in the working tree, recoverable by re-running `aic`.
 
 OpenRouter and the OpenAI-compatible provider have no default model — set `LLM_MODEL` explicitly. The OpenAI-compatible provider also requires `LLM_BASE_URL` and routes through the OpenAI client against any server that speaks the OpenAI chat-completions API (LM Studio, vLLM, gateways).
 
+Real per-provider smoke tests (one commit-message generation call each) live in `scripts/smoke-test-providers.sh` — export the provider key and run it to exercise any provider end to end.
+
 ## Resolving merge conflicts
 
 Run `aic resolve` when your repo is mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. Approve the ones you trust; the rest stay untouched. When nothing is left unmerged, it runs the merge's `--continue` for you.
