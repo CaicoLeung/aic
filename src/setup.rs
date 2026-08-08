@@ -318,12 +318,15 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
                 ));
             }
             Step::Model => {
-                let (model, _) = resolve_field(
+                let (model, source) = resolve_field(
                     draft.model.as_deref().filter(|m| !m.is_empty()),
                     p.default_model(),
                 );
                 entries.push(ProviderEntry::Model);
-                labels.push(format!("{ICON_MODEL} Model — {}", model_label(&model)));
+                labels.push(format!(
+                    "{ICON_MODEL} Model — {}",
+                    model_label(&model, source)
+                ));
             }
         }
     }
@@ -483,14 +486,13 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
 
 fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
-    // Effective key for editing: the draft (a user edit or the seeded config
-    // value). aic reads only the config file.
+    // Effective key for editing: the draft (a user edit or the seeded config value).
     let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
     match provider.requires_key() {
         // Cloud provider — key required.
         true => {
             if !key.is_empty() {
-                // A key already exists (config or env): keep or replace it — a
+                // A key already exists (from config): keep or replace it — a
                 // choice, so offer an option list instead of a typed prompt.
                 // The replace path is a sub-mode: Esc there returns to the
                 // keep/replace choice.
@@ -771,7 +773,7 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
 fn step_verify(draft: &Draft) -> Result<Nav> {
     let p = draft.provider.unwrap_or(Provider::OpenAI);
     // Effective values: the draft (a user edit or the seeded config value),
-    // then the default. aic reads only the config file.
+    // then the default.
     let api_key = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty())).0;
     let base_url = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p).0;
     let model = resolve_field(

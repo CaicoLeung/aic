@@ -2,7 +2,7 @@
 //! into the values an [`crate::llm::LLM`] actually uses.
 //!
 //! This module owns the **deep** config concept: the on-disk [`Config`] shape,
-//! [`ResolvedConfig`] precedence (env var > config file > provider default),
+//! [`ResolvedConfig`] precedence (config file > provider default),
 //! and the field-level resolution helpers. The interactive `aic setup` wizard
 //! that *writes* this config lives in [`crate::setup`]; the generic
 //! interactive-input primitives (menus, text prompts, IO-cancel classifier)

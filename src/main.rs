@@ -500,7 +500,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     );
     let git = Git::at(Path::new("."))?;
     // Absent/malformed config keeps the default (no confirmation) — same
-    // tolerance `LLM::from_env` uses for the provider fields.
+    // tolerance `LLM::load` uses for the provider fields.
     let confirm_enabled = config::Config::load()
         .ok()
         .flatten()

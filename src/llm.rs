@@ -382,7 +382,10 @@ pub struct LLM {
 }
 
 impl LLM {
-    pub fn from_env() -> Result<Self> {
+    /// Load the runtime [`LLM`] from the resolved config file. aic reads only
+    /// the config file — no environment variables — so it is the single source
+    /// of truth (ADR 0008).
+    pub fn load() -> Result<Self> {
         let config = crate::config::Config::load().ok().flatten();
         let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
         resolved.validate()?;

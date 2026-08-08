@@ -115,10 +115,7 @@ pub fn validate_batch_plan(
 impl Generator {
     pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
         let p = PromptConfig::default().git_message;
-        LLM::from_env()?
-            .agent(&p)
-            .schema::<CommitOutput>(diff)
-            .await
+        LLM::load()?.agent(&p).schema::<CommitOutput>(diff).await
     }
 
     /// Split the workdir diff into logical commit batches, streaming the
@@ -131,7 +128,7 @@ impl Generator {
         on_reasoning: impl FnMut(&str),
     ) -> anyhow::Result<BatchPlanOutput> {
         let p = PromptConfig::default().batch_plan_prompt;
-        LLM::from_env()?
+        LLM::load()?
             .agent(&p)
             .stream_typed_with_reasoning::<BatchPlanOutput>(diff, on_reasoning)
             .await
@@ -143,7 +140,7 @@ impl Generator {
     /// markdown code fence around the output is stripped (ADR 0005).
     pub async fn resolve_conflict(file_content: &str) -> anyhow::Result<String> {
         let p = PromptConfig::default().resolve_prompt;
-        let raw = LLM::from_env()?.agent(&p).call(file_content).await?;
+        let raw = LLM::load()?.agent(&p).call(file_content).await?;
         Ok(crate::llm::strip_code_fence(&raw).to_string())
     }
 }

@@ -66,7 +66,9 @@ run_one() {
 
   # aic reads only the config file — write a per-provider config.toml into the
   # throwaway HOME (both macOS and Linux locations) so the real ~/.config/aic
-  # never leaks in. Provider keys are still sourced from the environment here.
+  # never leaks in. The provider key is read from the runner's environment only
+  # to seed this file; the binary itself is invoked with every LLM_* var unset
+  # (see the `env -u` flags below), so it cannot consume env keys.
   local cfg
   cfg=$(printf 'backend = "%s"\nmodel = "%s"\napi_key = "%s"\n' \
     "$backend" "$model" "${!key_var}")
