@@ -171,35 +171,31 @@ impl CommitType {
         }
     }
 
-    /// Display color for a **named** commit type. Reads the single-source
-    /// [`NAMED_PALETTE`]; [`CommitType::Unknown`] falls back to
-    /// [`NEUTRAL_GRAY`] (used directly only when the type token is empty or
-    /// the message has no colon — see [`CommitType::color_for`] for the
-    /// full resolution including the hash fallback for unrecognized names).
-    pub fn color(self) -> Style {
+    /// Display color for a **named** commit type. Internal palette lookup used
+    /// by [`CommitType::color_for`]; reads [`NAMED_PALETTE`] and falls back to
+    /// [`NEUTRAL_GRAY`] for [`CommitType::Unknown`]. Not public — renderers
+    /// go through [`CommitType::color_for`], which layers the empty-token and
+    /// unrecognized-name resolution on top.
+    fn color(self) -> Style {
         let rgb = NAMED_PALETTE
             .iter()
             .find(|(t, _)| *t == self)
             .map(|(_, rgb)| *rgb)
             .unwrap_or(NEUTRAL_GRAY);
-        Style::new().true_color(rgb.0, rgb.1, rgb.2)
+        rgb_style(rgb)
     }
 
     /// Resolve the color for an arbitrary type-token string — the renderer's
     /// entry point. Resolution order:
     ///
-    /// 1. **Named type** (`feat`, `ci`, `revert`, …) → its palette color via
-    ///    [`CommitType::color`].
+    /// 1. **Named type** (`feat`, `ci`, `revert`, …) → its palette color
+    ///    (looked up in [`NAMED_PALETTE`]).
     /// 2. **Empty / whitespace-only** (e.g. a no-colon message) →
     ///    [`NEUTRAL_GRAY`]. A missing token carries no signal worth coloring.
     /// 3. **Non-empty unrecognized** (`wip` before it was named, custom team
     ///    types like `blob`, `ux`, …) → deterministic FNV-1a hash into
     ///    [`FALLBACK_PALETTE`]. Same name → same color, every run, every
     ///    machine — stable scrollback and muscle memory without config.
-    ///
-    /// Use this instead of [`CommitType::color`] whenever the raw type-token
-    /// text is available (i.e. everywhere except places that already hold a
-    /// parsed [`CommitType`]).
     pub fn color_for(type_name: &str) -> Style {
         let named = CommitType::parse(type_name);
         if named != CommitType::Unknown {
