@@ -140,15 +140,17 @@ mod tests {
     }
 
     /// [`terminal_width`] is [`resolve_cols`] applied to the real terminal:
-    /// always within `[FALLBACK_COLS, HARD_CAP]`, never negative or uncapped.
-    /// (We can't assert an exact value — it reads the live terminal — but the
-    /// bounds are the load-bearing contract.)
+    /// always `<= HARD_CAP` (the cap is load-bearing) and never `0` on a TTY
+    /// (`0` is mapped to [`FALLBACK_COLS`]). [`resolve_cols`] does *not* floor
+    /// non-zero readings at [`FALLBACK_COLS`] — a real narrow terminal can
+    /// report below it — so only the hard cap is asserted here. We can't assert
+    /// an exact value because it reads the live terminal.
     #[test]
     fn terminal_width_stays_within_resolved_bounds() {
         let w = terminal_width();
         assert!(
-            (FALLBACK_COLS..=HARD_CAP).contains(&w),
-            "terminal_width {w} outside [{FALLBACK_COLS}, {HARD_CAP}]"
+            w <= HARD_CAP,
+            "terminal_width {w} exceeds hard cap {HARD_CAP}"
         );
     }
 }
