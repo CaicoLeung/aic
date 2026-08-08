@@ -243,6 +243,17 @@ fn show_screen() -> Result<()> {
     Ok(())
 }
 
+// Glyphs that visually distinguish each setup item across the menus. Each
+// appears at the start of its menu row so items are scannable at a glance
+// (AIC-15). Plain `&str` constants keep the menu code readable as labels.
+const ICON_PROVIDER: &str = "🤖";
+const ICON_API_KEY: &str = "🔑";
+const ICON_BASE_URL: &str = "🌐";
+const ICON_MODEL: &str = "🧠";
+const ICON_CONFIRM: &str = "📋";
+const ICON_SAVE: &str = "💾";
+const ICON_DONE: &str = "↩️";
+
 /// Per-step outcome for the setup state machine.
 enum Nav {
     Next,
@@ -369,6 +380,19 @@ fn seed_draft(existing: &Option<Config>) -> Draft {
     draft
 }
 
+/// The model the selected provider will actually use, for display: the
+/// in-session draft choice (seeded from the existing config in
+/// [`seed_draft`]) first, else the provider default. Empty when the provider
+/// has no default (OpenRouter, OpenAI-compatible).
+fn effective_model(p: Provider, draft: &Draft) -> String {
+    draft
+        .model
+        .as_deref()
+        .filter(|m| !m.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| p.default_model().to_string())
+}
+
 /// `AI provider` menu row: the current provider and the model that would be
 /// used (the chosen one, else the provider default). `(not set)` when no
 /// provider is configured yet.
@@ -376,22 +400,30 @@ fn provider_label(draft: &Draft) -> String {
     let Some(p) = draft.provider else {
         return "(not set)".to_string();
     };
-    let model = draft
-        .model
-        .as_deref()
-        .filter(|m| !m.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            let d = p.default_model();
-            if d.is_empty() {
-                None
-            } else {
-                Some(d.to_string())
-            }
-        });
-    match model {
-        Some(m) => format!("{} · {m}", p.display()),
-        None => p.display().to_string(),
+    let model = effective_model(p, draft);
+    if model.is_empty() {
+        p.display().to_string()
+    } else {
+        format!("{} · {model}", p.display())
+    }
+}
+
+/// One row in the provider picker (the screen *before* this provider's
+/// submenu). For the currently selected provider, show the model the user
+/// actually chose (`draft.model`, seeded from the existing config) rather than
+/// the bare default — otherwise re-entering setup makes the selection read as
+/// lost (AIC-15). For every other provider, show its default so the options
+/// stay comparable at a glance.
+fn provider_choice_label(p: Provider, draft: &Draft) -> String {
+    let model = if draft.provider == Some(p) {
+        effective_model(p, draft)
+    } else {
+        p.default_model().to_string()
+    };
+    if model.is_empty() {
+        format!("{}  (no default — you'll pick a model)", p.display())
+    } else {
+        format!("{}  ({model})", p.display())
     }
 }
 
@@ -467,7 +499,10 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
                     None => resolve_api_key(None, &p),
                 };
                 entries.push(ProviderEntry::ApiKey);
-                labels.push(format!("API key — {}", api_key_label(&key, source)));
+                labels.push(format!(
+                    "{ICON_API_KEY} API key — {}",
+                    api_key_label(&key, source)
+                ));
             }
             Step::BaseUrl => {
                 let (url, source) = match draft.base_url.as_deref().filter(|u| !u.is_empty()) {
@@ -476,7 +511,7 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
                 };
                 entries.push(ProviderEntry::BaseUrl);
                 labels.push(format!(
-                    "Base URL — {}",
+                    "{ICON_BASE_URL} Base URL — {}",
                     base_url_label(url.as_deref(), source)
                 ));
             }
@@ -486,12 +521,15 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
                     None => resolve_field("LLM_MODEL", None, p.default_model()),
                 };
                 entries.push(ProviderEntry::Model);
-                labels.push(format!("Model — {}", model_label(&model, source)));
+                labels.push(format!(
+                    "{ICON_MODEL} Model — {}",
+                    model_label(&model, source)
+                ));
             }
         }
     }
     entries.push(ProviderEntry::Done);
-    labels.push("Done — back to main menu".to_string());
+    labels.push(format!("{ICON_DONE} Done — back to main menu"));
     (entries, labels)
 }
 
@@ -502,9 +540,12 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
 fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
     show_screen()?;
     let items = vec![
-        format!("AI provider — {}", provider_label(draft)),
-        format!("Confirm before commit — {}", confirm_label(draft)),
-        "Save & exit".to_string(),
+        format!("{ICON_PROVIDER} AI provider — {}", provider_label(draft)),
+        format!(
+            "{ICON_CONFIRM} Confirm before commit — {}",
+            confirm_label(draft)
+        ),
+        format!("{ICON_SAVE} Save & exit"),
     ];
     match opt_nav("What would you like to configure?", &items, default_idx)? {
         OptNav::Value(0) => Ok(MenuChoice::Provider),
@@ -611,10 +652,7 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
     let providers = Provider::all();
     let items: Vec<String> = providers
         .iter()
-        .map(|p| match p.default_model() {
-            "" => format!("{}  (no default — you'll pick a model)", p.display()),
-            m => format!("{}  ({m})", p.display()),
-        })
+        .map(|&p| provider_choice_label(p, draft))
         .collect();
     let default_idx = draft
         .provider
@@ -1372,9 +1410,63 @@ mod tests {
                 ProviderEntry::Done
             ]
         );
-        assert_eq!(labels[0], "API key — ••••••");
-        assert_eq!(labels[1], "Model — deepseek-v4-pro");
-        assert_eq!(labels[2], "Done — back to main menu");
+        assert_eq!(labels[0], "🔑 API key — ••••••");
+        assert_eq!(labels[1], "🧠 Model — deepseek-v4-pro");
+        assert_eq!(labels[2], "↩️ Done — back to main menu");
+    }
+
+    #[test]
+    fn effective_model_prefers_draft_then_default() {
+        // Draft model wins over the provider default.
+        let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
+        assert_eq!(effective_model(Provider::OpenAI, &d), "gpt-5");
+        // No draft model -> provider default.
+        let d = draft(Some(Provider::OpenAI), None, None, None);
+        assert_eq!(effective_model(Provider::OpenAI, &d), "gpt-5-mini");
+        // Provider with no default -> empty string.
+        let d = draft(Some(Provider::OpenRouter), None, None, None);
+        assert_eq!(effective_model(Provider::OpenRouter, &d), "");
+    }
+
+    #[test]
+    fn provider_choice_label_shows_chosen_model_for_selected_provider() {
+        // The selected provider shows the user's chosen model, not the bare
+        // default — re-entering setup must not read as if the choice was lost
+        // (AIC-15).
+        let mut d = draft(Some(Provider::DeepSeek), None, None, None);
+        d.model = Some("deepseek-v4-pro".into());
+        assert_eq!(
+            provider_choice_label(Provider::DeepSeek, &d),
+            "DeepSeek  (deepseek-v4-pro)"
+        );
+
+        // Other providers still show their default for comparison.
+        assert_eq!(
+            provider_choice_label(Provider::OpenAI, &d),
+            "OpenAI  (gpt-5-mini)"
+        );
+
+        // No chosen model -> the provider default for the selected provider.
+        let d = draft(Some(Provider::DeepSeek), None, None, None);
+        assert_eq!(
+            provider_choice_label(Provider::DeepSeek, &d),
+            "DeepSeek  (deepseek-v4-flash)"
+        );
+
+        // Selected provider with no default and a chosen model -> chosen model.
+        let mut d = draft(Some(Provider::OpenRouter), None, None, None);
+        d.model = Some("meta-llama/llama-4-scout".into());
+        assert_eq!(
+            provider_choice_label(Provider::OpenRouter, &d),
+            "OpenRouter  (meta-llama/llama-4-scout)"
+        );
+
+        // Selected provider with no default and no chosen model -> the hint.
+        let d = draft(Some(Provider::OpenRouter), None, None, None);
+        assert_eq!(
+            provider_choice_label(Provider::OpenRouter, &d),
+            "OpenRouter  (no default — you'll pick a model)"
+        );
     }
 
     #[test]
