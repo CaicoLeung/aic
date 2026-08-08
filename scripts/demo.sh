@@ -48,6 +48,7 @@ FAKE_HOME=""
 cleanup() {
   rm -rf "$WORK_DIR"
   [[ -n "$FAKE_HOME" ]] && rm -rf "$FAKE_HOME"
+  :
 }
 trap cleanup EXIT
 
