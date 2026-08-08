@@ -11,6 +11,27 @@ AI-powered git commit tool that writes Conventional Commit messages for you — 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
+![aic splits one file's mixed edits into three atomic commits](docs/demo/aic-hunk-split.gif)
+
+<sub>One file carrying three unrelated concerns — a `fix`, a `feat`, a `refactor` — becomes three clean atomic commits. Cast: [`docs/demo/aic-hunk-split.cast`](docs/demo/aic-hunk-split.cast) · re-render with `python3 docs/demo/make-cast.py`.</sub>
+
+## Try it in 30 seconds
+
+See the headline on your own machine — **no API key required** (deterministic, offline fixture):
+
+```sh
+git clone https://github.com/CaicoLeung/aic.git && cd aic
+./scripts/demo.sh
+```
+
+You get **three atomic Conventional Commits** (`fix`, `feat`, `refactor`) split from one file's mixed edits — with zero network and zero config. [`scripts/demo.sh`](scripts/demo.sh) materializes a throwaway repo, applies three unrelated edits to a single file, and replays aic's recorded split.
+
+Want the **real** LLM doing the split? Configure a provider once (`aic setup`, or run a local [Ollama](https://ollama.com) with no key), then:
+
+```sh
+AIC_DEMO_LIVE=1 ./scripts/demo.sh
+```
+
 ---
 
 ## ✨ The headline: hunk-level commits, not file-level
@@ -108,6 +129,27 @@ aic
 #    changes into hunk-level atomic commits automatically
 aic
 ```
+
+## How aic compares
+
+Most AI commit tools treat a **file** as the atomic unit. aic treats a **hunk** as the atomic unit — that is the only thing it claims to do that the others don't. Everything else, we concede honestly.
+
+| Tool | AI messages | Hunk-level split | Conventional Commits | Multi-provider | Conflict resolution | Rust binary |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **aic** | ✅ | ✅ | ✅ | ✅ 12 | ✅ `aic resolve` | ✅ |
+| [aicommits](https://github.com/Nutlope/aicommits) | ✅ | ❌ | ⚠️ generated, not enforced | ❌ OpenAI only | ❌ | ❌ Node |
+| [opencommit](https://github.com/di-sukharev/opencommit) | ✅ | ❌ | ✅ | ✅ several | ❌ | ❌ Node |
+| [commitizen](https://github.com/commitizen-tools/commitizen) | ❌ prompt only | ❌ | ✅ | — N/A | ❌ | ❌ Python |
+| [gitmoji-cli](https://github.com/carloscuesta/gitmoji-cli) | ❌ prompt only | ❌ | ⚠️ emoji-focused | — N/A | ❌ | ❌ Node |
+| [cz-cli](https://github.com/commitizen/cz-cli) | ❌ prompt only | ❌ | ✅ | — N/A | ❌ | ❌ Node |
+
+**Where aic wins:** hunk-level atomic commits (the only tool here that does it), a single Rust binary, and built-in merge-conflict resolution.
+
+**Where aic ties:** AI-generated messages and multi-provider support (opencommit is a strong peer here).
+
+**Where aic concedes:** if you want a battle-tested *non-AI* Conventional Commits prompt wizard, `commitizen` / `cz-cli` are more mature and need no API key.
+
+> Legend: ✅ supported · ❌ not supported · ⚠️ partial · — not applicable. Verified against each project's docs at the linked repos.
 
 ## Usage
 

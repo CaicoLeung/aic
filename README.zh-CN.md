@@ -11,6 +11,27 @@ AI 驱动的 git commit 工具，帮你写 Conventional Commit message —— �
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
+![aic 把一个文件的混杂改动拆成三个 atomic commit](docs/demo/aic-hunk-split.gif)
+
+<sub>一个文件里三处互不相关的改动（`fix`、`feat`、`refactor`）变成三个干净的 atomic commit。Cast：[`docs/demo/aic-hunk-split.cast`](docs/demo/aic-hunk-split.cast) · 用 `python3 docs/demo/make-cast.py` 重新渲染。</sub>
+
+## 30 秒试用
+
+在你自己的机器上看到这个亮点 —— **无需 API key**（确定性、离线 fixture）：
+
+```sh
+git clone https://github.com/CaicoLeung/aic.git && cd aic
+./scripts/demo.sh
+```
+
+你会得到 **三个 atomic Conventional Commit**（`fix`、`feat`、`refactor`），从一个文件的混杂改动中拆分而来 —— 零网络、零配置。[`scripts/demo.sh`](scripts/demo.sh) 会生成一个临时 repo，对一个文件应用三处互不相关的改动，并重放 aic 录制的拆分结果。
+
+想看**真实** LLM 拆分？配置一次 provider（`aic setup`，或本地跑一个无需 key 的 [Ollama](https://ollama.com)），然后：
+
+```sh
+AIC_DEMO_LIVE=1 ./scripts/demo.sh
+```
+
 ---
 
 ## ✨ 核心亮点：hunk 级别的 commit，而非 file 级别
@@ -108,6 +129,27 @@ aic
 #    自动拆分为 hunk 级别的 atomic commit
 aic
 ```
+
+## aic 与同类工具对比
+
+多数 AI commit 工具把 **file** 当作 atomic 单位。aic 把 **hunk** 当作 atomic 单位 —— 这是 aic 唯一声称别人没做到的事。其余方面，诚实相让。
+
+| 工具 | AI message | Hunk 级拆分 | Conventional Commits | 多 provider | Conflict resolution | Rust 二进制 |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **aic** | ✅ | ✅ | ✅ | ✅ 12 家 | ✅ `aic resolve` | ✅ |
+| [aicommits](https://github.com/Nutlope/aicommits) | ✅ | ❌ | ⚠️ 仅生成，不强制 | ❌ 仅 OpenAI | ❌ | ❌ Node |
+| [opencommit](https://github.com/di-sukharev/opencommit) | ✅ | ❌ | ✅ | ✅ 多家 | ❌ | ❌ Node |
+| [commitizen](https://github.com/commitizen-tools/commitizen) | ❌ 仅交互提示 | ❌ | ✅ | — 不适用 | ❌ | ❌ Python |
+| [gitmoji-cli](https://github.com/carloscuesta/gitmoji-cli) | ❌ 仅交互提示 | ❌ | ⚠️ 偏 emoji | — 不适用 | ❌ | ❌ Node |
+| [cz-cli](https://github.com/commitizen/cz-cli) | ❌ 仅交互提示 | ❌ | ✅ | — 不适用 | ❌ | ❌ Node |
+
+**aic 胜出：** hunk 级 atomic commit（这里唯一做到的工具）、单一 Rust 二进制、内置 merge conflict 解决。
+
+**aic 持平：** AI 生成 message 与多 provider 支持（opencommit 是有力的同类）。
+
+**aic 相让：** 如果你想要成熟、*非 AI* 的 Conventional Commits 交互提示器，`commitizen` / `cz-cli` 更成熟且无需 API key。
+
+> 图例：✅ 支持 · ❌ 不支持 · ⚠️ 部分 · — 不适用。依据各项目文档（见链接仓库）核实。
 
 ## Usage
 
