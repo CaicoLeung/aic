@@ -3,6 +3,7 @@
 .omc
 CLAUDE.md
 docs/drawio
+docs/popularize
 
 # zipsign private key — NEVER commit. Only keys/zipsign.pub is tracked.
 keys/*.key
