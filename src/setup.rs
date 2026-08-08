@@ -72,6 +72,7 @@ const ICON_BASE_URL: &str = "🌐";
 const ICON_MODEL: &str = "🧠";
 const ICON_CONFIRM: &str = "📋";
 const ICON_SAVE: &str = "💾";
+const ICON_VERIFY: &str = "🔌";
 const ICON_DONE: &str = "↩️";
 
 /// Per-step outcome for the setup state machine.
@@ -262,6 +263,7 @@ enum ProviderEntry {
     ApiKey,
     BaseUrl,
     Model,
+    Verify,
     Done,
 }
 
@@ -348,6 +350,10 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
             }
         }
     }
+    entries.push(ProviderEntry::Verify);
+    labels.push(format!(
+        "{ICON_VERIFY} Verify — test this provider with a sample request"
+    ));
     entries.push(ProviderEntry::Done);
     labels.push(format!("{ICON_DONE} Done — back to main menu"));
     (entries, labels)
@@ -410,6 +416,7 @@ fn run_provider_flow(
                             step_base_url(existing, existing_provider, draft)?
                         }
                         ProviderEntry::Model => step_model(existing, existing_provider, draft)?,
+                        ProviderEntry::Verify => step_verify(draft)?,
                         ProviderEntry::Done => return Ok(false),
                     };
                     // Any non-cancel outcome returns to the sub-menu; the field
@@ -775,6 +782,134 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
     }
 }
 
+/// The Verify item (AIC-23): make a minimal sample request against the
+/// selected provider using the **effective** config — draft value first, then
+/// env var, then the provider default — i.e. exactly the values the sub-menu
+/// rows show. Success or the underlying provider error (auth, rate limit,
+/// network, unknown model) is reported on a dedicated screen, then the wizard
+/// returns to the sub-menu. Never auto-advances: Verify is a probe, not a
+/// field edit.
+///
+/// The sample call runs on a dedicated current-thread Tokio runtime. `aic
+/// setup` is dispatched from `#[tokio::main]`, so the wizard is already
+/// executing inside a runtime; `block_in_place` parks the main task on the
+/// multi-thread runtime so a nested runtime can drive the async verify call
+/// without panicking.
+fn step_verify(draft: &Draft) -> Result<Nav> {
+    let p = draft.provider.unwrap_or(Provider::OpenAI);
+    // Effective values mirror provider_submenu_items exactly: the in-session
+    // draft wins; otherwise env/default resolve the field. The draft already
+    // carries any existing config value (seed_draft), so this is draft > env >
+    // default — what the rows display.
+    let api_key = match draft.api_key.as_deref().filter(|k| !k.is_empty()) {
+        Some(k) => k.to_string(),
+        None => resolve_api_key(None, &p).0,
+    };
+    let base_url = match draft.base_url.as_deref().filter(|u| !u.is_empty()) {
+        Some(u) => Some(u.to_string()),
+        None => resolve_base_url(None, &p).0,
+    };
+    let model = match draft.model.as_deref().filter(|m| !m.is_empty()) {
+        Some(m) => m.to_string(),
+        None => resolve_field("LLM_MODEL", None, p.default_model()).0,
+    };
+
+    // Pre-flight validation mirrors ResolvedConfig::validate so a missing
+    // required field reads as a setup hint, not an opaque provider error.
+    if let Err(e) = verify_preflight(p, base_url.as_deref(), &model) {
+        show_verify_result(&p, &model, &api_key, base_url.as_deref(), Err(e))?;
+        return Ok(Nav::Next);
+    }
+
+    let llm = crate::llm::LLM {
+        provider: p,
+        model: model.clone(),
+        api_key: api_key.clone(),
+        base_url: base_url.clone(),
+    };
+    let label = format!("Contacting {} ({model})…", p.display());
+    // block_in_place parks the outer multi-thread task; the nested
+    // current-thread runtime then drives the async verify future. Without
+    // block_in_place, Runtime::block_on panics inside an active runtime.
+    let result = tokio::task::block_in_place(|| -> Result<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build verify runtime")?;
+        rt.block_on(crate::progress::with_spinner(&label, async {
+            llm.agent("You are a connectivity checker. Follow the user's instruction exactly.")
+                .verify()
+                .await
+        }))
+    });
+
+    show_verify_result(&p, &model, &api_key, base_url.as_deref(), result)?;
+    Ok(Nav::Next)
+}
+
+/// Pre-flight checks for Verify: a provider whose base URL is required must
+/// have one, and the model must be set. Catches missing-field misconfigurations
+/// before they become opaque provider/HTTP errors.
+fn verify_preflight(p: Provider, base_url: Option<&str>, model: &str) -> Result<()> {
+    if p.base_url_requirement() == BaseUrlRequirement::Required && base_url.is_none() {
+        anyhow::bail!(
+            "the {} provider requires a base URL — set one in this menu first",
+            p.display()
+        );
+    }
+    if model.trim().is_empty() {
+        anyhow::bail!(
+            "no model is set — pick one in this menu first ({} has no default model)",
+            p.display()
+        );
+    }
+    Ok(())
+}
+
+/// Render the Verify result on a fresh screen and pause for a keypress so the
+/// user can read it before the sub-menu redraws. `result` carries the model's
+/// trimmed reply on success, or the propagated error on failure.
+fn show_verify_result(
+    p: &Provider,
+    model: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    result: Result<String>,
+) -> Result<()> {
+    let term = Term::stdout();
+    term.clear_screen()?;
+    term.move_cursor_to(0, 0)?;
+    term.write_line(&format!("Verify — {} ({model})", p.display()))?;
+    term.write_line(&format!(
+        "  API key:  {}",
+        if api_key.is_empty() {
+            "(none)".to_string()
+        } else {
+            mask_key(api_key)
+        }
+    ))?;
+    term.write_line(&format!("  Base URL: {}", base_url.unwrap_or("(none)")))?;
+    term.write_line("")?;
+    match result {
+        Ok(reply) => {
+            term.write_line("✅ Success — the provider responded.")?;
+            if !reply.is_empty() {
+                term.write_line(&format!("  Reply: {reply}"))?;
+            }
+        }
+        Err(e) => {
+            term.write_line("❌ Failed — the provider did not accept the request.")?;
+            term.write_line(&format!("  Error: {e}"))?;
+            term.write_line("")?;
+            term.write_line("  Common causes: wrong API key, model name, base URL, or network.")?;
+        }
+    }
+    term.write_line("")?;
+    term.write_line("Press Enter to return to the menu…")?;
+    let _ = term.read_char();
+    Ok(())
+}
+
 /// Initial value for the confirmation toggle: the in-session draft choice
 /// first, then the existing config's value, else `false` (default off). Not
 /// provider-dependent, so no `field_initial`-style provider guard is needed.
@@ -1003,7 +1138,7 @@ mod tests {
 
     #[test]
     fn provider_submenu_entries_follow_applicability() {
-        // OpenAI: API key + Model + Done (no base URL).
+        // OpenAI: API key + Model + Verify + Done (no base URL).
         let d = draft(Some(Provider::OpenAI), None, None, None);
         let (entries, _) = provider_submenu_items(&d);
         assert_eq!(
@@ -1011,11 +1146,12 @@ mod tests {
             vec![
                 ProviderEntry::ApiKey,
                 ProviderEntry::Model,
+                ProviderEntry::Verify,
                 ProviderEntry::Done
             ]
         );
 
-        // Ollama: Base URL + Model + Done (no API key).
+        // Ollama: Base URL + Model + Verify + Done (no API key).
         let d = draft(Some(Provider::Ollama), None, None, None);
         let (entries, _) = provider_submenu_items(&d);
         assert_eq!(
@@ -1023,11 +1159,12 @@ mod tests {
             vec![
                 ProviderEntry::BaseUrl,
                 ProviderEntry::Model,
+                ProviderEntry::Verify,
                 ProviderEntry::Done
             ]
         );
 
-        // OpenAI-compatible: API key + Base URL + Model + Done.
+        // OpenAI-compatible: API key + Base URL + Model + Verify + Done.
         let d = draft(Some(Provider::OpenAiCompatible), None, None, None);
         let (entries, _) = provider_submenu_items(&d);
         assert_eq!(
@@ -1036,6 +1173,7 @@ mod tests {
                 ProviderEntry::ApiKey,
                 ProviderEntry::BaseUrl,
                 ProviderEntry::Model,
+                ProviderEntry::Verify,
                 ProviderEntry::Done
             ]
         );
@@ -1058,12 +1196,17 @@ mod tests {
             vec![
                 ProviderEntry::ApiKey,
                 ProviderEntry::Model,
+                ProviderEntry::Verify,
                 ProviderEntry::Done
             ]
         );
         assert_eq!(labels[0], "🔑 API key — ••••••");
         assert_eq!(labels[1], "🧠 Model — deepseek-v4-pro");
-        assert_eq!(labels[2], "↩️ Done — back to main menu");
+        assert_eq!(
+            labels[2],
+            "🔌 Verify — test this provider with a sample request"
+        );
+        assert_eq!(labels[3], "↩️ Done — back to main menu");
     }
 
     #[test]
@@ -1210,5 +1353,22 @@ mod tests {
         assert!(!confirm_initial(&d, &existing));
         d.confirm_before_commit = Some(true);
         assert!(confirm_initial(&d, &None));
+    }
+
+    #[test]
+    fn verify_preflight_requires_base_url_and_model() {
+        // OpenAI-compatible requires a base URL — without one it fails with a
+        // readable hint, before any network call.
+        let err = verify_preflight(Provider::OpenAiCompatible, None, "m").unwrap_err();
+        assert!(err.to_string().contains("base URL"));
+        // With a URL + model it is fine.
+        assert!(verify_preflight(Provider::OpenAiCompatible, Some("http://h/v1"), "m").is_ok());
+
+        // OpenRouter has no default model — an empty model fails with a hint.
+        let err = verify_preflight(Provider::OpenRouter, None, "").unwrap_err();
+        assert!(err.to_string().contains("model"));
+
+        // OpenAI needs no base URL and carries a default model — ok.
+        assert!(verify_preflight(Provider::OpenAI, None, "gpt-5-mini").is_ok());
     }
 }
