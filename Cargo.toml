@@ -9,6 +9,14 @@ homepage = "https://github.com/CaicoLeung/aic"
 keywords = ["git", "ai", "cli", "commit", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 license = "MIT"
+exclude = [
+    # Demo/repro scaffolding — kept in git but excluded from the published
+    # crate so `cargo publish` ships only the tool. Release binaries (cargo-dist)
+    # never include these anyway. See ADR 0009 / AIC-34.
+    "examples",
+    "docs/demo",
+    "scripts/demo.sh",
+]
 
 [profile.dist]
 inherits = "release"

@@ -14,7 +14,7 @@ tap = "CaicoLeung/homebrew-aic"
 # Publish jobs to run at announce time (homebrew pushes the formula to the tap)
 publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "arm-unknown-linux-gnueabihf", "x86_64-pc-windows-msvc"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Checksums to generate for each App
 checksum = "sha256"
 # Which phase dist should use to create the GitHub release

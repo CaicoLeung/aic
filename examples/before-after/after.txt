@@ -1,0 +1,11 @@
+$ scripts/demo.sh   # then, in the sample repo:
+$ git -C <sample-repo> log --oneline --no-decorate
+<sha> style: label calculator output lines
+<sha> feat: add multiply function
+<sha> fix: subtract the right operand in calculator
+<sha> chore: seed calculator   ← baseline
+
+`aic` split one file's three unrelated concerns — a `fix`, a `feat`, and a
+`style` change, each in its own hunk — into three atomic Conventional-Commits,
+staging each hunk separately (`git add -p` style). SHAs vary per run; the
+subjects are deterministic in offline fixture mode.

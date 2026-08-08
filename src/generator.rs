@@ -5,7 +5,7 @@ use crate::prompt::PromptConfig;
 
 pub struct Generator {}
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct CommitOutput {
     pub message: String,
     pub body: Option<String>,
@@ -14,7 +14,7 @@ pub struct CommitOutput {
 /// One file's contribution to a batch. A single file can appear in several
 /// batches with disjoint hunks — `git add -p` style — because a file often
 /// mixes changes of different scopes.
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchChange {
     /// Repo-relative file path.
     pub file: String,
@@ -24,13 +24,13 @@ pub struct BatchChange {
     pub hunks: Vec<usize>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchPlanBatch {
     pub changes: Vec<BatchChange>,
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchPlanOutput {
     pub batches: Vec<BatchPlanBatch>,
 }
@@ -114,6 +114,11 @@ pub fn validate_batch_plan(
 
 impl Generator {
     pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
+        // Offline fixture mode (ADR 0009): serve a recorded message instead of
+        // calling the LLM so demos/CI run deterministically with no network.
+        if let Some(result) = crate::fixture::serve_commit() {
+            return result;
+        }
         let p = PromptConfig::default().git_message;
         LLM::load()?.agent(&p).schema::<CommitOutput>(diff).await
     }
@@ -127,6 +132,12 @@ impl Generator {
         diff: &str,
         on_reasoning: impl FnMut(&str),
     ) -> anyhow::Result<BatchPlanOutput> {
+        // Offline fixture mode (ADR 0009): serve the recorded plan and skip the
+        // reasoning stream. The served plan is still validated by the caller
+        // against the real diff's hunk counts, so a stale fixture is rejected.
+        if let Some(result) = crate::fixture::serve_plan() {
+            return result;
+        }
         let p = PromptConfig::default().batch_plan_prompt;
         LLM::load()?
             .agent(&p)

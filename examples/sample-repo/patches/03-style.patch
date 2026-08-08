@@ -1,0 +1,18 @@
+diff --git a/src/calculator.rs b/src/calculator.rs
+--- a/src/calculator.rs
++++ b/src/calculator.rs
+@@ -44,11 +44,11 @@ pub fn power(base: i32, exp: u32) -> i32 {
+
+ pub fn main() {
+     let sum = add(2, 3);
+-    println!("2 + 3 = {sum}");
++    println!("add:      2 + 3 = {sum}");
+
+     let diff = subtract(5, 2);
+-    println!("5 - 2 = {diff}");
++    println!("subtract: 5 - 2 = {diff}");
+
+     let quotient = divide(10, 2);
+-    println!("10 / 2 = {quotient:?}");
++    println!("divide:   10 / 2 = {quotient:?}");
+ }

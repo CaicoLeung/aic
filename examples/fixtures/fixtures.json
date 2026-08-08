@@ -1,0 +1,29 @@
+{
+  "plan": {
+    "batches": [
+      {
+        "changes": [
+          { "file": "src/calculator.rs", "hunks": [1] }
+        ],
+        "reason": "Fix subtract subtracting the wrong operand"
+      },
+      {
+        "changes": [
+          { "file": "src/calculator.rs", "hunks": [2] }
+        ],
+        "reason": "Add a multiply function"
+      },
+      {
+        "changes": [
+          { "file": "src/calculator.rs", "hunks": [3] }
+        ],
+        "reason": "Label the calculator output lines"
+      }
+    ]
+  },
+  "commits": [
+    { "message": "fix: subtract the right operand in calculator", "body": null },
+    { "message": "feat: add multiply function", "body": null },
+    { "message": "style: label calculator output lines", "body": null }
+  ]
+}

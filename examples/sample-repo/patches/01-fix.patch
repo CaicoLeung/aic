@@ -1,0 +1,12 @@
+diff --git a/src/calculator.rs b/src/calculator.rs
+--- a/src/calculator.rs
++++ b/src/calculator.rs
+@@ -10,7 +10,7 @@ pub fn add(a: i32, b: i32) -> i32 {
+ }
+
+ pub fn subtract(a: i32, b: i32) -> i32 {
+-    a - a // BUG: should be `a - b`
++    a - b
+ }
+
+ pub fn divide(a: i32, b: i32) -> Option<i32> {

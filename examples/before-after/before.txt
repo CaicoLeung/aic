@@ -1,0 +1,6 @@
+$ git -C <sample-repo> log --oneline --no-decorate
+<sha> chore: seed calculator
+
+(working tree then receives three unrelated edits — a fix, a feat, and a style
+tweak — left unstaged, exactly as a developer would leave them before running
+`aic`.)

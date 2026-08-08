@@ -1,0 +1,14 @@
+diff --git a/src/calculator.rs b/src/calculator.rs
+--- a/src/calculator.rs
++++ b/src/calculator.rs
+@@ -25,6 +25,10 @@ pub fn modulo(a: i32, b: i32) -> i32 {
+     a % b
+ }
+
++pub fn multiply(a: i32, b: i32) -> i32 {
++    a * b
++}
++
+ pub fn power(base: i32, exp: u32) -> i32 {
+     base.pow(exp)
+ }

@@ -5,6 +5,7 @@ pub mod confirm;
 pub mod conflict;
 pub mod diff;
 pub mod display;
+pub mod fixture;
 pub mod generator;
 pub mod git;
 pub mod grouping;
