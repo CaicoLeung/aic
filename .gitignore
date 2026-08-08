@@ -5,5 +5,8 @@ CLAUDE.md
 docs/drawio
 docs/popularize
 
+# demo working repo created by scripts/demo.sh (reproducible; never commit)
+examples/.demo-work/
+
 # zipsign private key — NEVER commit. Only keys/zipsign.pub is tracked.
 keys/*.key

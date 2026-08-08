@@ -1,0 +1,16 @@
+diff --git a/src/auth.rs b/src/auth.rs
+index 77a78f5..d16ce76 100644
+--- a/src/auth.rs
++++ b/src/auth.rs
+@@ -32,9 +32,8 @@ impl Auth {
+     pub fn is_valid(&self, token: &str) -> bool {
+         let now = current_unix_time();
+         match self.tokens.get(token) {
+-            // BUG: an expiring token that equals `now` is still valid this
+-            // second, but the strict `<` below rejects it one second early.
+-            Some(expiry) => now < *expiry,
++            // A token whose expiry equals the current second is still valid.
++            Some(expiry) => now <= *expiry,
+             None => false,
+         }
+     }

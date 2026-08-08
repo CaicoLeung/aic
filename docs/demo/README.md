@@ -1,52 +1,78 @@
-# Re-recording the demo
+# docs/demo/
 
-`scripts/demo.sh` is the single source of truth for the headline demo (aic
-splits one file's mixed edits into **block-level atomic commits**). Re-recording
-the GIF / asciinema cast for the README is one command.
+Assets and instructions for the aic demo GIF / asciinema cast (the
+"hunk-level split" shown at the top of the README).
 
-## One-command re-record
+## One-command demo
 
-```bash
-# Default (no network): deterministic fixture — always works, CI-safe.
+```sh
 scripts/demo.sh
-
-# Live: run the real aic against a local Ollama model, then capture a cast.
-AIC_DEMO_LIVE=1 asciinema rec demo.cast --command scripts/demo.sh
 ```
 
-## What you need for a *live* recording
+Needs **no API key and no network**: it replays a recorded fixture of `aic`'s
+hunk-level split over [`examples/sample-repo/`](../../examples/sample-repo/) —
+one file edited in three unrelated ways becomes three atomic Conventional
+Commits. See [`examples/before-after/`](../../examples/before-after/) for the
+result captured as text.
 
-1. A local Ollama instance running and a model pulled, e.g.:
+## Re-recording the GIF
 
-   ```bash
-   ollama serve &
-   ollama pull qwen2.5-coder:7b
-   ```
+The cast is regenerated from `scripts/demo.sh`, so it never goes stale when the
+UX or messages change.
 
-2. `aic` available — either on your `PATH` (`cargo install --path .`) or built
-   locally (`scripts/demo.sh` auto-detects `target/release/aic` then
-   `target/debug/aic`). Override with `AIC_BIN=/path/to/aic` if needed.
+### 1. Install asciinema + agg (once)
 
-3. Opt in to the live path:
+```sh
+# asciinema records the terminal session
+brew install asciinema        # macOS; or: pipx install asciinema
+# agg renders a .cast to an embeddable, autoplaying GIF
+cargo install --git https://github.com/nickolasburr/agg
+```
 
-   ```bash
-   AIC_DEMO_LIVE=1 scripts/demo.sh
-   ```
+### 2. Record the cast
 
-   `scripts/demo.sh` probes `$AIC_OLLAMA_URL` (default `http://localhost:11434`);
-   if Ollama is unreachable or `aic` is missing, it **automatically falls back**
-   to the deterministic fixture so the demo never fails mid-record.
+Use the **recorded-fixture** mode so the cast is deterministic (no network):
 
-## Fixture mode (default, no network)
+```sh
+asciinema rec docs/demo/aic-hunk-split.cast \
+  --command "scripts/demo.sh" \
+  --idle-time-limit 1.5 --cols 80 --rows 24
+```
 
-With `AIC_DEMO_LIVE` unset, `scripts/demo.sh` replays the recorded commit
-history pinned in [`examples/before-after/after.txt`](../../examples/before-after/after.txt).
-The printed `git log --oneline` is identical every run: one base commit plus
-three atomic Conventional Commits (`fix`, `feat`, `style`). This is what runs in
-CI and what powers the no-network GIF.
+> Prefer to show the **live** tool in the GIF? Record with the real binary
+> instead (slower, messages may vary by model):
+> ```sh
+> AIC_DEMO_LIVE=1 asciinema rec docs/demo/aic-hunk-split.cast \
+>   --command "scripts/demo.sh" --idle-time-limit 2 --cols 80 --rows 24
+> ```
 
-## Keeping the fixture fresh
+### 3. Render the GIF
 
-When you change the demo edits (in `scripts/demo.sh`'s `write_after_*` functions),
-update [`examples/before-after/after.txt`](../../examples/before-after/after.txt)
-to match so the fixture and the recorded expectation stay in sync.
+```sh
+agg --theme monokai --font-size 16 --speed 1 \
+  docs/demo/aic-hunk-split.cast docs/demo/aic-hunk-split.gif
+```
+
+Keep the GIF **≤ ~8 s, ≤ 5 MB, no audio** so it autoplays in the GitHub repo
+header. Tune `--speed` and `--idle-time-limit` to hit that target.
+
+### 4. Commit both
+
+```sh
+git add docs/demo/aic-hunk-split.cast docs/demo/aic-hunk-split.gif
+git commit -m "docs(demo): refresh hunk-split cast + gif"
+```
+
+The README embeds `aic-hunk-split.gif`; the `.cast` is committed so anyone can
+re-render or host the interactive version.
+
+## Files
+
+| file | purpose |
+| --- | --- |
+| `aic-hunk-split.cast` | asciinema recording (committed; re-renderable) |
+| `aic-hunk-split.gif`  | autoplaying GIF embedded in the README header |
+
+(Both are produced by the steps above; the GIF/cast themselves land with the
+A2-1 README package — this directory owns the *recipe*, `scripts/demo.sh` owns
+the *run*.)

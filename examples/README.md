@@ -1,38 +1,57 @@
 # examples/
 
-Reproducible demo assets for aic. Everything here exists to make the headline
-(aic splits one file's mixed edits into **block-level atomic commits**) trivial
-to reproduce and re-record.
+Reproducible artifacts for the **hunk-level split** demo — the "one file, three
+unrelated edits → three atomic commits" headline from the README.
 
 ## Layout
 
-| Path | Purpose |
-| --- | --- |
-| [`sample-repo/`](sample-repo/) | Seed files for the throwaway git repo the demo runs against. **Not** a nested git repo — `scripts/demo.sh` materializes a fresh one in a temp dir. |
-| [`before-after/`](before-after/) | Recorded `git log --oneline` of the demo: the **before** (base state) and **after** (three atomic Conventional Commits) the demo is expected to print. This is the deterministic, no-network fixture. |
-
-## Intended outcome
-
-`scripts/demo.sh` applies three deliberately-unrelated edits to `sample-repo/src/main.rs`
-(a `fix`, a `feat`, and a `style` change) **at once, with nothing staged**, then runs `aic`.
-The expected result is three separate atomic commits:
-
 ```
-<sha> style: add module doc comment and trailing newline
-<sha> feat: print the name in uppercase when --upper is passed
-<sha> fix: guard against a missing argument to avoid a panic
-<sha> chore: initial commit
+examples/
+├── sample-repo/        tiny throwaway Rust "project" used as the demo input
+│   ├── src/auth.rs     the file aic splits (baseline; three regions get edited)
+│   └── edits/          one unified-diff patch per logical change (1 hunk each)
+│       ├── 01-style.patch
+│       ├── 02-fix.patch
+│       └── 03-feat.patch
+└── before-after/       the demo result captured as TEXT (not just video)
+    ├── before.txt      what a file-level tool produces (1 mixed commit)
+    └── after.txt       what aic produces (3 atomic Conventional Commits)
 ```
 
-The exact hashes vary; the **count (≥ 3 atomic Conventional Commits) and the
-types/scopes do not**. That is what `examples/before-after/after.txt` pins.
+## The scenario
 
-## Live vs fixture
+`sample-repo/src/auth.rs` is a small auth module. The three patches in `edits/`
+each touch a **different, unrelated region** of that one file, far enough apart
+that git emits a separate hunk per change:
 
-`scripts/demo.sh` is **no-network-by-default**. It runs the real `aic` only when
-you opt in with `AIC_DEMO_LIVE=1` **and** a local provider (Ollama) is reachable;
-otherwise it replays the recorded fixture from `before-after/` so the demo is
-deterministic and CI-safe. See [`docs/demo/README.md`](../docs/demo/README.md).
+| patch | concern | region |
+| --- | --- | --- |
+| `01-style.patch` | `style` | the `Auth::new` constructor |
+| `02-fix.patch` | `fix` | the token-expiry comparison in `is_valid` |
+| `03-feat.patch` | `feat` | a new `oauth2_login` method |
+
+Applied together they are **one file changed in three unrelated ways** — exactly
+the case where file-level commit tools produce one muddy commit and `aic`
+produces three clean ones.
+
+## Reproduce it
+
+```sh
+scripts/demo.sh                   # no API key, no network — recorded fixture
+AIC_DEMO_LIVE=1 scripts/demo.sh   # run the real aic binary (needs `aic setup`)
+```
+
+See [`scripts/demo.sh`](../scripts/demo.sh) and
+[`docs/demo/README.md`](../docs/demo/README.md) for details and for how to
+re-record the GIF.
 
 > `examples/` is excluded from the published crate (see `exclude` in
-> `Cargo.toml`). It ships only in the git repo for contributors/reviewers.
+> `Cargo.toml`); it ships only in the git repo for contributors/reviewers.
+
+## Why patches (not a nested git repo)
+
+`sample-repo/` ships as **plain source files**, not a git repository. A nested
+`.git` would either be ignored or turn into an unwanted submodule, so
+`scripts/demo.sh` initializes the throwaway git repo itself at run time (under
+`examples/.demo-work/`, gitignored). That keeps this directory lean and the run
+fully reproducible from a fresh clone.

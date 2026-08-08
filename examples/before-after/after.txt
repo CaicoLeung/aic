@@ -1,17 +1,10 @@
-# AFTER — recorded result of `scripts/demo.sh`
+# AFTER — aic (hunk-level atomic commits)
 #
-# `git log --oneline` once aic has split the three deliberately-unrelated edits
-# in sample-repo/src/main.rs into block-level atomic commits.
-#
-# This is the deterministic, no-network FIXTURE: when `AIC_DEMO_LIVE` is not set
-# (or no local provider is reachable), scripts/demo.sh reproduces exactly this
-# history and prints this log. Hashes vary; the message set does not.
-#
-# Expected: one base commit + THREE atomic Conventional Commits (a fix, a feat,
-# and a style change) — proving aic splits one file's mixed edits, not just
-# file-level commits.
+# Same three edits -> THREE atomic Conventional Commits, one per hunk.
+# Recorded output of a real `aic` run over examples/sample-repo/.
+# Commit hashes are illustrative; the structure (3 commits) and messages are stable.
 
-<sha> style: add module doc comment and trailing newline
-<sha> feat: print the name uppercased when --upper is passed
-<sha> fix: guard against a missing argument to avoid a panic
-<sha> chore: seed sample-repo base state
+ba9613e feat(auth): add OAuth2 login support
+da2956d fix(auth): allow tokens expiring at current second
+944d94f style(auth): format Auth constructor
+5ab3687 chore: baseline auth module

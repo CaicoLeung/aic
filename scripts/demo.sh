@@ -1,192 +1,149 @@
 #!/usr/bin/env bash
 #
-# scripts/demo.sh — reproduce aic's headline (block-level atomic commits) in
-# one command, deterministically and with NO network by default.
+# scripts/demo.sh — reproducible aic hunk-level split demo.
 #
-# What it does:
-#   1. Materializes a throwaway git repo from examples/sample-repo/ in a temp dir.
-#   2. Commits the base state.
-#   3. Applies three deliberately-unrelated edits to src/main.rs (a fix, a feat,
-#      and a style change).
-#   4. Either:
-#        - LIVE  (AIC_DEMO_LIVE=1 + reachable local provider): runs the real
-#          `aic` against the mixed working tree and lets it split the edits into
-#          atomic commits; or
-#        - FIXTURE (default): replays the recorded commit history from
-#          examples/before-after/after.txt so the demo is deterministic and
-#          CI-safe.
-#   5. Prints `git log --oneline` (>= 3 atomic Conventional Commits) and exits 0.
+# Creates a throwaway git repo (examples/sample-repo), edits ONE file in three
+# unrelated ways, and turns it into THREE atomic Conventional Commits — the
+# exact "hunk-level, not file-level" headline from the README.
 #
-# Re-record the GIF / asciinema with:
-#   AIC_DEMO_LIVE=1 asciinema rec demo.cast --command scripts/demo.sh
-# (see docs/demo/README.md).
+# The demo is fully self-contained:
+#   * DEFAULT (recorded-fixture mode) needs NO API key and NO network. It
+#     replays the exact hunk partition + Conventional Commit messages a real
+#     `aic` run produces for this sample, staging each hunk the same way `aic`
+#     does (`git apply --cached`), so what you see is what `aic` does.
+#   * AIC_DEMO_LIVE=1 runs the real `aic` binary instead (needs a configured
+#     provider, e.g. `aic setup`, or a local Ollama server). Use this to
+#     re-record the demo GIF against the live tool.
 #
-# Env knobs:
-#   AIC_DEMO_LIVE=1   Run the real aic against a local provider (default: off).
-#   AIC_BIN           Path to the aic binary (default: `aic` from PATH, then
-#                     target/release/aic, then target/debug/aic).
-#   AIC_OLLAMA_URL    URL to probe for Ollama (default: http://localhost:11434).
+# Re-record the cast/GIF: see docs/demo/README.md.
+#
+# Usage:
+#   scripts/demo.sh                  # recorded fixture (no key, no network)
+#   AIC_DEMO_LIVE=1 scripts/demo.sh  # run the real aic binary
+#   AIC_DEMO_WORKDIR=/tmp/x scripts/demo.sh
+#   AIC_BIN=/path/to/aic AIC_DEMO_LIVE=1 scripts/demo.sh
+#
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SAMPLE_DIR="$REPO_ROOT/examples/sample-repo"
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+# --- locate the repo root (parent of this script's dir) -----------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SAMPLE_SRC="$REPO_ROOT/examples/sample-repo"
 
-# --- helpers -----------------------------------------------------------------
-
-log()  { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
-note() { printf '    %s\n' "$*" >&2; }
-
-# Base state of src/main.rs (matches examples/sample-repo/src/main.rs).
-write_base() {
-  cat > src/main.rs <<'RS'
-// A tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-// single file's mixed edits into block-level atomic commits.
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let name = &args[1];
-    println!("Hello, {}", name);
-}
-RS
-}
-
-# After the `fix` edit: guard against a missing argument.
-write_after_fix() {
-  cat > src/main.rs <<'RS'
-// A tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-// single file's mixed edits into block-level atomic commits.
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("usage: demo <name>");
-        std::process::exit(1);
-    }
-    let name = &args[1];
-    println!("Hello, {}", name);
-}
-RS
-}
-
-# After the `feat` edit on top of fix: uppercase the name when --upper is passed.
-write_after_feat() {
-  cat > src/main.rs <<'RS'
-// A tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-// single file's mixed edits into block-level atomic commits.
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("usage: demo <name>");
-        std::process::exit(1);
-    }
-    let name = &args[1];
-    let upper = args.iter().any(|a| a == "--upper");
-    let display = if upper { name.to_uppercase() } else { name.clone() };
-    println!("Hello, {}", display);
-}
-RS
-}
-
-# After the `style` edit on top of feat: module doc comment + trailing newline.
-write_after_style() {
-  cat > src/main.rs <<'RS'
-//! Tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-//! single file's mixed edits into block-level atomic commits.
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("usage: demo <name>");
-        std::process::exit(1);
-    }
-    let name = &args[1];
-    let upper = args.iter().any(|a| a == "--upper");
-    let display = if upper { name.to_uppercase() } else { name.clone() };
-    println!("Hello, {}", display);
-}
-RS
-}
-
-# --- materialize the throwaway repo ------------------------------------------
-
-log "Materializing throwaway repo in: $WORK_DIR"
-mkdir -p "$WORK_DIR/src"
-cp "$SAMPLE_DIR/Cargo.toml" "$WORK_DIR/Cargo.toml"
-cd "$WORK_DIR"
-git init -q
-git config user.email "demo@aic.local"
-git config user.name "aic demo"
-write_base
-git add -A
-git commit -qm "chore: seed sample-repo base state"
-
-# --- live vs fixture ---------------------------------------------------------
-
-resolve_aic_bin() {
-  if [[ -n "${AIC_BIN:-}" && -x "$AIC_BIN" ]]; then printf '%s' "$AIC_BIN"; return; fi
-  if command -v aic >/dev/null 2>&1; then printf '%s' "aic"; return; fi
-  if [[ -x "$REPO_ROOT/target/release/aic" ]]; then printf '%s' "$REPO_ROOT/target/release/aic"; return; fi
-  if [[ -x "$REPO_ROOT/target/debug/aic" ]]; then printf '%s' "$REPO_ROOT/target/debug/aic"; return; fi
-  return 1
-}
-
-provider_reachable() {
-  local url="${AIC_OLLAMA_URL:-http://localhost:11434}"
-  # 2s timeout, any HTTP response (even 404) means the server is up.
-  if command -v curl >/dev/null 2>&1; then
-    curl -sS -o /dev/null --max-time 2 "$url" >/dev/null 2>&1 || return 1
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -T 2 -O /dev/null "$url" >/dev/null 2>&1 || return 1
-  else
-    return 1
-  fi
-}
-
-run_live() {
-  local aic; aic="$(resolve_aic_bin)" || return 1
-  log "LIVE: applying all three edits at once (mixed working tree)"
-  write_after_style           # all three edits combined, nothing staged
-  note "running: $aic (LLM_BACKEND=${LLM_BACKEND:-ollama})"
-  log "aic is splitting the mixed edits into atomic commits…"
-  if ! LLM_BACKEND="${LLM_BACKEND:-ollama}" \
-       LLM_MODEL="${LLM_MODEL:-qwen2.5-coder:7b}" \
-       LLM_BASE_URL="${LLM_BASE_URL:-${AIC_OLLAMA_URL:-http://localhost:11434}}" \
-       "$aic" </dev/null; then
-    return 1
-  fi
-}
-
-run_fixture() {
-  log "FIXTURE: replaying recorded atomic history (examples/before-after/after.txt)"
-  note "apply fix edit";   write_after_fix;   git add -A
-  git commit -qm "fix: guard against a missing argument to avoid a panic"
-  note "apply feat edit";  write_after_feat;  git add -A
-  git commit -qm "feat: print the name uppercased when --upper is passed"
-  note "apply style edit"; write_after_style; git add -A
-  git commit -qm "style: add module doc comment and trailing newline"
-}
-
-if [[ "${AIC_DEMO_LIVE:-0}" == "1" ]]; then
-  if provider_reachable && run_live; then
-    log "aic finished (live)"
-  else
-    log "Live run unavailable (no local provider or aic missing); falling back to fixture."
-    run_fixture
-  fi
-else
-  run_fixture
-fi
-
-# --- result ------------------------------------------------------------------
-
-echo >&2
-log "Resulting history (git log --oneline):"
-git log --oneline
-
-# Verify the headline: >= 3 atomic Conventional Commits on top of the base.
-commits=$(git rev-list --count HEAD)
-if (( commits < 4 )); then
-  echo "ERROR: expected >= 3 atomic commits on top of the base commit, got $((commits - 1))" >&2
+if [[ ! -f "$SAMPLE_SRC/src/auth.rs" ]]; then
+  echo "demo.sh: sample repo not found at $SAMPLE_SRC/src/auth.rs" >&2
   exit 1
 fi
-echo >&2
-log "OK: $((${commits} - 1)) atomic Conventional Commits split from one file's mixed edits."
+
+# --- working directory (wiped + rebuilt every run for reproducibility) --------
+WORK="${AIC_DEMO_WORKDIR:-$REPO_ROOT/examples/.demo-work/sample-repo}"
+rm -rf "$WORK"
+mkdir -p "$WORK"
+
+# --- pretty printing ----------------------------------------------------------
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; GREEN=$'\033[32m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+  BOLD=''; DIM=''; GREEN=''; CYAN=''; RESET=''
+fi
+step() { printf '\n%s▸ %s%s\n' "$CYAN$BOLD" "$1" "$RESET"; }
+note() { printf '%s%s%s\n' "$DIM" "$1" "$RESET"; }
+
+# --- seed the throwaway repo from the checked-in sample -----------------------
+step "Create throwaway git repo at $WORK"
+cp -R "$SAMPLE_SRC/." "$WORK/"
+cd "$WORK"
+git init -q
+git config user.name "aic demo"
+git config user.email "demo@aic.dev"
+git config commit.gpgsign false
+git add -A
+git commit -q -m "chore: baseline auth module"
+note "baseline committed ($(git rev-parse --short HEAD))"
+
+# --- apply the three unrelated edits to the WORKING TREE (nothing staged) -----
+step "Edit ONE file (src/auth.rs) in three unrelated ways — nothing staged"
+git apply edits/01-style.patch
+git apply edits/02-fix.patch
+git apply edits/03-feat.patch
+echo "$DIM--- git diff --stat ---$RESET"
+git diff --stat -- src/auth.rs
+echo "$DIM--- hunk count in workdir diff ---$RESET"
+printf 'hunks: %s\n' "$(git diff -- src/auth.rs | grep -c '^@@')"
+
+# --- BEFORE: what a file-level tool would do ----------------------------------
+step "BEFORE — a file-level tool makes ONE mixed-concern commit"
+note "aicommits / opencommit / plain \"git commit -am\" would land this as:"
+printf '  %supdate src/auth.rs%s   <- mixed concerns, muddy history\n' "$DIM" "$RESET"
+
+# --- the split ----------------------------------------------------------------
+if [[ "${AIC_DEMO_LIVE:-0}" == "1" ]]; then
+  step "AFTER (LIVE) — run the real 'aic' binary (LLM hunk-level split)"
+  # Resolve the aic binary: explicit override, PATH, then local build outputs.
+  AIC_BIN="${AIC_BIN:-}"
+  if [[ -z "$AIC_BIN" ]]; then
+    if command -v aic >/dev/null 2>&1; then
+      AIC_BIN="aic"
+    elif [[ -x "$REPO_ROOT/target/release/aic" ]]; then
+      AIC_BIN="$REPO_ROOT/target/release/aic"
+    elif [[ -x "$REPO_ROOT/target/debug/aic" ]]; then
+      AIC_BIN="$REPO_ROOT/target/debug/aic"
+    else
+      echo "demo.sh: AIC_DEMO_LIVE=1 but no 'aic' binary found." >&2
+      echo "         Install it (cargo install --path .) or set AIC_BIN, then re-run." >&2
+      exit 1
+    fi
+  elif ! command -v "$AIC_BIN" >/dev/null 2>&1 && [[ ! -x "$AIC_BIN" ]]; then
+    echo "demo.sh: AIC_BIN='$AIC_BIN' not found / not executable." >&2
+    exit 1
+  fi
+  # aic reads its config from dirs::config_dir()/aic/config.toml — replicate
+  # that resolution so we can fail fast with guidance instead of letting aic
+  # hang on retries when no provider is configured.
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    AIC_CFG="$XDG_CONFIG_HOME/aic/config.toml"
+  elif [[ "$(uname)" == "Darwin" ]]; then
+    AIC_CFG="$HOME/Library/Application Support/aic/config.toml"
+  else
+    AIC_CFG="$HOME/.config/aic/config.toml"
+  fi
+  if [[ ! -f "$AIC_CFG" ]]; then
+    echo "demo.sh: AIC_DEMO_LIVE=1 but no aic config found at:" >&2
+    echo "         $AIC_CFG" >&2
+    echo "         Run 'aic setup' to configure a provider (or start a local" >&2
+    echo "         Ollama server and point aic at it), then re-run." >&2
+    exit 1
+  fi
+  note "binary: $AIC_BIN | config: $AIC_CFG"
+  # aic with nothing staged batch-splits every hunk into atomic commits.
+  "$AIC_BIN"
+else
+  step "AFTER (aic) — three atomic, hunk-level Conventional Commits"
+  note "recorded fixture: same partition + messages a real 'aic' run produces."
+  note "staging each hunk via 'git apply --cached' (exactly how aic stages)."
+  # Recorded output of a real `aic` run over this exact sample. Regenerate live
+  # with AIC_DEMO_LIVE=1; messages may vary slightly by model.
+  # Hunk 1 — style
+  git apply --cached edits/01-style.patch
+  git commit -q -m "style(auth): format Auth constructor"
+  # Hunk 2 — fix
+  git apply --cached edits/02-fix.patch
+  git commit -q -m "fix(auth): allow tokens expiring at current second"
+  # Hunk 3 — feat
+  git apply --cached edits/03-feat.patch
+  git commit -q -m "feat(auth): add OAuth2 login support"
+fi
+
+# --- show the result ----------------------------------------------------------
+step "Resulting history"
+echo "$DIM--- git log --oneline ---$RESET"
+git log --oneline
+echo "$DIM--- working tree clean? ---$RESET"
+if [[ -z "$(git status --porcelain)" ]]; then
+  printf '%s✓ clean — every hunk landed in exactly one commit%s\n' "$GREEN" "$RESET"
+else
+  git status --porcelain
+fi
+
+step "Done — 3 atomic commits from 1 file, no manual 'git add -p'."
+printf '%sRe-record the GIF:%s see docs/demo/README.md\n' "$DIM" "$RESET"

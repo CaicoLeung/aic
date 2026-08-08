@@ -1,8 +1,7 @@
-# BEFORE — base state of the throwaway sample repo
+# BEFORE — a file-level commit tool (aicommits / opencommit / plain "git commit -am")
 #
-# `git log --oneline` right after `scripts/demo.sh` commits the seed files,
-# before any of the three demo edits are applied.
-#
-# (The hash is non-deterministic across runs; only the count and message matter.)
+# One file changed in three unrelated ways -> ONE mixed-concern commit.
+# Commit hashes are illustrative; the structure (1 commit) is the point.
 
-<sha> chore: seed sample-repo base state
+ce47d7c update src/auth.rs
+5ab3687 chore: baseline auth module

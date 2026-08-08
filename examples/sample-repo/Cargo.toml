@@ -1,7 +1,0 @@
-[package]
-name = "demo-sample-repo"
-version = "0.1.0"
-edition = "2021"
-
-# Throwaway sample used only by `scripts/demo.sh` to demonstrate aic.
-# NOT published, NOT part of the aic crate. See examples/README.md.

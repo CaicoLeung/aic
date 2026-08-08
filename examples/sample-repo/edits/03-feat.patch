@@ -1,0 +1,21 @@
+diff --git a/src/auth.rs b/src/auth.rs
+index 77a78f5..d3ebd2f 100644
+--- a/src/auth.rs
++++ b/src/auth.rs
+@@ -48,7 +48,15 @@ impl Auth {
+     // OAuth2
+     // ------------------------------------------------------------------
+ 
+-    // (OAuth2 support is not implemented yet.)
++    /// Exchange an authorization code for an OAuth2 access token.
++    ///
++    /// Returns the synthesized token string, or `None` for an empty code.
++    pub fn oauth2_login(&self, code: &str) -> Option<String> {
++        if code.is_empty() {
++            return None;
++        }
++        Some(format!("oauth2-{code}"))
++    }
+ }
+ 
+ fn current_unix_time() -> u64 {
