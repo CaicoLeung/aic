@@ -17,21 +17,39 @@
 #          CI-safe.
 #   5. Prints `git log --oneline` (>= 3 atomic Conventional Commits) and exits 0.
 #
-# Re-record the GIF / asciinema with:
-#   AIC_DEMO_LIVE=1 asciinema rec demo.cast --command scripts/demo.sh
-# (see docs/demo/README.md).
+# Re-record the GIF / asciinema with the LIVE path (see docs/demo/README.md):
+#   AIC_DEMO_PROVIDER=ollama AIC_DEMO_LIVE=1 \
+#     asciinema rec docs/demo/aic-hunk-split.cast --command scripts/demo.sh
 #
 # Env knobs:
-#   AIC_DEMO_LIVE=1   Run the real aic against a local provider (default: off).
-#   AIC_BIN           Path to the aic binary (default: `aic` from PATH, then
-#                     target/release/aic, then target/debug/aic).
-#   AIC_OLLAMA_URL    URL to probe for Ollama (default: http://localhost:11434).
+#   AIC_DEMO_LIVE=1        Run the real aic against a provider (default: off,
+#                          falls back to the deterministic fixture on failure).
+#   AIC_DEMO_PROVIDER       Provider for the live run (default: ollama). Any aic
+#                          provider name: ollama, openai, deepseek, groq, ...
+#   AIC_DEMO_KEY            API key for the live provider (not needed for
+#                          ollama).
+#   AIC_DEMO_MODEL          Model id override for the live run.
+#   AIC_DEMO_BASE_URL       Base URL override (ollama / openai-compatible).
+#   AIC_BIN                Path to the aic binary (default: `aic` from PATH,
+#                          then target/release/aic, then target/debug/aic).
+#   AIC_OLLAMA_URL          URL to probe for a default local Ollama
+#                          (default: http://localhost:11434).
+#
+# NOTE: aic reads its provider from ~/.config/aic/config.toml, NOT from env
+# vars (those were removed in the config-single-source-of-truth refactor). For
+# the live run this script writes an isolated config to a throwaway HOME so
+# your real aic config is never touched.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SAMPLE_DIR="$REPO_ROOT/examples/sample-repo"
 WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+FAKE_HOME=""
+cleanup() {
+  rm -rf "$WORK_DIR"
+  [[ -n "$FAKE_HOME" ]] && rm -rf "$FAKE_HOME"
+}
+trap cleanup EXIT
 
 # --- helpers -----------------------------------------------------------------
 
@@ -41,21 +59,57 @@ note() { printf '    %s\n' "$*" >&2; }
 # Base state of src/main.rs (matches examples/sample-repo/src/main.rs).
 write_base() {
   cat > src/main.rs <<'RS'
-// A tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-// single file's mixed edits into block-level atomic commits.
+// Tiny throwaway program for scripts/demo.sh: shows aic splitting one file's
+// mixed, unrelated edits into block-level atomic commits.
+//
+// Three concerns live in three functions, spaced far enough apart that git
+// emits one hunk per concern.
+
+/// Program entry: parse args and print a greeting.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // BUG: indexing args[1] panics when no name is given.
     let name = &args[1];
-    println!("Hello, {}", name);
+    println!("{}", greet(name));
+}
+
+/// A decorative separator used when printing headings.
+fn divider() -> String {
+    let bar = "=".repeat(20);
+    bar
+}
+
+/// Build a friendly greeting for a name.
+fn greet(name: &str) -> String {
+    format!("Hello, {}", name)
+}
+
+/// Wrap a heading with a divider on each side.
+fn banner(heading: &str) -> String {
+    let bar = divider();
+    let body = heading.to_string();
+    format!("{}\n{}\n{}", bar, body, bar)
+}
+
+/// Emit a one-line access record for a caller.
+fn log_access(who: &str) {
+    let message = who.to_string();
+    let stamped = format!("[access] {}", message);
+    println!("{}", stamped);
 }
 RS
 }
 
-# After the `fix` edit: guard against a missing argument.
+# After the `fix` edit: guard against a missing argument (in main).
 write_after_fix() {
   cat > src/main.rs <<'RS'
-// A tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-// single file's mixed edits into block-level atomic commits.
+// Tiny throwaway program for scripts/demo.sh: shows aic splitting one file's
+// mixed, unrelated edits into block-level atomic commits.
+//
+// Three concerns live in three functions, spaced far enough apart that git
+// emits one hunk per concern.
+
+/// Program entry: parse args and print a greeting.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -63,16 +117,46 @@ fn main() {
         std::process::exit(1);
     }
     let name = &args[1];
-    println!("Hello, {}", name);
+    println!("{}", greet(name));
+}
+
+/// A decorative separator used when printing headings.
+fn divider() -> String {
+    let bar = "=".repeat(20);
+    bar
+}
+
+/// Build a friendly greeting for a name.
+fn greet(name: &str) -> String {
+    format!("Hello, {}", name)
+}
+
+/// Wrap a heading with a divider on each side.
+fn banner(heading: &str) -> String {
+    let bar = divider();
+    let body = heading.to_string();
+    format!("{}\n{}\n{}", bar, body, bar)
+}
+
+/// Emit a one-line access record for a caller.
+fn log_access(who: &str) {
+    let message = who.to_string();
+    let stamped = format!("[access] {}", message);
+    println!("{}", stamped);
 }
 RS
 }
 
-# After the `feat` edit on top of fix: uppercase the name when --upper is passed.
+# After the `feat` edit on top of fix: uppercase the name with --upper (in greet).
 write_after_feat() {
   cat > src/main.rs <<'RS'
-// A tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-// single file's mixed edits into block-level atomic commits.
+// Tiny throwaway program for scripts/demo.sh: shows aic splitting one file's
+// mixed, unrelated edits into block-level atomic commits.
+//
+// Three concerns live in three functions, spaced far enough apart that git
+// emits one hunk per concern.
+
+/// Program entry: parse args and print a greeting.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -80,18 +164,48 @@ fn main() {
         std::process::exit(1);
     }
     let name = &args[1];
-    let upper = args.iter().any(|a| a == "--upper");
-    let display = if upper { name.to_uppercase() } else { name.clone() };
-    println!("Hello, {}", display);
+    println!("{}", greet(name));
+}
+
+/// A decorative separator used when printing headings.
+fn divider() -> String {
+    let bar = "=".repeat(20);
+    bar
+}
+
+/// Build a friendly greeting for a name.
+fn greet(name: &str) -> String {
+    let upper = std::env::args().any(|a| a == "--upper");
+    let display = if upper { name.to_uppercase() } else { name.to_string() };
+    format!("Hello, {}", display)
+}
+
+/// Wrap a heading with a divider on each side.
+fn banner(heading: &str) -> String {
+    let bar = divider();
+    let body = heading.to_string();
+    format!("{}\n{}\n{}", bar, body, bar)
+}
+
+/// Emit a one-line access record for a caller.
+fn log_access(who: &str) {
+    let message = who.to_string();
+    let stamped = format!("[access] {}", message);
+    println!("{}", stamped);
 }
 RS
 }
 
-# After the `style` edit on top of feat: module doc comment + trailing newline.
+# After the `style` edit on top of feat: inline the access-log formatting (in log_access).
 write_after_style() {
   cat > src/main.rs <<'RS'
-//! Tiny throwaway program used by `scripts/demo.sh` to show aic splitting a
-//! single file's mixed edits into block-level atomic commits.
+// Tiny throwaway program for scripts/demo.sh: shows aic splitting one file's
+// mixed, unrelated edits into block-level atomic commits.
+//
+// Three concerns live in three functions, spaced far enough apart that git
+// emits one hunk per concern.
+
+/// Program entry: parse args and print a greeting.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -99,9 +213,32 @@ fn main() {
         std::process::exit(1);
     }
     let name = &args[1];
-    let upper = args.iter().any(|a| a == "--upper");
-    let display = if upper { name.to_uppercase() } else { name.clone() };
-    println!("Hello, {}", display);
+    println!("{}", greet(name));
+}
+
+/// A decorative separator used when printing headings.
+fn divider() -> String {
+    let bar = "=".repeat(20);
+    bar
+}
+
+/// Build a friendly greeting for a name.
+fn greet(name: &str) -> String {
+    let upper = std::env::args().any(|a| a == "--upper");
+    let display = if upper { name.to_uppercase() } else { name.to_string() };
+    format!("Hello, {}", display)
+}
+
+/// Wrap a heading with a divider on each side.
+fn banner(heading: &str) -> String {
+    let bar = divider();
+    let body = heading.to_string();
+    format!("{}\n{}\n{}", bar, body, bar)
+}
+
+/// Emit a one-line access record for a caller.
+fn log_access(who: &str) {
+    println!("[access] {who}");
 }
 RS
 }
@@ -141,35 +278,73 @@ provider_reachable() {
   fi
 }
 
+# Print the config dir aic uses for a given $HOME (mirrors the `dirs` crate:
+# ~/Library/Application Support on macOS, ~/.config everywhere else).
+config_dir_for_home() {
+  case "$(uname -s)" in
+    Darwin) printf '%s/Library/Application Support/aic' "$1" ;;
+    *)      printf '%s/.config/aic' "$1" ;;
+  esac
+}
+
+# Write an isolated aic config.toml for the demo provider into a throwaway
+# HOME and print that HOME. aic no longer reads env vars, so a config file is
+# the only way to pin a provider for the live run. Your real config is untouched.
+ensure_demo_config() {
+  local provider="${AIC_DEMO_PROVIDER:-ollama}"
+  local key="${AIC_DEMO_KEY:-}"
+  local model="${AIC_DEMO_MODEL:-}"
+  local base_url="${AIC_DEMO_BASE_URL:-}"
+  if [[ "$provider" == "ollama" ]]; then
+    base_url="${base_url:-${AIC_OLLAMA_URL:-http://localhost:11434}}"
+  fi
+
+  FAKE_HOME="$(mktemp -d)"
+  local cfgdir; cfgdir="$(config_dir_for_home "$FAKE_HOME")"
+  mkdir -p "$cfgdir"
+  {
+    printf 'backend = "%s"\n' "$provider"
+    [[ -n "$key" ]]      && printf 'api_key = "%s"\n' "$key"
+    [[ -n "$model" ]]    && printf 'model = "%s"\n' "$model"
+    [[ -n "$base_url" ]] && printf 'base_url = "%s"\n' "$base_url"
+  } > "$cfgdir/config.toml"
+  printf '%s' "$FAKE_HOME"
+}
+
 run_live() {
-  local aic; aic="$(resolve_aic_bin)" || return 1
+  local aic; aic="$(resolve_aic_bin)" || { note "aic binary not found"; return 1; }
+
+  local provider="${AIC_DEMO_PROVIDER:-ollama}"
+  local run_home
+  if [[ "$provider" == "ollama" && -z "${AIC_DEMO_KEY:-}" ]]; then
+    note "LIVE provider: local Ollama at ${AIC_OLLAMA_URL:-http://localhost:11434}"
+    provider_reachable || { note "Ollama not reachable."; return 1; }
+  else
+    note "LIVE provider: $provider (model=${AIC_DEMO_MODEL:-<default>})"
+  fi
+  run_home="$(ensure_demo_config)" || return 1
+
   log "LIVE: applying all three edits at once (mixed working tree)"
   write_after_style           # all three edits combined, nothing staged
-  note "running: $aic (LLM_BACKEND=${LLM_BACKEND:-ollama})"
   log "aic is splitting the mixed edits into atomic commits…"
-  if ! LLM_BACKEND="${LLM_BACKEND:-ollama}" \
-       LLM_MODEL="${LLM_MODEL:-qwen2.5-coder:7b}" \
-       LLM_BASE_URL="${LLM_BASE_URL:-${AIC_OLLAMA_URL:-http://localhost:11434}}" \
-       "$aic" </dev/null; then
-    return 1
-  fi
+  HOME="$run_home" "$aic" </dev/null
 }
 
 run_fixture() {
   log "FIXTURE: replaying recorded atomic history (examples/before-after/after.txt)"
   note "apply fix edit";   write_after_fix;   git add -A
-  git commit -qm "fix: guard against a missing argument to avoid a panic"
+  git commit -qm "fix(main): guard against missing name argument"
   note "apply feat edit";  write_after_feat;  git add -A
-  git commit -qm "feat: print the name uppercased when --upper is passed"
-  note "apply style edit"; write_after_style; git add -A
-  git commit -qm "style: add module doc comment and trailing newline"
+  git commit -qm "feat(main): add --upper flag to greet"
+  note "apply refactor edit"; write_after_style; git add -A
+  git commit -qm "refactor(main): simplify log_access with inline formatting"
 }
 
 if [[ "${AIC_DEMO_LIVE:-0}" == "1" ]]; then
-  if provider_reachable && run_live; then
+  if run_live; then
     log "aic finished (live)"
   else
-    log "Live run unavailable (no local provider or aic missing); falling back to fixture."
+    log "Live run unavailable (no provider or aic missing); falling back to fixture."
     run_fixture
   fi
 else
@@ -189,4 +364,4 @@ if (( commits < 4 )); then
   exit 1
 fi
 echo >&2
-log "OK: $((${commits} - 1)) atomic Conventional Commits split from one file's mixed edits."
+log "OK: $((commits - 1)) atomic Conventional Commits split from one file's mixed edits."

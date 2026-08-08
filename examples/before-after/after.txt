@@ -4,14 +4,14 @@
 # in sample-repo/src/main.rs into block-level atomic commits.
 #
 # This is the deterministic, no-network FIXTURE: when `AIC_DEMO_LIVE` is not set
-# (or no local provider is reachable), scripts/demo.sh reproduces exactly this
-# history and prints this log. Hashes vary; the message set does not.
+# (or no provider is configured/reachable), scripts/demo.sh reproduces exactly
+# this history and prints this log. Hashes vary; the message set does not.
 #
-# Expected: one base commit + THREE atomic Conventional Commits (a fix, a feat,
-# and a style change) — proving aic splits one file's mixed edits, not just
-# file-level commits.
+# The edits live in three separate functions (main, greet, log_access), spaced
+# far enough apart that git emits one hunk per concern — so aic's live run
+# produces the same three atomic commits, not just the fixture.
 
-<sha> style: add module doc comment and trailing newline
-<sha> feat: print the name uppercased when --upper is passed
-<sha> fix: guard against a missing argument to avoid a panic
+<sha> refactor(main): simplify log_access with inline formatting
+<sha> feat(main): add --upper flag to greet
+<sha> fix(main): guard against missing name argument
 <sha> chore: seed sample-repo base state

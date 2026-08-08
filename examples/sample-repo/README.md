@@ -6,9 +6,11 @@ edits into **block-level atomic commits**.
 
 `scripts/demo.sh` copies this directory into a fresh temp location, `git init`s
 it, commits the base state, then applies three deliberately-unrelated edits to
-`src/main.rs` at once — a `fix`, a `feat`, and a `style` change. Running `aic`
-against that working tree (with nothing staged) yields three separate Conventional
-Commits instead of one muddled commit.
+`src/main.rs` at once — a `fix` in `main`, a `feat` in `greet`, and a `refactor`
+in `log_access`, each in its own function and spaced far enough apart that git
+emits one hunk per concern. Running `aic` against that working tree (with
+nothing staged) yields three separate Conventional Commits instead of one
+muddled commit.
 
 This directory is the **seed** (base state). It is not itself a git repository —
 no nested `.git` — so it stays clean inside the aic repo. The demo materializes
