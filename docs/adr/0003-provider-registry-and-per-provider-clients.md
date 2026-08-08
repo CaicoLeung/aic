@@ -1,12 +1,12 @@
 # Provider support via a registry table and per-provider rig clients
 
-Status: accepted
+Status: accepted (env-var resolution superseded by ADR 0008, 2026-08-08)
 
 aic supports many LLM providers (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama,
 xAI, Mistral, OpenRouter, Perplexity, Together, plus a generic OpenAI-compatible
-escape hatch). Provider *identity* — canonical name, aliases, API-key requirement,
+escape hatch). Provider *identity* — canonical name, aliases, env-key variable,
 default model, and setup label — lives in a single static registry table that drives
-name resolution, default-model lookup, API-key applicability, and the `aic setup` menu.
+name resolution, default-model lookup, API-key discovery, and the `aic setup` menu.
 Each provider's rig client is still constructed in a dedicated arm of the
 `with_agent!` macro.
 
@@ -25,15 +25,19 @@ gateways) and accept that their endpoint must support structured output.
 ## Why aic owns the base URL instead of rig's built-in env vars
 
 rig already reads `OPENAI_BASE_URL` / `OLLAMA_API_BASE_URL` from the environment.
-We instead resolve endpoint base URLs through aic's own config (`base_url` field,
-surfaced in `aic list`) so that a single config surface and the uniform config >
-default precedence apply to every provider — including the previously hardcoded
-Ollama URL (`localhost:11434`).
+We instead resolve endpoint base URLs through aic's own config (`base_url` field +
+`LLM_BASE_URL` env, surfaced in `aic list`) so that a single config surface and the
+uniform env > config > default precedence apply to every provider — including the
+previously hardcoded Ollama URL (`localhost:11434`).
+
+> **Historical note:** the `LLM_BASE_URL` env var and the `env > config > default`
+> precedence described above were removed by [ADR 0008](0008-config-single-source-of-truth.md).
+> aic still owns the base URL via its config field; the env-var channel is gone.
 
 ## Considered options
 
 - **Per-provider enum + macro arms only** (status quo): adding a provider touched
-  ~6 scattered call sites (`Provider` enum, `from_name`, `default_model`, `requires_key`,
+  ~6 scattered call sites (`Provider` enum, `from_name`, `default_model`, `env_key`,
   setup list, macro arm). Rejected as the duplication that makes provider expansion
   painful.
 - **Single generic OpenAI-compatible adapter for everything**: smallest code, but
