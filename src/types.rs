@@ -207,10 +207,9 @@ impl CommitType {
         }
         let trimmed = type_name.trim();
         if trimmed.is_empty() {
-            return Style::new().true_color(NEUTRAL_GRAY.0, NEUTRAL_GRAY.1, NEUTRAL_GRAY.2);
+            return neutral_gray();
         }
-        let rgb = FALLBACK_PALETTE[fallback_palette_index(trimmed)];
-        Style::new().true_color(rgb.0, rgb.1, rgb.2)
+        rgb_style(FALLBACK_PALETTE[fallback_palette_index(trimmed)])
     }
 
     /// Decompose a conventional-commit subject into typed parts.
