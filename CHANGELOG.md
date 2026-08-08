@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.8] - 2026-08-08
+
+> 🎉 **0.4.8** — 5 changes · 1 contributor
+
+### Breaking Changes
+
+- Config file is the single source of truth (drop env vars) (#108) (**BREAKING**)
+
+### Features
+
+- Deterministic block grouping engine v1 (#96)
+- Verify provider config with a sample request (AIC-23) (#105)
+
+### Bug Fixes
+
+- Show chosen model in provider picker and add item icons (AIC-15) (#100)
+- Let env override win in Verify, matching runtime (AIC-24) (#106)
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.4.7] - 2026-08-07
 
 > 🎉 **0.4.7** — 1 change · 1 contributor
