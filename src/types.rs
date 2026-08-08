@@ -48,6 +48,13 @@ const FALLBACK_PALETTE: [(u8, u8, u8); 6] = [
 /// muted text stays readable on a light background.
 const NEUTRAL_GRAY: (u8, u8, u8) = (107, 114, 128);
 
+/// Commit-hash amber (`#d97706`, amber-600) for the short commit-id token in
+/// `display::commit_line`. The one palette color not keyed by a
+/// [`CommitType`]; kept here so the whole palette — and its readability guard
+/// — lives in one place. Bolded at the call site so the short ref qualifies
+/// as WCAG AA Large (3:1) on both themes.
+const COMMIT_ID_COLOR: (u8, u8, u8) = (217, 119, 6);
+
 /// FNV-1a 32-bit over the lowercased token, mapped into [`FALLBACK_PALETTE`].
 /// Stable, dependency-free, decent distribution for short strings. Extracted
 /// from [`CommitType::color_for`] so determinism and distribution can be
@@ -64,6 +71,28 @@ fn fallback_palette_index(name: &str) -> usize {
         h = h.wrapping_mul(0x0100_0193);
     }
     (h as usize) % FALLBACK_PALETTE.len()
+}
+
+/// Build a [`Style`] from an RGB triple — the single
+/// converter every palette entry and public accessor funnels through, so the
+/// `Style::new().true_color(r, g, b)` construction can't drift across sites.
+fn rgb_style((r, g, b): (u8, u8, u8)) -> Style {
+    Style::new().true_color(r, g, b)
+}
+
+/// Muted gray [`Style`] for prefix/body/scope text and for
+/// empty or colon-less type tokens. Reads the single-source [`NEUTRAL_GRAY`]
+/// so renderers can never drift from the contrast-guarded value — call this
+/// instead of re-typing the RGB literal.
+pub fn neutral_gray() -> Style {
+    rgb_style(NEUTRAL_GRAY)
+}
+
+/// Amber [`Style`] for the commit-id token. Reads the
+/// single-source [`COMMIT_ID_COLOR`]; the caller bolds it so the short ref
+/// qualifies as WCAG AA Large.
+pub fn commit_id_color() -> Style {
+    rgb_style(COMMIT_ID_COLOR)
 }
 
 /// Conventional Commit type with associated display color.
@@ -487,9 +516,23 @@ mod tests {
         );
         checked += 1;
 
+        // Commit-id amber (the one palette color not keyed by a CommitType) —
+        // guarded here so the headline contrast fix can't silently regress.
+        let on_white = contrast(COMMIT_ID_COLOR, WHITE);
+        let on_dark = contrast(COMMIT_ID_COLOR, DARK);
+        assert!(
+            on_white >= AA_LARGE,
+            "commit-id amber fails 3:1 on white: {on_white:.2}"
+        );
+        assert!(
+            on_dark >= AA_LARGE,
+            "commit-id amber fails 3:1 on dark: {on_dark:.2}"
+        );
+        checked += 1;
+
         // Guard against the palette arrays silently shrinking to [] and the
         // loop body never running (a passing-vacuously regression).
-        assert_eq!(checked, NAMED_PALETTE.len() + FALLBACK_PALETTE.len() + 1);
+        assert_eq!(checked, NAMED_PALETTE.len() + FALLBACK_PALETTE.len() + 2);
     }
 
     /// `fallback_palette_index` is deterministic: the same token resolves to
