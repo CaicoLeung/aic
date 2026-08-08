@@ -9,6 +9,11 @@ homepage = "https://github.com/CaicoLeung/aic"
 keywords = ["git", "ai", "cli", "commit", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 license = "MIT"
+exclude = [
+    # Demo/repro assets only — not part of the published crate. See examples/README.md.
+    "examples",
+    "docs/demo",
+]
 
 [profile.dist]
 inherits = "release"

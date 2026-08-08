@@ -1,0 +1,17 @@
+# AFTER — recorded result of `scripts/demo.sh`
+#
+# `git log --oneline` once aic has split the three deliberately-unrelated edits
+# in sample-repo/src/main.rs into block-level atomic commits.
+#
+# This is the deterministic, no-network FIXTURE: when `AIC_DEMO_LIVE` is not set
+# (or no local provider is reachable), scripts/demo.sh reproduces exactly this
+# history and prints this log. Hashes vary; the message set does not.
+#
+# Expected: one base commit + THREE atomic Conventional Commits (a fix, a feat,
+# and a style change) — proving aic splits one file's mixed edits, not just
+# file-level commits.
+
+<sha> style: add module doc comment and trailing newline
+<sha> feat: print the name uppercased when --upper is passed
+<sha> fix: guard against a missing argument to avoid a panic
+<sha> chore: seed sample-repo base state

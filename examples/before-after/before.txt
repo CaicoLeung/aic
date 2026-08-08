@@ -1,0 +1,8 @@
+# BEFORE — base state of the throwaway sample repo
+#
+# `git log --oneline` right after `scripts/demo.sh` commits the seed files,
+# before any of the three demo edits are applied.
+#
+# (The hash is non-deterministic across runs; only the count and message matter.)
+
+<sha> chore: seed sample-repo base state
