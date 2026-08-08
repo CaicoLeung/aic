@@ -13,6 +13,12 @@ AI 驱动的 git commit 工具，帮你写 Conventional Commit message —— �
 
 ---
 
+![aic 把一个文件拆成三个 atomic commit](docs/demo/aic-hunk-split.gif)
+
+*一个文件、三处互不相关的改动 → 三个干净的 atomic commit。录制自一次真实的 `aic` 运行 —— [asciinema cast](docs/demo/aic-hunk-split.cast)，[自己复现一次](docs/demo/demo-run.sh)。*
+
+---
+
 ## ✨ 核心亮点：hunk 级别的 commit，而非 file 级别
 
 多数 AI commit 工具把 **file** 当作 atomic 单位。aic 则把 **hunk**（一段连续的代码改动）当作 atomic 单位。
@@ -36,6 +42,21 @@ aic:       3 个 commit，每个对应一处逻辑改动      ✅
 - **Exact-partition 校验** —— 每个 hunk 精确分配到恰好一个 commit，无重叠、无遗漏，因此不会丢失或重复 commit。只要有任何一个 hunk 缺失或越界，整个 plan 就会被拒绝。
 - **Context-aware 的 staging** —— 选中的 hunk 会重建为 patch，再用 `git apply --cached` stage；该命令会依据周围的 context 行重新定位每个 hunk，因此即便前一个 commit 改变了行号，hunk 依然能正确落地。
 - **Live reasoning** —— aic 会在 model 决定拆分方案时实时流式输出它的思考过程，让你在 commit 落地前看清每个 hunk *为何* 被归到一起。
+
+## 30 秒试用
+
+看 `aic` 如何把一个文件拆成三个 atomic commit —— 无需手动 `git add -p`：
+
+```sh
+git clone https://github.com/CaicoLeung/aic.git && cd aic
+cargo build --release                       # 构建 CLI（或用上面的 installer）
+./docs/demo/demo-run.sh                     # 一个文件、三处互不相关的改动 → 三个 atomic commit
+```
+
+**没有 API key？** demo 会自动使用本地 **Ollama** 模型
+（`ollama pull llama3.3`，然后重跑脚本）—— 或者先跑一次 `aic setup`，
+指向 12 家云端 provider 中的任意一家。整个运行完全隔离：使用一次性的
+repo 和一次性的 `aic` 配置，绝不会触碰你真实的仓库和真实的 `aic` 配置。
 
 ## Features
 
@@ -206,6 +227,27 @@ OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config �
 你也可以在 conflict 的 repo 里直接运行普通的 `aic` —— 它会察觉并提议移交给 resolve，同时一个 commit guard 会阻止任何仍带有 conflict marker 的 commit。
 
 **v1 限制：** `aic resolve` 只处理 conflict 的 **merge** 状态 —— 若检测到 rebase 或 `am` 进行中则会被拒绝。Binary、超大体积、以及 delete/modify 类型的 conflict 会被跳过并给出原因，由你手动解决。Finalize 是 all-or-nothing：只要还有未 merge 的路径，`--continue` 就会被阻塞，hand-off 也会明确告诉你还剩什么。
+
+## aic 对比其他工具
+
+aic 唯一的差异化是 **hunk 级别的拆分** —— 下面其他工具都把 file（或你
+整个 staged 的改动）当作 atomic 单位。其他工具更强的地方我们如实承认：
+基于 prompt 的工具不需要 API key，也不会因网络问题失败；JS/Python 生态
+也更大。
+
+| 工具 | AI 写 message | Hunk 级拆分 | Conventional Commits | 多 provider | 解决冲突 | Rust 二进制 |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **aic** | ✅ | ✅ | ✅ | ✅ (12 家) | ✅ | ✅ |
+| [aicommits](https://github.com/Nutlope/aicommits) | ✅ | ❌ | ⚠️ 可选 | ❌ 仅 OpenAI | ❌ | ❌ Node |
+| [opencommit](https://github.com/di-sukharev/opencommit) | ✅ | ❌ | ⚠️ 可选 | ✅ 多家 | ❌ | ❌ Node |
+| [commitizen](https://github.com/commitizen-tools/commitizen) | ❌ | ❌ | ✅ | — | ❌ | ❌ Python |
+| [gitmoji-cli](https://github.com/carloscuesta/gitmoji-cli) | ❌ | ❌ | ❌ emoji | — | ❌ | ❌ Node |
+| [cz-cli](https://github.com/commitizen/cz-cli) | ❌ | ❌ | ✅ | — | ❌ | ❌ Node |
+
+表中每个格子都是撰写时各项目公开、可核验的事实。aic 只主张唯一只有它能
+做到的事 —— 把单个文件的多个 hunk 拆进多个 atomic commit —— 其余一律
+让步：基于 prompt 的工具（commitizen、cz-cli）零成本且久经考验，
+opencommit/aicommits 目前的社区更大。
 
 ## Contributing
 

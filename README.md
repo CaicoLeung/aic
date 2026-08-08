@@ -13,6 +13,12 @@ AI-powered git commit tool that writes Conventional Commit messages for you — 
 
 ---
 
+![aic splits one file into three atomic commits](docs/demo/aic-hunk-split.gif)
+
+*One file, three unrelated edits → three clean atomic commits. Recorded from a real `aic` run — [asciinema cast](docs/demo/aic-hunk-split.cast), [reproduce it yourself](docs/demo/demo-run.sh).*
+
+---
+
 ## ✨ The headline: hunk-level commits, not file-level
 
 Most AI commit tools treat a **file** as the atomic unit. aic treats a **hunk** (a single contiguous code change) as the atomic unit.
@@ -36,6 +42,22 @@ aic:          3 commits, one per logical change  ✅
 - **Exact-partition validation** — every hunk is assigned to exactly one commit, with no overlaps and no gaps, so nothing is lost or double-committed. The plan is rejected if a single hunk is missing or out of range.
 - **Context-aware staging** — selected hunks are rebuilt into a patch and staged with `git apply --cached`, which relocates each hunk by its surrounding context lines so it still lands correctly after an earlier commit shifted line numbers.
 - **Live reasoning** — aic streams the model's thinking as it decides the split, so you can see *why* each hunk was grouped before the commits land.
+
+## Try it in 30 seconds
+
+Watch `aic` split one file into three atomic commits — no manual `git add -p`:
+
+```sh
+git clone https://github.com/CaicoLeung/aic.git && cd aic
+cargo build --release                       # build the CLI (or use the installer above)
+./docs/demo/demo-run.sh                     # one file, three unrelated edits → three atomic commits
+```
+
+**No API key?** The demo auto-uses a local **Ollama** model
+(`ollama pull llama3.3`, then re-run the script) — or run `aic setup` once to
+point `aic` at any of the 12 cloud providers. The run is fully isolated: a
+throwaway repo and a throwaway `aic` config, so your real repositories and your
+real `aic` config are never touched.
 
 ## Features
 
@@ -216,6 +238,28 @@ Run `aic resolve` when your repo is mid-merge. It reads each conflicted file, pr
 You can also run plain `aic` in a conflicted repo — it notices and offers to hand off to resolve, and a commit guard blocks any commit that still carries conflict markers.
 
 **v1 limits:** `aic resolve` handles conflicted **merge** state — a rebase or `am` in flight is detected and refused. Binary, oversized, and delete/modify conflicts are skipped with a reason for you to resolve by hand. Finalize is all-or-nothing: `--continue` blocks on any unmerged path, and the hand-off tells you exactly what's left.
+
+## How aic compares
+
+aic's one differentiator is **hunk-level splitting** — every other tool here
+treats a file (or your whole staged change) as the atomic unit. We concede
+honestly where others are stronger: the prompt-based tools need no API key and
+never trip on a network blip, and the JS/Python ecosystem is larger.
+
+| Tool | AI messages | Hunk-level split | Conventional Commits | Multi-provider | Conflict resolution | Rust binary |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **aic** | ✅ | ✅ | ✅ | ✅ (12) | ✅ | ✅ |
+| [aicommits](https://github.com/Nutlope/aicommits) | ✅ | ❌ | ⚠️ optional | ❌ OpenAI | ❌ | ❌ Node |
+| [opencommit](https://github.com/di-sukharev/opencommit) | ✅ | ❌ | ⚠️ optional | ✅ several | ❌ | ❌ Node |
+| [commitizen](https://github.com/commitizen-tools/commitizen) | ❌ | ❌ | ✅ | — | ❌ | ❌ Python |
+| [gitmoji-cli](https://github.com/carloscuesta/gitmoji-cli) | ❌ | ❌ | ❌ emoji | — | ❌ | ❌ Node |
+| [cz-cli](https://github.com/commitizen/cz-cli) | ❌ | ❌ | ✅ | — | ❌ | ❌ Node |
+
+Every cell is a verifiable public fact about each project at the time of
+writing. aic claims the one thing only it does — splitting a single file's
+hunks across multiple atomic commits — and concedes the rest: the prompt tools
+(commitizen, cz-cli) are zero-cost and battle-tested, and
+opencommit/aicommits have larger communities today.
 
 ## Contributing
 
