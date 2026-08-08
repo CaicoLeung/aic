@@ -2,7 +2,7 @@ use console::{Style, Term};
 
 use crate::conflict::{ConflictedFile, RepoState};
 use crate::layout::{FALLBACK_COLS, MARGIN, resolve_cols, wrap_line};
-use crate::types::CommitType;
+use crate::types::{CommitType, commit_id_color, neutral_gray};
 
 /// Line-based write seam behind [`Display`].
 ///
@@ -181,18 +181,16 @@ impl Display {
     /// [`Display::text_width`] with continuation lines aligned under the first
     /// body char; no hanging indent. Blank body lines stay blank.
     pub fn commit_line(&self, hash: &str, message: &str, body: Option<&str>, prefix: &str) {
-        // Muted gray for prefix/body/scope. Matches types::NEUTRAL_GRAY so the
-        // whole muted layer reads as one tone; darkened from the old
-        // #8a8f9f (3.2:1 on white, thin margin) to #6b7280 (~4.7:1 white /
-        // ~3.9:1 dark) for safe readability on light backgrounds.
-        let gray = Style::new().true_color(107, 114, 128);
+        // Muted gray for prefix/body/scope — read from the single-source
+        // palette so it can't drift from the WCAG-guarded value.
+        let gray = neutral_gray();
 
         // Main line: [prefix] ✓ <hash> <message>
         let check = self.styled("\u{2713}", Style::new().green().bold());
         // Commit ID: amber #d97706, bold so the short token qualifies as WCAG
         // AA Large (3:1) on both themes — the old #f3b340 read at ~1.9:1 on
         // white. Bold is also the right visual weight for a ref.
-        let hash_styled = self.styled(hash, Style::new().true_color(217, 119, 6).bold());
+        let hash_styled = self.styled(hash, commit_id_color().bold());
         let pre = if prefix.is_empty() {
             String::new()
         } else {
@@ -220,7 +218,7 @@ impl Display {
     /// user confirms is byte-for-byte what the completed line will show.
     fn styled_subject(&self, message: &str) -> String {
         // Muted gray for the optional `(scope)` — matches the body/prefix tone.
-        let gray = Style::new().true_color(107, 114, 128);
+        let gray = neutral_gray();
         let parsed = CommitType::parse_message(message);
         match parsed.description {
             Some(desc) => {
@@ -251,7 +249,7 @@ impl Display {
     /// [`Display::commit_line`] and [`Display::commit_preview`].
     fn emit_body(&self, body: &str) -> usize {
         // Muted gray, darkened from #8a8f9f to #6b7280 for light-bg readability.
-        let gray = Style::new().true_color(107, 114, 128);
+        let gray = neutral_gray();
         let trimmed = body.trim();
         let mut rows = 0;
         if !trimmed.is_empty() {
