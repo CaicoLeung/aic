@@ -265,7 +265,9 @@ enum ProviderEntry {
     Done,
 }
 
-/// `API key` sub-menu row: the masked effective key.
+/// `API key` sub-menu row: the masked effective key (or "(not set)"). An API
+/// key has no provider default, so — unlike [`base_url_label`] /
+/// [`model_label`] — it takes no [`Source`].
 fn api_key_label(key: &str) -> String {
     if key.is_empty() {
         return "(not set)".to_string();
@@ -283,12 +285,16 @@ fn base_url_label(url: Option<&str>, source: Source) -> String {
     }
 }
 
-/// `Model` sub-menu row: the effective model (config > provider default).
-fn model_label(model: &str) -> String {
+/// `Model` sub-menu row: the effective model (config > provider default),
+/// annotated with its source.
+fn model_label(model: &str, source: Source) -> String {
     if model.is_empty() {
         return "(not set)".to_string();
     }
-    model.to_string()
+    match source {
+        Source::Default => format!("{model} (default)"),
+        _ => model.to_string(),
+    }
 }
 
 /// The AI-provider sub-menu: one entry per applicable field (based on the
@@ -303,7 +309,7 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
             Step::Provider => {} // chosen before this menu
             Step::ApiKey => {
                 // Effective key for display: the draft (a user edit or the
-                // seeded config value). aic reads only the config file.
+                // seeded config value).
                 let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
                 entries.push(ProviderEntry::ApiKey);
                 labels.push(format!("{ICON_API_KEY} API key — {}", api_key_label(&key)));
@@ -1082,9 +1088,13 @@ mod tests {
         assert_eq!(api_key_label("sk-123"), "••••••");
         assert_eq!(api_key_label(""), "(not set)");
 
-        // Model: value, (not set) when empty.
-        assert_eq!(model_label("gpt-5"), "gpt-5");
-        assert_eq!(model_label(""), "(not set)");
+        // Model: value, (default) when provider-default-sourced, (not set) when empty.
+        assert_eq!(model_label("gpt-5", Source::Config), "gpt-5");
+        assert_eq!(
+            model_label("deepseek-v4-flash", Source::Default),
+            "deepseek-v4-flash (default)"
+        );
+        assert_eq!(model_label("", Source::Default), "(not set)");
 
         // Base URL: value, annotated by source, (not set) when none.
         assert_eq!(
