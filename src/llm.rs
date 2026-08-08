@@ -578,6 +578,20 @@ impl LLMAgent {
         .await?)
     }
 
+    /// One-shot connectivity check: a single minimal completion attempt with
+    /// **no retry**. Used by the `aic setup` Verify item (AIC-23) to confirm
+    /// the API key + model are usable before the config is saved. Unlike
+    /// [`Self::call`], a budget-starved empty response is not retried — Verify
+    /// is a user-initiated probe, and the user would rather see the raw
+    /// outcome than wait for backoff. Any real failure (auth, rate limit,
+    /// network, unknown model) propagates verbatim so the wizard can show it
+    /// and the user can act on it. Returns the model's trimmed reply on
+    /// success.
+    pub async fn verify(&self) -> Result<String> {
+        let text = self.prompt_once("Reply with exactly: OK").await?;
+        Ok(text.trim().to_string())
+    }
+
     /// One streaming attempt: routes the model's "thinking"/reasoning deltas
     /// to `on_reasoning` and returns the accumulated assistant text (possibly
     /// empty). No retry here — retries live in
