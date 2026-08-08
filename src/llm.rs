@@ -781,6 +781,98 @@ mod tests {
         assert_eq!(Provider::Mistral.default_model(), "mistral-small-latest");
     }
 
+    /// AIC-12: the five Phase-1 providers (xAI, Mistral, OpenRouter,
+    /// Perplexity, Together) plus the OpenAI-compatible escape hatch must each
+    /// resolve a canonical name, an API-key env var where the provider needs
+    /// one, a sensible default model, and a correct base-URL requirement.
+    #[test]
+    fn new_provider_metadata_is_complete() {
+        // Canonical LLM_BACKEND values (README + CLAUDE.md tables mirror these).
+        assert_eq!(Provider::Xai.name(), "xai");
+        assert_eq!(Provider::Mistral.name(), "mistral");
+        assert_eq!(Provider::OpenRouter.name(), "openrouter");
+        assert_eq!(Provider::Perplexity.name(), "perplexity");
+        assert_eq!(Provider::Together.name(), "together");
+        assert_eq!(Provider::OpenAiCompatible.name(), "openai-compatible");
+
+        // Env keys: cloud providers carry provider-specific keys; Ollama and
+        // the openai-compatible escape hatch do not.
+        assert_eq!(Provider::Xai.env_key(), Some("XAI_API_KEY"));
+        assert_eq!(Provider::Mistral.env_key(), Some("MISTRAL_API_KEY"));
+        assert_eq!(Provider::OpenRouter.env_key(), Some("OPENROUTER_API_KEY"));
+        assert_eq!(Provider::Perplexity.env_key(), Some("PERPLEXITY_API_KEY"));
+        assert_eq!(Provider::Together.env_key(), Some("TOGETHER_API_KEY"));
+        assert_eq!(Provider::OpenAiCompatible.env_key(), None);
+
+        // Defaults: fast, low-cost models; the routers have none by design.
+        assert_eq!(Provider::Xai.default_model(), "grok-4.3");
+        assert_eq!(Provider::Mistral.default_model(), "mistral-small-latest");
+        assert_eq!(Provider::Perplexity.default_model(), "sonar");
+        assert_eq!(
+            Provider::Together.default_model(),
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        );
+        assert!(Provider::OpenRouter.default_model().is_empty());
+        assert!(Provider::OpenAiCompatible.default_model().is_empty());
+
+        // Base URL: built-in endpoints for the five; required for the escape
+        // hatch (LLM_BASE_URL / config `base_url`).
+        assert_eq!(
+            Provider::Xai.base_url_requirement(),
+            BaseUrlRequirement::None
+        );
+        assert_eq!(
+            Provider::Mistral.base_url_requirement(),
+            BaseUrlRequirement::None
+        );
+        assert_eq!(
+            Provider::OpenRouter.base_url_requirement(),
+            BaseUrlRequirement::None
+        );
+        assert_eq!(
+            Provider::Perplexity.base_url_requirement(),
+            BaseUrlRequirement::None
+        );
+        assert_eq!(
+            Provider::Together.base_url_requirement(),
+            BaseUrlRequirement::None
+        );
+        assert_eq!(
+            Provider::OpenAiCompatible.base_url_requirement(),
+            BaseUrlRequirement::Required
+        );
+
+        // Setup picker lists: curated models exist for the four with defaults;
+        // OpenRouter and the escape hatch intentionally expose none.
+        assert!(!Provider::Xai.models().is_empty());
+        assert!(!Provider::Mistral.models().is_empty());
+        assert!(Provider::OpenRouter.models().is_empty());
+        assert!(!Provider::Perplexity.models().is_empty());
+        assert!(!Provider::Together.models().is_empty());
+        assert!(Provider::OpenAiCompatible.models().is_empty());
+    }
+
+    /// AIC-12: `aic list` and the setup flow resolve keys through the registry
+    /// — every cloud provider must map to a distinct env var so two providers
+    /// never read the same key.
+    #[test]
+    fn cloud_provider_env_keys_are_distinct() {
+        let keys: Vec<Option<&'static str>> = ALL_PROVIDERS
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.base_url_requirement(),
+                    BaseUrlRequirement::None | BaseUrlRequirement::Optional(_)
+                )
+            })
+            .map(|p| p.env_key())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for key in keys.into_iter().flatten() {
+            assert!(seen.insert(key), "duplicate env key {key}");
+        }
+    }
+
     #[test]
     fn routers_have_no_default_model() {
         // OpenRouter and the OpenAI-compatible escape hatch require an explicit model.
