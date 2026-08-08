@@ -13,7 +13,8 @@
 //! Run already holds. See CONTEXT.md "Commit confirmation".
 
 use crate::CommitMessenger;
-use crate::display::{self, Display};
+use crate::display::Display;
+use crate::progress;
 use anyhow::Context;
 
 // ----------------------------------------------------------------------
@@ -185,7 +186,7 @@ pub(crate) async fn confirm_draft(
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
                 let result =
-                    display::with_spinner("Regenerating message", messenger(diff.clone())).await?;
+                    progress::with_spinner("Regenerating message", messenger(diff.clone())).await?;
                 message = result.message;
                 body = result.body;
             }
