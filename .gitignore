@@ -11,3 +11,6 @@ keys/*.key
 # python bytecode
 __pycache__/
 *.pyc
+
+#benchmark
+benchmarks/results
