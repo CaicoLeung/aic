@@ -181,11 +181,18 @@ impl Display {
     /// [`Display::text_width`] with continuation lines aligned under the first
     /// body char; no hanging indent. Blank body lines stay blank.
     pub fn commit_line(&self, hash: &str, message: &str, body: Option<&str>, prefix: &str) {
-        let gray = Style::new().true_color(138, 143, 159);
+        // Muted gray for prefix/body/scope. Matches types::NEUTRAL_GRAY so the
+        // whole muted layer reads as one tone; darkened from the old
+        // #8a8f9f (3.2:1 on white, thin margin) to #6b7280 (~4.7:1 white /
+        // ~3.9:1 dark) for safe readability on light backgrounds.
+        let gray = Style::new().true_color(107, 114, 128);
 
         // Main line: [prefix] ✓ <hash> <message>
         let check = self.styled("\u{2713}", Style::new().green().bold());
-        let hash_styled = self.styled(hash, Style::new().true_color(243, 179, 64));
+        // Commit ID: amber #d97706, bold so the short token qualifies as WCAG
+        // AA Large (3:1) on both themes — the old #f3b340 read at ~1.9:1 on
+        // white. Bold is also the right visual weight for a ref.
+        let hash_styled = self.styled(hash, Style::new().true_color(217, 119, 6).bold());
         let pre = if prefix.is_empty() {
             String::new()
         } else {
@@ -212,11 +219,20 @@ impl Display {
     /// and [`Display::commit_preview`] (pre-commit confirmation) so what the
     /// user confirms is byte-for-byte what the completed line will show.
     fn styled_subject(&self, message: &str) -> String {
-        let gray = Style::new().true_color(138, 143, 159);
+        // Muted gray for the optional `(scope)` — matches the body/prefix tone.
+        let gray = Style::new().true_color(107, 114, 128);
         let parsed = CommitType::parse_message(message);
         match parsed.description {
             Some(desc) => {
-                let colored_type = self.styled(parsed.type_name, parsed.commit_type.color());
+                // Type token: named palette color, or deterministic hash color
+                // for unrecognized non-empty types, or neutral gray for empty.
+                // Bolded so the short token qualifies as WCAG AA Large (3:1) on
+                // both themes — the old bright type colors (feat #4ade80 etc.)
+                // read at ~1.7:1 on white.
+                let colored_type = self.styled(
+                    parsed.type_name,
+                    CommitType::color_for(parsed.type_name).bold(),
+                );
                 let scope = match parsed.scope {
                     Some(s) => self.styled(&format!("({s})"), gray.clone()),
                     None => String::new(),
@@ -224,8 +240,9 @@ impl Display {
                 let bold_desc = self.styled(desc, Style::new().bold());
                 format!("{}{}: {}", colored_type, scope, bold_desc)
             }
-            // No colon — unknown type; color the whole message via the type palette.
-            None => self.styled(message, parsed.commit_type.color()),
+            // No colon — no type token to color; render the whole message in
+            // muted gray so it reads as a non-conventional fallback.
+            None => self.styled(message, gray),
         }
     }
 
@@ -233,7 +250,8 @@ impl Display {
     /// Blank body lines stay blank (no trailing-whitespace margin). Shared by
     /// [`Display::commit_line`] and [`Display::commit_preview`].
     fn emit_body(&self, body: &str) -> usize {
-        let gray = Style::new().true_color(138, 143, 159);
+        // Muted gray, darkened from #8a8f9f to #6b7280 for light-bg readability.
+        let gray = Style::new().true_color(107, 114, 128);
         let trimmed = body.trim();
         let mut rows = 0;
         if !trimmed.is_empty() {
@@ -757,14 +775,14 @@ mod tests {
         });
         d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
         let joined = lines.lock().join("\n");
-        // hash #f3b340, feat type green #4ade80, description bold default fg,
-        // body + prefix gray #8a8f9f.
+        // hash #d97706 (bold), feat type green #15803d (bold), description bold
+        // default fg, body + prefix muted gray #6b7280.
         assert!(
-            joined.contains("243;179;64"),
-            "hash color missing: {joined:?}"
+            joined.contains("217;119;6"),
+            "hash amber color missing: {joined:?}"
         );
         assert!(
-            joined.contains("74;222;128"),
+            joined.contains("21;128;61"),
             "feat type green color missing: {joined:?}"
         );
         assert!(
@@ -776,15 +794,15 @@ mod tests {
             "subject must not use hardcoded white: {joined:?}"
         );
         assert!(
-            joined.contains("138;143;159"),
-            "gray color missing: {joined:?}"
+            joined.contains("107;114;128"),
+            "muted gray color missing: {joined:?}"
         );
         // [n/m] prefix text survives styling (format kept, not "n.").
         assert!(joined.contains("[1/3]"), "prefix text missing: {joined:?}");
     }
 
     #[test]
-    fn fix_type_gets_yellow_orange_color() {
+    fn fix_type_gets_orange_color() {
         let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
@@ -794,10 +812,11 @@ mod tests {
         });
         d.commit_line("def5678", "fix(auth): correct token check", None, "");
         let joined = lines.lock().join("\n");
-        // fix type should be yellow/orange #fbbf24
+        // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
+        // readability — see types::NAMED_PALETTE).
         assert!(
-            joined.contains("251;191;36"),
-            "fix type yellow/orange color missing: {joined:?}"
+            joined.contains("234;88;12"),
+            "fix type orange color missing: {joined:?}"
         );
         // Scope parens must survive rendering (regression guard).
         assert!(
@@ -825,19 +844,21 @@ mod tests {
         assert_eq!(got[0], "  \u{2713} def5678 fix(auth): correct token check");
     }
 
+    /// Spot-check that `styled_subject` wires `CommitType::color_for` through
+    /// to the rendered bytes for a representative spread: a re-toned original
+    /// type (feat), a new type (ci), the promoted-from-gray chore, and a
+    /// named neutral (wip). The exhaustive palette + WCAG 3:1 guard lives in
+    /// `types::tests::all_colors_pass_wcag_aa_large_on_both_themes` — this
+    /// test only pins the display wiring.
     #[test]
-    fn each_type_renders_its_color() {
+    fn each_type_renders_its_palette_color() {
         let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         for (type_str, rgb) in [
-            ("feat", "74;222;128"),
-            ("fix", "251;191;36"),
-            ("chore", "156;163;175"),
-            ("docs", "96;165;250"),
-            ("style", "167;139;250"),
-            ("refactor", "34;211;238"),
-            ("perf", "248;113;113"),
-            ("test", "244;114;182"),
+            ("feat", "21;128;61"),
+            ("ci", "99;102;241"),
+            ("chore", "15;118;110"),
+            ("wip", "100;116;139"),
         ] {
             let lines = Arc::new(Mutex::new(Vec::new()));
             let d = Display::with(Buf {
@@ -853,8 +874,12 @@ mod tests {
         }
     }
 
+    /// Unrecognized (non-empty) type tokens go through the deterministic hash
+    /// fallback — they must render a fallback-palette color, NOT the neutral
+    /// gray (the old behavior collapsed everything unmatched to gray, which
+    /// read as "uncolored"). Stability/distribution is pinned in `types::tests`.
     #[test]
-    fn unknown_type_gets_gray_color() {
+    fn unrecognized_type_gets_hash_fallback_color() {
         let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
@@ -862,17 +887,31 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("ghi9012", "wip: thing in progress", None, "");
+        d.commit_line("ghi9012", "blob: thing in progress", None, "");
         let joined = lines.lock().join("\n");
-        // Unknown type should be gray #9ca3af
         assert!(
-            joined.contains("156;163;175"),
-            "unknown type gray color missing: {joined:?}"
+            !joined.contains("107;114;128"),
+            "unrecognized type must not collapse to neutral gray: {joined:?}"
+        );
+        // It must be one of the six fallback-palette RGBs.
+        let hits_fallback = [
+            (13, 148, 136),
+            (147, 51, 234),
+            (194, 65, 12),
+            (14, 116, 144),
+            (168, 85, 247),
+            (59, 130, 246),
+        ]
+        .iter()
+        .any(|(r, g, b)| joined.contains(&format!("{r};{g};{b}")));
+        assert!(
+            hits_fallback,
+            "unrecognized should hit fallback palette: {joined:?}"
         );
     }
 
     #[test]
-    fn no_colon_message_gets_gray_unknown_type() {
+    fn no_colon_message_gets_muted_gray() {
         let _env = COLOR_ENV.lock();
         let _guard = ColorGuard::force();
         let lines = Arc::new(Mutex::new(Vec::new()));
@@ -882,10 +921,11 @@ mod tests {
         });
         d.commit_line("jkl3456", "no colon message", None, "");
         let joined = lines.lock().join("\n");
-        // Messages without colon should be gray (unknown type fallback)
+        // No-colon messages have no type token to color → muted gray #6b7280
+        // (darkened from the old #9ca3af for white-bg readability).
         assert!(
-            joined.contains("156;163;175"),
-            "no-colon message should be gray: {joined:?}"
+            joined.contains("107;114;128"),
+            "no-colon message should be muted gray: {joined:?}"
         );
     }
 }
