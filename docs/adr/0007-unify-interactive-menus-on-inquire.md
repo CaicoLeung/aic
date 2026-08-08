@@ -70,3 +70,19 @@ restored without forking the crate:
 These are accepted trade-offs for unifying on one prompt library; revisit means
 forking `inquire` or re-introducing `dialoguer`, neither warranted for a
 cosmetic follow-up.
+
+## Amendment (AIC-17): code relocation only
+
+This decision is unchanged. The code it references has since moved, but the
+inquire unification, the `opt_nav` three-way mapping, and the cancel predicates
+are identical — only their module home changed:
+
+- `opt_nav` / `OptNav` / `prompt_text` / `TextAct` / `is_io_cancel` moved from
+  `config.rs` to a new `input.rs` (generic interactive-input primitives).
+- `is_graceful_cancel` lives in `confirm.rs` (the body above says `main.rs`,
+  which was already stale before this change).
+
+So the shared cancel predicate is now `input::is_io_cancel` (consumed by both
+`confirm::is_graceful_cancel` and `input::opt_nav`), and `opt_nav` is
+`input::opt_nav`. The prompt library (inquire) and the menu vocabulary are
+untouched.
