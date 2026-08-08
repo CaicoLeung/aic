@@ -8,11 +8,13 @@ pub mod display;
 pub mod generator;
 pub mod git;
 pub mod grouping;
+pub mod input;
 pub mod layout;
 pub mod llm;
 pub mod progress;
 pub mod prompt;
 pub mod retry;
+pub mod setup;
 pub mod staging;
 pub mod types;
 pub mod update;
@@ -531,7 +533,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        Some(Commands::Setup) => config::run_setup(),
+        Some(Commands::Setup) => setup::run_setup(),
         Some(Commands::List) => config::run_list(),
         Some(Commands::Update) => update::run_update(),
         Some(Commands::Resolve) => run_resolve_workflow().await,

@@ -133,8 +133,8 @@ pub(crate) fn ensure_confirm_terminal(
 /// too and treat them as cancels (matching the setup wizard's handling).
 pub(crate) fn is_graceful_cancel(e: &inquire::InquireError) -> bool {
     // Esc (OperationCanceled) plus the hard cancels shared with the wizard's
-    // `opt_nav` (Ctrl-C / closed stdin) — see `config::is_io_cancel`.
-    matches!(e, inquire::InquireError::OperationCanceled) || crate::config::is_io_cancel(e)
+    // `opt_nav` (Ctrl-C / closed stdin) — see `input::is_io_cancel`.
+    matches!(e, inquire::InquireError::OperationCanceled) || crate::input::is_io_cancel(e)
 }
 
 /// Map an inquire prompt result to an `Option` (`None` = the user cancelled),
