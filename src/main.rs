@@ -7,7 +7,9 @@ pub mod display;
 pub mod generator;
 pub mod git;
 pub mod grouping;
+pub mod layout;
 pub mod llm;
+pub mod progress;
 pub mod prompt;
 pub mod retry;
 pub mod staging;
@@ -53,22 +55,22 @@ pub(crate) type CommitMessenger =
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling
-/// [`display::REASONING_WINDOW`]-row block that redraws in place as the
+/// [`progress::REASONING_WINDOW`]-row block that redraws in place as the
 /// model thinks — newest rows at the bottom, oldest scrolled out of the
 /// window — and is erased when thinking ends, so the reasoning never lingers
 /// on screen or in the scrollback. The cap bounds the in-place block while
 /// it streams, even when a line wraps long.
 ///
-/// Rendering is hand-rolled via [`display::ReasoningRenderer`] rather than an
+/// Rendering is hand-rolled via [`progress::ReasoningRenderer`] rather than an
 /// indicatif multi-line spinner: indicatif repaints by blanking every row then
 /// redrawing them, and its steady tick forced that ~20×/s, so a multi-row
 /// window flickered. The renderer clears and rewrites one row at a time (any
 /// instant has at most one blank row) and repaints only on a reasoning change,
-/// so the window is flicker-free. See [`display::ReasoningRenderer`] for the
+/// so the window is flicker-free. See [`progress::ReasoningRenderer`] for the
 /// redraw contract.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    let mut view = display::ThinkingView::new();
-    let mut renderer = display::ReasoningRenderer::new("Analyzing changes");
+    let mut view = progress::ThinkingView::new();
+    let mut renderer = progress::ReasoningRenderer::new("Analyzing changes");
 
     let result = generator::Generator::split_patch_streaming(diff, |delta| {
         let window = view.push(delta);
@@ -104,7 +106,7 @@ async fn generate_and_commit(
 
     // Generate initial draft, then run confirmation loop if enabled.
     let result =
-        display::with_spinner("Generating commit message", messenger(diff_str.clone())).await?;
+        progress::with_spinner("Generating commit message", messenger(diff_str.clone())).await?;
     let (message, body, preview_rows) = confirm_draft(
         (result.message, result.body),
         paths,
@@ -244,7 +246,7 @@ pub(crate) async fn run_resolve_workflow_impl(
             // copy the reference rather than the content.
             let content = original.to_string();
             async move {
-                match display::with_spinner(&label, resolve_ref(content)).await {
+                match progress::with_spinner(&label, resolve_ref(content)).await {
                     Ok(resolved) if !conflict::has_conflict_markers(&resolved) => Ok(resolved),
                     Ok(_markers) => Err(retry::RetryReason::Markers),
                     Err(err) => Err(retry::RetryReason::Fatal(err)),
