@@ -44,7 +44,7 @@ aic:       3 个 commit，每个对应一处逻辑改动      ✅
 - **Conflict resolution** —— 正处于 merge 中？`aic resolve` 会逐文件给出解决方案供你 review 和批准，然后完成 merge
 - **Interactive setup** —— `aic setup` 引导你完成 provider、API key、model 的选择，并可开启提交前确认开关
 - **Conventional Commits** —— message 遵循 [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) 规范
-- **可配置** —— config 文件、环境变量，或单次运行 override
+- **可配置** —— config 文件，或单次运行 override
 
 ## Installation
 
@@ -116,7 +116,7 @@ aic
 | `aic`          | 用一条 message commit 已 stage 的文件。若没有 stage 任何内容，则把所有未 stage 的改动批量规划为 **hunk 级别**的 atomic commit。 |
 | `aic resolve`  | 通过 LLM 解决 git merge conflict。逐文件给出方案供 review，然后完成 merge。                                            |
 | `aic setup`    | Interactive 向导，选择 provider、输入 API key、选择 model；也可切换提交前确认。                                          |
-| `aic list`     | 展示已 resolve 的 config：provider、model，以及每个值来自哪里（env / config / default）。                              |
+| `aic list`     | 展示已 resolve 的 config：provider、model，以及每个值来自哪里（config / default）。                                     |
 | `aic update`   | 从 GitHub Releases 把 aic 更新到最新版本。                                                                             |
 
 ## How It Works
@@ -147,28 +147,21 @@ aic resolve
 
 ## Configuration
 
-Config 文件：`~/.config/aic/config.toml`
+Config 文件是唯一的真相来源：`~/.config/aic/config.toml`。provider 设置**不**读取环境变量——`aic setup` 保存的值就是 `aic` 运行时实际使用的值。
 
-### 环境变量
-
-| 变量               | 用途                                            | 默认值           |
-| ------------------ | ----------------------------------------------- | ---------------- |
-| `LLM_BACKEND`      | provider 名称                                   | `openai`         |
-| `LLM_API_KEY`      | API key（回退到 provider 专属变量）             | —                |
-| `LLM_MODEL`        | model ID override                               | Provider default |
-| `LLM_BASE_URL`     | endpoint base URL（Ollama / OpenAI-compatible） | Provider default |
-| `AIC_SYSTEM_PROMPT`| override commit message 的 system prompt        | Built-in prompt  |
-
-Provider 专属的 API key 环境变量（`OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 等）同样会被识别。
+| 字段       | 用途                                            | 默认值           |
+| ---------- | ----------------------------------------------- | ---------------- |
+| `backend`  | provider 名称                                   | `openai`         |
+| `api_key`  | API key                                         | —                |
+| `model`    | model ID                                        | Provider default |
+| `base_url` | endpoint base URL（Ollama / OpenAI-compatible） | Provider default |
 
 ### Resolution order
 
 对 `backend`、`api_key`、`model`、`base_url` 每一项：
 
-1. 通用环境变量（`LLM_BACKEND`、`LLM_API_KEY`、`LLM_MODEL`）
-2. Provider 专属环境变量（仅 API key）
-3. Config 文件（`~/.config/aic/config.toml`）
-4. Built-in default
+1. Config 文件（`~/.config/aic/config.toml`）
+2. Built-in default
 
 ### 提交前确认
 
@@ -189,22 +182,22 @@ Batch 模式下 Abort 后，已提交的 batch 保持不变，其余更改留在
 
 ### 支持的 provider
 
-| Provider          | 默认 model                                 | Env key                                                       |
-| ----------------- | ------------------------------------------ | ------------------------------------------------------------- |
-| OpenAI            | `gpt-5-mini`                               | `OPENAI_API_KEY`                                              |
-| Anthropic         | `claude-haiku-4-5`                         | `ANTHROPIC_API_KEY`                                           |
-| Gemini            | `gemini-2.5-flash`                         | `GEMINI_API_KEY`                                              |
-| DeepSeek          | `deepseek-v4-flash`                        | `DEEPSEEK_API_KEY`                                            |
-| Groq              | `llama-3.3-70b-versatile`                  | `GROQ_API_KEY`                                                |
-| xAI               | `grok-4.3`                                 | `XAI_API_KEY`                                                 |
-| Mistral           | `mistral-small-latest`                     | `MISTRAL_API_KEY`                                             |
-| OpenRouter        | _(必须指定 model)_                         | `OPENROUTER_API_KEY`                                          |
-| Perplexity        | `sonar`                                    | `PERPLEXITY_API_KEY`                                          |
-| Together          | `meta-llama/Llama-3.3-70B-Instruct-Turbo`  | `TOGETHER_API_KEY`                                            |
-| Ollama            | `llama3.3`                                 | _(无需 key；通过 `LLM_BASE_URL` override URL)_                |
-| OpenAI-compatible | _(必须指定 model)_                         | _(可选；设置 `LLM_BASE_URL` + `LLM_MODEL`)_                   |
+| Provider          | 默认 model                                 | API key  | Base URL                                       |
+| ----------------- | ------------------------------------------ | -------- | ---------------------------------------------- |
+| OpenAI            | `gpt-5-mini`                               | required | built-in                                       |
+| Anthropic         | `claude-haiku-4-5`                         | required | built-in                                       |
+| Gemini            | `gemini-2.5-flash`                         | required | built-in                                       |
+| DeepSeek          | `deepseek-v4-flash`                        | required | built-in                                       |
+| Groq              | `llama-3.3-70b-versatile`                  | required | built-in                                       |
+| xAI               | `grok-4.3`                                 | required | built-in                                       |
+| Mistral           | `mistral-small-latest`                     | required | built-in                                       |
+| OpenRouter        | _(必须指定 model)_                         | required | built-in                                       |
+| Perplexity        | `sonar`                                    | required | built-in                                       |
+| Together          | `meta-llama/Llama-3.3-70B-Instruct-Turbo`  | required | built-in                                       |
+| Ollama            | `llama3.3`                                 | none     | optional（默认 `http://localhost:11434`）      |
+| OpenAI-compatible | _(必须指定 model)_                         | optional | required                                       |
 
-OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 必须显式设置 `LLM_MODEL`。OpenAI-compatible provider 还要求设置 `LLM_BASE_URL`，它通过 OpenAI client 路由到任何兼容 OpenAI chat-completions API 的 server（LM Studio、vLLM、各类 gateway）。
+OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config 中设置 `model`（运行 `aic setup`）。OpenAI-compatible provider 还要求设置 `base_url`，它通过 OpenAI client 路由到任何兼容 OpenAI chat-completions API 的 server（LM Studio、vLLM、各类 gateway）。
 
 ## 解决 merge conflict
 
