@@ -1,6 +1,6 @@
 # Provider support via a registry table and per-provider rig clients
 
-Status: accepted
+Status: accepted (env-var resolution superseded by ADR 0008, 2026-08-08)
 
 aic supports many LLM providers (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama,
 xAI, Mistral, OpenRouter, Perplexity, Together, plus a generic OpenAI-compatible
@@ -29,6 +29,10 @@ We instead resolve endpoint base URLs through aic's own config (`base_url` field
 `LLM_BASE_URL` env, surfaced in `aic list`) so that a single config surface and the
 uniform env > config > default precedence apply to every provider — including the
 previously hardcoded Ollama URL (`localhost:11434`).
+
+> **Historical note:** the `LLM_BASE_URL` env var and the `env > config > default`
+> precedence described above were removed by [ADR 0008](0008-config-single-source-of-truth.md).
+> aic still owns the base URL via its config field; the env-var channel is gone.
 
 ## Considered options
 

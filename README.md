@@ -44,7 +44,7 @@ aic:          3 commits, one per logical change  ✅
 - **Conflict resolution** — mid-merge? `aic resolve` proposes per-file resolutions you review and approve, then finalizes the merge
 - **Interactive setup** — `aic setup` is menu-driven: pick the AI provider (backend, API key, base URL, model) or the per-commit confirmation toggle in any order, then save
 - **Conventional Commits** — messages follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) spec
-- **Configurable** — config file, environment variables, or per-run override
+- **Configurable** — config file or per-run override
 
 ## Installation
 
@@ -116,7 +116,7 @@ aic
 | `aic`         | Commit staged files with one message. If nothing is staged, batch-plan all unstaged changes into **hunk-level** atomic commits. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Proposes per-file resolutions to review, then finalizes the merge.            |
 | `aic setup`   | Menu-driven config: AI provider (backend, API key, base URL, model) and a pre-commit confirmation toggle, in any order.    |
-| `aic list`    | Show resolved config: provider, model, and where each value comes from (env / config / default).                       |
+| `aic list`    | Show resolved config: provider, model, and where each value comes from (config / default).                       |
 | `aic update`  | Update aic to the latest version from GitHub Releases.                                                                 |
 
 ## How It Works
@@ -147,28 +147,23 @@ All commit messages follow Conventional Commits (`feat:`, `fix:`, `refactor:`, e
 
 ## Configuration
 
-Config file: `~/.config/aic/config.toml`
+The config file is the single source of truth: `~/.config/aic/config.toml`.
+Environment variables are **not** read for provider settings — the values
+`aic setup` saves are exactly what `aic` uses at runtime.
 
-### Environment variables
-
-| Variable            | Purpose                                        | Default          |
-| ------------------- | ---------------------------------------------- | ---------------- |
-| `LLM_BACKEND`       | Provider name                                  | `openai`         |
-| `LLM_API_KEY`       | API key (falls back to provider-specific vars) | —                |
-| `LLM_MODEL`         | Model ID override                              | Provider default |
-| `LLM_BASE_URL`      | Endpoint base URL (Ollama / OpenAI-compatible) | Provider default |
-| `AIC_SYSTEM_PROMPT` | Override the commit message system prompt      | Built-in prompt  |
-
-Provider-specific API key env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) are also recognized.
+| Field      | Purpose                                        | Default          |
+| ---------- | ---------------------------------------------- | ---------------- |
+| `backend`  | Provider name                                  | `openai`         |
+| `api_key`  | API key                                        | —                |
+| `model`    | Model ID                                       | Provider default |
+| `base_url` | Endpoint base URL (Ollama / OpenAI-compatible) | Provider default |
 
 ### Resolution order
 
 For each of `backend`, `api_key`, `model`, and `base_url`:
 
-1. Generic env var (`LLM_BACKEND`, `LLM_API_KEY`, `LLM_MODEL`)
-2. Provider-specific env var (API key only)
-3. Config file (`~/.config/aic/config.toml`)
-4. Built-in default
+1. Config file (`~/.config/aic/config.toml`)
+2. Built-in default
 
 ### Pre-commit confirmation
 
@@ -195,22 +190,22 @@ rest in the working tree, recoverable by re-running `aic`.
 
 ### Supported providers
 
-| Provider          | Default model                              | Env key                                                       |
-| ----------------- | ------------------------------------------ | ------------------------------------------------------------- |
-| OpenAI            | `gpt-5-mini`                               | `OPENAI_API_KEY`                                              |
-| Anthropic         | `claude-haiku-4-5`                         | `ANTHROPIC_API_KEY`                                           |
-| Gemini            | `gemini-2.5-flash`                         | `GEMINI_API_KEY`                                              |
-| DeepSeek          | `deepseek-v4-flash`                        | `DEEPSEEK_API_KEY`                                            |
-| Groq              | `llama-3.3-70b-versatile`                  | `GROQ_API_KEY`                                                |
-| xAI               | `grok-4.3`                                 | `XAI_API_KEY`                                                 |
-| Mistral           | `mistral-small-latest`                     | `MISTRAL_API_KEY`                                             |
-| OpenRouter        | _(model required)_                         | `OPENROUTER_API_KEY`                                          |
-| Perplexity        | `sonar`                                    | `PERPLEXITY_API_KEY`                                          |
-| Together          | `meta-llama/Llama-3.3-70B-Instruct-Turbo`  | `TOGETHER_API_KEY`                                            |
-| Ollama            | `llama3.3`                                 | _(no key; override URL via `LLM_BASE_URL`)_                   |
-| OpenAI-compatible | _(model required)_                         | _(optional; set `LLM_BASE_URL` + `LLM_MODEL`)_                |
+| Provider          | Default model                              | API key  | Base URL                                       |
+| ----------------- | ------------------------------------------ | -------- | ---------------------------------------------- |
+| OpenAI            | `gpt-5-mini`                               | required | built-in                                       |
+| Anthropic         | `claude-haiku-4-5`                         | required | built-in                                       |
+| Gemini            | `gemini-2.5-flash`                         | required | built-in                                       |
+| DeepSeek          | `deepseek-v4-flash`                        | required | built-in                                       |
+| Groq              | `llama-3.3-70b-versatile`                  | required | built-in                                       |
+| xAI               | `grok-4.3`                                 | required | built-in                                       |
+| Mistral           | `mistral-small-latest`                     | required | built-in                                       |
+| OpenRouter        | _(model required)_                         | required | built-in                                       |
+| Perplexity        | `sonar`                                    | required | built-in                                       |
+| Together          | `meta-llama/Llama-3.3-70B-Instruct-Turbo`  | required | built-in                                       |
+| Ollama            | `llama3.3`                                 | none     | optional (default `http://localhost:11434`)    |
+| OpenAI-compatible | _(model required)_                         | optional | required                                       |
 
-OpenRouter and the OpenAI-compatible provider have no default model — set `LLM_MODEL` explicitly. The OpenAI-compatible provider also requires `LLM_BASE_URL` and routes through the OpenAI client against any server that speaks the OpenAI chat-completions API (LM Studio, vLLM, gateways).
+OpenRouter and the OpenAI-compatible provider have no default model — set `model` in config (run `aic setup`). The OpenAI-compatible provider also requires a `base_url` and routes through the OpenAI client against any server that speaks the OpenAI chat-completions API (LM Studio, vLLM, gateways).
 
 Real per-provider smoke tests (one commit-message generation call each) live in `scripts/smoke-test-providers.sh` — export the provider key and run it to exercise any provider end to end.
 

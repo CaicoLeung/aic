@@ -29,9 +29,9 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# provider <name> <LLM_BACKEND> <model> [extra env assignments...]
+# provider <name> <backend> <model> [base_url]
 run_one() {
-  local name="$1" backend="$2" model="$3"
+  local name="$1" backend="$2" model="$3" base_url="${4:-}"
   shift 3
 
   local key_var=""
@@ -64,13 +64,27 @@ run_one() {
   printf 'fn main() {\n    println!("hello, world");\n    println!("bye");\n}\n' > "$repo/main.rs"
   git -C "$repo" add main.rs
 
+  # aic reads only the config file — write a per-provider config.toml into the
+  # throwaway HOME (both macOS and Linux locations) so the real ~/.config/aic
+  # never leaks in. The provider key is read from the runner's environment only
+  # to seed this file; the binary itself is invoked with every LLM_* var unset
+  # (see the `env -u` flags below), so it cannot consume env keys.
+  local cfg
+  cfg=$(printf 'backend = "%s"\nmodel = "%s"\napi_key = "%s"\n' \
+    "$backend" "$model" "${!key_var}")
+  if [[ -n "$base_url" ]]; then
+    cfg+=$(printf 'base_url = "%s"\n' "$base_url")
+  fi
+  for d in "$WORK/home/.config/aic" "$WORK/home/Library/Application Support/aic"; do
+    mkdir -p "$d"
+    printf '%s' "$cfg" > "$d/config.toml"
+  done
+
   local log subject regex
   regex='^(feat|fix|chore|docs|refactor|perf|test|build|ci|style|revert)(\([^)]*\))?!?:'
   if log=$(cd "$repo" && \
       env -u LLM_BACKEND -u LLM_MODEL -u LLM_API_KEY -u LLM_BASE_URL \
           HOME="$WORK/home" \
-          LLM_BACKEND="$backend" LLM_MODEL="$model" \
-          LLM_API_KEY="${!key_var}" "$@" \
           "$AIC_BIN" 2>&1); then
     subject=$(git -C "$repo" log -1 --format=%s)
     if [[ "$subject" =~ $regex ]]; then
@@ -95,7 +109,7 @@ run_one "Perplexity"               perplexity       "sonar"
 run_one "Together"                 together         "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
 run_one "OpenAI-compatible→DeepSeek" openai-compatible "deepseek-v4-flash" \
-  LLM_BASE_URL="https://api.deepseek.com"
+  "https://api.deepseek.com"
 
 # Sanity: the already-verified providers still work through the same binary.
 run_one "DeepSeek (baseline)"     deepseek         "deepseek-v4-flash"

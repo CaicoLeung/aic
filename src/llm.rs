@@ -135,15 +135,15 @@ pub enum BaseUrlRequirement {
 }
 
 /// Identity metadata for one provider. The `REGISTRY` table below is the single
-/// source of truth for a provider's canonical name, aliases, API-key env var,
-/// and base-URL requirement. Adding a provider = one registry row + one
+/// source of truth for a provider's canonical name, aliases, API-key
+/// requirement, and base-URL requirement. Adding a provider = one registry row + one
 /// `default_model` arm + one `with_agent!` arm. See docs/adr/0003.
 struct ProviderMeta {
     provider: Provider,
     name: &'static str,
     display: &'static str,
     aliases: &'static [&'static str],
-    env_key: Option<&'static str>,
+    requires_key: bool,
     base_url: BaseUrlRequirement,
 }
 
@@ -158,7 +158,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "openai",
         display: "OpenAI",
         aliases: &[],
-        env_key: Some("OPENAI_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -166,7 +166,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "anthropic",
         display: "Anthropic",
         aliases: &["claude"],
-        env_key: Some("ANTHROPIC_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -174,7 +174,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "gemini",
         display: "Gemini",
         aliases: &["google"],
-        env_key: Some("GEMINI_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -182,7 +182,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "deepseek",
         display: "DeepSeek",
         aliases: &[],
-        env_key: Some("DEEPSEEK_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -190,7 +190,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "groq",
         display: "Groq",
         aliases: &[],
-        env_key: Some("GROQ_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -198,7 +198,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "ollama",
         display: "Ollama",
         aliases: &[],
-        env_key: None,
+        requires_key: false,
         base_url: BaseUrlRequirement::Optional(OLLAMA_DEFAULT_BASE_URL),
     },
     ProviderMeta {
@@ -206,7 +206,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "xai",
         display: "xAI",
         aliases: &["grok"],
-        env_key: Some("XAI_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -214,7 +214,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "mistral",
         display: "Mistral",
         aliases: &[],
-        env_key: Some("MISTRAL_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -222,7 +222,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "openrouter",
         display: "OpenRouter",
         aliases: &[],
-        env_key: Some("OPENROUTER_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -230,7 +230,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "perplexity",
         display: "Perplexity",
         aliases: &[],
-        env_key: Some("PERPLEXITY_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -238,7 +238,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "together",
         display: "Together",
         aliases: &["together-ai"],
-        env_key: Some("TOGETHER_API_KEY"),
+        requires_key: true,
         base_url: BaseUrlRequirement::None,
     },
     ProviderMeta {
@@ -246,7 +246,7 @@ const REGISTRY: &[ProviderMeta] = &[
         name: "openai-compatible",
         display: "OpenAI-compatible",
         aliases: &["custom"],
-        env_key: None,
+        requires_key: false,
         base_url: BaseUrlRequirement::Required,
     },
 ];
@@ -293,8 +293,8 @@ impl Provider {
         self.meta().display
     }
 
-    pub fn env_key(&self) -> Option<&'static str> {
-        self.meta().env_key
+    pub fn requires_key(&self) -> bool {
+        self.meta().requires_key
     }
 
     pub fn base_url_requirement(&self) -> BaseUrlRequirement {
@@ -382,7 +382,10 @@ pub struct LLM {
 }
 
 impl LLM {
-    pub fn from_env() -> Result<Self> {
+    /// Load the runtime [`LLM`] from the resolved config file. aic reads only
+    /// the config file — no environment variables — so it is the single source
+    /// of truth (ADR 0008).
+    pub fn load() -> Result<Self> {
         let config = crate::config::Config::load().ok().flatten();
         let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
         resolved.validate()?;
@@ -515,8 +518,8 @@ macro_rules! with_agent {
             Provider::OpenAiCompatible => {
                 let base_url = $self.llm.base_url.as_deref().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "the openai-compatible provider requires a base URL — set LLM_BASE_URL or \
-                         `base_url` in config"
+                        "the openai-compatible provider requires a base URL — set \
+                         `base_url` in config (run `aic setup`)"
                     )
                 })?;
                 // Local OpenAI-compatible servers often need no key; pass a
@@ -783,11 +786,11 @@ mod tests {
 
     /// AIC-12: the five Phase-1 providers (xAI, Mistral, OpenRouter,
     /// Perplexity, Together) plus the OpenAI-compatible escape hatch must each
-    /// resolve a canonical name, an API-key env var where the provider needs
-    /// one, a sensible default model, and a correct base-URL requirement.
+    /// resolve a canonical name, an API-key requirement where the provider
+    /// needs one, a sensible default model, and a correct base-URL requirement.
     #[test]
     fn new_provider_metadata_is_complete() {
-        // Canonical LLM_BACKEND values (README + CLAUDE.md tables mirror these).
+        // Canonical backend values (README tables mirror these).
         assert_eq!(Provider::Xai.name(), "xai");
         assert_eq!(Provider::Mistral.name(), "mistral");
         assert_eq!(Provider::OpenRouter.name(), "openrouter");
@@ -795,14 +798,14 @@ mod tests {
         assert_eq!(Provider::Together.name(), "together");
         assert_eq!(Provider::OpenAiCompatible.name(), "openai-compatible");
 
-        // Env keys: cloud providers carry provider-specific keys; Ollama and
-        // the openai-compatible escape hatch do not.
-        assert_eq!(Provider::Xai.env_key(), Some("XAI_API_KEY"));
-        assert_eq!(Provider::Mistral.env_key(), Some("MISTRAL_API_KEY"));
-        assert_eq!(Provider::OpenRouter.env_key(), Some("OPENROUTER_API_KEY"));
-        assert_eq!(Provider::Perplexity.env_key(), Some("PERPLEXITY_API_KEY"));
-        assert_eq!(Provider::Together.env_key(), Some("TOGETHER_API_KEY"));
-        assert_eq!(Provider::OpenAiCompatible.env_key(), None);
+        // API keys: cloud providers require one; Ollama and the openai-compatible
+        // escape hatch do not.
+        assert!(Provider::Xai.requires_key());
+        assert!(Provider::Mistral.requires_key());
+        assert!(Provider::OpenRouter.requires_key());
+        assert!(Provider::Perplexity.requires_key());
+        assert!(Provider::Together.requires_key());
+        assert!(!Provider::OpenAiCompatible.requires_key());
 
         // Defaults: fast, low-cost models; the routers have none by design.
         assert_eq!(Provider::Xai.default_model(), "grok-4.3");
@@ -816,7 +819,7 @@ mod tests {
         assert!(Provider::OpenAiCompatible.default_model().is_empty());
 
         // Base URL: built-in endpoints for the five; required for the escape
-        // hatch (LLM_BASE_URL / config `base_url`).
+        // hatch (config `base_url`).
         assert_eq!(
             Provider::Xai.base_url_requirement(),
             BaseUrlRequirement::None
@@ -852,27 +855,6 @@ mod tests {
         assert!(Provider::OpenAiCompatible.models().is_empty());
     }
 
-    /// AIC-12: `aic list` and the setup flow resolve keys through the registry
-    /// — every cloud provider must map to a distinct env var so two providers
-    /// never read the same key.
-    #[test]
-    fn cloud_provider_env_keys_are_distinct() {
-        let keys: Vec<Option<&'static str>> = ALL_PROVIDERS
-            .iter()
-            .filter(|p| {
-                matches!(
-                    p.base_url_requirement(),
-                    BaseUrlRequirement::None | BaseUrlRequirement::Optional(_)
-                )
-            })
-            .map(|p| p.env_key())
-            .collect();
-        let mut seen = std::collections::HashSet::new();
-        for key in keys.into_iter().flatten() {
-            assert!(seen.insert(key), "duplicate env key {key}");
-        }
-    }
-
     #[test]
     fn routers_have_no_default_model() {
         // OpenRouter and the OpenAI-compatible escape hatch require an explicit model.
@@ -897,12 +879,11 @@ mod tests {
     }
 
     #[test]
-    fn ollama_has_no_env_key_but_cloud_providers_do() {
-        assert_eq!(Provider::Ollama.env_key(), None);
-        assert_eq!(Provider::OpenAiCompatible.env_key(), None);
-        assert!(Provider::OpenAI.env_key().is_some());
-        assert!(Provider::Xai.env_key().is_some());
-        assert_eq!(Provider::Xai.env_key(), Some("XAI_API_KEY"));
+    fn ollama_and_openai_compatible_do_not_require_keys() {
+        assert!(!Provider::Ollama.requires_key());
+        assert!(!Provider::OpenAiCompatible.requires_key());
+        assert!(Provider::OpenAI.requires_key());
+        assert!(Provider::Xai.requires_key());
     }
 
     /// [`classify_retry`] is the boundary mapping every retry seam relies on:
