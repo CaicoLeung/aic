@@ -30,9 +30,7 @@ pub fn run_setup() -> Result<()> {
         eprintln!(
             "  • write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit), or"
         );
-        eprintln!(
-            "  • set environment variables: LLM_BACKEND, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL"
-        );
+        eprintln!("  • run `aic setup` in a TTY, or edit the config file directly");
         anyhow::bail!("cannot run interactive setup without a TTY");
     }
 
@@ -160,7 +158,7 @@ fn wizard() -> Result<Option<Config>> {
 }
 
 fn key_applies(p: Provider) -> bool {
-    p.env_key().is_some() || p == Provider::OpenAiCompatible
+    p.requires_key() || p == Provider::OpenAiCompatible
 }
 
 fn base_url_applies(p: Provider) -> bool {
@@ -267,39 +265,30 @@ enum ProviderEntry {
     Done,
 }
 
-/// `API key` sub-menu row: the masked effective key, annotated with its
-/// source so an environment-provided key doesn't read as unset.
-fn api_key_label(key: &str, source: Source) -> String {
+/// `API key` sub-menu row: the masked effective key.
+fn api_key_label(key: &str) -> String {
     if key.is_empty() {
         return "(not set)".to_string();
     }
-    match source {
-        Source::Env => format!("{} (env)", mask_key(key)),
-        _ => mask_key(key),
-    }
+    mask_key(key)
 }
 
-/// `Base URL` sub-menu row: the effective URL (env > config > provider
-/// default), annotated with its source.
+/// `Base URL` sub-menu row: the effective URL (config > provider default),
+/// annotated with its source.
 fn base_url_label(url: Option<&str>, source: Source) -> String {
     match (url, source) {
-        (Some(u), Source::Env) => format!("{u} (env)"),
         (Some(u), Source::Default) => format!("{u} (default)"),
         (Some(u), _) => u.to_string(),
         (None, _) => "(not set)".to_string(),
     }
 }
 
-/// `Model` sub-menu row: the effective model (env > config > provider
-/// default), annotated with its source when not from config.
-fn model_label(model: &str, source: Source) -> String {
+/// `Model` sub-menu row: the effective model (config > provider default).
+fn model_label(model: &str) -> String {
     if model.is_empty() {
         return "(not set)".to_string();
     }
-    match source {
-        Source::Env => format!("{model} (env)"),
-        _ => model.to_string(),
-    }
+    model.to_string()
 }
 
 /// The AI-provider sub-menu: one entry per applicable field (based on the
@@ -313,17 +302,11 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
         match step {
             Step::Provider => {} // chosen before this menu
             Step::ApiKey => {
-                // Effective key for display: an env var wins (matching
-                // `LLM::from_env`), then the draft (a user edit or the seeded
-                // config value). The draft is passed as the config slot so a
-                // stale config value never masks a valid env var (AIC-24).
-                let (key, source) =
-                    resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()), &p);
+                // Effective key for display: the draft (a user edit or the
+                // seeded config value). aic reads only the config file.
+                let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
                 entries.push(ProviderEntry::ApiKey);
-                labels.push(format!(
-                    "{ICON_API_KEY} API key — {}",
-                    api_key_label(&key, source)
-                ));
+                labels.push(format!("{ICON_API_KEY} API key — {}", api_key_label(&key)));
             }
             Step::BaseUrl => {
                 let (url, source) =
@@ -335,16 +318,12 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
                 ));
             }
             Step::Model => {
-                let (model, source) = resolve_field(
-                    "LLM_MODEL",
+                let (model, _) = resolve_field(
                     draft.model.as_deref().filter(|m| !m.is_empty()),
                     p.default_model(),
                 );
                 entries.push(ProviderEntry::Model);
-                labels.push(format!(
-                    "{ICON_MODEL} Model — {}",
-                    model_label(&model, source)
-                ));
+                labels.push(format!("{ICON_MODEL} Model — {}", model_label(&model)));
             }
         }
     }
@@ -504,17 +483,12 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
 
 fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
-    // Effective key for editing: an env var wins (matching `LLM::from_env`),
-    // then the draft (a user edit or the seeded config value). Passing the
-    // draft as the config slot means a stale config value never masks a valid
-    // env var (AIC-24).
-    let (key, _) = resolve_api_key(
-        draft.api_key.as_deref().filter(|k| !k.is_empty()),
-        &provider,
-    );
-    match provider.env_key() {
+    // Effective key for editing: the draft (a user edit or the seeded config
+    // value). aic reads only the config file.
+    let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
+    match provider.requires_key() {
         // Cloud provider — key required.
-        Some(_) => {
+        true => {
             if !key.is_empty() {
                 // A key already exists (config or env): keep or replace it — a
                 // choice, so offer an option list instead of a typed prompt.
@@ -570,7 +544,7 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             }
         }
         // OpenAI-compatible — key optional (keyless servers allowed).
-        None if provider == Provider::OpenAiCompatible => {
+        false if provider == Provider::OpenAiCompatible => {
             let has_key = !key.is_empty();
             let items: Vec<String> = if has_key {
                 vec![
@@ -612,7 +586,7 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             }
         }
         // Ollama — unreachable (step skipped via key_applies); defensive.
-        None => {
+        false => {
             draft.api_key = None;
             Ok(Nav::Next)
         }
@@ -655,7 +629,7 @@ fn step_base_url(
                 draft.base_url.as_deref().filter(|u| !u.is_empty()),
                 &provider,
             );
-            let has_url = matches!(source, Source::Env | Source::Config);
+            let has_url = matches!(source, Source::Config);
             let current = effective.as_deref().unwrap_or(default);
             let items: Vec<String> = if has_url {
                 vec![
@@ -782,13 +756,12 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
 }
 
 /// The Verify item (AIC-23): make a minimal sample request against the
-/// selected provider using the **effective** config — the same env > config >
-/// default precedence `LLM::from_env` uses at runtime, with an in-session
-/// draft edit standing in for the config value — i.e. exactly the values the
-/// sub-menu rows show. Success or the underlying provider error (auth, rate limit,
-/// network, unknown model) is reported on a dedicated screen, then the wizard
-/// returns to the sub-menu. Never auto-advances: Verify is a probe, not a
-/// field edit.
+/// selected provider using the **effective** config — config > default, with
+/// an in-session draft edit standing in for the config value — i.e. exactly
+/// the values the sub-menu rows show. Success or the underlying provider
+/// error (auth, rate limit, network, unknown model) is reported on a dedicated
+/// screen, then the wizard returns to the sub-menu. Never auto-advances:
+/// Verify is a probe, not a field edit.
 ///
 /// The sample call runs on a dedicated current-thread Tokio runtime. `aic
 /// setup` is dispatched from `#[tokio::main]`, so the wizard is already
@@ -797,17 +770,11 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
 /// without panicking.
 fn step_verify(draft: &Draft) -> Result<Nav> {
     let p = draft.provider.unwrap_or(Provider::OpenAI);
-    // Effective values mirror `LLM::from_env` exactly: an env var wins, then
-    // the draft (a user edit or the seeded config value), then the default.
-    // The draft is passed as the config slot of each `resolve_*` so a stale
-    // config value never masks a valid env var — AIC-24. Previously this
-    // short-circuited on `Some(draft)` and probed the on-disk config key even
-    // when an env override was the one `aic` actually used at runtime,
-    // reporting a spurious 401.
-    let api_key = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()), &p).0;
+    // Effective values: the draft (a user edit or the seeded config value),
+    // then the default. aic reads only the config file.
+    let api_key = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty())).0;
     let base_url = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p).0;
     let model = resolve_field(
-        "LLM_MODEL",
         draft.model.as_deref().filter(|m| !m.is_empty()),
         p.default_model(),
     )
@@ -963,13 +930,6 @@ fn mask_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serializes tests that mutate shared env vars (`LLM_API_KEY`,
-    /// `DEEPSEEK_API_KEY`, `LLM_MODEL`) so they cannot race under cargo's
-    /// parallel test runner. Take the guard at the start of any env-touching
-    /// test.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn cfg(
         backend: &str,
@@ -1116,24 +1076,18 @@ mod tests {
 
     #[test]
     fn submenu_labels_reflect_value_and_source() {
-        // API key: masked, annotated when env-sourced, (not set) when empty.
-        assert_eq!(api_key_label("sk-123", Source::Config), "••••••");
-        assert_eq!(api_key_label("sk-123", Source::Env), "•••••• (env)");
-        assert_eq!(api_key_label("", Source::Default), "(not set)");
+        // API key: masked, (not set) when empty.
+        assert_eq!(api_key_label("sk-123"), "••••••");
+        assert_eq!(api_key_label(""), "(not set)");
 
-        // Model: value, annotated when env-sourced, (not set) when empty.
-        assert_eq!(model_label("gpt-5", Source::Config), "gpt-5");
-        assert_eq!(model_label("gpt-5", Source::Env), "gpt-5 (env)");
-        assert_eq!(model_label("", Source::Default), "(not set)");
+        // Model: value, (not set) when empty.
+        assert_eq!(model_label("gpt-5"), "gpt-5");
+        assert_eq!(model_label(""), "(not set)");
 
         // Base URL: value, annotated by source, (not set) when none.
         assert_eq!(
             base_url_label(Some("http://h:1"), Source::Config),
             "http://h:1"
-        );
-        assert_eq!(
-            base_url_label(Some("http://h:1"), Source::Env),
-            "http://h:1 (env)"
         );
         assert_eq!(
             base_url_label(Some("http://localhost:11434"), Source::Default),
@@ -1187,65 +1141,32 @@ mod tests {
 
     #[test]
     fn submenu_labels_show_effective_value() {
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        // No env override: the in-session draft (a user choice or a seeded
-        // config value) is the effective value and is shown as-is —
-        // re-entering setup must not read as if the choice was lost (AIC-15).
-        temp_env::with_vars(
-            [
-                ("LLM_API_KEY", None::<&str>),
-                ("DEEPSEEK_API_KEY", None::<&str>),
-                ("LLM_MODEL", None::<&str>),
-            ],
-            || {
-                let d = draft(
-                    Some(Provider::DeepSeek),
-                    Some("sk-123"),
-                    Some("deepseek-v4-pro"),
-                    None,
-                );
-                let (entries, labels) = provider_submenu_items(&d);
-                assert_eq!(
-                    entries,
-                    vec![
-                        ProviderEntry::ApiKey,
-                        ProviderEntry::Model,
-                        ProviderEntry::Verify,
-                        ProviderEntry::Done
-                    ]
-                );
-                assert_eq!(labels[0], "🔑 API key — ••••••");
-                assert_eq!(labels[1], "🧠 Model — deepseek-v4-pro");
-                assert_eq!(
-                    labels[2],
-                    "🔌 Verify — test this provider with a sample request"
-                );
-                assert_eq!(labels[3], "↩️ Done — back to main menu");
-            },
+        // The in-session draft (a user choice or a seeded config value) is the
+        // effective value and is shown as-is — re-entering setup must not read
+        // as if the choice was lost (AIC-15).
+        let d = draft(
+            Some(Provider::DeepSeek),
+            Some("sk-123"),
+            Some("deepseek-v4-pro"),
+            None,
         );
-
-        // AIC-24: when an env override is present it wins over the (possibly
-        // stale) draft/config value, matching `LLM::from_env` — so the menu
-        // never shows a key or model the runtime would not actually use.
-        temp_env::with_vars(
-            [
-                ("LLM_API_KEY", None::<&str>),
-                ("DEEPSEEK_API_KEY", Some("sk-env-override")),
-                ("LLM_MODEL", Some("deepseek-v4-flash")),
-            ],
-            || {
-                let d = draft(
-                    Some(Provider::DeepSeek),
-                    Some("sk-stale-config"),
-                    Some("deepseek-v4-pro"),
-                    None,
-                );
-                let (_entries, labels) = provider_submenu_items(&d);
-                assert_eq!(labels[0], "🔑 API key — •••••••••••• (env)");
-                assert_eq!(labels[1], "🧠 Model — deepseek-v4-flash (env)");
-            },
+        let (entries, labels) = provider_submenu_items(&d);
+        assert_eq!(
+            entries,
+            vec![
+                ProviderEntry::ApiKey,
+                ProviderEntry::Model,
+                ProviderEntry::Verify,
+                ProviderEntry::Done
+            ]
         );
+        assert_eq!(labels[0], "🔑 API key — ••••••");
+        assert_eq!(labels[1], "🧠 Model — deepseek-v4-pro");
+        assert_eq!(
+            labels[2],
+            "🔌 Verify — test this provider with a sample request"
+        );
+        assert_eq!(labels[3], "↩️ Done — back to main menu");
     }
 
     #[test]
@@ -1395,42 +1316,15 @@ mod tests {
     }
 
     #[test]
-    fn env_var_beats_config_seeded_draft_value() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // AIC-24 regression: when both an env var and a (config-seeded) draft
-        // value exist, the env var must win — exactly what `LLM::from_env`
-        // does at runtime. Before the fix the wizard's resolution
-        // short-circuited on `Some(draft)` and probed/displayed the stale
-        // config key, so Verify reported a spurious 401 even though real
-        // commits (which let env win) worked fine. The fix passes the draft
-        // value as the config slot to `resolve_*`, so env precedence is never
-        // bypassed.
-        temp_env::with_vars(
-            [
-                ("LLM_API_KEY", None::<&str>),
-                ("DEEPSEEK_API_KEY", Some("sk-valid-env")),
-            ],
-            || {
-                // `Some("sk-stale-config")` simulates `seed_draft` pulling a
-                // stale key out of the config file into the draft.
-                let (key, source) = resolve_api_key(Some("sk-stale-config"), &Provider::DeepSeek);
-                assert_eq!(key, "sk-valid-env");
-                assert_eq!(source, Source::Env);
-            },
-        );
-
-        // Without the env override, the draft (config) value is used as-is.
-        temp_env::with_vars(
-            [
-                ("LLM_API_KEY", None::<&str>),
-                ("DEEPSEEK_API_KEY", None::<&str>),
-            ],
-            || {
-                let (key, source) = resolve_api_key(Some("sk-config"), &Provider::DeepSeek);
-                assert_eq!(key, "sk-config");
-                assert_eq!(source, Source::Config);
-            },
-        );
+    fn resolve_api_key_uses_config_value() {
+        // aic reads only the config file: the config value is used as-is.
+        let (key, source) = resolve_api_key(Some("sk-config"));
+        assert_eq!(key, "sk-config");
+        assert_eq!(source, Source::Config);
+        // No config value -> empty, default source.
+        let (key, source) = resolve_api_key(None);
+        assert_eq!(key, "");
+        assert_eq!(source, Source::Default);
     }
 
     #[test]

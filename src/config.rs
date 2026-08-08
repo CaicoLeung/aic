@@ -11,7 +11,6 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -72,7 +71,6 @@ impl Config {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Source {
-    Env,
     Config,
     Default,
 }
@@ -80,7 +78,6 @@ pub enum Source {
 impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Source::Env => write!(f, "env"),
             Source::Config => write!(f, "config"),
             Source::Default => write!(f, "default"),
         }
@@ -108,15 +105,13 @@ impl ResolvedConfig {
             confirm_before_commit: None,
         });
 
-        let (backend, backend_source) =
-            resolve_field("LLM_BACKEND", cfg.backend.as_deref(), DEFAULT_PROVIDER);
+        let (backend, backend_source) = resolve_field(cfg.backend.as_deref(), DEFAULT_PROVIDER);
 
         let provider = Provider::from_name(&backend);
 
-        let (api_key, api_key_source) = resolve_api_key(cfg.api_key.as_deref(), &provider);
+        let (api_key, api_key_source) = resolve_api_key(cfg.api_key.as_deref());
 
-        let (model, model_source) =
-            resolve_field("LLM_MODEL", cfg.model.as_deref(), provider.default_model());
+        let (model, model_source) = resolve_field(cfg.model.as_deref(), provider.default_model());
 
         let (base_url, base_url_source) = resolve_base_url(cfg.base_url.as_deref(), &provider);
 
@@ -141,13 +136,13 @@ impl ResolvedConfig {
             && self.base_url.is_none()
         {
             anyhow::bail!(
-                "provider '{}' requires a base URL — set LLM_BASE_URL or `base_url` in config",
+                "provider '{}' requires a base URL — set `base_url` in config (run `aic setup`)",
                 provider.name()
             );
         }
         if self.model.trim().is_empty() {
             anyhow::bail!(
-                "provider '{}' has no default model — set LLM_MODEL or `model` in config",
+                "provider '{}' has no default model — set `model` in config (run `aic setup`)",
                 provider.name()
             );
         }
@@ -166,50 +161,35 @@ impl ResolvedConfig {
     }
 }
 
-/// Resolve one scalar field by precedence: env var > config file > default.
-/// `pub(crate)` so the setup wizard can show the effective value/source of a
-/// field the user has not edited yet (env- or default-sourced).
-pub(crate) fn resolve_field(
-    env_var: &str,
-    config_value: Option<&str>,
-    default: &str,
-) -> (String, Source) {
-    if let Ok(v) = env::var(env_var) {
-        return (v, Source::Env);
-    }
+/// Resolve one scalar field by precedence: config file > default. aic reads
+/// only the config file — environment variables are intentionally NOT
+/// consulted, so `aic setup` is the single source of truth. `pub(crate)` so
+/// the setup wizard can show the effective value/source of a field the user
+/// has not edited yet (config- or default-sourced).
+pub(crate) fn resolve_field(config_value: Option<&str>, default: &str) -> (String, Source) {
     if let Some(v) = config_value {
         return (v.to_string(), Source::Config);
     }
     (default.to_string(), Source::Default)
 }
 
-/// Resolve the API key by precedence: `LLM_API_KEY` > the provider's own env
-/// var > config file > none. `pub(crate)` for the same setup-wizard reason as
-/// [`resolve_field`].
-pub(crate) fn resolve_api_key(config_value: Option<&str>, provider: &Provider) -> (String, Source) {
-    if let Ok(v) = env::var("LLM_API_KEY") {
-        return (v, Source::Env);
-    }
-    if let Some(key) = provider.env_key()
-        && let Ok(v) = env::var(key)
-    {
-        return (v, Source::Env);
-    }
+/// Resolve the API key by precedence: config file > none. Environment
+/// variables are not consulted (the config file is the single source of
+/// truth). `pub(crate)` for the same setup-wizard reason as [`resolve_field`].
+pub(crate) fn resolve_api_key(config_value: Option<&str>) -> (String, Source) {
     if let Some(v) = config_value {
         return (v.to_string(), Source::Config);
     }
     (String::new(), Source::Default)
 }
 
-/// Resolve the base URL by precedence: `LLM_BASE_URL` > config file > provider
-/// default. `pub(crate)` for the same setup-wizard reason as [`resolve_field`].
+/// Resolve the base URL by precedence: config file > provider default.
+/// Environment variables are not consulted. `pub(crate)` for the same
+/// setup-wizard reason as [`resolve_field`].
 pub(crate) fn resolve_base_url(
     config_value: Option<&str>,
     provider: &Provider,
 ) -> (Option<String>, Source) {
-    if let Ok(v) = env::var("LLM_BASE_URL") {
-        return (Some(v), Source::Env);
-    }
     if let Some(v) = config_value {
         return (Some(v.to_string()), Source::Config);
     }
@@ -278,27 +258,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_field_precedence_env_over_config_over_default() {
+    fn resolve_field_config_over_default() {
         // Default when nothing is set.
-        let (v, s) = resolve_field("AIC_TEST_NOPE_FIELD", None, "def");
+        let (v, s) = resolve_field(None, "def");
         assert_eq!(v, "def");
         assert_eq!(s, Source::Default);
 
         // Config value beats default.
-        let (v, s) = resolve_field("AIC_TEST_NOPE_FIELD", Some("from-cfg"), "def");
+        let (v, s) = resolve_field(Some("from-cfg"), "def");
         assert_eq!(v, "from-cfg");
         assert_eq!(s, Source::Config);
-    }
-
-    #[test]
-    fn resolve_field_env_wins() {
-        // Env var beats both config and default. Clean and re-set to avoid
-        // interference between assertions within the same process.
-        temp_env::with_var("AIC_TEST_RESOLVE_FIELD", Some("from-env"), || {
-            let (v, s) = resolve_field("AIC_TEST_RESOLVE_FIELD", Some("from-cfg"), "def");
-            assert_eq!(v, "from-env");
-            assert_eq!(s, Source::Env);
-        });
     }
 
     #[test]
