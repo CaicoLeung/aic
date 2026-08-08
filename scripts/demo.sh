@@ -54,7 +54,14 @@ trap cleanup EXIT
 
 # --- helpers -----------------------------------------------------------------
 
-log()  { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
+# Narrate to stderr. Style the `==>` marker bold ONLY when stderr is a TTY so
+# that captured / piped / CI-log output never shows raw ^[[ escape garbage —
+# plain `==>` otherwise. `note()` is always plain (a sub-bullet under a log()).
+if [[ -t 2 ]]; then
+  log()  { printf '\033[1m==>\033[0m %s\n' "$*" >&2; }
+else
+  log()  { printf '==> %s\n' "$*" >&2; }
+fi
 note() { printf '    %s\n' "$*" >&2; }
 
 # Base state of src/main.rs (matches examples/sample-repo/src/main.rs).
