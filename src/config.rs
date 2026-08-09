@@ -722,64 +722,40 @@ mod tests {
         );
     }
 
-    /// `CliConfig::to_spec` infers the stdout [`Encoding`] from the argv
-    /// template — the single source of truth shared with `aic setup` verify,
-    /// so a config written by the claude preset (carrying
-    /// `--output-format stream-json`) routes stdout through the NDJSON decoder.
+    /// `CliConfig::to_spec` reads the stdout [`Encoding`] from the explicit
+    /// `encoding` field (stated by `aic setup` from the preset) — never
+    /// re-derived from `args`. Absent ⇒ `Encoding::Plain` (the documented
+    /// "custom commands run plain" contract).
     #[test]
-    fn cli_spec_infers_encoding_from_args() {
+    fn cli_spec_uses_explicit_encoding_field() {
         use crate::cli_agent::Encoding;
-        // claude preset argv → stream-json decoder.
+        // A preset-written config states its encoding; to_spec uses it as-is,
+        // regardless of the argv.
         let claude = CliConfig {
             command: Some("claude".into()),
-            args: Some(vec![
-                "-p".into(),
-                "{prompt}".into(),
-                "--output-format".into(),
-                "stream-json".into(),
-                "--include-partial-messages".into(),
-            ]),
+            args: Some(vec!["-p".into(), "{prompt}".into()]),
+            encoding: Some(Encoding::ClaudeStreamJson),
             ..Default::default()
         };
         assert_eq!(claude.to_spec().encoding, Encoding::ClaudeStreamJson);
 
-        // pi `--mode json` → pi decoder.
-        let pi = CliConfig {
-            command: Some("pi".into()),
+        // The argv no longer selects encoding: a codex argv with no encoding
+        // field yields Plain (the field is authoritative, the flags are not).
+        let codex_argv_no_field = CliConfig {
+            command: Some("codex".into()),
             args: Some(vec![
-                "--no-tools".into(),
-                "--mode".into(),
-                "json".into(),
-                "-p".into(),
+                "exec".into(),
+                "--json".into(),
+                "-s".into(),
+                "read-only".into(),
                 "{prompt}".into(),
             ]),
             ..Default::default()
         };
-        assert_eq!(pi.to_spec().encoding, Encoding::PiStreamJson);
+        assert_eq!(codex_argv_no_field.to_spec().encoding, Encoding::Plain);
 
-        // opencode `--format json` → opencode decoder.
-        let oc = CliConfig {
-            command: Some("opencode".into()),
-            args: Some(vec![
-                "run".into(),
-                "--format".into(),
-                "json".into(),
-                "{prompt}".into(),
-            ]),
-            ..Default::default()
-        };
-        assert_eq!(oc.to_spec().encoding, Encoding::OpenCodeJson);
-
-        // Plain argv (pre-streaming claude, codex, or any custom non-streaming
-        // command) → plain: stdout is the answer verbatim, no decoder.
-        let plain = CliConfig {
-            command: Some("claude".into()),
-            args: Some(vec!["-p".into(), "{prompt}".into()]),
-            ..Default::default()
-        };
-        assert_eq!(plain.to_spec().encoding, Encoding::Plain);
-
-        // Defaults: no args → `["{prompt}"]`; no timeout → 240s.
+        // Defaults: no args → `["{prompt}"]`; no timeout → 240s; no encoding
+        // → Plain.
         let defaulted = CliConfig {
             command: Some("my-agent".into()),
             ..Default::default()
@@ -787,6 +763,7 @@ mod tests {
         let spec = defaulted.to_spec();
         assert_eq!(spec.args, vec![crate::cli_agent::PROMPT_PLACEHOLDER]);
         assert_eq!(spec.timeout_secs, crate::cli_agent::DEFAULT_TIMEOUT_SECS);
+        assert_eq!(spec.encoding, Encoding::Plain);
     }
 
     #[test]
