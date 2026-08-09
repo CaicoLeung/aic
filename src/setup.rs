@@ -15,7 +15,7 @@ use console::Term;
 use std::io::{self, IsTerminal};
 use std::time::Duration;
 
-use crate::cli_agent::{DEFAULT_TIMEOUT_SECS, PRESETS, PROMPT_PLACEHOLDER, cli_preset};
+use crate::cli_agent::{PRESETS, cli_preset};
 use crate::config::{
     BackendKind, Config, Source, config_path, resolve_api_key, resolve_base_url, resolve_field,
 };
@@ -635,10 +635,14 @@ fn smoke_check(program: &str) -> String {
     }
 }
 
-/// Configure the CLI-agent backend: pick a preset (claude/codex/pi) or enter a
-/// custom command + args template. The other Backend's fields are kept dormant
-/// by [`finalize`], so configuring a CLI here does not wipe an API-provider
-/// config. Returns `true` only on Ctrl-C (cancel setup).
+/// Configure the CLI-agent backend: pick a preset (claude/codex/pi/opencode).
+/// Custom commands are intentionally not offered — every streaming backend
+/// needs a dedicated decoder for its stdout envelope (claude `stream-json`,
+/// pi `--mode json`, opencode `--format json`), and a free-form command has
+/// none, so it would silently run in plain-text mode with no reasoning feed
+/// and no clean answer extraction. The other Backend's fields are kept
+/// dormant by [`finalize`], so configuring a CLI here does not wipe an
+/// API-provider config. Returns `true` only on Ctrl-C (cancel setup).
 fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
     loop {
         show_screen()?;
@@ -656,12 +660,6 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
                     draft.cli_timeout_secs = Some(spec.timeout_secs);
                     pause_done()?;
                     return Ok(false);
-                }
-                Some(CliRow::Custom) => {
-                    if step_custom_cli(draft)? == Nav::Cancel {
-                        return Ok(true);
-                    }
-                    continue;
                 }
                 Some(CliRow::Verify) => {
                     if step_verify_cli(draft)? == Nav::Cancel {
@@ -689,8 +687,6 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
 enum CliRow {
     /// A named preset (an entry of [`PRESETS`]).
     Preset(&'static str),
-    /// Enter a custom command + args template + timeout.
-    Custom,
     /// Probe install + auth now — only present when a command is set.
     Verify,
     /// Return to the main menu.
@@ -705,7 +701,6 @@ impl CliRow {
                 let spec = cli_preset(name).unwrap();
                 format!("{name} — `{} {}`", spec.command, spec.args.join(" "))
             }
-            CliRow::Custom => "Custom command…".to_string(),
             CliRow::Verify => "Verify (probe the CLI now)".to_string(),
             CliRow::Done => "↩️ Done — back to main menu".to_string(),
         }
@@ -717,67 +712,11 @@ impl CliRow {
 /// deliberately absent — every row is an actionable [`CliRow`].
 fn cli_menu_rows(command_set: bool) -> Vec<CliRow> {
     let mut rows: Vec<CliRow> = PRESETS.iter().copied().map(CliRow::Preset).collect();
-    rows.push(CliRow::Custom);
     if command_set {
         rows.push(CliRow::Verify);
     }
     rows.push(CliRow::Done);
     rows
-}
-
-/// Enter a custom command + args template + timeout. Args defaults to the
-/// `{prompt}` placeholder; an empty submit keeps the existing value.
-fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
-    show_screen()?;
-    let initial_cmd = draft.cli_command.as_deref().unwrap_or("");
-    let command = match prompt_text(
-        "Command (e.g. claude, codex, pi)",
-        if initial_cmd.is_empty() {
-            None
-        } else {
-            Some(initial_cmd)
-        },
-        false,
-        "command is required",
-    )? {
-        TextAct::Value(v) => v.trim().to_string(),
-        TextAct::Back => return Ok(Nav::Back),
-        TextAct::Cancel => return Ok(Nav::Cancel),
-    };
-    let initial_args = draft
-        .cli_args
-        .as_ref()
-        .map(|a| a.join(" "))
-        .unwrap_or_else(|| PROMPT_PLACEHOLDER.to_string());
-    let args_str = match prompt_text(
-        &format!("Args template (space-separated, use {PROMPT_PLACEHOLDER} for the prompt)"),
-        Some(&initial_args),
-        true,
-        "",
-    )? {
-        TextAct::Value(v) if v.trim().is_empty() => initial_args.clone(),
-        TextAct::Value(v) => v.trim().to_string(),
-        TextAct::Back => return Ok(Nav::Back),
-        TextAct::Cancel => return Ok(Nav::Cancel),
-    };
-    let args: Vec<String> = split_args(&args_str);
-    let initial_to = draft
-        .cli_timeout_secs
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| DEFAULT_TIMEOUT_SECS.to_string());
-    let to_str = match prompt_text("Timeout in seconds", Some(&initial_to), true, "")? {
-        TextAct::Value(v) if v.trim().is_empty() => initial_to.clone(),
-        TextAct::Value(v) => v.trim().to_string(),
-        TextAct::Back => return Ok(Nav::Back),
-        TextAct::Cancel => return Ok(Nav::Cancel),
-    };
-    let timeout_secs = to_str.trim().parse::<u64>().unwrap_or(DEFAULT_TIMEOUT_SECS);
-    println!("\n{}", smoke_check(&command));
-    draft.cli_command = Some(command);
-    draft.cli_args = Some(args);
-    draft.cli_timeout_secs = Some(timeout_secs);
-    pause_done()?;
-    Ok(Nav::Next)
 }
 
 /// Wait for Enter so a smoke-check / status message stays visible before the
@@ -788,16 +727,6 @@ fn pause_done() -> Result<()> {
     let mut line = String::new();
     let _ = std::io::stdin().lock().read_line(&mut line);
     Ok(())
-}
-
-/// Whitespace-only splitter for the custom-CLI args template. This is **not**
-/// shell parsing: quotes are not honored and multi-word values cannot be
-/// expressed as a single argument. Use it only for simple flags where each
-/// whitespace-delimited token is one argv element, and let `{prompt}` carry
-/// the full prompt as one arg anyway. (Avoids pulling in a shell-parsing crate
-/// for a handful of simple tokens.)
-fn split_args(s: &str) -> Vec<String> {
-    s.split_whitespace().map(String::from).collect()
 }
 
 fn finalize(draft: Draft) -> Config {
@@ -1926,7 +1855,10 @@ mod tests {
         // Regression: the CLI-agent menu once had a "Choose a preset:" *label*
         // as row 0 with no action — selecting it panicked the TUI. Now every
         // row is an actionable CliRow paired with its label, so there is no
-        // separate index to leave unmapped.
+        // separate index to leave unmapped. There is also no "Custom command…"
+        // row: a free-form command has no decoder for its stdout envelope, so
+        // it would silently run in plain-text mode — only the four presets
+        // (each with a dedicated decoder) are offered.
         for command_set in [false, true] {
             let rows = cli_menu_rows(command_set);
             // Row 0 must be a real preset, never a bare label.
@@ -1934,15 +1866,12 @@ mod tests {
                 matches!(rows.first(), Some(CliRow::Preset(_))),
                 "row 0 must be an actionable preset, not a header (command_set={command_set})"
             );
-            // Presets lead, then Custom, then (only when set) Verify, then
-            // Done — every expected variant present, nothing extra.
-            assert_eq!(
-                rows.len(),
-                PRESETS.len() + 1 + usize::from(command_set) + 1
-            );
-            assert!(rows.contains(&CliRow::Custom));
-            assert!(rows.contains(&CliRow::Done));
+            // Presets lead, then (only when set) Verify, then Done — every
+            // expected variant present, nothing extra, and no Custom row.
+            assert_eq!(rows.len(), PRESETS.len() + usize::from(command_set) + 1);
+            assert!(!rows.contains(&CliRow::Verify) || command_set);
             assert_eq!(rows.contains(&CliRow::Verify), command_set);
+            assert!(rows.contains(&CliRow::Done));
             // Done is always last.
             assert!(matches!(rows.last(), Some(CliRow::Done)));
         }
