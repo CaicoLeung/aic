@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::llm::LLM;
+use crate::llm::LlmConfig;
 use crate::prompt::PromptConfig;
 
 pub struct Generator {}
@@ -115,7 +115,10 @@ pub fn validate_batch_plan(
 impl Generator {
     pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
         let p = PromptConfig::default().git_message;
-        LLM::load()?.agent(&p).schema::<CommitOutput>(diff).await
+        LlmConfig::load()?
+            .agent(&p)
+            .schema::<CommitOutput>(diff)
+            .await
     }
 
     /// Split the workdir diff into logical commit batches, streaming the
@@ -125,10 +128,10 @@ impl Generator {
     /// single typed call.
     pub async fn split_patch_streaming(
         diff: &str,
-        on_reasoning: impl FnMut(&str),
+        on_reasoning: impl FnMut(&str) + Send,
     ) -> anyhow::Result<BatchPlanOutput> {
         let p = PromptConfig::default().batch_plan_prompt;
-        LLM::load()?
+        LlmConfig::load()?
             .agent(&p)
             .stream_typed_with_reasoning::<BatchPlanOutput>(diff, on_reasoning)
             .await
@@ -140,7 +143,7 @@ impl Generator {
     /// markdown code fence around the output is stripped (ADR 0005).
     pub async fn resolve_conflict(file_content: &str) -> anyhow::Result<String> {
         let p = PromptConfig::default().resolve_prompt;
-        let raw = LLM::load()?.agent(&p).call(file_content).await?;
+        let raw = LlmConfig::load()?.agent(&p).call(file_content).await?;
         Ok(crate::llm::strip_code_fence(&raw).to_string())
     }
 }

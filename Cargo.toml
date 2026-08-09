@@ -18,6 +18,7 @@ codegen-units = 1 # reduce codegen units to improve compile times
 
 [dependencies]
 anyhow = "1.0.102"
+async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
@@ -29,7 +30,7 @@ schemars = "1"
 similar = "3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
 toml = "1"
 # Archive features must cover BOTH release formats cargo-dist ships:
 #   unix-archive = ".tar.gz"  -> compression-tar-gz (archive-tar + flate2 + zipsign verify-tar)

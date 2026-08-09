@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Features
+
+- Explicit `backend_kind` config discriminator (`"api"` / `"cli"`) selecting the active backend, with strict validation — a mismatched `command`/`api_key` is a hard error, not a silent inference (ADR 0011). The setup wizard is mode-first on first run, shows a persistent active-backend banner, and radio-switches between backends with confirmation; each Run prints which backend it uses.
+
 ## [0.4.8] - 2026-08-08
 
 > 🎉 **0.4.8** — 5 changes · 1 contributor

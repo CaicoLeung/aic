@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod cli_agent;
 pub mod completion;
 pub mod config;
 pub mod confirm;
@@ -69,19 +70,129 @@ pub(crate) type CommitMessenger =
 /// instant has at most one blank row) and repaints only on a reasoning change,
 /// so the window is flicker-free. See [`progress::ReasoningRenderer`] for the
 /// redraw contract.
+///
+/// **Silent-backend fallback.** A backend that emits no reasoning deltas at
+/// all (a CLI agent in single-shot print mode, or an API cold start) would
+/// leave the renderer's first frame unpainted — a dead silent screen for the
+/// whole run. To avoid that, a loading frame
+/// ([`progress::ReasoningRenderer::paint_loading`]) is painted on a
+/// [`progress::SPINNER_TICK`] cadence between stream start and the first
+/// delta: a spinner + elapsed-seconds counter immediately, and after
+/// [`progress::LOADING_GRACE`] an explanatory notice that this CLI agent does
+/// not stream its thinking process. The first delta cancels loading and hands
+/// off to the normal reasoning window; both frames go through the same
+/// [`progress::ReasoningRenderer`] so the in-place repaint handles the height
+/// transition with no flicker. Reasoning deltas flow through an unbounded
+/// channel so the streaming future (which owns the [`progress::ThinkingView`]
+/// inside its callback closure) and the repaint loop never borrow-conflict —
+/// the future writes windows, the loop paints them.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    let mut view = progress::ThinkingView::new();
+    use std::time::Instant;
+
     let mut renderer = progress::ReasoningRenderer::new("Analyzing changes");
+    let start = Instant::now();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
 
-    let result = generator::Generator::split_patch_streaming(diff, |delta| {
-        let window = view.push(delta);
-        renderer.paint(&window);
-    })
-    .await;
+    // A streaming-capable backend (claude `stream-json`, pi `--mode json`)
+    // that has not yet produced reasoning is in a cold start — SessionStart
+    // hooks, MCP handshakes, and a network TTFT often total 6–10 s before
+    // the first `thinking_delta`. That is NOT "does not support streaming",
+    // so past [`progress::LOADING_GRACE`] its loading frame shows a
+    // cold-start notice rather than the non-streaming claim. Plain backends
+    // (and opencode/codex, whose reasoning arrives whole at completion) are
+    // the case the non-streaming notice was written for.
+    //
+    // The decision — "is this a streaming-capable cold start, and what name
+    // labels the notice" — is decided behind the Backend seam by
+    // [`LlmConfig::cold_start_program`], so this frame never branches on
+    // backend kind or encoding. `None` ⇒ not streaming-capable → the silent
+    // notice. Defaults to `None` on any config-read glitch (safer: never
+    // falsely claims a streaming capability).
+    let cold_start: Option<String> = crate::llm::LlmConfig::load()
+        .ok()
+        .and_then(|c| c.cold_start_program());
 
-    // Thinking is over: `finish` erases the reasoning block (in-place all
-    // along, so nothing ever hit the scrollback) and parks the cursor below
-    // it. The renderer's Drop is a backstop if the stream aborted first.
+    // The streaming future owns the `ThinkingView` inside its `on_reasoning`
+    // closure; windows are forwarded to the channel rather than rendered
+    // inline, so the repaint loop below holds the renderer with no overlapping
+    // borrow of the view. `tokio::pin!` lets us poll it across `select!`
+    // arms without re-creating it each iteration.
+    let fut = async {
+        let mut view = progress::ThinkingView::new();
+        generator::Generator::split_patch_streaming(diff, |delta| {
+            let window = view.push(delta);
+            // Channel send only fails if the receiver was dropped — which
+            // happens after `fut` completes, when pending windows no longer
+            // matter — so the error is silently swallowed.
+            let _ = tx.send(window);
+        })
+        .await
+    };
+    tokio::pin!(fut);
+
+    let mut got_output = false;
+    let mut last_window: Vec<String> = Vec::new();
+    let mut ticker = tokio::time::interval(progress::SPINNER_TICK);
+    // The interval's first tick fires immediately; we want the first painted
+    // frame to reflect a real (even if 0 s) elapsed, so the immediate tick is
+    // welcome — it gives sub-second feedback before any LLM round-trip.
+
+    let result = loop {
+        tokio::select! {
+            biased;
+            // Completion wins over everything: a fast backend never paints a
+            // loading frame at all.
+            res = &mut fut => {
+                break res;
+            }
+            // A reasoning delta or startup milestone hands the rolling window
+            // to the renderer and latches `got_output` so no later tick can
+            // repaint a loading frame over the feed. The same window is
+            // retained for the steady-tick repaint below.
+            window = rx.recv() => {
+                if let Some(window) = window {
+                    got_output = true;
+                    last_window = window.clone();
+                    renderer.paint(&window, Some(start.elapsed()));
+                }
+            }
+            // Steady tick — two roles by mode:
+            //  * Before the first line (genuinely silent backend, e.g. codex
+            //    plain): the loading frame keeps the screen alive — spinner +
+            //    elapsed, plus the silent/cold-start notice once past
+            //    [`LOADING_GRACE`].
+            //  * After the first line (startup milestones or reasoning are
+            //    flowing): repaint the retained window with a fresh elapsed so
+            //    the spinner keeps animating and the clock keeps rising while
+            //    the model is silent between deltas — e.g. claude's post-init
+            //    TTFT gap. The loading grace never trips in this mode, because
+            //    startup milestones arrive within ~1 s and each resets
+            //    `got_output`; the grace therefore measures only true
+            //    no-output-at-all backends, not cold starts.
+            _ = ticker.tick() => {
+                let elapsed = start.elapsed();
+                if !got_output {
+                    let notice = if elapsed >= progress::LOADING_GRACE {
+                        match &cold_start {
+                            Some(program) => {
+                                progress::LoadingNotice::ColdStart(program.clone())
+                            }
+                            None => progress::LoadingNotice::Silent,
+                        }
+                    } else {
+                        progress::LoadingNotice::None
+                    };
+                    renderer.paint_loading(elapsed, notice);
+                } else {
+                    renderer.paint(&last_window, Some(elapsed));
+                }
+            }
+        }
+    };
+
+    // Thinking is over: `finish` erases the reasoning/loading block (in-place
+    // all along, so nothing ever hit the scrollback) and parks the cursor
+    // below it. The renderer's Drop is a backstop if the stream aborted first.
     renderer.finish();
     result
 }
@@ -500,7 +611,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     );
     let git = Git::at(Path::new("."))?;
     // Absent/malformed config keeps the default (no confirmation) — same
-    // tolerance `LLM::load` uses for the provider fields.
+    // tolerance the provider-field resolution uses (config > default).
     let confirm_enabled = config::Config::load()
         .ok()
         .flatten()
@@ -531,6 +642,30 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
+
+    // One-time location migration (ADR 0012) — move a pre-0012 macOS config
+    // from `~/Library/Application Support/aic/` to the fixed `~/.config/aic/`
+    // location the docs have always claimed. Must run before preset migration
+    // so the file lands at its new path first. Idempotent: copy old → new then
+    // delete old; skip silently if the new file already exists; no-op when the
+    // paths coincide or the old file is absent. A notice prints only when a
+    // file is actually moved; a failure is logged, never blocks the run.
+    match config::Config::migrate_location() {
+        Ok(notices) => notices.iter().for_each(|n| eprintln!("aic: {n}")),
+        Err(e) => eprintln!("aic: config location migration skipped: {e:#}"),
+    }
+
+    // Auto-migrate a stale CLI-agent config to the current preset shape before
+    // any run that uses it — the fix for configs stranded on an older aic's
+    // preset (e.g. claude before `stream-json`). Idempotent and conservative:
+    // only configs byte-identical to a known legacy preset snapshot are
+    // rewritten; a custom command is never touched. Notices print to stderr so
+    // the file rewrite is transparent; a migration failure is logged but
+    // never blocks the run (the user can still `aic setup` to refresh).
+    match config::Config::migrate_if_stale() {
+        Ok(notices) => notices.iter().for_each(|n| eprintln!("aic: {n}")),
+        Err(e) => eprintln!("aic: config migration skipped: {e:#}"),
+    }
 
     match cli.command {
         Some(Commands::Setup) => setup::run_setup(),

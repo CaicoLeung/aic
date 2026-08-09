@@ -42,7 +42,7 @@ aic:          3 commits, one per logical change  ✅
 - **Hunk-level batch splitting** — one file, many concerns? aic splits per-hunk into atomic commits (`git add -p` style, fully non-interactive)
 - **Multi-provider** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, xAI, Mistral, OpenRouter, Perplexity, Together, Ollama, and any OpenAI-compatible server
 - **Conflict resolution** — mid-merge? `aic resolve` proposes per-file resolutions you review and approve, then finalizes the merge
-- **Interactive setup** — `aic setup` is menu-driven: pick the AI provider (backend, API key, base URL, model) or the per-commit confirmation toggle in any order, then save
+- **Interactive setup** — `aic setup` is menu-driven: pick the AI provider (backend, API key, base URL, model), a **CLI agent** backend (Claude Code / Codex / pi — no API key), or the per-commit confirmation toggle in any order, then save
 - **Conventional Commits** — messages follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) spec
 - **Configurable** — config file or per-run override
 
@@ -115,7 +115,7 @@ aic
 | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `aic`         | Commit staged files with one message. If nothing is staged, batch-plan all unstaged changes into **hunk-level** atomic commits. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Proposes per-file resolutions to review, then finalizes the merge.            |
-| `aic setup`   | Menu-driven config: AI provider (backend, API key, base URL, model) and a pre-commit confirmation toggle, in any order.    |
+| `aic setup`   | Menu-driven config: AI provider (backend, API key, base URL, model), a CLI-agent backend, and a pre-commit confirmation toggle, in any order.    |
 | `aic list`    | Show resolved config: provider, model, and where each value comes from (config / default).                       |
 | `aic update`  | Update aic to the latest version from GitHub Releases.                                                                 |
 
@@ -151,12 +151,16 @@ The config file is the single source of truth: `~/.config/aic/config.toml`.
 Environment variables are **not** read for provider settings — the values
 `aic setup` saves are exactly what `aic` uses at runtime.
 
-| Field      | Purpose                                        | Default          |
-| ---------- | ---------------------------------------------- | ---------------- |
-| `backend`  | Provider name                                  | `openai`         |
-| `api_key`  | API key                                        | —                |
-| `model`    | Model ID                                       | Provider default |
-| `base_url` | Endpoint base URL (Ollama / OpenAI-compatible) | Provider default |
+| Field          | Purpose                                        | Default          |
+| -------------- | ---------------------------------------------- | ---------------- |
+| `backend_kind` | Active backend: `"api"` (default) or `"cli"`   | `"api"`          |
+| `backend`      | Provider name — API backend                    | `openai`         |
+| `api_key`      | API key — API backend                          | —                |
+| `model`        | Model ID — API backend                         | Provider default |
+| `base_url`     | Endpoint base URL — Ollama / OpenAI-compatible | Provider default |
+| `command`      | CLI-agent backend command — CLI backend        | —                |
+| `args`         | Argv template for `command` (use `{prompt}`)   | `["{prompt}"]`   |
+| `timeout_secs` | Per-call timeout for the CLI backend           | `60`             |
 
 ### Resolution order
 
@@ -164,6 +168,72 @@ For each of `backend`, `api_key`, `model`, and `base_url`:
 
 1. Config file (`~/.config/aic/config.toml`)
 2. Built-in default
+
+### CLI agent backend (no API key)
+
+If you already have a coding-agent CLI installed and authenticated —
+[Claude Code](https://docs.anthropic.com/claude/docs/claude-code),
+[OpenAI Codex](https://github.com/openai/codex),
+[pi](https://pi.dev), GitHub Copilot, Opencode, … — aic can drive it in
+**headless/print mode** and reuse its auth, so **no API key is needed**.
+
+Set `backend_kind = "cli"` to switch to the CLI-agent backend, and `command`
+to the CLI to drive. aic shells out to that CLI with a single prompt (the
+`{prompt}` placeholder in `args` is replaced by the full system + user prompt)
+and reads the answer from stdout. The two backends' fields may coexist in
+the file: `backend_kind` selects the active one and the other's fields are
+kept **dormant** (preserved across switches, ignored at run time) — so
+switching never wipes what you entered for the other (ADR 0011).
+
+Presets are offered by `aic setup` (→ **CLI agent**); you can also edit the
+config directly:
+
+```toml
+# Claude Code — print mode + stream-json so reasoning streams live
+# (skip-permissions is opt-in, so no auto tool-use)
+backend_kind = "cli"
+command = "claude"
+args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
+timeout_secs = 120
+```
+```toml
+# OpenAI Codex — exec --json (JSONL event stream) pinned to a read-only
+# sandbox; reasoning streams live when codex emits it (best-effort).
+backend_kind = "cli"
+command = "codex"
+args = ["exec", "--json", "-s", "read-only", "{prompt}"]
+```
+```toml
+# pi — --no-tools disables all tools; --mode json streams reasoning + answer
+backend_kind = "cli"
+command = "pi"
+args = ["--no-tools", "--mode", "json", "-p", "{prompt}"]
+```
+
+Notes:
+
+- **Headless only, least-permission by default.** aic never runs the agent in
+  agentic/tool-use mode — it sends one prompt and reads stdout. The built-in
+  presets pin themselves to text-only / read-only (`pi --no-tools`,
+  `codex exec --json -s read-only`; claude print mode is already non-yolo), so an
+  injected instruction can't make the agent touch your working tree. Custom
+  `command`/`args` backends are yours to harden.
+- **The CLI must already be installed and logged in.** aic does not install or
+  authenticate it; if it's missing or unauthenticated the call fails with a
+  clear hint.
+- **Output is JSON for typed paths.** aic asks the CLI for JSON (the system
+  prompts already specify the shape) and tolerant-parses it, the same way the
+  batch-plan API path already does.
+- **Presets only (claude / codex / pi / opencode).** Each preset ships a
+  dedicated decoder for its CLI's stdout envelope (claude `stream-json`,
+  pi `--mode json`, opencode `--format json`, codex `--json`), so aic can stream
+  reasoning where the CLI exposes it and cleanly extract the answer. The
+  setup wizard no longer offers a free-form "Custom command…" — a hand-edited
+  `command`/`args` still runs, but in plain-text mode with no reasoning feed
+  and no envelope decoding (unsupported). See
+  [ADR 0010](docs/adr/0010-cli-agent-backend.md) for the backend design and
+  [ADR 0011](docs/adr/0011-explicit-backend-discriminator.md) for the
+  `backend_kind` discriminator.
 
 ### Pre-commit confirmation
 

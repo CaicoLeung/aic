@@ -37,6 +37,7 @@ name = "aic"
 version = "0.4.8"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "clap_complete",
  "clap_complete_nushell",

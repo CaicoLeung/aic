@@ -13,6 +13,7 @@
 //! mapping at this boundary, and every seam uses [`RetryPolicy::transient`]
 //! (budget 2, 300 ms linear backoff). Non-content errors are never retried.
 
+use crate::cli_agent::{CliAgent, CliSpec};
 use crate::retry::{RetryPolicy, RetryReason, retry, should_retry};
 use anyhow::Result;
 use futures::StreamExt;
@@ -83,7 +84,7 @@ pub(crate) fn strip_code_fence(mut s: &str) -> &str {
 /// policy ([`classify_retry`]) treats tolerant-parse failures exactly like
 /// typed-path truncation. The raw text rides in an anyhow context (the
 /// downcast in `classify_retry` still finds the underlying error).
-fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
+pub(crate) fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     let body = strip_code_fence(raw);
     let start = body.find(['{', '[']).unwrap_or(0);
     let mut stream =
@@ -106,6 +107,69 @@ fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
         ),
     }
 }
+
+/// Failures from the CLI-agent backend (ADR 0010). API-path failures keep
+/// flowing through rig's error types; these only arise when `command` is set.
+/// Surfaced with a human hint, never a raw panic.
+#[derive(Debug)]
+pub enum LlmError {
+    /// The configured CLI binary could not be found on `$PATH`.
+    CliNotInstalled(String),
+    /// The CLI exited with an auth-shaped error — it is installed but not
+    /// logged in / authenticated.
+    CliNotAuthenticated(String),
+    /// The call exceeded `timeout_secs` and was killed.
+    Timeout(u64),
+    /// Non-zero exit for any other reason; carries stderr for the message.
+    NonZeroExit {
+        program: String,
+        code: Option<i32>,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CliNotInstalled(prog) => write!(
+                f,
+                "CLI backend `{prog}` was not found on $PATH — install it, or run `aic setup` "
+            ),
+            Self::CliNotAuthenticated(prog) => write!(
+                f,
+                "CLI backend `{prog}` is not authenticated — run `{prog}` once yourself to log in"
+            ),
+            Self::Timeout(secs) => {
+                write!(
+                    f,
+                    "CLI backend produced no output for {secs}s — it may be stalled. \
+                     The timeout is idle: it resets whenever the CLI prints a line, so a \
+                     CLI that streams while it thinks (claude, pi) rarely trips it. Batch \
+                     CLIs (codex, opencode) stay silent until they finish, so a long \
+                     reasoning run can hit it — raise `timeout_secs` in config if so"
+                )
+            }
+            Self::NonZeroExit {
+                program,
+                code,
+                stderr,
+            } => {
+                let hint = stderr.trim();
+                if let Some(c) = code {
+                    write!(f, "`{program}` exited with code {c}")
+                } else {
+                    write!(f, "`{program}` exited abnormally")
+                }?;
+                if !hint.is_empty() {
+                    write!(f, ": {hint}")?
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -275,14 +339,30 @@ impl Provider {
             .expect("every Provider variant has a registry row")
     }
 
-    pub fn from_name(s: &str) -> Self {
+    /// Case-insensitive registry lookup by canonical name or alias. The single
+    /// search shared by [`Self::from_name`] (infallible — used by the setup
+    /// wizard, which only ever offers known names) and [`Self::is_known_name`]
+    /// (the strict check config validation uses).
+    fn find_meta(s: &str) -> Option<&'static ProviderMeta> {
         let lower = s.to_lowercase();
-        for m in REGISTRY {
-            if m.name == lower || m.aliases.iter().any(|a| *a == lower) {
-                return m.provider;
-            }
-        }
-        Provider::OpenAI
+        REGISTRY
+            .iter()
+            .find(|m| m.name == lower || m.aliases.iter().any(|a| *a == lower))
+    }
+
+    pub fn from_name(s: &str) -> Self {
+        Self::find_meta(s)
+            .map(|m| m.provider)
+            .unwrap_or(Provider::OpenAI)
+    }
+
+    /// Whether `s` is a recognized provider name or alias. The strict check
+    /// behind [`ResolvedConfig::validate`](crate::config::ResolvedConfig::validate):
+    /// a hand-edited config with a typo'd `backend` is rejected at load time
+    /// rather than silently routed to the OpenAI default and the wrong
+    /// provider's endpoint.
+    pub fn is_known_name(s: &str) -> bool {
+        Self::find_meta(s).is_some()
     }
 
     pub fn name(&self) -> &'static str {
@@ -382,21 +462,6 @@ pub struct LLM {
 }
 
 impl LLM {
-    /// Load the runtime [`LLM`] from the resolved config file. aic reads only
-    /// the config file — no environment variables — so it is the single source
-    /// of truth (ADR 0008).
-    pub fn load() -> Result<Self> {
-        let config = crate::config::Config::load().ok().flatten();
-        let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
-        resolved.validate()?;
-        Ok(Self {
-            provider: Provider::from_name(&resolved.backend),
-            model: resolved.model,
-            api_key: resolved.api_key,
-            base_url: resolved.base_url,
-        })
-    }
-
     pub fn agent(&self, system_prompt: impl Into<String>) -> LLMAgent {
         LLMAgent {
             llm: self.clone(),
@@ -725,9 +790,176 @@ impl LLMAgent {
     }
 }
 
+/// Runtime dispatch over the two backend kinds. Returned by
+/// [`LlmConfig::agent`]; the public methods mirror [`LLMAgent`] so call sites
+/// (`generator.rs`) are backend-agnostic. An enum rather than `Box<dyn>` so
+/// the generic typed methods (`schema<T>`, `stream_typed_with_reasoning<T>`)
+/// stay monomorphized per backend — generic methods are not object-safe.
+pub enum Backend {
+    /// `rig-core` API path (the 12 providers).
+    Rig(LLMAgent),
+    /// External CLI-agent, headless/print mode (ADR 0010).
+    Cli(CliAgent),
+}
+
+impl Backend {
+    pub async fn call(&self, prompt: &str) -> Result<String> {
+        match self {
+            Self::Rig(a) => a.call(prompt).await,
+            Self::Cli(a) => a.call(prompt).await,
+        }
+    }
+
+    pub async fn schema<T>(&self, prompt: &str) -> Result<T>
+    where
+        T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,
+    {
+        match self {
+            Self::Rig(a) => a.schema::<T>(prompt).await,
+            Self::Cli(a) => a.schema::<T>(prompt).await,
+        }
+    }
+
+    pub async fn stream_typed_with_reasoning<T>(
+        &self,
+        prompt: &str,
+        on_reasoning: impl FnMut(&str) + Send,
+    ) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        match self {
+            Self::Rig(a) => {
+                a.stream_typed_with_reasoning::<T>(prompt, on_reasoning)
+                    .await
+            }
+            Self::Cli(a) => {
+                a.stream_typed_with_reasoning::<T>(prompt, on_reasoning)
+                    .await
+            }
+        }
+    }
+}
+
+/// Which backend a run uses, resolved from config (ADR 0011). The active kind
+/// is the `backend_kind` discriminator (`"cli"` ⇒ [`Cli`], absent / `"api"` ⇒
+/// [`Rig`]); resolved and consistency-validated by
+/// [`crate::config::Config::resolve_backend`].
+pub enum LlmConfig {
+    Rig(LLM),
+    Cli(CliSpec),
+}
+
+impl LlmConfig {
+    /// Load the active backend from the config file.
+    ///
+    /// Which backend is active is decided by the `backend_kind` discriminator
+    /// (ADR 0011), resolved and consistency-validated by
+    /// [`Config::resolve_backend`]. `"cli"` ⇒ the CLI-agent backend;
+    /// absent / `"api"` ⇒ the rig API path, resolved exactly as before
+    /// (ADR 0008: the config file is the single source of truth, no env vars).
+    pub fn load() -> Result<Self> {
+        let config = crate::config::Config::load().ok().flatten();
+        let kind = match &config {
+            Some(c) => c.resolve_backend()?,
+            None => crate::config::BackendKind::Api,
+        };
+        match kind {
+            crate::config::BackendKind::Cli => Ok(Self::Cli(
+                config
+                    .as_ref()
+                    .expect("cli backend implies config present")
+                    .cli
+                    .to_spec(),
+            )),
+            crate::config::BackendKind::Api => {
+                let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
+                resolved.validate()?;
+                Ok(Self::Rig(LLM {
+                    provider: Provider::from_name(&resolved.backend),
+                    model: resolved.model,
+                    api_key: resolved.api_key,
+                    base_url: resolved.base_url,
+                }))
+            }
+        }
+    }
+
+    /// Build an agent for one task. Dispatches to [`LLMAgent`] on the API path
+    /// or to [`CliAgent`] on the CLI path; the returned [`Backend`] exposes the
+    /// same methods either way.
+    pub fn agent(&self, system_prompt: impl Into<String>) -> Backend {
+        match self {
+            Self::Rig(llm) => Backend::Rig(llm.agent(system_prompt)),
+            Self::Cli(spec) => Backend::Cli(CliAgent::new(spec.clone(), system_prompt.into())),
+        }
+    }
+
+    /// The program name to label a cold-start notice with, when the active
+    /// backend expects a live reasoning stream but has not produced one yet.
+    /// `Some(name)` for a CLI-agent backend whose envelope
+    /// [`streams_reasoning_live`](crate::cli_agent::Encoding::streams_reasoning_live)
+    /// (claude `stream-json`, pi `--mode json`: both emit a live
+    /// `thinking_delta` feed whose pre-first-delta wait is a cold start —
+    /// hooks/MCP/TTFT, often 6–10 s — not a capability gap); `None`
+    /// otherwise (the API/rig path; a CLI whose reasoning arrives whole at
+    /// completion like opencode/codex; or a config-read glitch). The
+    /// reasoning-feed loading frame crosses this one seam instead of
+    /// reaching through the backend kind and encoding separately.
+    pub fn cold_start_program(&self) -> Option<String> {
+        match self {
+            Self::Cli(spec) if spec.encoding.streams_reasoning_live() => Some(spec.command.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_agent::{CliSpec, Encoding};
+
+    #[test]
+    fn cold_start_program_behind_the_backend_seam() {
+        // The loading frame crosses ONE seam: cold_start_program composes the
+        // envelope's streams_reasoning_live policy with the CLI command name.
+        // A live-token-streaming CLI (claude/pi) labels the cold-start notice;
+        // anything else (whole-at-completion codex/opencode, plain, or the
+        // API/rig path) returns None → the silent notice.
+        let claude = LlmConfig::Cli(CliSpec {
+            command: "claude".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            timeout_secs: 10,
+            encoding: Encoding::ClaudeStreamJson,
+        });
+        assert_eq!(claude.cold_start_program().as_deref(), Some("claude"));
+
+        let pi = LlmConfig::Cli(CliSpec {
+            command: "pi".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            timeout_secs: 10,
+            encoding: Encoding::PiStreamJson,
+        });
+        assert_eq!(pi.cold_start_program().as_deref(), Some("pi"));
+
+        // codex reasons whole-at-completion (no live stream) → None.
+        let codex = LlmConfig::Cli(CliSpec {
+            command: "codex".into(),
+            args: vec!["exec".into(), "{prompt}".into()],
+            timeout_secs: 10,
+            encoding: Encoding::CodexJson,
+        });
+        assert_eq!(codex.cold_start_program(), None);
+
+        // The API/rig path never cold-starts a reasoning feed → None.
+        let rig = LlmConfig::Rig(LLM {
+            provider: Provider::OpenAI,
+            model: String::new(),
+            api_key: String::new(),
+            base_url: None,
+        });
+        assert_eq!(rig.cold_start_program(), None);
+    }
 
     #[test]
     fn all_providers_have_a_registry_row() {
@@ -765,6 +997,19 @@ mod tests {
     #[test]
     fn from_name_unknown_falls_back_to_openai() {
         assert_eq!(Provider::from_name("nope"), Provider::OpenAI);
+    }
+
+    #[test]
+    fn is_known_name_recognizes_canonical_names_and_aliases() {
+        assert!(Provider::is_known_name("openai"));
+        assert!(Provider::is_known_name("Anthropic"));
+        assert!(Provider::is_known_name("claude"));
+        assert!(Provider::is_known_name("openai-compatible"));
+        assert!(Provider::is_known_name("custom"));
+        // The typo the strict check exists to catch.
+        assert!(!Provider::is_known_name("anthpopic"));
+        assert!(!Provider::is_known_name("nope"));
+        assert!(!Provider::is_known_name(""));
     }
 
     #[test]

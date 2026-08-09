@@ -13,9 +13,12 @@
 use anyhow::{Context, Result};
 use console::Term;
 use std::io::{self, IsTerminal};
+use std::time::Duration;
 
+use crate::cli_agent::{PRESETS, cli_preset};
 use crate::config::{
-    Config, Source, config_path, resolve_api_key, resolve_base_url, resolve_field,
+    BackendKind, CliConfig, Config, Source, config_path, resolve_api_key, resolve_base_url,
+    resolve_field,
 };
 use crate::input::{OptNav, TextAct, opt_nav, prompt_text};
 use crate::llm::{BaseUrlRequirement, Provider};
@@ -72,8 +75,11 @@ const ICON_CONFIRM: &str = "📋";
 const ICON_SAVE: &str = "💾";
 const ICON_VERIFY: &str = "🔌";
 const ICON_DONE: &str = "↩️";
+const ICON_CLI: &str = "⌨️";
+const ICON_BACKEND: &str = "🔘";
 
 /// Per-step outcome for the setup state machine.
+#[derive(PartialEq)]
 enum Nav {
     Next,
     Back,
@@ -85,6 +91,10 @@ enum Nav {
 /// existing config ([`seed_draft`]) so untouched fields survive saving.
 #[derive(Default)]
 struct Draft {
+    /// Which Backend this session has chosen (ADR 0011). `None` ⇒ not yet
+    /// chosen; [`Draft::active_backend`] defaults it to [`BackendKind::Api`].
+    /// Set by the mode-first screen or a radio switch; drives [`finalize`].
+    backend_kind: Option<BackendKind>,
     provider: Option<Provider>,
     api_key: Option<String>,
     base_url: Option<String>,
@@ -93,6 +103,27 @@ struct Draft {
     /// "not chosen yet" (finalize keeps it unset → config absent → default
     /// off); the wizard default shown to the user is `false`.
     confirm_before_commit: Option<bool>,
+    /// External coding-agent CLI fields (ADR 0010), shared with
+    /// [`Config::cli`] so the command/args/timeout trio has one owner and is
+    /// not redeclared here. When `backend_kind = cli`, aic runs in CLI-backend
+    /// mode and the provider/api-key fields are dormant.
+    cli: CliConfig,
+}
+
+impl Draft {
+    /// The active CLI command (trimmed, non-empty) from the in-progress draft,
+    /// or `None` when the API provider path is selected. Mirrors
+    /// [`Config::active_cli_command`] so "is the CLI backend set?" has one
+    /// definition across the wizard.
+    fn active_cli_command(&self) -> Option<&str> {
+        self.cli.active_command()
+    }
+
+    /// The Backend this draft resolves to: the session choice, else
+    /// [`BackendKind::Api`] (the default when nothing is chosen — ADR 0011).
+    fn active_backend(&self) -> BackendKind {
+        self.backend_kind.unwrap_or(BackendKind::Api)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +138,9 @@ enum Step {
 /// cancels the whole setup; entering a sub-flow and finishing (or backing out
 /// of its first step) returns here.
 enum MenuChoice {
+    Backend,
     Provider,
+    CliAgent,
     Confirm,
     Save,
     Cancel,
@@ -117,11 +150,13 @@ enum MenuChoice {
 /// top-level menu, or Ctrl-C anywhere). Silent on the cancel path — the
 /// caller prints the notice.
 ///
-/// The wizard is menu-driven, not a forced linear path: the top level offers
-/// two independent entries — the AI provider (provider + key + base URL +
-/// model) and the pre-commit confirmation toggle — plus `Save & exit`. Each
-/// entry configures only its own fields and returns to the menu, so e.g. the
-/// confirmation toggle is reachable without ever touching the provider path.
+/// The wizard is menu-driven, not a forced linear path: the top level offers a
+/// Backend selector (which of the API-provider / CLI-agent backends a Run
+/// uses), the AI provider (provider + key + base URL + model), the CLI agent
+/// (command + args + timeout), and the pre-commit confirmation toggle — plus
+/// `Save & exit`. Each entry configures only its own fields and returns to the
+/// menu; both backends keep their configured content, so switching the active
+/// Backend never wipes what was entered for the other.
 fn wizard() -> Result<Option<Config>> {
     let existing = Config::load().unwrap_or(None);
     let existing_provider = existing
@@ -131,30 +166,120 @@ fn wizard() -> Result<Option<Config>> {
 
     // Seed the draft from the existing config so a partial visit never wipes
     // fields the user didn't touch: `Save & exit` writes the merged draft.
-    // Switching provider later still clears key/url/model (step_provider).
     let mut draft = seed_draft(&existing);
+
+    // Mode-first on a fresh install (ADR 0011): with no config yet, teach the
+    // two-backend model up front and route into the chosen backend's flow.
+    // Re-config skips this and lands on the menu, whose Backend selector row
+    // sets the active backend (both backends' fields stay in the draft).
+    if existing.is_none() {
+        match step_mode_choice()? {
+            ModeChoice::Api => {
+                draft.backend_kind = Some(BackendKind::Api);
+                if run_provider_flow(&existing, existing_provider, &mut draft)? {
+                    return Ok(None);
+                }
+            }
+            ModeChoice::Cli => {
+                draft.backend_kind = Some(BackendKind::Cli);
+                if run_cli_flow(&mut draft)? {
+                    return Ok(None);
+                }
+            }
+            ModeChoice::Skip => {} // Esc — drop straight into the menu
+            ModeChoice::Cancel => return Ok(None),
+        }
+    }
+
     // Which menu row to highlight when the menu re-renders: returning from a
-    // sub-flow highlights the entry the user just finished (0 = provider,
-    // 1 = confirmation).
+    // sub-flow highlights the entry the user just finished.
     let mut highlight = 0;
     loop {
         match step_menu(&draft, highlight)? {
+            MenuChoice::Backend => {
+                // Flip the active Backend (ADR 0011). Both backends keep their
+                // configured fields; only the selector changes, and `finalize`
+                // writes just the active one on save.
+                if step_backend_choice(&mut draft)? {
+                    return Ok(None); // Ctrl-C on the backend selector
+                }
+                highlight = 0;
+            }
             MenuChoice::Provider => {
                 if run_provider_flow(&existing, existing_provider, &mut draft)? {
                     return Ok(None); // Ctrl-C inside the provider path
                 }
-                highlight = 0;
+                highlight = 1;
+            }
+            MenuChoice::CliAgent => {
+                if run_cli_flow(&mut draft)? {
+                    return Ok(None); // Ctrl-C inside the CLI-agent path
+                }
+                highlight = 2;
             }
             MenuChoice::Confirm => {
                 if run_confirm_flow(&existing, &mut draft)? {
                     return Ok(None); // Ctrl-C on the confirmation toggle
                 }
-                highlight = 1;
+                highlight = 3;
             }
             MenuChoice::Save => return Ok(Some(finalize(draft))),
             MenuChoice::Cancel => return Ok(None),
         }
     }
+}
+
+/// Mode-first first-run choice (ADR 0011): which Backend to set up. Offered
+/// only when no config exists yet.
+enum ModeChoice {
+    Api,
+    Cli,
+    /// Esc on the mode screen — skip the guided choice and drop into the menu.
+    Skip,
+    Cancel,
+}
+
+/// First-run screen: pick which Backend aic should use. Teaches the
+/// two-backend model without forcing re-configuring users through it. Esc
+/// skips to the menu; Ctrl-C cancels setup.
+fn step_mode_choice() -> Result<ModeChoice> {
+    show_screen()?;
+    let items = vec![
+        "API provider — use an API key (OpenAI, Anthropic, Gemini, …)".to_string(),
+        "CLI agent — reuse Claude Code / Codex / pi (no API key needed)".to_string(),
+    ];
+    Ok(match opt_nav("How should aic get its model?", &items, 0)? {
+        OptNav::Value(0) => ModeChoice::Api,
+        OptNav::Value(1) => ModeChoice::Cli,
+        OptNav::Value(_) => unreachable!("mode choice has exactly two entries"),
+        OptNav::Back => ModeChoice::Skip,
+        OptNav::Cancel => ModeChoice::Cancel,
+    })
+}
+
+/// Pick the active Backend (ADR 0011): a two-option nav between the API
+/// provider and CLI agent. Both backends keep their configured fields in the
+/// draft — this only flips which one a Run uses (and which [`finalize`]
+/// writes). Defaults to the current selection; a config with no `backend_kind`
+/// seeds as API (the historical default). Returns `true` on Ctrl-C (cancel
+/// setup).
+fn step_backend_choice(draft: &mut Draft) -> Result<bool> {
+    show_screen()?;
+    let items = vec![
+        "API provider — use an API key".to_string(),
+        "CLI agent — reuse a coding-agent CLI (no API key)".to_string(),
+    ];
+    let default = match draft.active_backend() {
+        BackendKind::Api => 0,
+        BackendKind::Cli => 1,
+    };
+    match opt_nav("Which backend should aic use?", &items, default)? {
+        OptNav::Value(0) => draft.backend_kind = Some(BackendKind::Api),
+        OptNav::Value(_) => draft.backend_kind = Some(BackendKind::Cli),
+        OptNav::Back => {} // Esc — keep the current selection
+        OptNav::Cancel => return Ok(true),
+    }
+    Ok(false)
 }
 
 fn key_applies(p: Provider) -> bool {
@@ -191,10 +316,12 @@ fn seed_draft(existing: &Option<Config>) -> Draft {
     let mut draft = Draft::default();
     if let Some(c) = existing {
         draft.provider = c.backend.as_deref().map(Provider::from_name);
+        draft.backend_kind = c.backend_kind;
         draft.api_key = c.api_key.clone();
         draft.base_url = c.base_url.clone();
         draft.model = c.model.clone();
         draft.confirm_before_commit = c.confirm_before_commit;
+        draft.cli = c.cli.clone();
     }
     draft
 }
@@ -213,11 +340,18 @@ fn effective_model(p: Provider, draft: &Draft) -> String {
 }
 
 /// `AI provider` menu row: the current provider and the model that would be
-/// used (the chosen one, else the provider default). `(not set)` when no
-/// provider is configured yet.
+/// used (the chosen one, else the provider default). The API backend always
+/// resolves to a provider — OpenAI by default, matching [`finalize`] — so the
+/// row never reads `(not set)` while API is the active backend. `(not set)`
+/// stays correct only for the CLI backend, which ignores the provider.
 fn provider_label(draft: &Draft) -> String {
-    let Some(p) = draft.provider else {
-        return "(not set)".to_string();
+    let p = match draft.provider {
+        Some(p) => p,
+        // API backend defaults to OpenAI (mirrors `finalize`), so the menu
+        // shows what aic will actually use instead of the misleading
+        // "(not set)" after the API mode/backend is chosen.
+        None if draft.active_backend() == BackendKind::Api => Provider::OpenAI,
+        None => return "(not set)".to_string(),
     };
     let model = effective_model(p, draft);
     if model.is_empty() {
@@ -252,6 +386,20 @@ fn confirm_label(draft: &Draft) -> String {
         "yes".to_string()
     } else {
         "no".to_string()
+    }
+}
+
+/// `CLI agent` menu row: the configured command, or `(not configured)` when no
+/// CLI-agent backend is set. The active backend is named separately by the
+/// [`backend_banner`] on the main menu.
+fn cli_label(draft: &Draft) -> String {
+    match draft.active_cli_command() {
+        Some(cmd) => {
+            let mut parts = vec![cmd.to_string()];
+            parts.extend(draft.cli.args.clone().unwrap_or_default());
+            parts.join(" ")
+        }
+        None => "(not configured)".to_string(),
     }
 }
 
@@ -352,7 +500,12 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
 fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
     show_screen()?;
     let items = vec![
+        format!(
+            "{ICON_BACKEND} Backend — {}",
+            draft.active_backend().display_name()
+        ),
         format!("{ICON_PROVIDER} AI provider — {}", provider_label(draft)),
+        format!("{ICON_CLI} CLI agent — {}", cli_label(draft)),
         format!(
             "{ICON_CONFIRM} Confirm before commit — {}",
             confirm_label(draft)
@@ -360,10 +513,12 @@ fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
         format!("{ICON_SAVE} Save & exit"),
     ];
     match opt_nav("What would you like to configure?", &items, default_idx)? {
-        OptNav::Value(0) => Ok(MenuChoice::Provider),
-        OptNav::Value(1) => Ok(MenuChoice::Confirm),
-        OptNav::Value(2) => Ok(MenuChoice::Save),
-        OptNav::Value(_) => unreachable!("menu has exactly three entries"),
+        OptNav::Value(0) => Ok(MenuChoice::Backend),
+        OptNav::Value(1) => Ok(MenuChoice::Provider),
+        OptNav::Value(2) => Ok(MenuChoice::CliAgent),
+        OptNav::Value(3) => Ok(MenuChoice::Confirm),
+        OptNav::Value(4) => Ok(MenuChoice::Save),
+        OptNav::Value(_) => unreachable!("menu has exactly five entries"),
         OptNav::Back | OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
 }
@@ -428,14 +583,207 @@ fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool
     }
 }
 
+/// Best-effort check that `program` is installed. Runs `program --version`
+/// with **stdin detached** and a hard 3 s cap, so a misconfigured custom CLI
+/// that ignores `--version` and tries to read stdin or enter an interactive
+/// loop cannot hang `aic setup`. Never blocks longer than the cap; a miss or
+/// timeout yields a warning the user can ignore (ADR 0010 — aic never installs
+/// or authenticates a CLI on the user's behalf). Returns a human one-liner.
+fn smoke_check(program: &str) -> String {
+    const SMOKE_TIMEOUT: Duration = Duration::from_secs(3);
+    let mut cmd = match std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return format!(
+                "⚠️  `{program}` not found on $PATH — install + authenticate it before using aic"
+            );
+        }
+        Err(_) => return format!("⚠️  could not verify `{program}`"),
+    };
+    let deadline = std::time::Instant::now() + SMOKE_TIMEOUT;
+    loop {
+        match cmd.try_wait() {
+            Ok(Some(status)) if status.success() => return format!("✅ `{program}` found"),
+            Ok(Some(_)) => {
+                return format!(
+                    "⚠️  `{program}` ran but `--version` exited non-zero — it may still work"
+                );
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                // Exceeded the cap: kill + reap the child, then report.
+                let _ = cmd.kill();
+                let _ = cmd.wait();
+                return format!(
+                    "⚠️  `{program}` did not respond to `--version` within 3s — it may not support print mode, or is not installed"
+                );
+            }
+            Err(_) => return format!("⚠️  could not verify `{program}`"),
+        }
+    }
+}
+
+/// Configure the CLI-agent backend: pick a preset (claude/codex/pi/opencode).
+/// Custom commands are intentionally not offered — every streaming backend
+/// needs a dedicated decoder for its stdout envelope (claude `stream-json`,
+/// pi `--mode json`, opencode `--format json`), and a free-form command has
+/// none, so it would silently run in plain-text mode with no reasoning feed
+/// and no clean answer extraction. The other Backend's fields are kept
+/// dormant by [`finalize`], so configuring a CLI here does not wipe an
+/// API-provider config. Returns `true` only on Ctrl-C (cancel setup).
+fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
+    loop {
+        show_screen()?;
+        let rows = cli_menu_rows(draft.active_cli_command().is_some());
+        let labels: Vec<String> = rows.iter().map(CliRow::label).collect();
+        match opt_nav("CLI agent backend", &labels, 0)? {
+            OptNav::Back => return Ok(false),
+            OptNav::Cancel => return Ok(true),
+            OptNav::Value(i) => match rows.get(i).copied() {
+                Some(CliRow::Preset(name)) => {
+                    let spec = cli_preset(name).unwrap();
+                    println!("\n{}", smoke_check(&spec.command));
+                    draft.cli = CliConfig {
+                        command: Some(spec.command),
+                        args: Some(spec.args),
+                        timeout_secs: Some(spec.timeout_secs),
+                        encoding: Some(spec.encoding),
+                    };
+                    pause_done()?;
+                    return Ok(false);
+                }
+                Some(CliRow::Verify) => {
+                    if step_verify_cli(draft)? == Nav::Cancel {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                Some(CliRow::Done) => return Ok(false),
+                // `opt_nav` only ever returns an index inside `labels`, so an
+                // out-of-range row cannot occur in practice; re-show the menu
+                // rather than panic if it ever does.
+                None => continue,
+            },
+        }
+    }
+}
+
+/// One selectable row of the CLI-agent menu: the label shown to the user and
+/// the action selecting it takes, paired. Building the list once means every
+/// selectable row has an action **by construction** — there is no separate
+/// index arithmetic to drift out of sync, so no row can ever be "unmapped".
+/// (An earlier version put a "Choose a preset:" *label* in as row 0 with no
+/// matching action; selecting it panicked the TUI at the `unreachable!`.)
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CliRow {
+    /// A named preset (an entry of [`PRESETS`]).
+    Preset(&'static str),
+    /// Probe install + auth now — only present when a command is set.
+    Verify,
+    /// Return to the main menu.
+    Done,
+}
+
+impl CliRow {
+    /// The text shown for this row in the [`opt_nav`] menu.
+    fn label(&self) -> String {
+        match self {
+            CliRow::Preset(name) => {
+                let spec = cli_preset(name).unwrap();
+                format!("{name} — `{} {}`", spec.command, spec.args.join(" "))
+            }
+            CliRow::Verify => "Verify (probe the CLI now)".to_string(),
+            CliRow::Done => "↩️ Done — back to main menu".to_string(),
+        }
+    }
+}
+
+/// Build the CLI-agent menu rows in presentation order. `command_set` gates the
+/// Verify row, which only makes sense once a CLI is configured. A label row is
+/// deliberately absent — every row is an actionable [`CliRow`].
+fn cli_menu_rows(command_set: bool) -> Vec<CliRow> {
+    let mut rows: Vec<CliRow> = PRESETS.iter().copied().map(CliRow::Preset).collect();
+    if command_set {
+        rows.push(CliRow::Verify);
+    }
+    rows.push(CliRow::Done);
+    rows
+}
+
+/// Wait for Enter so a smoke-check / status message stays visible before the
+/// screen redraws. Best-effort: a non-interactive stdin just continues.
+fn pause_done() -> Result<()> {
+    use std::io::BufRead;
+    eprint!("\nPress Enter to continue… ");
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    Ok(())
+}
+
 fn finalize(draft: Draft) -> Config {
-    let provider = draft.provider.unwrap_or(Provider::OpenAI);
+    // Both backends keep their configured fields, so switching the active
+    // Backend never wipes what was entered for the other. `backend_kind`
+    // selects which Backend a Run actually uses; the inactive one's fields
+    // stay dormant on disk and are restored when you switch back (ADR 0011).
+    let active = draft.active_backend();
+    let command = draft.active_cli_command().map(str::to_owned);
+    let has_cli = command.is_some();
+
+    // `backend_kind` is written whenever it is non-default (CLI) or a dormant
+    // CLI command is present, so the discriminator always disambiguates a
+    // config that carries both backends' fields. For a pure API config (API
+    // active, no command) it stays absent — byte-identical to before this
+    // field existed, so released configs need no migration.
+    let backend_kind = match active {
+        BackendKind::Cli => Some(BackendKind::Cli),
+        BackendKind::Api if has_cli => Some(BackendKind::Api),
+        BackendKind::Api => None,
+    };
+
+    // When the API Backend is active, default a missing provider to OpenAI
+    // (historical behavior). When it is dormant (CLI active), preserve the
+    // draft's value verbatim so switching back restores it.
+    let backend = match active {
+        BackendKind::Api => Some(
+            draft
+                .provider
+                .unwrap_or(Provider::OpenAI)
+                .name()
+                .to_string(),
+        ),
+        BackendKind::Cli => draft.provider.map(|p| p.name().to_string()),
+    };
+
+    // CLI fields are a unit (command + args + timeout + encoding); only
+    // persist them when a command is set, so an unconfigured CLI leaves no
+    // orphaned keys.
+    let cli = if has_cli {
+        CliConfig {
+            command,
+            args: draft.cli.args,
+            timeout_secs: draft.cli.timeout_secs,
+            encoding: draft.cli.encoding,
+        }
+    } else {
+        CliConfig::default()
+    };
+
     Config {
-        backend: Some(provider.name().to_string()),
+        backend_kind,
+        backend,
         api_key: draft.api_key,
         model: draft.model,
         base_url: draft.base_url,
         confirm_before_commit: draft.confirm_before_commit,
+        cli,
     }
 }
 
@@ -492,58 +840,31 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
 
 fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
-    // Effective key for editing: the draft (a user edit or the seeded config value).
+    // Effective key for editing + keep semantics: the draft (a user edit or
+    // the seeded config value).
     let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
     match provider.requires_key() {
-        // Cloud provider — key required.
+        // Cloud provider — key required. A single visible, editable prompt:
+        // type a new key (shown in the clear) or leave it blank to keep the
+        // current one. No masked input and no keep/replace menu, so the user
+        // always sees what they enter — the masked Password left no visible
+        // field and gave no feedback after pasting.
         true => {
-            if !key.is_empty() {
-                // A key already exists (from config): keep or replace it — a
-                // choice, so offer an option list instead of a typed prompt.
-                // The replace path is a sub-mode: Esc there returns to the
-                // keep/replace choice.
-                let masked = mask_key(&key);
-                let items = vec![
-                    "Keep current key".to_string(),
-                    "Enter a new key…".to_string(),
-                ];
-                loop {
-                    show_screen()?;
-                    match opt_nav(&format!("API key (current: {masked})"), &items, 0)? {
-                        OptNav::Value(0) => return Ok(Nav::Next),
-                        OptNav::Value(1) => {
-                            show_screen()?;
-                            match prompt_text(
-                                "API key (paste — input stays hidden)",
-                                true,
-                                None,
-                                false,
-                                "API key cannot be empty",
-                            )? {
-                                TextAct::Value(v) => {
-                                    draft.api_key = Some(v);
-                                    return Ok(Nav::Next);
-                                }
-                                TextAct::Back => continue,
-                                TextAct::Cancel => return Ok(Nav::Cancel),
-                            }
-                        }
-                        OptNav::Value(_) => unreachable!("two api key options"),
-                        OptNav::Back => return Ok(Nav::Back),
-                        OptNav::Cancel => return Ok(Nav::Cancel),
-                    }
-                }
-            }
-            // No key at all — it must be entered; there is no choice to offer.
+            let prompt = if key.is_empty() {
+                "API key".to_string()
+            } else {
+                format!(
+                    "API key (current: {} — leave blank to keep)",
+                    mask_key(&key)
+                )
+            };
+            // Blank is accepted only when there is a current key to keep;
+            // otherwise the validator enforces a non-empty entry.
+            let allow_empty = !key.is_empty();
             show_screen()?;
-            match prompt_text(
-                "API key (paste — input stays hidden)",
-                true,
-                None,
-                false,
-                "API key cannot be empty",
-            )? {
+            match prompt_text(&prompt, None, allow_empty, "API key cannot be empty")? {
                 TextAct::Value(v) => {
+                    let v = if v.is_empty() { key } else { v };
                     draft.api_key = Some(v);
                     Ok(Nav::Next)
                 }
@@ -551,7 +872,10 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
                 TextAct::Cancel => Ok(Nav::Cancel),
             }
         }
-        // OpenAI-compatible — key optional (keyless servers allowed).
+        // OpenAI-compatible — key optional (keyless servers allowed). "No key"
+        // is a first-class choice a single text field cannot express, so keep
+        // it as a menu option; but enter the key in the clear (not masked) so
+        // the user sees what they type.
         false if provider == Provider::OpenAiCompatible => {
             let has_key = !key.is_empty();
             let items: Vec<String> = if has_key {
@@ -568,17 +892,23 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             };
             let no_key_idx = if has_key { 2 } else { 0 };
             let enter_idx = 1;
+            // Row 0 is "Keep current key" only when a key is already set; with
+            // no key, row 0 is the "No API key" option instead.
+            let keep_idx = if has_key { Some(0) } else { None };
             loop {
                 show_screen()?;
                 match opt_nav("API key", &items, 0)? {
+                    OptNav::Value(i) if keep_idx == Some(i) => {
+                        // Keep current key — draft.api_key already holds it.
+                        return Ok(Nav::Next);
+                    }
                     OptNav::Value(i) if i == no_key_idx => {
                         draft.api_key = None;
                         return Ok(Nav::Next);
                     }
                     OptNav::Value(i) if i == enter_idx => {
                         show_screen()?;
-                        match prompt_text("API key (blank = keyless server)", true, None, true, "")?
-                        {
+                        match prompt_text("API key (blank = keyless server)", None, true, "")? {
                             TextAct::Value(v) => {
                                 draft.api_key = if v.is_empty() { None } else { Some(v) };
                                 return Ok(Nav::Next);
@@ -619,7 +949,6 @@ fn step_base_url(
             show_screen()?;
             match prompt_text(
                 "Base URL (e.g. http://localhost:1234/v1)",
-                false,
                 initial.as_deref(),
                 false,
                 "base URL cannot be empty",
@@ -653,9 +982,16 @@ fn step_base_url(
             };
             let use_default_idx = if has_url { 1 } else { 0 };
             let custom_idx = if has_url { 2 } else { 1 };
+            // Row 0 is "Keep current URL" only when a URL is already set; with
+            // none, row 0 is the "Use default" option instead.
+            let keep_idx = if has_url { Some(0) } else { None };
             loop {
                 show_screen()?;
                 match opt_nav("Base URL", &items, 0)? {
+                    OptNav::Value(i) if keep_idx == Some(i) => {
+                        // Keep current URL — draft.base_url already holds it.
+                        return Ok(Nav::Next);
+                    }
                     OptNav::Value(i) if i == use_default_idx => {
                         draft.base_url = None;
                         return Ok(Nav::Next);
@@ -664,7 +1000,6 @@ fn step_base_url(
                         show_screen()?;
                         match prompt_text(
                             &format!("Custom base URL (e.g. {default})"),
-                            false,
                             None,
                             false,
                             "base URL cannot be empty",
@@ -701,7 +1036,6 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         show_screen()?;
         return match prompt_text(
             "Model (required)",
-            false,
             initial.as_deref(),
             false,
             "model cannot be empty",
@@ -734,7 +1068,7 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         match opt_nav("Model", &items, highlight)? {
             OptNav::Value(i) if i == custom_idx => {
                 show_screen()?;
-                match prompt_text("Custom model", false, None, false, "model cannot be empty")? {
+                match prompt_text("Custom model", None, false, "model cannot be empty")? {
                     TextAct::Value(v) => {
                         draft.model = Some(v);
                         return Ok(Nav::Next);
@@ -884,6 +1218,81 @@ fn show_verify_result(
     Ok(())
 }
 
+/// The CLI analogue of [`step_verify`] (AIC-23): probe the configured CLI with a
+/// minimal prompt using the **effective** draft values, so a missing binary or
+/// an unauthenticated CLI is caught here — at setup time — rather than failing
+/// mid-Run. The CLI runs in headless/print mode; the probe sends "Reply with
+/// exactly: OK" and checks for a reply. Install / auth / timeout errors surface
+/// as the matching [`LlmError`](crate::llm::LlmError); success reports the
+/// trimmed reply.
+///
+/// Runs on a dedicated current-thread runtime like [`step_verify`] — `aic
+/// setup` is already inside `#[tokio::main]`, so `block_in_place` parks the
+/// outer task while the nested runtime drives the async probe.
+fn step_verify_cli(draft: &Draft) -> Result<Nav> {
+    if draft.active_cli_command().is_none() {
+        // Defensive: the menu only offers Verify when a command is set.
+        show_cli_verify_result(Err(anyhow::anyhow!("no CLI command is set yet")))?;
+        return Ok(Nav::Next);
+    }
+    // Resolve the spec the SAME way a run does — `CliConfig::to_spec` — so
+    // verify decodes the CLI's stdout envelope with the right decoder. The
+    // prior hand-built spec hardcoded `Encoding::Plain`, so a claude-preset
+    // verify (whose argv carries `--output-format stream-json`) rendered raw
+    // NDJSON events as the reply instead of `OK`. Sharing `to_spec` with
+    // `LlmConfig::load` means setup and run-time can no longer disagree on
+    // the decoder.
+    let spec = draft.cli.to_spec();
+    let label = format!("Probing `{}` (print mode)…", spec.command);
+    let agent = crate::cli_agent::CliAgent::new(
+        spec,
+        "You are a connectivity checker. Follow the user's instruction exactly.".to_string(),
+    );
+    let result = tokio::task::block_in_place(|| -> Result<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build verify runtime")?;
+        rt.block_on(crate::progress::with_spinner(&label, async {
+            agent.verify().await
+        }))
+    });
+    show_cli_verify_result(result)?;
+    Ok(Nav::Next)
+}
+
+/// Render the CLI Verify result on a fresh screen and pause for a keypress,
+/// mirroring [`show_verify_result`] for the API path. `result` carries the
+/// trimmed reply on success, or the propagated
+/// [`LlmError`](crate::llm::LlmError) on failure (its `Display` already
+/// carries a human hint).
+fn show_cli_verify_result(result: Result<String>) -> Result<()> {
+    let term = Term::stdout();
+    term.clear_screen()?;
+    term.move_cursor_to(0, 0)?;
+    term.write_line("Verify — CLI agent")?;
+    term.write_line("")?;
+    match result {
+        Ok(reply) => {
+            term.write_line("✅ Success — the CLI responded.")?;
+            if !reply.is_empty() {
+                term.write_line(&format!("  Reply: {reply}"))?;
+            }
+        }
+        Err(e) => {
+            term.write_line("❌ Failed — the CLI did not answer.")?;
+            term.write_line(&format!("  Error: {e}"))?;
+            term.write_line("")?;
+            term.write_line("  Common causes: the CLI is not installed, not")?;
+            term.write_line("  authenticated, or timed out. Run the CLI once to log in.")?;
+        }
+    }
+    term.write_line("")?;
+    term.write_line("Press Enter to return to the menu…")?;
+    let _ = term.read_char();
+    Ok(())
+}
+
 /// Initial value for the confirmation toggle: the in-session draft choice
 /// first, then the existing config's value, else `false` (default off). Not
 /// provider-dependent, so no `field_initial`-style provider guard is needed.
@@ -951,6 +1360,7 @@ mod tests {
             model: model.map(String::from),
             base_url: base_url.map(String::from),
             confirm_before_commit: None,
+            ..Default::default()
         }
     }
 
@@ -966,6 +1376,7 @@ mod tests {
             model: model.map(String::from),
             base_url: base_url.map(String::from),
             confirm_before_commit: None,
+            ..Default::default()
         }
     }
 
@@ -1047,6 +1458,7 @@ mod tests {
             model: None,
             base_url: None,
             confirm_before_commit: Some(true),
+            ..Default::default()
         });
         let d = seed_draft(&existing);
         assert_eq!(d.confirm_before_commit, Some(true));
@@ -1054,8 +1466,21 @@ mod tests {
     }
 
     #[test]
-    fn provider_label_shows_not_set_when_unconfigured() {
+    fn provider_label_defaults_to_openai_for_api_backend() {
+        // API backend (the default) with no provider chosen shows the OpenAI
+        // default + its default model, mirroring `finalize` — never "(not set)"
+        // while API is active.
         let d = draft(None, None, None, None);
+        assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+
+        // Explicit API backend, still no provider -> same default.
+        let mut d = draft(None, None, None, None);
+        d.backend_kind = Some(BackendKind::Api);
+        assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+
+        // CLI backend ignores the provider -> "(not set)" until one is set.
+        let mut d = draft(None, None, None, None);
+        d.backend_kind = Some(BackendKind::Cli);
         assert_eq!(provider_label(&d), "(not set)");
     }
 
@@ -1310,6 +1735,7 @@ mod tests {
             model: None,
             base_url: None,
             confirm_before_commit: Some(true),
+            ..Default::default()
         });
 
         // No draft, existing true -> true.
@@ -1354,5 +1780,104 @@ mod tests {
 
         // OpenAI needs no base URL and carries a default model — ok.
         assert!(verify_preflight(Provider::OpenAI, None, "gpt-5-mini").is_ok());
+    }
+
+    fn draft_with_cli(command: Option<&str>) -> Draft {
+        Draft {
+            backend_kind: command.map(|_| BackendKind::Cli),
+            provider: Some(Provider::OpenAI),
+            api_key: Some("sk-stale".into()),
+            model: Some("gpt-5".into()),
+            base_url: None,
+            confirm_before_commit: Some(true),
+            cli: CliConfig {
+                command: command.map(String::from),
+                args: Some(vec!["-p".into(), "{prompt}".into()]),
+                timeout_secs: Some(90),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn finalize_cli_backend_preserves_dormant_provider_fields() {
+        // backend_kind = cli is active, but the API-provider fields are kept
+        // dormant on disk so switching back to the API Backend restores them
+        // (ADR 0011) — switching never wipes the other Backend's config.
+        let cfg = finalize(draft_with_cli(Some("claude")));
+        // CLI Backend is active:
+        assert_eq!(cfg.cli.command.as_deref(), Some("claude"));
+        assert_eq!(
+            cfg.cli.args.as_deref(),
+            Some(&["-p".to_string(), "{prompt}".to_string()][..])
+        );
+        assert_eq!(cfg.cli.timeout_secs, Some(90));
+        assert_eq!(cfg.backend_kind, Some(BackendKind::Cli));
+        // API-provider fields preserved dormant (not dropped):
+        assert_eq!(cfg.backend.as_deref(), Some("openai"));
+        assert_eq!(cfg.api_key.as_deref(), Some("sk-stale"));
+        assert_eq!(cfg.model.as_deref(), Some("gpt-5"));
+        assert!(cfg.base_url.is_none());
+        // confirm_before_commit is orthogonal and survives.
+        assert_eq!(cfg.confirm_before_commit, Some(true));
+    }
+
+    #[test]
+    fn finalize_provider_backend_clears_cli_fields() {
+        // No CLI command → provider path; any stale CLI fields are cleared.
+        let cfg = finalize(draft_with_cli(None));
+        assert_eq!(cfg.backend.as_deref(), Some("openai"));
+        assert_eq!(cfg.api_key.as_deref(), Some("sk-stale"));
+        assert!(cfg.cli.command.is_none());
+        assert!(cfg.cli.args.is_none());
+        assert!(cfg.cli.timeout_secs.is_none());
+        assert!(cfg.backend_kind.is_none());
+    }
+
+    #[test]
+    fn cli_label_shows_command_or_not_configured() {
+        assert_eq!(
+            cli_label(&draft_with_cli(Some("claude"))),
+            "claude -p {prompt}"
+        );
+        assert_eq!(cli_label(&draft_with_cli(None)), "(not configured)");
+    }
+
+    #[test]
+    fn cli_label_ignores_blank_command() {
+        let mut d = draft_with_cli(Some("   "));
+        d.cli.command = Some("   ".into());
+        assert_eq!(
+            cli_label(&d),
+            "(not configured)",
+            "whitespace-only command is treated as unset"
+        );
+    }
+
+    #[test]
+    fn cli_menu_rows_have_no_unmappable_header() {
+        // Regression: the CLI-agent menu once had a "Choose a preset:" *label*
+        // as row 0 with no action — selecting it panicked the TUI. Now every
+        // row is an actionable CliRow paired with its label, so there is no
+        // separate index to leave unmapped. There is also no "Custom command…"
+        // row: a free-form command has no decoder for its stdout envelope, so
+        // it would silently run in plain-text mode — only the four presets
+        // (each with a dedicated decoder) are offered.
+        for command_set in [false, true] {
+            let rows = cli_menu_rows(command_set);
+            // Row 0 must be a real preset, never a bare label.
+            assert!(
+                matches!(rows.first(), Some(CliRow::Preset(_))),
+                "row 0 must be an actionable preset, not a header (command_set={command_set})"
+            );
+            // Presets lead, then (only when set) Verify, then Done — every
+            // expected variant present, nothing extra, and no Custom row.
+            assert_eq!(rows.len(), PRESETS.len() + usize::from(command_set) + 1);
+            assert!(!rows.contains(&CliRow::Verify) || command_set);
+            assert_eq!(rows.contains(&CliRow::Verify), command_set);
+            assert!(rows.contains(&CliRow::Done));
+            // Done is always last.
+            assert!(matches!(rows.last(), Some(CliRow::Done)));
+        }
     }
 }
