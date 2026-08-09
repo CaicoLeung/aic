@@ -25,6 +25,8 @@ that invokes an external coding-agent CLI in headless/print mode.
 
 ### Selection: the `command` field, not a magic backend name
 
+> ⚠️ **Selection mechanism superseded by [ADR 0011](0011-explicit-backend-discriminator.md):** the active Backend is now chosen by an explicit `backend_kind` field, not by "`command` is set." Everything else in this ADR stands.
+
 CLI mode is selected by the `command` config field being set (non-empty). There
 are **no reserved `backend` names** for CLI agents. This avoids a collision the
 naïve design would have introduced: `claude` is already an **alias for the
