@@ -186,27 +186,30 @@ Presets are offered by `aic setup` (→ **CLI agent**); you can also edit the
 config directly:
 
 ```toml
-# Claude Code
+# Claude Code — print mode (skip-permissions is opt-in, so no auto tool-use)
 command = "claude"
 args = ["-p", "{prompt}"]
 timeout_secs = 120
 ```
 ```toml
-# OpenAI Codex
+# OpenAI Codex — exec pinned to a read-only sandbox
 command = "codex"
-args = ["exec", "{prompt}"]
+args = ["exec", "-s", "read-only", "{prompt}"]
 ```
 ```toml
-# pi
+# pi — --no-tools disables all tools so print mode is text-only
 command = "pi"
-args = ["-p", "{prompt}"]
+args = ["--no-tools", "-p", "{prompt}"]
 ```
 
 Notes:
 
-- **Headless only.** aic never runs the agent in agentic/tool-use mode — it
-  sends one prompt and reads stdout, so an injected instruction can't make the
-  agent touch your working tree.
+- **Headless only, least-permission by default.** aic never runs the agent in
+  agentic/tool-use mode — it sends one prompt and reads stdout. The built-in
+  presets pin themselves to text-only / read-only (`pi --no-tools`,
+  `codex exec -s read-only`; claude print mode is already non-yolo), so an
+  injected instruction can't make the agent touch your working tree. Custom
+  `command`/`args` backends are yours to harden.
 - **The CLI must already be installed and logged in.** aic does not install or
   authenticate it; if it's missing or unauthenticated the call fails with a
   clear hint.

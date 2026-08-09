@@ -67,6 +67,19 @@ single prompt and reads stdout. No tool loop is ever allowed: an agent that can
 run tools could act on prompt-injected instructions against the working tree.
 Print mode removes that entire class of risk.
 
+**Least-permission presets.** The promise above is enforced by the invocation
+itself, not by trusting each CLI's default — every preset pins itself to a
+text-only / read-only stance, because defaults differ and one (pi) is unsafe:
+
+| Preset | Pinned flags | Why |
+| --- | --- | --- |
+| `claude` | `-p` (print) | `--dangerously-skip-permissions` is opt-in and print mode cannot prompt, so no privileged tool auto-executes. claude has no reliable `--no-tools` flag (`--allowedTools` is variadic and greedily consumes the prompt), so print mode's conservative default is the lever. |
+| `codex` | `exec -s read-only` | `exec` runs non-interactively; the sandbox is pinned to `read-only` so model-generated shell commands cannot write, even if a global config widens the default. `--dangerously-bypass-approvals-and-sandbox` is opt-in. |
+| `pi` | `--no-tools -p` | **Required.** pi enables `read/bash/edit/write` tools by default; in print mode on a *trusted* project it can auto-run them (it cannot prompt) — effectively yolo. `--no-tools` disables all tools so print mode is genuinely text-only. |
+
+Custom `command`/`args` backends are the user's responsibility to harden; the
+presets are the safe defaults.
+
 ### Typed output via prompt-for-JSON + lenient parse
 
 The commit-message and batch-plan paths need typed JSON. The CLI backend does

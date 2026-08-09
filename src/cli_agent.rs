@@ -72,10 +72,42 @@ pub struct CliSpec {
 /// the answer in a provider-specific event/object we'd then have to peel, and
 /// the plain text already carries the JSON our system prompt asks for.
 pub fn cli_preset(name: &str) -> Option<CliSpec> {
+    // Least-permission defaults (ADR 0010): each preset pins itself to a
+    // text-only / read-only stance so the "never agentic / no tool use"
+    // promise is enforced by the invocation itself, not by trusting each
+    // CLI's default.
     let (command, args) = match name {
+        // Print mode. `--dangerously-skip-permissions` is opt-in, and print
+        // mode cannot prompt, so claude will not auto-execute privileged
+        // tools. claude exposes no reliable `--no-tools` flag (its
+        // `--allowedTools` is variadic and greedily consumes the prompt), so
+        // we rely on print mode's conservative default rather than a brittle
+        // flag.
         "claude" => ("claude", vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()]),
-        "codex" => ("codex", vec!["exec".to_string(), PROMPT_PLACEHOLDER.to_string()]),
-        "pi" => ("pi", vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()]),
+        // `exec` runs non-interactively; pin the sandbox to `read-only` so
+        // model-generated shell commands cannot write or mutate the repo,
+        // even if a user's global config widens the default.
+        "codex" => (
+            "codex",
+            vec![
+                "exec".to_string(),
+                "-s".to_string(),
+                "read-only".to_string(),
+                PROMPT_PLACEHOLDER.to_string(),
+            ],
+        ),
+        // `--no-tools` disables ALL tools (read/bash/edit/write) so print
+        // mode is genuinely text-only. Without it pi leaves tools live and,
+        // on a project the user has trusted, can auto-run them in print mode
+        // (it cannot prompt) — effectively yolo.
+        "pi" => (
+            "pi",
+            vec![
+                "--no-tools".to_string(),
+                "-p".to_string(),
+                PROMPT_PLACEHOLDER.to_string(),
+            ],
+        ),
         _ => return None,
     };
     Some(CliSpec {
@@ -453,9 +485,15 @@ mod tests {
         assert_eq!(c.args, vec!["-p", PROMPT_PLACEHOLDER]);
         let codex = cli_preset("codex").unwrap();
         assert_eq!(codex.command, "codex");
-        assert_eq!(codex.args, vec!["exec", PROMPT_PLACEHOLDER]);
+        // exec pinned to a read-only sandbox (ADR 0010 least-permission).
+        assert_eq!(
+            codex.args,
+            vec!["exec", "-s", "read-only", PROMPT_PLACEHOLDER]
+        );
         let pi = cli_preset("pi").unwrap();
         assert_eq!(pi.command, "pi");
+        // --no-tools disables all tools so print mode is text-only.
+        assert!(pi.args.iter().any(|a| a == "--no-tools"));
         assert!(pi.args.iter().any(|a| a == "-p"));
         assert!(cli_preset("nope").is_none());
         assert_eq!(PRESETS, &["claude", "codex", "pi"]);
