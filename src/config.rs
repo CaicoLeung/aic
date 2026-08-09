@@ -789,4 +789,43 @@ mod tests {
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(back.backend_kind, Some(BackendKind::Cli));
     }
+
+    #[test]
+    fn cli_encoding_round_trips_through_toml() {
+        // The `encoding` field serializes to the snake_case variant name and
+        // deserializes back. Each preset's encoding round-trips.
+        use crate::cli_agent::Encoding;
+        for enc in [
+            Encoding::Plain,
+            Encoding::ClaudeStreamJson,
+            Encoding::PiStreamJson,
+            Encoding::OpenCodeJson,
+            Encoding::CodexJson,
+        ] {
+            let c = Config {
+                backend_kind: Some(BackendKind::Cli),
+                cli: CliConfig {
+                    command: Some("x".into()),
+                    encoding: Some(enc),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let s = toml::to_string(&c).unwrap();
+            let back: Config = toml::from_str(&s).unwrap();
+            assert_eq!(back.cli.encoding, Some(enc), "round-trip failed for {enc:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_cli_encoding_is_rejected_at_parse() {
+        // Like backend_kind, the encoding is typed — an unknown value fails at
+        // TOML parse time and can never exist in a parsed Config.
+        let err = toml::from_str::<Config>(
+            "backend_kind = \"cli\"\ncommand = \"x\"\nencoding = \"telepathy\"\n",
+        );
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("encoding") || msg.contains("telepathy"));
+    }
 }
