@@ -304,10 +304,7 @@ const LEGACY_PRESETS: &[(&str, &str, &[&str])] = &[
 /// it runs on every `aic` load, idempotently (a migrated config matches no
 /// legacy fingerprint on the next run), and only for configs byte-identical
 /// to a preset snapshot.
-pub fn cli_preset_migration(
-    command: &str,
-    args: &[String],
-) -> Option<(&'static str, Vec<String>)> {
+pub fn cli_preset_migration(command: &str, args: &[String]) -> Option<(&'static str, Vec<String>)> {
     for &(name, legacy_cmd, legacy_args) in LEGACY_PRESETS {
         if command == legacy_cmd
             && args.len() == legacy_args.len()
@@ -707,9 +704,7 @@ fn decode_claude_system_event(v: &serde_json::Value) -> Option<ClaudeDelta> {
                     let total = a.len();
                     let connected = a
                         .iter()
-                        .filter(|s| {
-                            s.get("status").and_then(|x| x.as_str()) == Some("connected")
-                        })
+                        .filter(|s| s.get("status").and_then(|x| x.as_str()) == Some("connected"))
                         .count();
                     (total, connected)
                 }
@@ -1054,14 +1049,17 @@ impl CliAgent {
     where
         T: serde::de::DeserializeOwned,
     {
-        self.typed_internal::<T>(user_prompt, &mut on_reasoning).await
+        self.typed_internal::<T>(user_prompt, &mut on_reasoning)
+            .await
     }
 
     /// One-shot connectivity probe for `aic setup`: a minimal prompt. A missing
     /// binary / auth failure / timeout surfaces as the matching [`LlmError`].
     pub async fn verify(&self) -> Result<String> {
         let mut noop = |_: &str| {};
-        let raw = self.run_once("Reply with exactly: OK", Mode::Text, &mut noop).await?;
+        let raw = self
+            .run_once("Reply with exactly: OK", Mode::Text, &mut noop)
+            .await?;
         Ok(strip_code_fence(&raw).trim().to_string())
     }
 }
@@ -1143,9 +1141,8 @@ mod tests {
     #[test]
     fn preset_migration_rewrites_legacy_claude_to_stream_json() {
         // The exact stale shape from the regression: plain `-p {prompt}`.
-        let (name, new_args) =
-            cli_preset_migration("claude", &["-p".into(), "{prompt}".into()])
-                .expect("legacy claude fingerprint must migrate");
+        let (name, new_args) = cli_preset_migration("claude", &["-p".into(), "{prompt}".into()])
+            .expect("legacy claude fingerprint must migrate");
         assert_eq!(name, "claude");
         assert!(new_args.iter().any(|a| a == "stream-json"));
         assert!(new_args.iter().any(|a| a == "--include-partial-messages"));
@@ -1154,13 +1151,15 @@ mod tests {
     #[test]
     fn preset_migration_rewrites_legacy_pi_to_mode_json() {
         // Stale pi: plain `--no-tools -p {prompt}` (pre-`--mode json` streaming).
-        let (name, new_args) = cli_preset_migration(
-            "pi",
-            &["--no-tools".into(), "-p".into(), "{prompt}".into()],
-        )
-        .expect("legacy pi fingerprint must migrate");
+        let (name, new_args) =
+            cli_preset_migration("pi", &["--no-tools".into(), "-p".into(), "{prompt}".into()])
+                .expect("legacy pi fingerprint must migrate");
         assert_eq!(name, "pi");
-        assert!(new_args.windows(2).any(|w| w[0] == "--mode" && w[1] == "json"));
+        assert!(
+            new_args
+                .windows(2)
+                .any(|w| w[0] == "--mode" && w[1] == "json")
+        );
     }
 
     #[test]
@@ -1176,7 +1175,10 @@ mod tests {
         // A custom command (even one close to a preset, with an extra flag) is
         // left alone — exact-match only.
         assert_eq!(
-            cli_preset_migration("claude", &["-p".into(), "{prompt}".into(), "--model".into(), "x".into()]),
+            cli_preset_migration(
+                "claude",
+                &["-p".into(), "{prompt}".into(), "--model".into(), "x".into()]
+            ),
             None,
             "customized args must never be silently rewritten"
         );
@@ -1227,7 +1229,11 @@ mod tests {
         let oc = cli_preset("opencode").unwrap();
         assert_eq!(oc.command, "opencode");
         // run --format json: NDJSON events for clean answer extraction.
-        assert!(oc.args.windows(2).any(|w| w[0] == "--format" && w[1] == "json"));
+        assert!(
+            oc.args
+                .windows(2)
+                .any(|w| w[0] == "--format" && w[1] == "json")
+        );
         assert_eq!(oc.encoding, Encoding::OpenCodeJson);
         assert!(cli_preset("nope").is_none());
         assert_eq!(PRESETS, &["claude", "codex", "pi", "opencode"]);
@@ -1420,8 +1426,14 @@ mod tests {
             .expect("frequent output must not trip the idle timeout");
         assert_eq!(v["message"], "feat: x");
         let lines = seen.lock().unwrap();
-        assert!(lines.iter().any(|l| l.contains("think 1")), "first line streamed: {lines:?}");
-        assert!(lines.iter().any(|l| l.contains("think 8")), "last line streamed: {lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("think 1")),
+            "first line streamed: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("think 8")),
+            "last line streamed: {lines:?}"
+        );
     }
 
     /// A CLI that emits one line then goes silent far longer than the idle
@@ -1488,7 +1500,9 @@ mod tests {
         let line = r#"{"type":"system","subtype":"hook_started","hook_event":"SessionStart","hook_name":"SessionStart:startup"}"#;
         assert_eq!(
             decode_claude_stream_line(line),
-            Some(ClaudeDelta::Milestone("Running SessionStart hooks…".to_string()))
+            Some(ClaudeDelta::Milestone(
+                "Running SessionStart hooks…".to_string()
+            ))
         );
     }
 
@@ -1496,7 +1510,8 @@ mod tests {
     fn decode_extracts_terminal_result_event() {
         // The authoritative final-answer carrier; shape trimmed to the fields
         // the decoder reads (real events also carry usage/cost/etc.).
-        let line = r#"{"is_error":false,"result":"hello world","type":"result","subtype":"success"}"#;
+        let line =
+            r#"{"is_error":false,"result":"hello world","type":"result","subtype":"success"}"#;
         assert_eq!(
             decode_claude_stream_line(line),
             Some(ClaudeDelta::Result("hello world".to_string()))
@@ -1509,9 +1524,11 @@ mod tests {
         // sibling tests); the still-noise subtypes — `hook_response`,
         // `status` — and assistant message snapshots stay filtered so they
         // never reach the reasoning window or the answer.
-        let hook_response = r#"{"type":"system","subtype":"hook_response","hook_id":"h","outcome":"success"}"#;
+        let hook_response =
+            r#"{"type":"system","subtype":"hook_response","hook_id":"h","outcome":"success"}"#;
         let status = r#"{"type":"system","subtype":"status","status":"ready"}"#;
-        let snapshot = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+        let snapshot =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(decode_claude_stream_line(hook_response), None);
         assert_eq!(decode_claude_stream_line(status), None);
         assert_eq!(decode_claude_stream_line(snapshot), None);
@@ -1528,7 +1545,10 @@ mod tests {
         assert_eq!(decode_claude_stream_line(""), None);
         assert_eq!(decode_claude_stream_line("   "), None);
         // Valid JSON missing the expected fields → None, not a panic.
-        assert_eq!(decode_claude_stream_line(r#"{"type":"stream_event"}"#), None);
+        assert_eq!(
+            decode_claude_stream_line(r#"{"type":"stream_event"}"#),
+            None
+        );
         assert_eq!(decode_claude_stream_line(r#"{"type":"unknown"}"#), None);
     }
 
@@ -1672,7 +1692,10 @@ mod tests {
         assert_eq!(decode_opencode_stream_line(step_finish), None);
         // Non-JSON / missing text field → None.
         assert_eq!(decode_opencode_stream_line("not json"), None);
-        assert_eq!(decode_opencode_stream_line(r#"{"type":"text","part":{"type":"text"}}"#), None);
+        assert_eq!(
+            decode_opencode_stream_line(r#"{"type":"text","part":{"type":"text"}}"#),
+            None
+        );
     }
 
     #[test]
@@ -1688,7 +1711,10 @@ mod tests {
             r#"{"type":"step_finish","part":{"type":"step-finish"}}"#,
         ]
         .join("\n");
-        assert_eq!(decode_opencode_answer(&blob).as_deref(), Some("final answer"));
+        assert_eq!(
+            decode_opencode_answer(&blob).as_deref(),
+            Some("final answer")
+        );
     }
 
     #[test]
