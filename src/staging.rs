@@ -108,7 +108,7 @@ impl Staging {
             }
             let patch = parse_file_patch(&current);
             let committed = self.committed_hunks.entry(file.clone()).or_default();
-            let mapping = map_planned_hunks(planned, committed, patch.hunk_count());
+            let mapping = map_planned_hunks(planned, committed, patch.hunk_count())?;
             if mapping.current.is_empty() {
                 continue;
             }
@@ -141,6 +141,7 @@ impl Staging {
 /// spaces into named fields (rather than returning one ambiguous `Vec`) is
 /// what stops callers from writing a remapped position back as an original
 /// index — the class of bug that aborted 3+-hunks-one-file Runs.
+#[derive(Debug)]
 struct HunkMapping {
     original: Vec<usize>,
     current: Vec<usize>,
@@ -159,7 +160,7 @@ fn map_planned_hunks(
     planned: &[usize],
     committed: &HashSet<usize>,
     current_count: usize,
-) -> HunkMapping {
+) -> Result<HunkMapping> {
     // Empty `planned` means "the whole file"; rebuild the original hunk count
     // from what the current diff still shows plus what's already gone.
     let wanted: Vec<usize> = if planned.is_empty() {
@@ -177,10 +178,25 @@ fn map_planned_hunks(
         // Every committed original hunk before `h` shifts it down by one slot
         // in the current (shrunk) diff.
         let shift = committed.iter().filter(|&&c| c < h).count();
+        let cur = h - shift;
+        // The remap assumes each committed original hunk removed exactly one
+        // hunk from the current diff (true for whole-hunk commits). A current
+        // position of 0 or beyond `current_count` means that assumption broke
+        // — most likely a pre-commit hook rewrote the file so hunk boundaries
+        // shifted without emptying the diff. Bail rather than hand `git apply`
+        // an index that no longer exists (a confusing failure) or, worse, land
+        // the wrong hunk.
+        if cur == 0 || cur > current_count {
+            anyhow::bail!(
+                "hunk {h} remaps to current position {cur}, but the current diff has \
+                 only {current_count} hunk(s); the file likely changed between plan \
+                 time and staging (a pre-commit hook may have rewritten it)"
+            );
+        }
         original.push(h);
-        current.push(h - shift);
+        current.push(cur);
     }
-    HunkMapping { original, current }
+    Ok(HunkMapping { original, current })
 }
 
 #[cfg(test)]
@@ -194,25 +210,25 @@ mod tests {
         // something is committed; conflating them is the bug this struct exists
         // to prevent, so assert both.
         let committed: HashSet<usize> = [1usize, 2].into_iter().collect();
-        let m = map_planned_hunks(&[3, 4, 5, 6, 7], &committed, 5);
+        let m = map_planned_hunks(&[3, 4, 5, 6, 7], &committed, 5).unwrap();
         assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
         assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
 
         // Empty planned hunks = every hunk of the file; the original count is
         // reconstructed as current + already-committed.
-        let m = map_planned_hunks(&[], &committed, 5);
+        let m = map_planned_hunks(&[], &committed, 5).unwrap();
         assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
         assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
 
         // Nothing committed yet → both views pass through unchanged.
-        let m = map_planned_hunks(&[1, 2], &HashSet::new(), 2);
+        let m = map_planned_hunks(&[1, 2], &HashSet::new(), 2).unwrap();
         assert_eq!(m.original, vec![1, 2]);
         assert_eq!(m.current, vec![1, 2]);
 
         // Interleaved committed hunks are dropped and current positions
         // recomputed.
         let committed: HashSet<usize> = [1usize, 3, 5].into_iter().collect();
-        let m = map_planned_hunks(&[2, 4, 6], &committed, 3);
+        let m = map_planned_hunks(&[2, 4, 6], &committed, 3).unwrap();
         assert_eq!(m.original, vec![2, 4, 6]);
         assert_eq!(m.current, vec![1, 2, 3]);
 
@@ -223,12 +239,37 @@ mod tests {
         // (1) instead of the original (2 / 3) here used to corrupt `committed`
         // and make batch 3 address a non-existent hunk 2.
         let mut committed: HashSet<usize> = [1usize].into_iter().collect();
-        let m = map_planned_hunks(&[2], &committed, 2);
+        let m = map_planned_hunks(&[2], &committed, 2).unwrap();
         assert_eq!(m.original, vec![2]);
         assert_eq!(m.current, vec![1]);
         committed.extend(m.original);
-        let m = map_planned_hunks(&[3], &committed, 1);
+        let m = map_planned_hunks(&[3], &committed, 1).unwrap();
         assert_eq!(m.original, vec![3]);
         assert_eq!(m.current, vec![1]);
+    }
+
+    /// The remap assumes each committed hunk removed exactly one current-diff
+    /// hunk. When that breaks (e.g. a pre-commit hook rewrote the file so hunk
+    /// boundaries shifted but the diff did not empty), a remapped index can
+    /// land past `current_count`. That must bail loudly rather than feed
+    // `git apply` a non-existent index (confusing failure) or land the wrong
+    // hunk.
+    #[test]
+    fn map_planned_hunks_bails_on_inconsistent_remap() {
+        // `committed` claims hunks 1..=4 are gone, but `current_count` is only
+        // 2 — so original hunk 5 would remap to current position 1, yet hunk 6
+        // remaps to 2, hunk 7 to 3 (> current_count). The arithmetic no longer
+        // describes a real diff.
+        let committed: HashSet<usize> = [1usize, 2, 3, 4].into_iter().collect();
+        let err = map_planned_hunks(&[5, 6, 7], &committed, 2).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("remaps to current position 3") || msg.contains("only 2 hunk"),
+            "should report the out-of-range remap, got: {msg}"
+        );
+
+        // A consistent plan still succeeds.
+        let committed: HashSet<usize> = [1usize, 2].into_iter().collect();
+        assert!(map_planned_hunks(&[3, 4, 5], &committed, 3).is_ok());
     }
 }

@@ -48,6 +48,10 @@ impl Config {
             .with_context(|| format!("failed to read {}", path.display()))?;
         let config: Config = toml::from_str(&content)
             .with_context(|| format!("failed to parse {}", path.display()))?;
+        // Tighten a pre-existing config (created before the 0600 fix) down to
+        // owner-only on first load — best-effort, never fatal: a chmod failure
+        // must not block the read that just succeeded.
+        restrict_file(&path);
         Ok(Some(config))
     }
 
@@ -59,13 +63,88 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let path = config_path().context("could not determine config directory")?;
+
+        // The config file holds the provider API key, so its parent directory
+        // and the file itself are created owner-only from the start. Opening
+        // with the mode set directly means the key is never world-readable —
+        // not even for the moment between `fs::write` and a later `chmod`.
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            create_secure_dir(parent)?;
         }
+
         let content = toml::to_string_pretty(self).context("failed to serialize config")?;
-        fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
+        write_secret_file(&path, &content)?;
         Ok(())
+    }
+}
+
+/// Create `path` (and missing parents) with owner-only permissions on Unix
+/// (`0700`); default recursive `mkdir` elsewhere. Used for the config
+/// directory, which holds the provider API key.
+fn create_secure_dir(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Overwrite `path` with `content` at owner-only permissions on Unix (`0600`).
+/// The file is opened with the mode set directly, so a secret is never
+/// world-readable between the write and a later `chmod`. Truncates if present.
+fn write_secret_file(path: &std::path::Path, content: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Best-effort: tighten an existing file to owner-only (`0600`) on Unix.
+/// Errors are deliberately swallowed — this only fixes up config files that
+/// pre-date the permission fix, and a failure to chmod must never block the
+/// read that discovered the file. No-op off Unix.
+fn restrict_file(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            // Only tighten — skip when already owner-only.
+            if perms.mode() & 0o077 != 0 {
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -131,6 +210,17 @@ impl ResolvedConfig {
     /// cannot default). Called when constructing an `LLM`, not when merely
     /// displaying resolved config (`aic list`).
     pub fn validate(&self) -> Result<()> {
+        if !Provider::is_known_name(&self.backend) {
+            anyhow::bail!(
+                "unknown backend '{}'; run `aic setup` to pick one of: {}",
+                self.backend,
+                Provider::all()
+                    .iter()
+                    .map(|p| p.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         let provider = Provider::from_name(&self.backend);
         if provider.base_url_requirement() == BaseUrlRequirement::Required
             && self.base_url.is_none()
@@ -284,6 +374,73 @@ mod tests {
         let (url, s) = resolve_base_url(None, &Provider::Ollama);
         assert!(url.is_some());
         assert_eq!(s, Source::Default);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_backend() {
+        let config = Config {
+            backend: Some("anthpopic".into()),
+            api_key: Some("k".into()),
+            model: None,
+            base_url: None,
+            confirm_before_commit: None,
+        };
+        let resolved = ResolvedConfig::resolve(Some(&config));
+        let err = resolved.validate().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unknown backend"), "got: {msg}");
+        assert!(
+            msg.contains("anthpopic"),
+            "should echo the bad value: {msg}"
+        );
+        assert!(
+            msg.contains("anthropic"),
+            "should list valid names as a hint: {msg}"
+        );
+    }
+
+    /// The config file holds an API key, so the write helper must land it
+    /// owner-only (0600) on Unix — never world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_file_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        super::write_secret_file(&path, "backend = \"openai\"\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "secret file must be owner-only (0600), got {:o}",
+            mode
+        );
+    }
+
+    /// `restrict_file` pulls a world-readable file down to 0600 and leaves an
+    /// already-tight file alone.
+    #[cfg(unix)]
+    #[test]
+    fn restrict_file_tightens_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.toml");
+        std::fs::write(&path, "x").unwrap();
+        // Force a permissive mode, then tighten.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::restrict_file(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "should tighten 0644 → 0600, got {:o}",
+            mode
+        );
+
+        // Already owner-only → unchanged.
+        super::restrict_file(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     // Silence the otherwise-unused `cfg` helper if every test using it is
