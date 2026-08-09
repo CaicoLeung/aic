@@ -108,8 +108,9 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // backend kind or encoding. `None` ⇒ not streaming-capable → the silent
     // notice. Defaults to `None` on any config-read glitch (safer: never
     // falsely claims a streaming capability).
-    let cold_start: Option<String> =
-        crate::llm::LlmConfig::load().ok().and_then(|c| c.cold_start_program());
+    let cold_start: Option<String> = crate::llm::LlmConfig::load()
+        .ok()
+        .and_then(|c| c.cold_start_program());
 
     // The streaming future owns the `ThinkingView` inside its `on_reasoning`
     // closure; windows are forwarded to the channel rather than rendered

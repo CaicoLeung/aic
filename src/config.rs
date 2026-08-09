@@ -970,7 +970,11 @@ mod tests {
             };
             let s = toml::to_string(&c).unwrap();
             let back: Config = toml::from_str(&s).unwrap();
-            assert_eq!(back.cli.encoding, Some(enc), "round-trip failed for {enc:?}");
+            assert_eq!(
+                back.cli.encoding,
+                Some(enc),
+                "round-trip failed for {enc:?}"
+            );
         }
     }
 

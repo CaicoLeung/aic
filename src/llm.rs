@@ -908,9 +908,7 @@ impl LlmConfig {
     /// reaching through the backend kind and encoding separately.
     pub fn cold_start_program(&self) -> Option<String> {
         match self {
-            Self::Cli(spec) if spec.encoding.streams_reasoning_live() => {
-                Some(spec.command.clone())
-            }
+            Self::Cli(spec) if spec.encoding.streams_reasoning_live() => Some(spec.command.clone()),
             _ => None,
         }
     }

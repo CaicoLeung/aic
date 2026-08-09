@@ -840,7 +840,10 @@ fn decode_codex_stream_line(line: &str) -> Option<CodexDelta> {
     // noise.
     if typ == "item.started" {
         if let Some(cmd) = item.get("command").and_then(|c| c.as_str()) {
-            return Some(CodexDelta::Progress(format!("codex: {}", short_command(cmd))));
+            return Some(CodexDelta::Progress(format!(
+                "codex: {}",
+                short_command(cmd)
+            )));
         }
         return match ityp {
             "file_change" => Some(CodexDelta::Progress("codex: editing file".to_string())),
@@ -865,11 +868,18 @@ fn decode_codex_stream_line(line: &str) -> Option<CodexDelta> {
 fn short_command(cmd: &str) -> String {
     const CAP: usize = 100;
     let s = cmd.trim();
-    let body = ["/bin/zsh -lc ", "/bin/bash -lc ", "/bin/sh -lc ", "zsh -lc ", "bash -lc ", "sh -lc "]
-        .iter()
-        .find_map(|p| s.strip_prefix(p))
-        .unwrap_or(s)
-        .trim_matches(|c| c == '\'' || c == '"');
+    let body = [
+        "/bin/zsh -lc ",
+        "/bin/bash -lc ",
+        "/bin/sh -lc ",
+        "zsh -lc ",
+        "bash -lc ",
+        "sh -lc ",
+    ]
+    .iter()
+    .find_map(|p| s.strip_prefix(p))
+    .unwrap_or(s)
+    .trim_matches(|c| c == '\'' || c == '"');
     let mut out: String = body.chars().take(CAP).collect();
     if body.chars().count() > CAP {
         out.push('…');
@@ -980,7 +990,9 @@ struct PiDecoder {
 
 impl PiDecoder {
     fn new() -> Self {
-        Self { text: String::new() }
+        Self {
+            text: String::new(),
+        }
     }
 }
 
@@ -1190,8 +1202,14 @@ impl CliAgent {
             }
             Encoding::OpenCodeJson => {
                 let mut dec = OpenCodeDecoder::new();
-                self.run_streamed(&spec, timeout, &mut dec, on_output, "opencode --format json")
-                    .await
+                self.run_streamed(
+                    &spec,
+                    timeout,
+                    &mut dec,
+                    on_output,
+                    "opencode --format json",
+                )
+                .await
             }
             Encoding::CodexJson => {
                 let mut dec = CodexDecoder::new();
@@ -1870,7 +1888,10 @@ mod tests {
         assert_eq!(ans.as_deref(), Some("full answer"));
         // Reasoning streamed live; the answer text did not.
         assert!(fwd.iter().any(|s| s == "t"), "thinking forwarded: {fwd:?}");
-        assert!(!fwd.iter().any(|s| s.contains("partial")), "answer not forwarded: {fwd:?}");
+        assert!(
+            !fwd.iter().any(|s| s.contains("partial")),
+            "answer not forwarded: {fwd:?}"
+        );
     }
 
     #[test]
@@ -1914,7 +1935,10 @@ mod tests {
         let milestones = fwd.iter().filter(|s| s.ends_with('\n')).count();
         assert_eq!(milestones, 2, "dedup: {fwd:?}");
         // The thinking delta reset the window → the trailing init re-fired.
-        assert!(fwd.iter().any(|s| s == "x"), "thinking forwarded + reset: {fwd:?}");
+        assert!(
+            fwd.iter().any(|s| s == "x"),
+            "thinking forwarded + reset: {fwd:?}"
+        );
     }
 
     // ---- pi `--mode json` decoding -------------------------------------------
@@ -2100,7 +2124,8 @@ mod tests {
         let updated = r#"{"type":"item.updated","item":{"type":"agent_message","text":"partial"}}"#;
         // item.completed for a non-text item type (command_execution) is not
         // the answer and not progress → None.
-        let cmd = r#"{"type":"item.completed","item":{"id":"c","type":"command_execution","text":"ls"}}"#;
+        let cmd =
+            r#"{"type":"item.completed","item":{"id":"c","type":"command_execution","text":"ls"}}"#;
         for l in [thread, turn_completed, started, updated, cmd] {
             assert_eq!(decode_codex_stream_line(l), None, "noise leaked: {l}");
         }
@@ -2126,7 +2151,9 @@ mod tests {
         let line = r#"{"type":"item.started","item":{"id":"c","type":"command_execution","command":"/bin/zsh -lc 'git diff --cached | head -50'"}}"#;
         assert_eq!(
             decode_codex_stream_line(line),
-            Some(CodexDelta::Progress("codex: git diff --cached | head -50".to_string()))
+            Some(CodexDelta::Progress(
+                "codex: git diff --cached | head -50".to_string()
+            ))
         );
     }
 
@@ -2167,10 +2194,15 @@ mod tests {
         assert_eq!(decode_codex_stream_line("not json"), None);
         assert_eq!(decode_codex_stream_line(""), None);
         // item.completed missing the item → None.
-        assert_eq!(decode_codex_stream_line(r#"{"type":"item.completed"}"#), None);
+        assert_eq!(
+            decode_codex_stream_line(r#"{"type":"item.completed"}"#),
+            None
+        );
         // item with an unknown type → None.
         assert_eq!(
-            decode_codex_stream_line(r#"{"type":"item.completed","item":{"type":"mystery","text":"x"}}"#),
+            decode_codex_stream_line(
+                r#"{"type":"item.completed","item":{"type":"mystery","text":"x"}}"#
+            ),
             None
         );
     }
@@ -2188,7 +2220,10 @@ mod tests {
         .join("\n");
         let (fwd, ans) = run_decoder(CodexDecoder::new(), &blob);
         assert_eq!(ans.as_deref(), Some("final answer"));
-        assert!(fwd.iter().any(|s| s == "deliberating"), "reasoning forwarded: {fwd:?}");
+        assert!(
+            fwd.iter().any(|s| s == "deliberating"),
+            "reasoning forwarded: {fwd:?}"
+        );
     }
 
     #[test]
@@ -2199,12 +2234,16 @@ mod tests {
         let blob = r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"just the answer"}}"#;
         let (fwd, ans) = run_decoder(CodexDecoder::new(), blob);
         assert_eq!(ans.as_deref(), Some("just the answer"));
-        assert!(fwd.is_empty(), "no reasoning forwarded when none emitted: {fwd:?}");
+        assert!(
+            fwd.is_empty(),
+            "no reasoning forwarded when none emitted: {fwd:?}"
+        );
     }
 
     #[test]
     fn codex_decoder_returns_none_without_agent_message() {
-        let noise = r#"{"type":"item.completed","item":{"id":"c","type":"command_execution","text":"ls"}}"#;
+        let noise =
+            r#"{"type":"item.completed","item":{"id":"c","type":"command_execution","text":"ls"}}"#;
         assert_eq!(run_decoder(CodexDecoder::new(), noise).1, None);
         assert_eq!(run_decoder(CodexDecoder::new(), "").1, None);
     }
