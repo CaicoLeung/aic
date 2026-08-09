@@ -17,7 +17,7 @@ use crate::retry::{RetryPolicy, RetryReason, retry, should_retry};
 use anyhow::Result;
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, Text};
-use rig::client::CompletionClient;
+use rig::client::AgentClientExt;
 use rig::completion::{Prompt, StructuredOutputError, TypedPrompt};
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 
@@ -612,7 +612,7 @@ impl LLMAgent {
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(Text { text }),
+                        StreamedAssistantContent::Text(Text { text, .. }),
                     )) => output.push_str(&text),
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ReasoningDelta { reasoning, .. },
