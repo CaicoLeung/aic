@@ -1311,6 +1311,7 @@ fn step_verify_cli(draft: &Draft) -> Result<Nav> {
         command,
         args,
         timeout_secs,
+        encoding: crate::cli_agent::Encoding::Plain,
     };
     let label = format!("Probing `{}` (print mode)…", spec.command);
     let agent = crate::cli_agent::CliAgent::new(

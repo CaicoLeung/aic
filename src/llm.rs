@@ -142,7 +142,9 @@ impl std::fmt::Display for LlmError {
             Self::Timeout(secs) => {
                 write!(
                     f,
-                    "CLI backend timed out after {secs}s (raise `timeout_secs` in config)"
+                    "CLI backend produced no output for {secs}s — it may be stalled \
+                     (the timeout is idle: it resets while the CLI keeps streaming). \
+                     Raise `timeout_secs` in config if the CLI needs longer quiet spells"
                 )
             }
             Self::NonZeroExit {
@@ -803,7 +805,7 @@ impl Backend {
     pub async fn stream_typed_with_reasoning<T>(
         &self,
         prompt: &str,
-        on_reasoning: impl FnMut(&str),
+        on_reasoning: impl FnMut(&str) + Send,
     ) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
@@ -870,11 +872,38 @@ impl LlmConfig {
             Self::Cli(spec) => Backend::Cli(CliAgent::new(spec.clone(), system_prompt.into())),
         }
     }
+
+    /// The CLI backend's stdout encoding, or `None` on the API (rig) path.
+    /// Used by the reasoning-feed UI ([`crate::analyze_changes`]) to
+    /// distinguish a streaming-capable CLI (claude `stream-json`, which emits
+    /// `thinking_delta` once the model reasons) from a plain CLI whose silence
+    /// past the loading grace may mean "does not support streaming" rather
+    /// than "still cold-starting". A streaming-capable CLI that has not yet
+    /// produced reasoning is in a cold start (hooks/MCP/TTFT, often 6–10 s),
+    /// not a capability gap — so its loading notice must not claim it cannot
+    /// stream.
+    pub fn cli_encoding(&self) -> Option<crate::cli_agent::Encoding> {
+        match self {
+            Self::Cli(spec) => Some(spec.encoding),
+            Self::Rig(_) => None,
+        }
+    }
 }
 
 /// Build the [`CliSpec`] from a config that has `command` set. Defaults the
 /// args template to a single `{prompt}` placeholder and the timeout to
 /// [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`].
+///
+/// The stdout [`Encoding`](crate::cli_agent::Encoding) is **inferred from the
+/// argv template**, not stored as a separate config field: claude's
+/// `stream-json` preset carries `--output-format stream-json` (the token that
+/// uniquely selects claude's NDJSON envelope), so its presence selects the
+/// [`ClaudeStreamJson`](crate::cli_agent::Encoding::ClaudeStreamJson) decoder;
+/// anything else is [`Plain`](crate::cli_agent::Encoding::Plain). Sniffing the
+/// args keeps existing configs working without a migration and treats the
+/// preset's own flags as the source of truth — re-running `aic setup` and
+/// picking the claude preset writes the stream-json flags, which is what flips
+/// a plain `-p {prompt}` config into the streaming path.
 fn resolve_cli(config: &crate::config::Config) -> CliSpec {
     let command = config
         .active_cli_command()
@@ -887,10 +916,16 @@ fn resolve_cli(config: &crate::config::Config) -> CliSpec {
     let timeout_secs = config
         .timeout_secs
         .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
+    let encoding = if args.iter().any(|a| a == "stream-json") {
+        crate::cli_agent::Encoding::ClaudeStreamJson
+    } else {
+        crate::cli_agent::Encoding::Plain
+    };
     CliSpec {
         command,
         args,
         timeout_secs,
+        encoding,
     }
 }
 
@@ -951,6 +986,44 @@ mod tests {
         assert_eq!(Provider::DeepSeek.default_model(), "deepseek-v4-flash");
         assert_eq!(Provider::Ollama.default_model(), "llama3.3");
         assert_eq!(Provider::Mistral.default_model(), "mistral-small-latest");
+    }
+
+    /// [`resolve_cli`] infers [`Encoding::ClaudeStreamJson`] from the argv
+    /// template: the `stream-json` token (from the claude preset's
+    /// `--output-format stream-json`) is what routes stdout through the NDJSON
+    /// decoder. This is the link that makes a config written by `aic setup`
+    /// (claude preset) actually stream — without it, the decoder never runs
+    /// and the loading frame falls back to the silent/cold-start notice.
+    #[test]
+    fn resolve_cli_infers_stream_json_encoding_from_args() {
+        let cfg = crate::config::Config {
+            command: Some("claude".into()),
+            args: Some(vec![
+                "-p".into(),
+                "{prompt}".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--include-partial-messages".into(),
+            ]),
+            ..Default::default()
+        };
+        let spec = resolve_cli(&cfg);
+        assert_eq!(spec.encoding, crate::cli_agent::Encoding::ClaudeStreamJson);
+    }
+
+    /// A plain `-p {prompt}` config (the pre-streaming claude preset, or any
+    /// custom non-streaming command) resolves to [`Encoding::Plain`] — the
+    /// runner treats stdout as the answer verbatim, no decoder. This is why a
+    /// stale config without the stream-json flags shows no startup feed.
+    #[test]
+    fn resolve_cli_infers_plain_for_non_stream_json_args() {
+        let cfg = crate::config::Config {
+            command: Some("claude".into()),
+            args: Some(vec!["-p".into(), "{prompt}".into()]),
+            ..Default::default()
+        };
+        let spec = resolve_cli(&cfg);
+        assert_eq!(spec.encoding, crate::cli_agent::Encoding::Plain);
     }
 
     /// AIC-12: the five Phase-1 providers (xAI, Mistral, OpenRouter,

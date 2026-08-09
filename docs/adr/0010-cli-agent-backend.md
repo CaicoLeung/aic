@@ -106,15 +106,25 @@ output-injection surface and makes malformed output fail loudly.
 - `CommandRunner` is an `async_trait` (`TokioRunner` real, `FakeRunner` in
   tests) so the arg-substitution / fence-strip / parse / retry / error-mapping
   glue is unit-tested without spawning real CLIs.
-- Subprocess is capped at `timeout_secs` (default 60) and killed on timeout via
-  `kill_on_drop`.
+- Subprocess is capped at an **idle** `timeout_secs` (default 240 — sized for a
+  local reasoning CLI, not the API path; see `DEFAULT_TIMEOUT_SECS`) and killed
+  via `kill_on_drop` when it fires. The timeout is **not a wall-clock cap**: it
+  resets on every line the CLI emits, so an actively-streaming agent runs
+  unbounded and only a fully silent one (no stdout/stderr for the whole
+  `timeout_secs`) surfaces `Timeout`. This is the right semantics for a local
+  reasoning CLI whose latency on a real diff dwarfs an API call — a hard
+  deadline would kill a healthy, actively-thinking agent.
 - `LlmError` classifies `CliNotInstalled` / `CliNotAuthenticated` / `Timeout` /
   `NonZeroExit` with human hints — never a raw panic.
 - Retry policy: **one retry max** on a parse failure (re-running a full CLI
   agent is expensive); infrastructure errors propagate immediately.
-- Streaming/reasoning: print mode is single-shot, so `on_reasoning` is accepted
-  (to share the call site) but never fires — the "Analyzing changes" spinner
-  goes quiet under the CLI backend. Reasoning was always cosmetic only.
+- Streaming/reasoning: the CLI's stdout/stderr are streamed **live**,
+  line-by-line, into `on_reasoning` as they arrive (two reader tasks forward
+  each complete line over a channel; the main loop resets the idle timer per
+  line and feeds the callback). This mirrors the API path's reasoning stream
+  so the "Analyzing changes" window shows the model's thinking process under
+  the CLI backend too — the prior "print mode is single-shot, so `on_reasoning`
+  never fires" design left the UI silent for the CLI's whole run.
 
 ## Consequences
 

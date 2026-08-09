@@ -128,7 +128,7 @@ impl Generator {
     /// single typed call.
     pub async fn split_patch_streaming(
         diff: &str,
-        on_reasoning: impl FnMut(&str),
+        on_reasoning: impl FnMut(&str) + Send,
     ) -> anyhow::Result<BatchPlanOutput> {
         let p = PromptConfig::default().batch_plan_prompt;
         LlmConfig::load()?
