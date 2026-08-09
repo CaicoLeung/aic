@@ -862,6 +862,39 @@ fn field_initial(
     None
 }
 
+/// Pure core of the provider-switch step: bank the provider being left (its
+/// in-session key/model/base_url, merged so a blank never erases a remembered
+/// value), then restore the target's remembered fields into the draft. Split
+/// from [`step_provider`] (which does the interactive pick) so the
+/// restore-on-switch contract is unit-testable.
+fn switch_provider(draft: &mut Draft, chosen: Provider) {
+    if draft.provider == Some(chosen) {
+        return;
+    }
+    // Remember the provider we're leaving before restoring the target, so a
+    // round-trip back to it brings up the key/model/base_url again instead of
+    // blanks. A first-time choice (current is None) has nothing to save.
+    if let Some(current) = draft.provider {
+        ProviderProfile::bank_active(
+            &mut draft.known_providers,
+            ProviderProfile::new(
+                current.name().to_string(),
+                draft.api_key.clone(),
+                draft.model.clone(),
+                draft.base_url.clone(),
+            ),
+        );
+    }
+    // Restore the target's remembered fields; None where it was never banked.
+    let restored = draft
+        .known_providers
+        .iter()
+        .find(|p| p.backend == chosen.name())
+        .cloned();
+    (draft.api_key, draft.model, draft.base_url) =
+        restored.map(|p| p.project_fields()).unwrap_or_default();
+}
+
 fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Result<Nav> {
     show_screen()?;
     let providers = Provider::all();
@@ -878,31 +911,7 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
     match opt_nav("Choose your AI provider", &items, default_idx)? {
         OptNav::Value(i) => {
             let chosen = providers[i];
-            if draft.provider != Some(chosen) {
-                // Remember the provider we're leaving (its in-session fields)
-                // before restoring the target, so a round-trip back to it
-                // brings up the key/model/base_url again instead of blanks.
-                // A first-time choice (current is None) has nothing to save.
-                if let Some(current) = draft.provider {
-                    ProviderProfile::upsert(
-                        &mut draft.known_providers,
-                        ProviderProfile {
-                            backend: current.name().to_string(),
-                            api_key: draft.api_key.clone(),
-                            model: draft.model.clone(),
-                            base_url: draft.base_url.clone(),
-                        },
-                    );
-                }
-                let restored = draft
-                    .known_providers
-                    .iter()
-                    .find(|p| p.backend == chosen.name())
-                    .cloned();
-                draft.api_key = restored.as_ref().and_then(|p| p.api_key.clone());
-                draft.base_url = restored.as_ref().and_then(|p| p.base_url.clone());
-                draft.model = restored.as_ref().and_then(|p| p.model.clone());
-            }
+            switch_provider(draft, chosen);
             draft.provider = Some(chosen);
             Ok(Nav::Next)
         }
