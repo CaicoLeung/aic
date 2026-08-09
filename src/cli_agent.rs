@@ -88,7 +88,8 @@ pub struct CliSpec {
 /// `on_output` feeds the reasoning window with whatever the CLI prints, and
 /// `into_result` returns the accumulated stdout verbatim.
 ///
-/// `ClaudeStreamJson` is the lone envelope aic parses: Claude Code's plain
+/// `ClaudeStreamJson` is one of four envelopes aic parses (and the only one
+/// with a live token-streamed reasoning feed): Claude Code's plain
 /// `-p` print mode returns only the final answer with no thinking feed, so
 /// the batch-plan reasoning window would stay empty under it. Switching to
 /// `--output-format stream-json --include-partial-messages` emits
@@ -98,8 +99,8 @@ pub struct CliSpec {
 /// snapshots) is filtered so the noise never reaches the UI or the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Encoding {
-    /// stdout IS the assistant's text. Used by `codex exec` (plain), and any
-    /// custom command.
+    /// stdout IS the assistant's text. Custom commands, and any print-mode
+    /// CLI whose stdout aic does not decode.
     #[default]
     Plain,
     /// Claude Code `--output-format stream-json --include-partial-messages`:
@@ -118,6 +119,15 @@ pub enum Encoding {
     /// live reasoning feed — the loading frame covers the wait. Decoded by
     /// [`decode_opencode_stream_line`].
     OpenCodeJson,
+    /// codex's `exec --json`: stdout is NDJSON of thread/turn/item events.
+    /// The answer is the `agent_message` (or its documented-but-drifted
+    /// `assistant_message` alias — Issue #4776) item's `text` at
+    /// `item.completed`, arriving whole (not token-streamed). Reasoning
+    /// (`reasoning` item at `item.completed`) is best-effort: account/org
+    /// dependent and often absent (Issue #10746), so its presence is a bonus
+    /// and its absence is normal. Decoded per-line by
+    /// [`decode_codex_stream_line`].
+    CodexJson,
 }
 
 impl Encoding {
@@ -132,18 +142,19 @@ impl Encoding {
     ///
     /// Priority is unambiguous in practice — no real preset combines two
     /// envelopes: claude's `--output-format stream-json` token, then pi's
-    /// `--mode json` pair, then opencode's `--format json` pair; anything
-    /// else is plain text. A custom command with none of these runs plain,
-    /// which is correct: it has no envelope aic can decode, so stdout is the
-    /// answer verbatim.
+    /// `--mode json` pair, then opencode's `--format json` pair, then codex's
+    /// bare `--json` token; anything else is plain text. A custom command
+    /// with none of these runs plain, which is correct: it has no envelope
+    /// aic can decode, so stdout is the answer verbatim.
     pub fn from_args(args: &[String]) -> Self {
-        // Priority order: stream-json > --mode json > --format json > plain.
-        // This is ordered only to break ties deterministically — in practice
-        // no preset carries two envelopes' flags, so the order never actually
-        // decides anything. IF a future preset ever combines two (e.g. a
-        // wrapper that pipes claude through a `--format json` harness), this
-        // would silently pick the first match — at that point promote
-        // `Encoding` to an explicit config field instead of sniffing argv.
+        // Priority order: stream-json > --mode json > --format json > --json
+        // > plain. This is ordered only to break ties deterministically — in
+        // practice no preset carries two envelopes' flags, so the order never
+        // actually decides anything. IF a future preset ever combines two
+        // (e.g. a wrapper that pipes claude through a `--format json`
+        // harness), this would silently pick the first match — at that point
+        // promote `Encoding` to an explicit config field instead of sniffing
+        // argv.
         if args.iter().any(|a| a == "stream-json") {
             Self::ClaudeStreamJson
         } else if args.windows(2).any(|w| w[0] == "--mode" && w[1] == "json") {
@@ -153,6 +164,8 @@ impl Encoding {
             .any(|w| w[0] == "--format" && w[1] == "json")
         {
             Self::OpenCodeJson
+        } else if args.iter().any(|a| a == "--json") {
+            Self::CodexJson
         } else {
             Self::Plain
         }
@@ -171,8 +184,9 @@ impl Encoding {
 /// so claude's `thinking_delta` reasoning streams live (plain `-p` returns
 /// only the final answer, leaving the reasoning window empty); its NDJSON
 /// envelope is decoded centrally in [`CliAgent::run_once`], so the typed
-/// paths still receive the plain JSON text they parse. codex exposes no
-/// reasoning feed, so its argv yields [`Encoding::Plain`] (strictly simpler).
+/// paths still receive the plain JSON text they parse. codex's `--json`
+/// yields [`Encoding::CodexJson`] (answer via `agent_message` at
+/// `item.completed`; reasoning best-effort).
 pub fn cli_preset(name: &str) -> Option<CliSpec> {
     // Least-permission defaults (ADR 0010): each preset pins itself to a
     // text-only / read-only stance so the "never agentic / no tool use"
@@ -203,13 +217,22 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         ),
         // `exec` runs non-interactively; pin the sandbox to `read-only` so
         // model-generated shell commands cannot write or mutate the repo,
-        // even if a user's global config widens the default. Codex's `--json`
-        // exposes no reasoning feed (reasoning is hidden by the provider),
-        // so plain text is strictly simpler — no envelope to peel.
+        // even if a user's global config widens the default. `--json` switches
+        // stdout to a JSONL event stream (decoded centrally by
+        // [`Encoding::CodexJson`]): the answer is the `agent_message` item's
+        // `text` at `item.completed` (tolerating the documented
+        // `assistant_message` drift — Issue #4776). Reasoning items
+        // (`reasoning` at `item.completed`) are forwarded when present but
+        // are account/org-dependent and often absent (Issue #10746), so the
+        // feed is best-effort — we do NOT force `-c model_reasoning_effort=`
+        // config overrides to chase an unreliable feed (latency cost on every
+        // commit-message call; opencode omits `--thinking` for the same
+        // reason). The loading frame covers the wait either way.
         "codex" => (
             "codex",
             vec![
                 "exec".to_string(),
+                "--json".to_string(),
                 "-s".to_string(),
                 "read-only".to_string(),
                 PROMPT_PLACEHOLDER.to_string(),
@@ -1214,12 +1237,13 @@ mod tests {
         assert_eq!(c.encoding, Encoding::ClaudeStreamJson);
         let codex = cli_preset("codex").unwrap();
         assert_eq!(codex.command, "codex");
-        // exec pinned to a read-only sandbox (ADR 0010 least-permission).
+        // exec pinned to a read-only sandbox; --json switches stdout to the
+        // JSONL event stream decoded centrally by Encoding::CodexJson.
         assert_eq!(
             codex.args,
-            vec!["exec", "-s", "read-only", PROMPT_PLACEHOLDER]
+            vec!["exec", "--json", "-s", "read-only", PROMPT_PLACEHOLDER]
         );
-        assert_eq!(codex.encoding, Encoding::Plain);
+        assert_eq!(codex.encoding, Encoding::CodexJson);
         let pi = cli_preset("pi").unwrap();
         assert_eq!(pi.command, "pi");
         // --no-tools disables all tools so print mode is text-only.

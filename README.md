@@ -197,10 +197,11 @@ args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-m
 timeout_secs = 120
 ```
 ```toml
-# OpenAI Codex — exec pinned to a read-only sandbox
+# OpenAI Codex — exec --json (JSONL event stream) pinned to a read-only
+# sandbox; reasoning streams live when codex emits it (best-effort).
 backend_kind = "cli"
 command = "codex"
-args = ["exec", "-s", "read-only", "{prompt}"]
+args = ["exec", "--json", "-s", "read-only", "{prompt}"]
 ```
 ```toml
 # pi — --no-tools disables all tools; --mode json streams reasoning + answer
@@ -214,7 +215,7 @@ Notes:
 - **Headless only, least-permission by default.** aic never runs the agent in
   agentic/tool-use mode — it sends one prompt and reads stdout. The built-in
   presets pin themselves to text-only / read-only (`pi --no-tools`,
-  `codex exec -s read-only`; claude print mode is already non-yolo), so an
+  `codex exec --json -s read-only`; claude print mode is already non-yolo), so an
   injected instruction can't make the agent touch your working tree. Custom
   `command`/`args` backends are yours to harden.
 - **The CLI must already be installed and logged in.** aic does not install or
@@ -225,7 +226,7 @@ Notes:
   batch-plan API path already does.
 - **Presets only (claude / codex / pi / opencode).** Each preset ships a
   dedicated decoder for its CLI's stdout envelope (claude `stream-json`,
-  pi `--mode json`, opencode `--format json`, codex plain), so aic can stream
+  pi `--mode json`, opencode `--format json`, codex `--json`), so aic can stream
   reasoning where the CLI exposes it and cleanly extract the answer. The
   setup wizard no longer offers a free-form "Custom command…" — a hand-edited
   `command`/`args` still runs, but in plain-text mode with no reasoning feed
