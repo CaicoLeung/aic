@@ -344,11 +344,18 @@ fn effective_model(p: Provider, draft: &Draft) -> String {
 }
 
 /// `AI provider` menu row: the current provider and the model that would be
-/// used (the chosen one, else the provider default). `(not set)` when no
-/// provider is configured yet.
+/// used (the chosen one, else the provider default). The API backend always
+/// resolves to a provider — OpenAI by default, matching [`finalize`] — so the
+/// row never reads `(not set)` while API is the active backend. `(not set)`
+/// stays correct only for the CLI backend, which ignores the provider.
 fn provider_label(draft: &Draft) -> String {
-    let Some(p) = draft.provider else {
-        return "(not set)".to_string();
+    let p = match draft.provider {
+        Some(p) => p,
+        // API backend defaults to OpenAI (mirrors `finalize`), so the menu
+        // shows what aic will actually use instead of the misleading
+        // "(not set)" after the API mode/backend is chosen.
+        None if draft.active_backend() == BackendKind::Api => Provider::OpenAI,
+        None => return "(not set)".to_string(),
     };
     let model = effective_model(p, draft);
     if model.is_empty() {
@@ -1532,8 +1539,21 @@ mod tests {
     }
 
     #[test]
-    fn provider_label_shows_not_set_when_unconfigured() {
+    fn provider_label_defaults_to_openai_for_api_backend() {
+        // API backend (the default) with no provider chosen shows the OpenAI
+        // default + its default model, mirroring `finalize` — never "(not set)"
+        // while API is active.
         let d = draft(None, None, None, None);
+        assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+
+        // Explicit API backend, still no provider -> same default.
+        let mut d = draft(None, None, None, None);
+        d.backend_kind = Some(BackendKind::Api);
+        assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+
+        // CLI backend ignores the provider -> "(not set)" until one is set.
+        let mut d = draft(None, None, None, None);
+        d.backend_kind = Some(BackendKind::Cli);
         assert_eq!(provider_label(&d), "(not set)");
     }
 
