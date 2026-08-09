@@ -142,9 +142,11 @@ impl std::fmt::Display for LlmError {
             Self::Timeout(secs) => {
                 write!(
                     f,
-                    "CLI backend produced no output for {secs}s — it may be stalled \
-                     (the timeout is idle: it resets while the CLI keeps streaming). \
-                     Raise `timeout_secs` in config if the CLI needs longer quiet spells"
+                    "CLI backend produced no output for {secs}s — it may be stalled. \
+                     The timeout is idle: it resets whenever the CLI prints a line, so a \
+                     CLI that streams while it thinks (claude, pi) rarely trips it. Batch \
+                     CLIs (codex, opencode) stay silent until they finish, so a long \
+                     reasoning run can hit it — raise `timeout_secs` in config if so"
                 )
             }
             Self::NonZeroExit {

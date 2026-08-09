@@ -60,7 +60,36 @@ pub const PROMPT_PLACEHOLDER: &str = "{prompt}";
 /// that diff; 240s covers it with headroom for larger diffs and slower
 /// models, while still bounding a genuinely wedged CLI. The API/rig path is
 /// unaffected — it has its own HTTP timeouts.
+///
+/// Correct for CLIs that **stream while they reason** (claude's
+/// `thinking_delta`, pi's `thinking_delta`): their live token deltas reset
+/// the idle timer continuously, so a 240s idle budget is generous. See
+/// [`BATCH_TIMEOUT_SECS`] for the batch-CLI exception.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 240;
+
+/// Default per-call timeout for **batch** CLIs whose answer arrives whole at
+/// completion with no live token stream — currently codex (`exec --json`)
+/// and opencode (`run --format json`). Overridable via `timeout_secs`.
+///
+/// These CLIs stay **silent for the entire reasoning phase**: codex emits
+/// `thread.started` + `turn.started` near instantly, then prints nothing until
+/// the `item.completed` answer lands (verified on codex 0.147 —
+/// `reasoning_output_tokens` is non-zero yet zero reasoning events stream,
+/// and the `concurrent_reasoning_summaries` feature is still "under
+/// development"). The runner's timeout is **idle** (reset per stdout/stderr
+/// line), so a long silent reasoning run looks identical to a wedged CLI.
+/// 240s is too tight for a big diff under `model_reasoning_effort = "high"`
+/// (observed multi-minute silent gaps), which killed healthy codex runs and
+/// surfaced as "produced no output for 240s". 600s covers that while still
+/// bounding a genuinely wedged CLI. The agentic phase is already safe —
+/// codex's `command_execution` items reset the timer per command — so this
+/// budget only needs to cover the silent reasoning gap.
+///
+/// Selected per-preset from the [`Encoding`] (batch vs streaming), not by
+/// name: a new batch CLI takes it automatically by carrying a batch
+/// [`Encoding`]. Existing configs keep their written `timeout_secs`; users on
+/// an older codex preset (240s) may want to raise it.
+pub const BATCH_TIMEOUT_SECS: u64 = 600;
 
 /// One CLI-agent command template.
 #[derive(Debug, Clone)]
@@ -189,7 +218,13 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // feed is best-effort — we do NOT force `-c model_reasoning_effort=`
         // config overrides to chase an unreliable feed (latency cost on every
         // commit-message call; opencode omits `--thinking` for the same
-        // reason). The loading frame covers the wait either way.
+        // reason). The loading frame covers the wait either way. Because
+        // codex is silent during reasoning (no live token stream), this preset
+        // carries [`Encoding::CodexJson`] and so picks up the larger
+        // [`BATCH_TIMEOUT_SECS`] budget at the foot of this function — 240s
+        // killed healthy long-reasoning runs. `turn.started` and tool-use
+        // `item.started` events are forwarded as live progress by
+        // [`decode_codex_stream_line`] so the reasoning window is not empty.
         "codex" => (
             "codex",
             vec![
@@ -239,10 +274,19 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         ),
         _ => return None,
     };
+    // Batch CLIs (codex, opencode) stay silent while reasoning — their answer
+    // arrives whole with no live token stream, so the streaming-sized
+    // DEFAULT_TIMEOUT_SECS is too tight (see [`BATCH_TIMEOUT_SECS`]). Tie the
+    // timeout to the encoding rather than the name: a new batch CLI takes the
+    // larger budget automatically by carrying a batch [`Encoding`].
+    let timeout_secs = match encoding {
+        Encoding::CodexJson | Encoding::OpenCodeJson => BATCH_TIMEOUT_SECS,
+        _ => DEFAULT_TIMEOUT_SECS,
+    };
     Some(CliSpec {
         command: command.to_string(),
         args,
-        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        timeout_secs,
         encoding,
     })
 }
@@ -1348,6 +1392,8 @@ mod tests {
             ]
         );
         assert_eq!(c.encoding, Encoding::ClaudeStreamJson);
+        // Streaming CLI: streaming-sized idle budget.
+        assert_eq!(c.timeout_secs, DEFAULT_TIMEOUT_SECS);
         let codex = cli_preset("codex").unwrap();
         assert_eq!(codex.command, "codex");
         // exec pinned to a read-only sandbox; --json switches stdout to the
@@ -1357,12 +1403,16 @@ mod tests {
             vec!["exec", "--json", "-s", "read-only", PROMPT_PLACEHOLDER]
         );
         assert_eq!(codex.encoding, Encoding::CodexJson);
+        // Batch CLI (silent during reasoning): larger idle budget so a long
+        // reasoning run is not killed.
+        assert_eq!(codex.timeout_secs, BATCH_TIMEOUT_SECS);
         let pi = cli_preset("pi").unwrap();
         assert_eq!(pi.command, "pi");
         // --no-tools disables all tools so print mode is text-only.
         assert!(pi.args.iter().any(|a| a == "--no-tools"));
         assert!(pi.args.iter().any(|a| a == "-p"));
         assert_eq!(pi.encoding, Encoding::PiStreamJson);
+        assert_eq!(pi.timeout_secs, DEFAULT_TIMEOUT_SECS);
         let oc = cli_preset("opencode").unwrap();
         assert_eq!(oc.command, "opencode");
         // run --format json: NDJSON events for clean answer extraction.
