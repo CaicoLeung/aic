@@ -379,9 +379,10 @@ impl Git {
     /// again after the commit (`verify_commit_clean`): marker-bearing hook
     /// output is reported as the landed commit it is, with the recovery path.
     ///
-    /// Returns the first 7 hex chars of the new HEAD — the same format the
-    /// libgit2 path returned (`oid.to_string()[..7]`), the conventional short
-    /// hash. The value is the commit git just created: commit hooks run before
+    /// Returns git's abbreviated hash (`git rev-parse --short`) for the new
+    /// HEAD — honoring `core.abbrev` and matching what `git log --oneline`
+    /// shows, rather than slicing a fixed width ourselves. The value is the
+    /// commit git just created: commit hooks run before
     /// the commit object is written, so HEAD is that commit (only a hook that
     /// itself commits could move HEAD further — and then the displayed hash is
     /// the state the user actually sees). If resolving HEAD fails after the
@@ -397,15 +398,18 @@ impl Git {
             Some(&full_message),
             &[],
         )?;
-        // First 7 hex chars of the new HEAD — the same format the libgit2 path
-        // returned (`oid.to_string()[..7]`), the conventional short hash.
-        let head = self
-            .run_git(&["rev-parse", "HEAD"], None, &[])
+        // git's abbreviated hash for the new HEAD (`git rev-parse --short`),
+        // honoring `core.abbrev` and matching what `git log --oneline` shows.
+        // Default abbreviation is 7 hex chars but git may extend it for repo
+        // size or to guarantee uniqueness, so we defer to git rather than
+        // slicing a fixed width ourselves.
+        let short = self
+            .run_git(&["rev-parse", "--short", "HEAD"], None, &[])
             .with_context(|| "commit landed, but the new HEAD could not be resolved")?;
-        let short = head
-            .trim()
-            .get(..7)
-            .ok_or_else(|| anyhow::anyhow!("unexpected HEAD output from rev-parse: {head:?}"))?;
+        let short = short.trim();
+        if short.is_empty() {
+            anyhow::bail!("commit landed, but `git rev-parse --short HEAD` returned no output");
+        }
         // Verify what actually shipped: the pre-commit guard scanned the index
         // *before* hooks ran; a hook that re-staged content is not in that
         // scan. Check the landed tree so marker-bearing hook output surfaces
@@ -1021,14 +1025,19 @@ pub(crate) mod tests {
         );
         // The authored subject survives alongside the hook's trailer.
         assert!(msg.contains("chore: hook test"));
-        // Hash still the 7-char HEAD prefix.
-        assert_eq!(hash.len(), 7);
+        // Hash matches git's own abbreviation (`rev-parse --short`), not a
+        // fixed width — so it stays correct if git extends it for this repo.
+        assert!(
+            !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash must be non-empty hex: {hash}"
+        );
     }
 
-    /// The returned short hash must be exactly the first 7 hex chars of the new
-    /// HEAD — the format the libgit2 path returned (`oid.to_string()[..7]`).
+    /// The returned hash must match `git rev-parse --short HEAD` for the new
+    /// commit — we defer the abbreviation width to git (honors `core.abbrev`)
+    /// rather than slicing a fixed 7 chars ourselves.
     #[test]
-    fn commit_returns_seven_char_head_prefix() {
+    fn commit_returns_rev_parse_short_prefix() {
         let dir = tempfile::tempdir().unwrap();
         init_test_repo(dir.path());
 
@@ -1038,8 +1047,11 @@ pub(crate) mod tests {
 
         let hash = git.commit("chore: hash format".into(), None).unwrap();
 
-        let full = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
-        assert_eq!(hash, &full.trim()[..7]);
+        let short = git
+            .run_git(&["rev-parse", "--short", "HEAD"], None, &[])
+            .unwrap();
+        assert_eq!(hash, short.trim());
+        assert!(!hash.is_empty());
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
@@ -1065,7 +1077,11 @@ pub(crate) mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(hash.len(), 7);
+        assert!(!hash.is_empty());
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash must be hex: {hash}"
+        );
 
         let msg = git
             .run_git(&["log", "-1", "--pretty=%B"], None, &[])
@@ -1156,7 +1172,11 @@ pub(crate) mod tests {
         git.add(&["tracked.txt"]).unwrap();
 
         let hash = git.commit("chore: hook staged".into(), None).unwrap();
-        assert_eq!(hash.len(), 7);
+        assert!(!hash.is_empty());
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash must be hex: {hash}"
+        );
 
         let content = git
             .run_git(&["show", "HEAD:hook-fixed.txt"], None, &[])

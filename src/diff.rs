@@ -122,6 +122,16 @@ impl FilePatch {
     }
 }
 
+/// A line is a unified-diff hunk header iff it opens with the `@@ -` shape
+/// (`@@ -old_start,old_count +new_start,new_count @@ …`). Requiring the old
+/// range marker keeps a combined merge-diff header (`@@@`) or any stray
+/// `@@`-prefixed body line from masquerading as a hunk start.
+/// `parse_file_patch` only ever sees single-parent workdir-vs-HEAD diffs, but
+/// this enforces that assumption rather than leaving it implicit.
+fn is_hunk_header(line: &str) -> bool {
+    line.starts_with("@@ -")
+}
+
 /// Parse a single-file unified diff into its header and raw hunks.
 pub fn parse_file_patch(raw: &str) -> FilePatch {
     let mut header = String::new();
@@ -129,7 +139,7 @@ pub fn parse_file_patch(raw: &str) -> FilePatch {
     let mut current: Option<String> = None;
 
     for line in raw.lines() {
-        if line.starts_with("@@") {
+        if is_hunk_header(line) {
             if let Some(prev) = current.take() {
                 hunks.push(prev);
             }
