@@ -1794,6 +1794,7 @@ mod tests {
                 command: command.map(String::from),
                 args: Some(vec!["-p".into(), "{prompt}".into()]),
                 timeout_secs: Some(90),
+                ..Default::default()
             },
         }
     }
