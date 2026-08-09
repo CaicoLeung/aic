@@ -345,6 +345,7 @@ pub(crate) async fn run_resolve_workflow_impl(
 /// Production entry point for `aic resolve` — wires the real LLM resolver and
 /// stdin y/n prompt into [`run_resolve_workflow_impl`].
 async fn run_resolve_workflow() -> anyhow::Result<()> {
+    print_active_backend();
     let resolver: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
@@ -481,10 +482,36 @@ pub(crate) async fn run_commit_workflow_impl(
     Ok(())
 }
 
+/// Print a one-line active-backend indicator at the start of a Run, so the
+/// user can see which Backend will answer (ADR 0011). Most useful for the
+/// CLI-agent backend, whose print mode produces no streaming feedback —
+/// without this line a Run looks hung (ADR 0010). Best-effort: a missing or
+/// inconsistent config stays silent here, since the forthcoming
+/// [`generator`] call runs `LlmConfig::load` and surfaces the authoritative
+/// error.
+fn print_active_backend() {
+    let Ok(Some(c)) = config::Config::load() else {
+        return;
+    };
+    match c.resolve_backend() {
+        Ok(config::BackendKind::Cli) => {
+            if let Some(cmd) = c.active_cli_command() {
+                eprintln!("Using CLI-agent backend — {cmd} (print mode, no streaming)");
+            }
+        }
+        Ok(config::BackendKind::Api) => {
+            let r = config::ResolvedConfig::resolve(Some(&c));
+            eprintln!("Using API-provider backend — {} / {}", r.backend, r.model);
+        }
+        Err(_) => {}
+    }
+}
+
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
 /// into [`run_commit_workflow_impl`].
 async fn run_commit_workflow() -> anyhow::Result<()> {
+    print_active_backend();
     let resolver: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
