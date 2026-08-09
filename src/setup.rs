@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use crate::cli_agent::{PRESETS, cli_preset};
 use crate::config::{
-    BackendKind, CliConfig, Config, Source, config_path, resolve_api_key, resolve_base_url,
-    resolve_field,
+    BackendKind, CliConfig, Config, ProviderProfile, Source, config_path, resolve_api_key,
+    resolve_base_url, resolve_field,
 };
 use crate::input::{OptNav, TextAct, opt_nav, prompt_text};
 use crate::llm::{BaseUrlRequirement, Provider};
@@ -108,6 +108,12 @@ struct Draft {
     /// not redeclared here. When `backend_kind = cli`, aic runs in CLI-backend
     /// mode and the provider/api-key fields are dormant.
     cli: CliConfig,
+    /// Remembered API-provider profiles (key/model/base_url per provider), so
+    /// switching provider in this wizard restores them instead of clearing.
+    /// Seeded from the existing config's `providers` list plus the active
+    /// top-level fields (for pre-bank configs), and written back on save via
+    /// [`finalize`].
+    known_providers: Vec<ProviderProfile>,
 }
 
 impl Draft {
@@ -322,6 +328,21 @@ fn seed_draft(existing: &Option<Config>) -> Draft {
         draft.model = c.model.clone();
         draft.confirm_before_commit = c.confirm_before_commit;
         draft.cli = c.cli.clone();
+        draft.known_providers = c.providers.clone();
+        // Pre-bank configs (written before the `providers` memory bank) carry
+        // the active provider only as top-level fields; fold it into the bank
+        // so the first save persists it and a later switch restores it. A
+        // no-op when the active provider is already in the list.
+        if let Some(name) = c.backend.as_deref() {
+            if !draft.known_providers.iter().any(|p| p.backend == name) {
+                draft.known_providers.push(ProviderProfile {
+                    backend: name.to_string(),
+                    api_key: c.api_key.clone(),
+                    model: c.model.clone(),
+                    base_url: c.base_url.clone(),
+                });
+            }
+        }
     }
     draft
 }
@@ -776,6 +797,25 @@ fn finalize(draft: Draft) -> Config {
         CliConfig::default()
     };
 
+    // Persist the memory bank: the active API provider's in-session fields
+    // are upserted into the bank, then the bank is written as `providers`.
+    // Under the CLI backend the API bank is left untouched (dormant), so a
+    // later switch back restores every remembered provider.
+    let mut providers = draft.known_providers;
+    if active == BackendKind::Api {
+        if let Some(p) = draft.provider {
+            ProviderProfile::upsert(
+                &mut providers,
+                ProviderProfile {
+                    backend: p.name().to_string(),
+                    api_key: draft.api_key.clone(),
+                    model: draft.model.clone(),
+                    base_url: draft.base_url.clone(),
+                },
+            );
+        }
+    }
+
     Config {
         backend_kind,
         backend,
@@ -784,6 +824,7 @@ fn finalize(draft: Draft) -> Config {
         base_url: draft.base_url,
         confirm_before_commit: draft.confirm_before_commit,
         cli,
+        providers,
     }
 }
 
@@ -824,11 +865,30 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
     match opt_nav("Choose your AI provider", &items, default_idx)? {
         OptNav::Value(i) => {
             let chosen = providers[i];
-            // Switching provider invalidates previously entered key/url/model.
             if draft.provider != Some(chosen) {
-                draft.api_key = None;
-                draft.base_url = None;
-                draft.model = None;
+                // Remember the provider we're leaving (its in-session fields)
+                // before restoring the target, so a round-trip back to it
+                // brings up the key/model/base_url again instead of blanks.
+                // A first-time choice (current is None) has nothing to save.
+                if let Some(current) = draft.provider {
+                    ProviderProfile::upsert(
+                        &mut draft.known_providers,
+                        ProviderProfile {
+                            backend: current.name().to_string(),
+                            api_key: draft.api_key.clone(),
+                            model: draft.model.clone(),
+                            base_url: draft.base_url.clone(),
+                        },
+                    );
+                }
+                let restored = draft
+                    .known_providers
+                    .iter()
+                    .find(|p| p.backend == chosen.name())
+                    .cloned();
+                draft.api_key = restored.as_ref().and_then(|p| p.api_key.clone());
+                draft.base_url = restored.as_ref().and_then(|p| p.base_url.clone());
+                draft.model = restored.as_ref().and_then(|p| p.model.clone());
             }
             draft.provider = Some(chosen);
             Ok(Nav::Next)
@@ -1796,6 +1856,7 @@ mod tests {
                 timeout_secs: Some(90),
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
@@ -1820,6 +1881,10 @@ mod tests {
         assert!(cfg.base_url.is_none());
         // confirm_before_commit is orthogonal and survives.
         assert_eq!(cfg.confirm_before_commit, Some(true));
+        // Under the CLI backend the API memory bank is left untouched (the
+        // active provider is not re-recorded) — a later switch back restores
+        // whatever was already remembered.
+        assert!(cfg.providers.is_empty());
     }
 
     #[test]
@@ -1832,6 +1897,89 @@ mod tests {
         assert!(cfg.cli.args.is_none());
         assert!(cfg.cli.timeout_secs.is_none());
         assert!(cfg.backend_kind.is_none());
+    }
+
+    /// `finalize` records the active API provider into the `providers` memory
+    /// bank, so a later switch away and back restores its key/model/base_url
+    /// without re-asking.
+    #[test]
+    fn finalize_records_active_provider_into_bank() {
+        let mut draft = draft_with_cli(None); // API backend (no command)
+        draft.provider = Some(Provider::OpenAI);
+        draft.api_key = Some("sk-aaa".into());
+        draft.model = Some("gpt-5".into());
+        let cfg = finalize(draft);
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].backend, "openai");
+        assert_eq!(cfg.providers[0].api_key.as_deref(), Some("sk-aaa"));
+        assert_eq!(cfg.providers[0].model.as_deref(), Some("gpt-5"));
+    }
+
+    /// `finalize` upserts: a pre-existing bank entry for the active provider
+    /// is updated in place rather than duplicated.
+    #[test]
+    fn finalize_upserts_active_provider_over_existing_bank_entry() {
+        let mut draft = draft_with_cli(None);
+        draft.provider = Some(Provider::OpenAI);
+        draft.api_key = Some("sk-new".into());
+        draft.known_providers.push(ProviderProfile {
+            backend: "openai".into(),
+            api_key: Some("sk-old".into()),
+            model: Some("gpt-4o".into()),
+            base_url: None,
+        });
+        draft.known_providers.push(ProviderProfile {
+            backend: "anthropic".into(),
+            api_key: Some("sk-ant".into()),
+            model: None,
+            base_url: None,
+        });
+        let cfg = finalize(draft);
+        // One openai entry (updated), anthropic preserved — no duplicate.
+        let openai = cfg.providers.iter().filter(|p| p.backend == "openai").count();
+        assert_eq!(openai, 1);
+        assert_eq!(cfg.providers[0].api_key.as_deref(), Some("sk-new"));
+        assert_eq!(cfg.providers[0].model.as_deref(), Some("gpt-5"));
+        assert_eq!(cfg.providers.len(), 2);
+        assert!(cfg.providers.iter().any(|p| p.backend == "anthropic"));
+    }
+
+    /// `seed_draft` folds a pre-bank config's top-level fields into the bank
+    /// so the first save persists the active provider. Without this, a config
+    /// written before the bank existed would lose its active provider on the
+    /// next switch (the bank would be empty, so the restore would blank it).
+    #[test]
+    fn seed_draft_folds_legacy_top_level_into_bank() {
+        let existing = Some(Config {
+            backend: Some("openai".into()),
+            api_key: Some("sk-x".into()),
+            model: Some("gpt-5".into()),
+            ..Default::default()
+        });
+        let draft = seed_draft(&existing);
+        assert_eq!(draft.known_providers.len(), 1);
+        assert_eq!(draft.known_providers[0].backend, "openai");
+        assert_eq!(draft.known_providers[0].api_key.as_deref(), Some("sk-x"));
+    }
+
+    /// `seed_draft` does not duplicate the active provider when it is already
+    /// in the bank (e.g. a config written by a newer aic).
+    #[test]
+    fn seed_draft_does_not_duplicate_banked_active() {
+        let existing = Some(Config {
+            backend: Some("openai".into()),
+            api_key: Some("sk-x".into()),
+            model: Some("gpt-5".into()),
+            providers: vec![ProviderProfile {
+                backend: "openai".into(),
+                api_key: Some("sk-x".into()),
+                model: Some("gpt-5".into()),
+                base_url: None,
+            }],
+            ..Default::default()
+        });
+        let draft = seed_draft(&existing);
+        assert_eq!(draft.known_providers.len(), 1);
     }
 
     #[test]
