@@ -16,9 +16,9 @@ use std::path::PathBuf;
 
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
 
-/// The CLI-agent Backend's three config fields — a unit (command + argv
-/// template + timeout) that travels together through [`Config`], the setup
-/// `Draft`, and [`CliSpec`](crate::cli_agent::CliSpec). On disk they stay
+/// The CLI-agent Backend's four config fields — a unit (command + argv
+/// template + timeout + stdout encoding) that travels together through
+/// [`Config`], the setup `Draft`, and [`CliSpec`](crate::cli_agent::CliSpec). On disk they stay
 /// **flat** top-level TOML keys via `#[serde(flatten)]` (ADR 0011: the
 /// `backend_kind` discriminator carries the grouping; a nested table would
 /// duplicate it).
@@ -37,14 +37,22 @@ pub struct CliConfig {
     pub command: Option<String>,
     /// Argv template for [`Self::command`]. Each element may contain the
     /// literal `{prompt}` placeholder, replaced with the full prompt at run
-    /// time. Defaults to `["{prompt}"]`. The flags here also select the
-    /// stdout [`Encoding`](crate::cli_agent::Encoding) via
-    /// [`Encoding::from_args`](crate::cli_agent::Encoding::from_args).
+    /// time. Defaults to `["{prompt}"]`.
     pub args: Option<Vec<String>>,
     /// Per-call timeout for the CLI backend, in seconds. Defaults to 240
     /// (see [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`] for why it is far
     /// above the API path's latency budget).
     pub timeout_secs: Option<u64>,
+    /// How [`Self::command`]'s stdout is encoded, so aic picks the right
+    /// decoder. Stated explicitly by `aic setup` (each preset knows its
+    /// encoding) — NOT inferred from `args` — so adding an envelope is one
+    /// site (the preset), and config-load never re-derives it. Absent (a
+    /// hand-edited or pre-field config) ⇒ [`Encoding::Plain`]
+    /// ([`crate::cli_agent::Encoding::Plain`]): stdout is the answer
+    /// verbatim, matching the documented "custom commands run plain"
+    /// contract. An unknown value is rejected at config-parse time, like
+    /// [`BackendKind`].
+    pub encoding: Option<crate::cli_agent::Encoding>,
 }
 
 impl CliConfig {
@@ -64,12 +72,10 @@ impl CliConfig {
     /// Resolve this config into a runnable
     /// [`CliSpec`](crate::cli_agent::CliSpec), applying the default args
     /// template (`["{prompt}"]`) and the default timeout. The stdout
-    /// [`Encoding`](crate::cli_agent::Encoding) is **inferred from the argv**
-    /// via [`Encoding::from_args`](crate::cli_agent::Encoding::from_args) —
-    /// the preset's own flags are the single source of truth, shared with
-    /// `aic setup` verify, so run-time and setup can never disagree on which
-    /// decoder runs (the regression that left a claude-preset verify decoding
-    /// raw NDJSON as plain text).
+    /// [`Encoding`](crate::cli_agent::Encoding) is read from the explicit
+    /// `encoding` field (ADR 0011; stated by `aic setup` from the preset),
+    /// defaulting to [`Encoding::Plain`](crate::cli_agent::Encoding::Plain)
+    /// when absent — never re-derived from `args`.
     ///
     /// Only call this when `backend_kind = "cli"` and `active_command` is
     /// `Some` (guaranteed by [`Config::resolve_backend`]).
@@ -85,7 +91,7 @@ impl CliConfig {
         let timeout_secs = self
             .timeout_secs
             .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
-        let encoding = crate::cli_agent::Encoding::from_args(&args);
+        let encoding = self.encoding.unwrap_or_default();
         crate::cli_agent::CliSpec {
             command,
             args,
