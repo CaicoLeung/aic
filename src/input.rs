@@ -56,12 +56,12 @@ pub(crate) fn is_io_cancel(e: &InquireError) -> bool {
 /// `options` is borrowed (`&[String]`) and cloned once here
 /// (`options.to_vec()`) because `inquire::Select` owns its list — borrowing
 /// lets call sites keep one reusable `Vec` across loop iterations without a
-/// per-iteration clone. Filtering stays ON (inquire's default): in 0.7.5 the
-/// no-filter path (`render_select_prompt` -> `print_prompt`) omits the newline
-/// after the prompt and glues the first option to it (`? prompt  opt0`),
-/// whereas the filter path ends the prompt line with a newline. So
-/// `.without_filtering()` is deliberately NOT used — it regresses the layout.
-/// The cost is a filter input line + type-to-filter narrowing; see ADR-0007.
+/// per-iteration clone. Filtering stays ON (inquire's default): the one-line
+/// filter + type-to-filter narrowing is the UX win ADR-0007 kept it for.
+/// `.without_filtering()` is no longer off-limits — the 0.7.5 no-filter
+/// newline bug (`? prompt  opt0`) that originally forced filtering ON was
+/// fixed in inquire 0.8 — but it is deliberately not used, because narrowing
+/// is still wanted on these short lists.
 pub(crate) fn opt_nav(prompt: &str, options: &[String], default: usize) -> Result<OptNav> {
     match Select::new(prompt, options.to_vec())
         .with_starting_cursor(default)
