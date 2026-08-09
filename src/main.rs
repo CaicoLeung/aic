@@ -662,6 +662,18 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
+    // One-time location migration (ADR 0012) — move a pre-0012 macOS config
+    // from `~/Library/Application Support/aic/` to the fixed `~/.config/aic/`
+    // location the docs have always claimed. Must run before preset migration
+    // so the file lands at its new path first. Idempotent: copy old → new then
+    // delete old; skip silently if the new file already exists; no-op when the
+    // paths coincide or the old file is absent. A notice prints only when a
+    // file is actually moved; a failure is logged, never blocks the run.
+    match config::Config::migrate_location() {
+        Ok(notices) => notices.iter().for_each(|n| eprintln!("aic: {n}")),
+        Err(e) => eprintln!("aic: config location migration skipped: {e:#}"),
+    }
+
     // Auto-migrate a stale CLI-agent config to the current preset shape before
     // any run that uses it — the fix for configs stranded on an older aic's
     // preset (e.g. claude before `stream-json`). Idempotent and conservative:
