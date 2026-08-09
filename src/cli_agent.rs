@@ -746,16 +746,28 @@ fn decode_opencode_stream_line(line: &str) -> Option<OpenCodeDelta> {
 
 // ---- codex `--json` decoding ----------------------------------------------
 //
-// codex `exec --json` emits one JSON object per stdout line. Only
-// `item.completed` events carry text we care about; `thread.*`, `turn.*`,
-// `item.started`, `item.updated`, and item types like `command_execution` /
-// `file_change` are noise. Tolerant of the documented `agent_message` ↔
+// codex `exec --json` emits one JSON object per stdout line. The answer and
+// reasoning text arrive at `item.completed`; the rest is structural
+// (`thread.*`, `turn.*`) or tool-use (`item.started`/`item.updated`/
+// `item.completed` for `command_execution`/`file_change`/`mcp_tool_call`).
+//
+// codex is a **batch/silent** protocol: unlike claude and pi it streams no
+// reasoning tokens (verified on 0.147 — `reasoning_output_tokens` is non-zero
+// yet zero reasoning events stream, and `concurrent_reasoning_summaries` is
+// still "under development"), so the reasoning window would otherwise stay
+// empty for the whole run. To give visible progress — and because codex
+// routinely runs shell commands under the read-only sandbox before answering
+// — `turn.started` and tool-use `item.started` events are surfaced as live
+// [`CodexDelta::Progress`] milestones. (The runner's idle timer already resets
+// on every raw line, so agentic runs never time out; the progress forwarding
+// is purely UX.) Tolerant of the documented `agent_message` ↔
 // `assistant_message` drift (Issue #4776) and of missing fields (→ None,
 // never an error), matching the other decoders.
 
 /// One decoded chunk from a codex `--json` line. codex emits reasoning and
-/// answer text only at `item.completed`, so each variant carries the full
-/// text for that item.
+/// answer text only at `item.completed`, so the text-bearing variants carry
+/// the full text for that item; [`CodexDelta::Progress`] carries a live
+/// milestone string forwarded to the reasoning window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CodexDelta {
     /// A `reasoning` item's `text` — the model's reasoning summary, forwarded
@@ -765,17 +777,28 @@ enum CodexDelta {
     /// An `agent_message` (or drifted `assistant_message`) item's `text` —
     /// the assistant's answer. Multiple → last wins.
     Text(String),
+    /// A live progress milestone (a `turn.started` boundary, or a tool-use
+    /// `item.started` — a shell command, file edit, or MCP call the model
+    /// issued). Forwarded to the reasoning window so a silent-by-design CLI
+    /// still shows visible progress. Never the answer.
+    Progress(String),
 }
 
 /// Decode one codex `--json` stdout line into a [`CodexDelta`], or `None` for
-/// any non-`item.completed` event or non-text item type (`command_execution`,
-/// `file_change`, `mcp_tool_call`, …). Tolerant: a malformed line or a missing
-/// field yields `None`, never an error.
+/// events that carry neither answer text, reasoning, nor useful progress.
+/// Tolerant: a malformed line or a missing field yields `None`, never an
+/// error.
 ///
-/// Event shapes:
+/// Answer/reasoning event shapes:
 /// ```text
 /// {"type":"item.completed","item":{"id":"…","type":"agent_message","text":"…"}}
 /// {"type":"item.completed","item":{"id":"…","type":"reasoning","text":"…"}}
+/// ```
+///
+/// Progress event shapes (forwarded live):
+/// ```text
+/// {"type":"turn.started"}
+/// {"type":"item.started","item":{"id":"…","type":"command_execution","command":"/bin/zsh -lc '…'"}}
 /// ```
 ///
 /// Both `agent_message` (codex ≥ v0.44.0) and its documented alias
@@ -783,17 +806,61 @@ enum CodexDelta {
 /// tolerant parse here is load-bearing against version skew.
 fn decode_codex_stream_line(line: &str) -> Option<CodexDelta> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    if v.get("type").and_then(|t| t.as_str())? != "item.completed" {
-        return None;
+    let typ = v.get("type").and_then(|t| t.as_str())?;
+    match typ {
+        // A single progress milestone at the start of the turn: codex emits
+        // this near-instantly, so forwarding it gives the user an immediate
+        // "it's working" signal before the (silent) reasoning phase.
+        "turn.started" => return Some(CodexDelta::Progress("codex turn started".to_string())),
+        "item.started" | "item.completed" => {}
+        _ => return None,
     }
     let item = v.get("item")?;
     let ityp = item.get("type").and_then(|t| t.as_str())?;
+
+    // Live progress for tool-use items the model issues mid-run. codex under
+    // the read-only sandbox frequently runs shell commands (pwd/git diff/cat)
+    // before answering; surfacing them turns a silent wait into visible
+    // progress. Only `item.started` is forwarded so each tool shows once,
+    // when it begins — the matching `item.completed` would just double the
+    // noise.
+    if typ == "item.started" {
+        if let Some(cmd) = item.get("command").and_then(|c| c.as_str()) {
+            return Some(CodexDelta::Progress(format!("codex: {}", short_command(cmd))));
+        }
+        return match ityp {
+            "file_change" => Some(CodexDelta::Progress("codex: editing file".to_string())),
+            "mcp_tool_call" => Some(CodexDelta::Progress("codex: mcp tool call".to_string())),
+            _ => None,
+        };
+    }
+
+    // item.completed: the answer (agent_message) and best-effort reasoning.
     let text = item.get("text").and_then(|t| t.as_str())?.to_string();
     match ityp {
         "agent_message" | "assistant_message" => Some(CodexDelta::Text(text)),
         "reasoning" => Some(CodexDelta::Thinking(text)),
         _ => None,
     }
+}
+
+/// Trim a codex `command_execution` command for display in the reasoning
+/// window. codex wraps shell commands as `<shell> -lc '<body>'` (e.g./// `/bin/zsh -lc 'git diff --cached'`); strip the wrapper and cap the length
+/// so a giant one-liner does not flood the window. Best-effort — falls back
+/// to the raw string when the shape differs.
+fn short_command(cmd: &str) -> String {
+    const CAP: usize = 100;
+    let s = cmd.trim();
+    let body = ["/bin/zsh -lc ", "/bin/bash -lc ", "/bin/sh -lc ", "zsh -lc ", "bash -lc ", "sh -lc "]
+        .iter()
+        .find_map(|p| s.strip_prefix(p))
+        .unwrap_or(s)
+        .trim_matches(|c| c == '\'' || c == '"');
+    let mut out: String = body.chars().take(CAP).collect();
+    if body.chars().count() > CAP {
+        out.push('…');
+    }
+    out
 }
 
 // ---- the decode seam ------------------------------------------------------
@@ -974,6 +1041,10 @@ impl Decoder for CodexDecoder {
     fn decode_line(&mut self, line: &str) -> Option<String> {
         match decode_codex_stream_line(line) {
             Some(CodexDelta::Thinking(t)) => Some(t),
+            // Live progress (turn boundary / tool-use item.started): forwarded
+            // so a silent-by-design CLI shows visible activity. Carries its
+            // own trailing newline — a milestone, like claude's.
+            Some(CodexDelta::Progress(p)) => Some(format!("{p}\n")),
             Some(CodexDelta::Text(s)) => {
                 self.answer = Some(s); // last wins
                 None
@@ -1989,16 +2060,76 @@ mod tests {
 
     #[test]
     fn decode_codex_drops_lifecycle_and_non_text_items() {
-        // thread.*/turn.*/item.started/item.updated carry no final text;
-        // command_execution/file_change are non-text item types.
+        // thread.*/turn.completed/item.updated carry no final text and no
+        // useful progress; item.started for a non-tool item type is noise too.
+        // (turn.STARTED and tool-use item.started ARE forwarded as Progress —
+        // see the dedicated tests below.)
         let thread = r#"{"type":"thread.started","id":"t"}"#;
-        let turn = r#"{"type":"turn.completed","id":"t"}"#;
+        let turn_completed = r#"{"type":"turn.completed","id":"t"}"#;
         let started = r#"{"type":"item.started","item":{"type":"agent_message"}}"#;
         let updated = r#"{"type":"item.updated","item":{"type":"agent_message","text":"partial"}}"#;
+        // item.completed for a non-text item type (command_execution) is not
+        // the answer and not progress → None.
         let cmd = r#"{"type":"item.completed","item":{"id":"c","type":"command_execution","text":"ls"}}"#;
-        for l in [thread, turn, started, updated, cmd] {
+        for l in [thread, turn_completed, started, updated, cmd] {
             assert_eq!(decode_codex_stream_line(l), None, "noise leaked: {l}");
         }
+    }
+
+    #[test]
+    fn decode_codex_forwards_turn_started_as_progress() {
+        // codex is silent during reasoning; turn.started is the earliest
+        // milestone, forwarded live so the reasoning window is not empty.
+        let line = r#"{"type":"turn.started"}"#;
+        assert_eq!(
+            decode_codex_stream_line(line),
+            Some(CodexDelta::Progress("codex turn started".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_codex_forwards_command_started_as_progress() {
+        // codex under the read-only sandbox routinely runs shell commands
+        // before answering; surfacing them turns a silent wait into visible
+        // progress. The `/bin/zsh -lc '…'` wrapper is stripped and the body
+        // is capped.
+        let line = r#"{"type":"item.started","item":{"id":"c","type":"command_execution","command":"/bin/zsh -lc 'git diff --cached | head -50'"}}"#;
+        assert_eq!(
+            decode_codex_stream_line(line),
+            Some(CodexDelta::Progress("codex: git diff --cached | head -50".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_codex_short_command_caps_long_bodies() {
+        // A huge one-liner must not flood the reasoning window.
+        let body = "echo ".to_string() + &"x".repeat(200);
+        let line = format!(
+            r#"{{"type":"item.started","item":{{"id":"c","type":"command_execution","command":"/bin/zsh -lc '{body}'"}}}}"#
+        );
+        match decode_codex_stream_line(&line) {
+            Some(CodexDelta::Progress(p)) => {
+                assert!(p.starts_with("codex: echo "), "got: {p}");
+                assert!(p.ends_with('…'), "should be capped with ellipsis: {p}");
+                // "codex: " (7) + 100 body chars + "…" (1) = 108.
+                assert_eq!(p.chars().count(), 108);
+            }
+            other => panic!("expected Progress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_codex_forwards_file_change_and_mcp_tool_started_as_progress() {
+        let file_change = r#"{"type":"item.started","item":{"id":"f","type":"file_change"}}"#;
+        assert_eq!(
+            decode_codex_stream_line(file_change),
+            Some(CodexDelta::Progress("codex: editing file".to_string()))
+        );
+        let mcp = r#"{"type":"item.started","item":{"id":"m","type":"mcp_tool_call"}}"#;
+        assert_eq!(
+            decode_codex_stream_line(mcp),
+            Some(CodexDelta::Progress("codex: mcp tool call".to_string()))
+        );
     }
 
     #[test]
