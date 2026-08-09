@@ -638,6 +638,18 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
+    // Auto-migrate a stale CLI-agent config to the current preset shape before
+    // any run that uses it — the fix for configs stranded on an older aic's
+    // preset (e.g. claude before `stream-json`). Idempotent and conservative:
+    // only configs byte-identical to a known legacy preset snapshot are
+    // rewritten; a custom command is never touched. Notices print to stderr so
+    // the file rewrite is transparent; a migration failure is logged but
+    // never blocks the run (the user can still `aic setup` to refresh).
+    match config::Config::migrate_if_stale() {
+        Ok(notices) => notices.iter().for_each(|n| eprintln!("aic: {n}")),
+        Err(e) => eprintln!("aic: config migration skipped: {e:#}"),
+    }
+
     match cli.command {
         Some(Commands::Setup) => setup::run_setup(),
         Some(Commands::List) => config::run_list(),

@@ -137,6 +137,59 @@ impl Config {
         fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
         Ok(())
     }
+
+    /// Auto-migrate a stale CLI-agent config written by an older aic to the
+    /// current preset shape, so a preset improvement (e.g. claude's switch to
+    /// `stream-json` for a live reasoning feed) reaches existing users
+    /// instead of stranding them on the args they set up once and forgot.
+    /// Returns one notice string per migration performed, for the caller to
+    /// print — the user's file is rewritten under them, so transparency is
+    /// non-negotiable.
+    ///
+    /// **Idempotent and conservative.** A config already on the current
+    /// preset matches no legacy fingerprint and is a no-op. A custom command
+    /// (one that matches no preset, current or legacy) is never touched — the
+    /// user owns it. Only the `args` field is rewritten; `command`,
+    /// `timeout_secs`, `backend_kind`, and all API fields are preserved
+    /// verbatim. Runs only when the CLI backend is active
+    /// (`backend_kind = "cli"`) — a dormant CLI config under the API backend
+    /// is left for an explicit `aic setup` to refresh, so a backend the user
+    /// is not using is not rewritten out from under them.
+    ///
+    /// Designed to be called once early in `main` on every invocation; the
+    /// cost is a config read plus an exact fingerprint compare, negligible.
+    pub fn migrate_if_stale() -> Result<Vec<String>> {
+        let mut config = match Self::load()? {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        // Only migrate the active CLI backend's spec — a dormant CLI config
+        // under `backend_kind = "api"` is none of our business until the user
+        // switches back via `aic setup`.
+        if config.backend_kind != Some(BackendKind::Cli) {
+            return Ok(Vec::new());
+        }
+        let command = match config.active_cli_command() {
+            Some(c) => c.to_string(),
+            None => return Ok(Vec::new()),
+        };
+        let args = config
+            .args
+            .clone()
+            .unwrap_or_else(|| vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
+        let (name, new_args) = match crate::cli_agent::cli_preset_migration(&command, &args) {
+            Some(m) => m,
+            None => return Ok(Vec::new()),
+        };
+        config.args = Some(new_args);
+        config.save()?;
+        Ok(vec![format!(
+            "auto-migrated the `{name}` CLI preset to its current shape (added the \
+             streaming/reasoning flags). Your stored args were a snapshot from an earlier \
+             aic; preset improvements now reach you automatically. command, timeout_secs, \
+             backend_kind, and API fields were left unchanged."
+        )])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
