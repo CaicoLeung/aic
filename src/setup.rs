@@ -382,11 +382,6 @@ fn provider_label(draft: &Draft) -> String {
     }
 }
 
-/// One row in the provider picker (the screen *before* this provider's
-/// submenu). For the currently selected provider, show the model the user
-/// actually chose (`draft.model`, seeded from the existing config) rather than
-/// the bare default — otherwise re-entering setup makes the selection read as
-/// lost (AIC-15). For every other provider, show its default so the options
 /// One provider's preview model for the `Choose your AI provider` list: the
 /// active draft choice first, then the remembered bank entry, then the
 /// provider default. The detail sub-menu reads the same bank (via
@@ -400,10 +395,20 @@ fn preview_model(p: Provider, draft: &Draft) -> String {
         .known_providers
         .iter()
         .find(|kp| kp.backend == p.name())
-        .and_then(|kp| kp.model.as_deref().filter(|m| !m.is_empty()).map(String::from))
+        .and_then(|kp| {
+            kp.model
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .map(String::from)
+        })
         .unwrap_or_else(|| p.default_model().to_string())
 }
 
+/// One row in the provider picker (the screen *before* this provider's
+/// submenu). For the currently selected provider, show the model the user
+/// actually chose (`draft.model`, seeded from the existing config) rather than
+/// the bare default — otherwise re-entering setup makes the selection read as
+/// lost (AIC-15). For every other provider, show its default so the options
 /// stay comparable at a glance.
 fn provider_choice_label(p: Provider, draft: &Draft) -> String {
     let model = preview_model(p, draft);
