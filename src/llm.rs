@@ -847,9 +847,13 @@ impl LlmConfig {
             None => crate::config::BackendKind::Api,
         };
         match kind {
-            crate::config::BackendKind::Cli => Ok(Self::Cli(resolve_cli(
-                config.as_ref().expect("cli backend implies config present"),
-            ))),
+            crate::config::BackendKind::Cli => Ok(Self::Cli(
+                config
+                    .as_ref()
+                    .expect("cli backend implies config present")
+                    .cli
+                    .to_spec(),
+            )),
             crate::config::BackendKind::Api => {
                 let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
                 resolved.validate()?;
@@ -898,55 +902,6 @@ impl LlmConfig {
             Self::Cli(spec) => Some(&spec.command),
             Self::Rig(_) => None,
         }
-    }
-}
-
-/// Build the [`CliSpec`] from a config that has `command` set. Defaults the
-/// args template to a single `{prompt}` placeholder and the timeout to
-/// [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`].
-///
-/// The stdout [`Encoding`](crate::cli_agent::Encoding) is **inferred from the
-/// argv template**, not stored as a separate config field: claude's
-/// `stream-json` preset carries `--output-format stream-json` (the token that
-/// uniquely selects claude's NDJSON envelope), so its presence selects the
-/// [`ClaudeStreamJson`](crate::cli_agent::Encoding::ClaudeStreamJson) decoder;
-/// anything else is [`Plain`](crate::cli_agent::Encoding::Plain). Sniffing the
-/// args keeps existing configs working without a migration and treats the
-/// preset's own flags as the source of truth — re-running `aic setup` and
-/// picking the claude preset writes the stream-json flags, which is what flips
-/// a plain `-p {prompt}` config into the streaming path.
-fn resolve_cli(config: &crate::config::Config) -> CliSpec {
-    let command = config
-        .active_cli_command()
-        .expect("resolve_cli only called when command is set")
-        .to_string();
-    let args = config
-        .args
-        .clone()
-        .unwrap_or_else(|| vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
-    let timeout_secs = config
-        .timeout_secs
-        .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
-    let encoding = if args.iter().any(|a| a == "stream-json") {
-        crate::cli_agent::Encoding::ClaudeStreamJson
-    } else if args
-        .windows(2)
-        .any(|w| w[0] == "--mode" && w[1] == "json")
-    {
-        crate::cli_agent::Encoding::PiStreamJson
-    } else if args
-        .windows(2)
-        .any(|w| w[0] == "--format" && w[1] == "json")
-    {
-        crate::cli_agent::Encoding::OpenCodeJson
-    } else {
-        crate::cli_agent::Encoding::Plain
-    };
-    CliSpec {
-        command,
-        args,
-        timeout_secs,
-        encoding,
     }
 }
 
@@ -1007,81 +962,6 @@ mod tests {
         assert_eq!(Provider::DeepSeek.default_model(), "deepseek-v4-flash");
         assert_eq!(Provider::Ollama.default_model(), "llama3.3");
         assert_eq!(Provider::Mistral.default_model(), "mistral-small-latest");
-    }
-
-    /// [`resolve_cli`] infers [`Encoding::ClaudeStreamJson`] from the argv
-    /// template: the `stream-json` token (from the claude preset's
-    /// `--output-format stream-json`) is what routes stdout through the NDJSON
-    /// decoder. This is the link that makes a config written by `aic setup`
-    /// (claude preset) actually stream — without it, the decoder never runs
-    /// and the loading frame falls back to the silent/cold-start notice.
-    #[test]
-    fn resolve_cli_infers_stream_json_encoding_from_args() {
-        let cfg = crate::config::Config {
-            command: Some("claude".into()),
-            args: Some(vec![
-                "-p".into(),
-                "{prompt}".into(),
-                "--output-format".into(),
-                "stream-json".into(),
-                "--include-partial-messages".into(),
-            ]),
-            ..Default::default()
-        };
-        let spec = resolve_cli(&cfg);
-        assert_eq!(spec.encoding, crate::cli_agent::Encoding::ClaudeStreamJson);
-    }
-
-    /// A plain `-p {prompt}` config (the pre-streaming claude preset, or any
-    /// custom non-streaming command) resolves to [`Encoding::Plain`] — the
-    /// runner treats stdout as the answer verbatim, no decoder. This is why a
-    /// stale config without the stream-json flags shows no startup feed.
-    #[test]
-    fn resolve_cli_infers_plain_for_non_stream_json_args() {
-        let cfg = crate::config::Config {
-            command: Some("claude".into()),
-            args: Some(vec!["-p".into(), "{prompt}".into()]),
-            ..Default::default()
-        };
-        let spec = resolve_cli(&cfg);
-        assert_eq!(spec.encoding, crate::cli_agent::Encoding::Plain);
-    }
-
-    /// pi's `--mode json` argv (the current preset) selects the pi stream
-    /// decoder, the same way claude's `stream-json` token selects claude's.
-    #[test]
-    fn resolve_cli_infers_pi_stream_json_from_mode_json() {
-        let cfg = crate::config::Config {
-            command: Some("pi".into()),
-            args: Some(vec![
-                "--no-tools".into(),
-                "--mode".into(),
-                "json".into(),
-                "-p".into(),
-                "{prompt}".into(),
-            ]),
-            ..Default::default()
-        };
-        let spec = resolve_cli(&cfg);
-        assert_eq!(spec.encoding, crate::cli_agent::Encoding::PiStreamJson);
-    }
-
-    /// opencode's `--format json` argv (the current preset) selects the
-    /// opencode event decoder.
-    #[test]
-    fn resolve_cli_infers_opencode_json_from_format_json() {
-        let cfg = crate::config::Config {
-            command: Some("opencode".into()),
-            args: Some(vec![
-                "run".into(),
-                "--format".into(),
-                "json".into(),
-                "{prompt}".into(),
-            ]),
-            ..Default::default()
-        };
-        let spec = resolve_cli(&cfg);
-        assert_eq!(spec.encoding, crate::cli_agent::Encoding::OpenCodeJson);
     }
 
     /// AIC-12: the five Phase-1 providers (xAI, Mistral, OpenRouter,

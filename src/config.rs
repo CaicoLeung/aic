@@ -16,6 +16,85 @@ use std::path::PathBuf;
 
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
 
+/// The CLI-agent Backend's three config fields — a unit (command + argv
+/// template + timeout) that travels together through [`Config`], the setup
+/// `Draft`, and [`CliSpec`](crate::cli_agent::CliSpec). On disk they stay
+/// **flat** top-level TOML keys via `#[serde(flatten)]` (ADR 0011: the
+/// `backend_kind` discriminator carries the grouping; a nested table would
+/// duplicate it).
+///
+/// Grouping the trio (instead of three loose `Option` fields redeclared in
+/// each context) gives them one owner and one `active_command` test, and lets
+/// resolution ([`Self::to_spec`]) live on the data it reads — fixing both the
+/// data-clump duplication and the feature-envy free function that reached
+/// across into [`Config`]'s fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CliConfig {
+    /// External coding-agent CLI to drive instead of an API key (ADR 0010).
+    /// When `backend_kind = "cli"`, aic shells out to `command` in
+    /// headless/print mode and reuses the CLI's own auth, so no `api_key` is
+    /// needed.
+    pub command: Option<String>,
+    /// Argv template for [`Self::command`]. Each element may contain the
+    /// literal `{prompt}` placeholder, replaced with the full prompt at run
+    /// time. Defaults to `["{prompt}"]`. The flags here also select the
+    /// stdout [`Encoding`](crate::cli_agent::Encoding) via
+    /// [`Encoding::from_args`](crate::cli_agent::Encoding::from_args).
+    pub args: Option<Vec<String>>,
+    /// Per-call timeout for the CLI backend, in seconds. Defaults to 240
+    /// (see [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`] for why it is far
+    /// above the API path's latency budget).
+    pub timeout_secs: Option<u64>,
+}
+
+impl CliConfig {
+    /// The CLI-agent `command` when set: the `command` field, trimmed and
+    /// non-empty; `None` when unset. The single "is the CLI backend
+    /// configured?" test, shared by [`Config`] and the setup `Draft` so every
+    /// reader agrees. NOTE (ADR 0011): this only *reads* the value — which
+    /// Backend is active is decided by [`Config::resolve_backend`] reading
+    /// `backend_kind`, not by command presence.
+    pub fn active_command(&self) -> Option<&str> {
+        self.command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Resolve this config into a runnable
+    /// [`CliSpec`](crate::cli_agent::CliSpec), applying the default args
+    /// template (`["{prompt}"]`) and the default timeout. The stdout
+    /// [`Encoding`](crate::cli_agent::Encoding) is **inferred from the argv**
+    /// via [`Encoding::from_args`](crate::cli_agent::Encoding::from_args) —
+    /// the preset's own flags are the single source of truth, shared with
+    /// `aic setup` verify, so run-time and setup can never disagree on which
+    /// decoder runs (the regression that left a claude-preset verify decoding
+    /// raw NDJSON as plain text).
+    ///
+    /// Only call this when `backend_kind = "cli"` and `active_command` is
+    /// `Some` (guaranteed by [`Config::resolve_backend`]).
+    pub fn to_spec(&self) -> crate::cli_agent::CliSpec {
+        let command = self
+            .active_command()
+            .expect("CliConfig::to_spec only called when a command is set")
+            .to_string();
+        let args = self
+            .args
+            .clone()
+            .unwrap_or_else(|| vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
+        let timeout_secs = self
+            .timeout_secs
+            .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
+        let encoding = crate::cli_agent::Encoding::from_args(&args);
+        crate::cli_agent::CliSpec {
+            command,
+            args,
+            timeout_secs,
+            encoding,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub backend: Option<String>,
@@ -33,22 +112,12 @@ pub struct Config {
     /// before each commit. Absent (or `false`) keeps the original
     /// generate-and-commit behavior.
     pub confirm_before_commit: Option<bool>,
-    /// External coding-agent CLI to drive instead of an API key (ADR 0010).
-    /// When `backend_kind = "cli"`, aic runs in **CLI backend** mode: it
-    /// shells out to `command` in headless/print mode and reuses the CLI's own
-    /// auth, so no `api_key` is needed. The CLI fields may coexist in the file
-    /// with the API fields (`backend`/`api_key`/`model`/`base_url`) as
-    /// **dormant** config — `backend_kind` selects the active Backend and the
-    /// rest are preserved across switches (ADR 0011).
-    pub command: Option<String>,
-    /// Argv template for [`Config::command`]. Each element may contain the
-    /// literal `{prompt}` placeholder, which is replaced with the full
-    /// (system + user) prompt at run time. Defaults to `["{prompt}"]`.
-    pub args: Option<Vec<String>>,
-    /// Per-call timeout for the CLI backend, in seconds. Defaults to 240
-    /// (see [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`] for why it is far above
-    /// the API path's latency budget).
-    pub timeout_secs: Option<u64>,
+    /// The CLI-agent Backend's fields. Flattened to top-level TOML keys
+    /// (`command` / `args` / `timeout_secs`) so the on-disk shape is unchanged
+    /// — ADR 0011 keeps the grouping in `backend_kind`, not in a nested
+    /// table. See [`CliConfig`].
+    #[serde(flatten)]
+    pub cli: CliConfig,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -79,17 +148,13 @@ impl Config {
         self.confirm_before_commit.unwrap_or(false)
     }
 
-    /// The CLI-agent `command` value when set: the `command` field, trimmed
-    /// and non-empty; `None` when unset. Centralizes the trim-and-non-empty
-    /// test so every reader agrees on what "set" means. NOTE: as of ADR 0011
-    /// this is no longer the *selection* lever — which Backend is active is
-    /// decided by [`Self::resolve_backend`] reading `backend_kind`. This only
-    /// reads the value.
+    /// The CLI-agent `command` value when set (trimmed, non-empty); `None`
+    /// when unset. Thin delegator over [`CliConfig::active_command`] for
+    /// call-site stability; the single "is the CLI backend configured?" test
+    /// (ADR 0011: `backend_kind` selects the active Backend; this only reads
+    /// the value).
     pub fn active_cli_command(&self) -> Option<&str> {
-        self.command
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+        self.cli.active_command()
     }
 
     /// Resolve the active [`BackendKind`] from the `backend_kind` discriminator
@@ -174,6 +239,7 @@ impl Config {
             None => return Ok(Vec::new()),
         };
         let args = config
+            .cli
             .args
             .clone()
             .unwrap_or_else(|| vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
@@ -181,7 +247,7 @@ impl Config {
             Some(m) => m,
             None => return Ok(Vec::new()),
         };
-        config.args = Some(new_args);
+        config.cli.args = Some(new_args);
         config.save()?;
         Ok(vec![format!(
             "auto-migrated the `{name}` CLI preset to its current shape (added the \
@@ -364,7 +430,7 @@ pub fn run_list() -> Result<()> {
                 .active_cli_command()
                 .expect("cli backend implies command set");
             println!("Command:  {command} (source: {})", Source::Config);
-            let (args, args_src) = match &c.args {
+            let (args, args_src) = match &c.cli.args {
                 Some(a) => (a.join(" "), Source::Config),
                 None => (
                     crate::cli_agent::PROMPT_PLACEHOLDER.to_string(),
@@ -372,7 +438,7 @@ pub fn run_list() -> Result<()> {
                 ),
             };
             println!("Args:     {args} (source: {args_src})");
-            let (timeout, to_src) = match c.timeout_secs {
+            let (timeout, to_src) = match c.cli.timeout_secs {
                 Some(t) => (t, Source::Config),
                 None => (crate::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
             };
@@ -499,7 +565,10 @@ mod tests {
         // Cli with a command resolves to Cli.
         let cli = Config {
             backend_kind: Some(BackendKind::Cli),
-            command: Some("claude".into()),
+            cli: CliConfig {
+                command: Some("claude".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_eq!(cli.resolve_backend().unwrap(), BackendKind::Cli);
@@ -521,7 +590,10 @@ mod tests {
         assert_eq!(
             Config {
                 backend_kind: Some(BackendKind::Api),
-                command: Some("claude".into()),
+                cli: CliConfig {
+                    command: Some("claude".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             }
             .resolve_backend()
@@ -531,7 +603,10 @@ mod tests {
         assert_eq!(
             Config {
                 backend_kind: Some(BackendKind::Cli),
-                command: Some("claude".into()),
+                cli: CliConfig {
+                    command: Some("claude".into()),
+                    ..Default::default()
+                },
                 api_key: Some("sk-x".into()),
                 ..Default::default()
             }
@@ -548,12 +623,82 @@ mod tests {
         assert!(
             Config {
                 backend_kind: None,
-                command: Some("claude".into()),
+                cli: CliConfig {
+                    command: Some("claude".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             }
             .resolve_backend()
             .is_err()
         );
+    }
+
+    /// `CliConfig::to_spec` infers the stdout [`Encoding`] from the argv
+    /// template — the single source of truth shared with `aic setup` verify,
+    /// so a config written by the claude preset (carrying
+    /// `--output-format stream-json`) routes stdout through the NDJSON decoder.
+    #[test]
+    fn cli_spec_infers_encoding_from_args() {
+        use crate::cli_agent::Encoding;
+        // claude preset argv → stream-json decoder.
+        let claude = CliConfig {
+            command: Some("claude".into()),
+            args: Some(vec![
+                "-p".into(),
+                "{prompt}".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--include-partial-messages".into(),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(claude.to_spec().encoding, Encoding::ClaudeStreamJson);
+
+        // pi `--mode json` → pi decoder.
+        let pi = CliConfig {
+            command: Some("pi".into()),
+            args: Some(vec![
+                "--no-tools".into(),
+                "--mode".into(),
+                "json".into(),
+                "-p".into(),
+                "{prompt}".into(),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(pi.to_spec().encoding, Encoding::PiStreamJson);
+
+        // opencode `--format json` → opencode decoder.
+        let oc = CliConfig {
+            command: Some("opencode".into()),
+            args: Some(vec![
+                "run".into(),
+                "--format".into(),
+                "json".into(),
+                "{prompt}".into(),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(oc.to_spec().encoding, Encoding::OpenCodeJson);
+
+        // Plain argv (pre-streaming claude, codex, or any custom non-streaming
+        // command) → plain: stdout is the answer verbatim, no decoder.
+        let plain = CliConfig {
+            command: Some("claude".into()),
+            args: Some(vec!["-p".into(), "{prompt}".into()]),
+            ..Default::default()
+        };
+        assert_eq!(plain.to_spec().encoding, Encoding::Plain);
+
+        // Defaults: no args → `["{prompt}"]`; no timeout → 240s.
+        let defaulted = CliConfig {
+            command: Some("my-agent".into()),
+            ..Default::default()
+        };
+        let spec = defaulted.to_spec();
+        assert_eq!(spec.args, vec![crate::cli_agent::PROMPT_PLACEHOLDER]);
+        assert_eq!(spec.timeout_secs, crate::cli_agent::DEFAULT_TIMEOUT_SECS);
     }
 
     #[test]

@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use crate::cli_agent::{PRESETS, cli_preset};
 use crate::config::{
-    BackendKind, Config, Source, config_path, resolve_api_key, resolve_base_url, resolve_field,
+    BackendKind, CliConfig, Config, Source, config_path, resolve_api_key, resolve_base_url,
+    resolve_field,
 };
 use crate::input::{OptNav, TextAct, opt_nav, prompt_text};
 use crate::llm::{BaseUrlRequirement, Provider};
@@ -102,11 +103,11 @@ struct Draft {
     /// "not chosen yet" (finalize keeps it unset → config absent → default
     /// off); the wizard default shown to the user is `false`.
     confirm_before_commit: Option<bool>,
-    /// External coding-agent CLI (ADR 0010). When set, aic runs in CLI-backend
-    /// mode and the provider/api-key fields are ignored.
-    cli_command: Option<String>,
-    cli_args: Option<Vec<String>>,
-    cli_timeout_secs: Option<u64>,
+    /// External coding-agent CLI fields (ADR 0010), shared with
+    /// [`Config::cli`] so the command/args/timeout trio has one owner and is
+    /// not redeclared here. When `backend_kind = cli`, aic runs in CLI-backend
+    /// mode and the provider/api-key fields are dormant.
+    cli: CliConfig,
 }
 
 impl Draft {
@@ -115,10 +116,7 @@ impl Draft {
     /// [`Config::active_cli_command`] so "is the CLI backend set?" has one
     /// definition across the wizard.
     fn active_cli_command(&self) -> Option<&str> {
-        self.cli_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+        self.cli.active_command()
     }
 
     /// The Backend this draft resolves to: the session choice, else
@@ -323,9 +321,7 @@ fn seed_draft(existing: &Option<Config>) -> Draft {
         draft.base_url = c.base_url.clone();
         draft.model = c.model.clone();
         draft.confirm_before_commit = c.confirm_before_commit;
-        draft.cli_command = c.command.clone();
-        draft.cli_args = c.args.clone();
-        draft.cli_timeout_secs = c.timeout_secs;
+        draft.cli = c.cli.clone();
     }
     draft
 }
@@ -400,7 +396,7 @@ fn cli_label(draft: &Draft) -> String {
     match draft.active_cli_command() {
         Some(cmd) => {
             let mut parts = vec![cmd.to_string()];
-            parts.extend(draft.cli_args.clone().unwrap_or_default());
+            parts.extend(draft.cli.args.clone().unwrap_or_default());
             parts.join(" ")
         }
         None => "(not configured)".to_string(),
@@ -655,9 +651,11 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
                 Some(CliRow::Preset(name)) => {
                     let spec = cli_preset(name).unwrap();
                     println!("\n{}", smoke_check(&spec.command));
-                    draft.cli_command = Some(spec.command);
-                    draft.cli_args = Some(spec.args);
-                    draft.cli_timeout_secs = Some(spec.timeout_secs);
+                    draft.cli = CliConfig {
+                        command: Some(spec.command),
+                        args: Some(spec.args),
+                        timeout_secs: Some(spec.timeout_secs),
+                    };
                     pause_done()?;
                     return Ok(false);
                 }
@@ -753,16 +751,26 @@ fn finalize(draft: Draft) -> Config {
     // (historical behavior). When it is dormant (CLI active), preserve the
     // draft's value verbatim so switching back restores it.
     let backend = match active {
-        BackendKind::Api => Some(draft.provider.unwrap_or(Provider::OpenAI).name().to_string()),
+        BackendKind::Api => Some(
+            draft
+                .provider
+                .unwrap_or(Provider::OpenAI)
+                .name()
+                .to_string(),
+        ),
         BackendKind::Cli => draft.provider.map(|p| p.name().to_string()),
     };
 
     // CLI fields are a unit (command + args + timeout); only persist them when
     // a command is set, so an unconfigured CLI leaves no orphaned keys.
-    let (args, timeout_secs) = if has_cli {
-        (draft.cli_args, draft.cli_timeout_secs)
+    let cli = if has_cli {
+        CliConfig {
+            command,
+            args: draft.cli.args,
+            timeout_secs: draft.cli.timeout_secs,
+        }
     } else {
-        (None, None)
+        CliConfig::default()
     };
 
     Config {
@@ -772,9 +780,7 @@ fn finalize(draft: Draft) -> Config {
         model: draft.model,
         base_url: draft.base_url,
         confirm_before_commit: draft.confirm_before_commit,
-        command,
-        args,
-        timeout_secs,
+        cli,
     }
 }
 
@@ -1221,27 +1227,19 @@ fn show_verify_result(
 /// setup` is already inside `#[tokio::main]`, so `block_in_place` parks the
 /// outer task while the nested runtime drives the async probe.
 fn step_verify_cli(draft: &Draft) -> Result<Nav> {
-    let command = match draft.active_cli_command() {
-        Some(c) => c.to_string(),
-        None => {
-            // Defensive: the menu only offers Verify when a command is set.
-            show_cli_verify_result(Err(anyhow::anyhow!("no CLI command is set yet")))?;
-            return Ok(Nav::Next);
-        }
-    };
-    let args = draft
-        .cli_args
-        .clone()
-        .unwrap_or_else(|| vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
-    let timeout_secs = draft
-        .cli_timeout_secs
-        .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
-    let spec = crate::cli_agent::CliSpec {
-        command,
-        args,
-        timeout_secs,
-        encoding: crate::cli_agent::Encoding::Plain,
-    };
+    if draft.active_cli_command().is_none() {
+        // Defensive: the menu only offers Verify when a command is set.
+        show_cli_verify_result(Err(anyhow::anyhow!("no CLI command is set yet")))?;
+        return Ok(Nav::Next);
+    }
+    // Resolve the spec the SAME way a run does — `CliConfig::to_spec` — so
+    // verify decodes the CLI's stdout envelope with the right decoder. The
+    // prior hand-built spec hardcoded `Encoding::Plain`, so a claude-preset
+    // verify (whose argv carries `--output-format stream-json`) rendered raw
+    // NDJSON events as the reply instead of `OK`. Sharing `to_spec` with
+    // `LlmConfig::load` means setup and run-time can no longer disagree on
+    // the decoder.
+    let spec = draft.cli.to_spec();
     let label = format!("Probing `{}` (print mode)…", spec.command);
     let agent = crate::cli_agent::CliAgent::new(
         spec,
@@ -1789,9 +1787,11 @@ mod tests {
             model: Some("gpt-5".into()),
             base_url: None,
             confirm_before_commit: Some(true),
-            cli_command: command.map(String::from),
-            cli_args: Some(vec!["-p".into(), "{prompt}".into()]),
-            cli_timeout_secs: Some(90),
+            cli: CliConfig {
+                command: command.map(String::from),
+                args: Some(vec!["-p".into(), "{prompt}".into()]),
+                timeout_secs: Some(90),
+            },
         }
     }
 
@@ -1802,12 +1802,12 @@ mod tests {
         // (ADR 0011) — switching never wipes the other Backend's config.
         let cfg = finalize(draft_with_cli(Some("claude")));
         // CLI Backend is active:
-        assert_eq!(cfg.command.as_deref(), Some("claude"));
+        assert_eq!(cfg.cli.command.as_deref(), Some("claude"));
         assert_eq!(
-            cfg.args.as_deref(),
+            cfg.cli.args.as_deref(),
             Some(&["-p".to_string(), "{prompt}".to_string()][..])
         );
-        assert_eq!(cfg.timeout_secs, Some(90));
+        assert_eq!(cfg.cli.timeout_secs, Some(90));
         assert_eq!(cfg.backend_kind, Some(BackendKind::Cli));
         // API-provider fields preserved dormant (not dropped):
         assert_eq!(cfg.backend.as_deref(), Some("openai"));
@@ -1824,9 +1824,9 @@ mod tests {
         let cfg = finalize(draft_with_cli(None));
         assert_eq!(cfg.backend.as_deref(), Some("openai"));
         assert_eq!(cfg.api_key.as_deref(), Some("sk-stale"));
-        assert!(cfg.command.is_none());
-        assert!(cfg.args.is_none());
-        assert!(cfg.timeout_secs.is_none());
+        assert!(cfg.cli.command.is_none());
+        assert!(cfg.cli.args.is_none());
+        assert!(cfg.cli.timeout_secs.is_none());
         assert!(cfg.backend_kind.is_none());
     }
 
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn cli_label_ignores_blank_command() {
         let mut d = draft_with_cli(Some("   "));
-        d.cli_command = Some("   ".into());
+        d.cli.command = Some("   ".into());
         assert_eq!(
             cli_label(&d),
             "(not configured)",
