@@ -655,6 +655,7 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
                         command: Some(spec.command),
                         args: Some(spec.args),
                         timeout_secs: Some(spec.timeout_secs),
+                        encoding: Some(spec.encoding),
                     };
                     pause_done()?;
                     return Ok(false);
@@ -761,13 +762,15 @@ fn finalize(draft: Draft) -> Config {
         BackendKind::Cli => draft.provider.map(|p| p.name().to_string()),
     };
 
-    // CLI fields are a unit (command + args + timeout); only persist them when
-    // a command is set, so an unconfigured CLI leaves no orphaned keys.
+    // CLI fields are a unit (command + args + timeout + encoding); only
+    // persist them when a command is set, so an unconfigured CLI leaves no
+    // orphaned keys.
     let cli = if has_cli {
         CliConfig {
             command,
             args: draft.cli.args,
             timeout_secs: draft.cli.timeout_secs,
+            encoding: draft.cli.encoding,
         }
     } else {
         CliConfig::default()
