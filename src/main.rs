@@ -105,7 +105,11 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     let expects_streaming = crate::llm::LlmConfig::load()
         .ok()
         .and_then(|c| c.cli_encoding())
-        .map(|e| matches!(e, crate::cli_agent::Encoding::ClaudeStreamJson))
+        .map(|e| matches!(
+            e,
+            crate::cli_agent::Encoding::ClaudeStreamJson
+                | crate::cli_agent::Encoding::PiStreamJson
+        ))
         .unwrap_or(false);
 
     // The streaming future owns the `ThinkingView` inside its `on_reasoning`

@@ -98,13 +98,19 @@ pub struct CliSpec {
 /// snapshots) is filtered so the noise never reaches the UI or the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Encoding {
-    /// stdout IS the assistant's text. Used by `codex exec` (plain), `pi -p`,
-    /// and any custom command.
+    /// stdout IS the assistant's text. Used by `codex exec` (plain), and any
+    /// custom command.
     #[default]
     Plain,
     /// Claude Code `--output-format stream-json --include-partial-messages`:
     /// stdout is NDJSON. Decoded per-line by [`decode_claude_stream_line`].
     ClaudeStreamJson,
+    /// pi's `--mode json`: stdout is NDJSON of `message_update` events whose
+    /// `assistantMessageEvent` carries `thinking_delta`/`text_delta` chunks —
+    /// a complete reasoning + answer stream (290 thinking + 142 text deltas
+    /// observed on a 120-word generation). Decoded per-line by
+    /// [`decode_pi_stream_line`].
+    PiStreamJson,
 }
 
 /// Built-in preset templates offered by `aic setup` and the docs. These are
@@ -165,18 +171,23 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
             ],
             Encoding::Plain,
         ),
-        // `--no-tools` disables ALL tools (read/bash/edit/write) so print
-        // mode is genuinely text-only. Without it pi leaves tools live and,
-        // on a project the user has trusted, can auto-run them in print mode
-        // (it cannot prompt) — effectively yolo.
+        // `--mode json` emits `message_update` events whose
+        // `assistantMessageEvent` carries `thinking_delta` (reasoning) and
+        // `text_delta` (answer) chunks — a complete stream, decoded centrally
+        // by [`Encoding::PiStreamJson`]. Plain `-p` mode block-buffers when
+        // piped and dumps only at exit, so `--mode json` is the only path that
+        // surfaces a reasoning feed. `--no-tools` still disables ALL tools so
+        // print mode is genuinely text-only.
         "pi" => (
             "pi",
             vec![
                 "--no-tools".to_string(),
+                "--mode".to_string(),
+                "json".to_string(),
                 "-p".to_string(),
                 PROMPT_PLACEHOLDER.to_string(),
             ],
-            Encoding::Plain,
+            Encoding::PiStreamJson,
         ),
         _ => return None,
     };
@@ -213,6 +224,10 @@ const LEGACY_PRESETS: &[(&str, &str, &[&str])] = &[
     // claude before stream-json streaming (pre-reasoning-feed): plain print
     // mode returned only the final answer with no thinking process.
     ("claude", "claude", &["-p", "{prompt}"]),
+    // pi before `--mode json` streaming: plain `-p` block-buffers when piped
+    // and dumps only at exit, with no reasoning feed. The current preset
+    // switches to `--mode json` for a live thinking/text stream.
+    ("pi", "pi", &["--no-tools", "-p", "{prompt}"]),
 ];
 
 /// If `(command, args)` exactly matches a legacy preset shape, return the
@@ -546,6 +561,63 @@ fn decode_claude_answer(raw: &str) -> Option<String> {
     })
 }
 
+/// One decoded chunk from a pi `--mode json` line. pi's stream is simpler
+/// than claude's: every delta is a `message_update` carrying an
+/// `assistantMessageEvent` of type `thinking_delta` (reasoning) or
+/// `text_delta` (answer). There are no startup milestones (pi's cold start is
+/// fast — no hooks/MCP dump) and no terminal `result` event with the full
+/// answer, so the answer is reconstructed by concatenating `text_delta`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PiDelta {
+    Thinking(String),
+    Text(String),
+}
+
+/// Decode one pi `--mode json` stdout line into a [`PiDelta`], or `None` for
+/// any non-delta event (`session`, `agent_start`, `turn_start`, `message_start`,
+/// `message_end`, `turn_end`, `agent_end`, `entry_appended`, `agent_settled`,
+/// and the `thinking_start`/`thinking_end`/`text_start`/`text_end` lifecycle
+/// markers). Tolerant like the claude decoder: a malformed line or missing
+/// field yields `None`, never an error.
+///
+/// Event shape:
+/// ```text
+/// {"type":"message_update","assistantMessageEvent":
+///  {"type":"thinking_delta","delta":"…"}}
+/// ```
+fn decode_pi_stream_line(line: &str) -> Option<PiDelta> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(|t| t.as_str())? != "message_update" {
+        return None;
+    }
+    let ev = v.get("assistantMessageEvent")?;
+    let delta = ev.get("delta").and_then(|d| d.as_str())?;
+    match ev.get("type").and_then(|t| t.as_str())? {
+        "thinking_delta" => Some(PiDelta::Thinking(delta.to_string())),
+        "text_delta" => Some(PiDelta::Text(delta.to_string())),
+        _ => None,
+    }
+}
+
+/// Reconstruct pi's answer text from a full `--mode json` stdout blob by
+/// concatenating every `text_delta` in arrival order. pi emits no terminal
+/// "result" event, so concatenation is the only source. Returns `None` if no
+/// text deltas arrived (e.g. an error turn), so the caller surfaces a typed
+/// error rather than feeding empty to JSON parsing.
+fn decode_pi_answer(raw: &str) -> Option<String> {
+    let mut text = String::new();
+    for line in raw.lines() {
+        if let Some(PiDelta::Text(s)) = decode_pi_stream_line(line) {
+            text.push_str(&s);
+        }
+    }
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// Decode a `system` event into a startup [`ClaudeDelta::Milestone`], or
 /// `None` for subtypes with nothing worth surfacing (`hook_response`,
 /// `status`, `thinking_tokens`). Pure and tolerant like the line decoder: a
@@ -746,6 +818,34 @@ impl CliAgent {
                     })),
                 }
             }
+            Encoding::PiStreamJson => {
+                // pi `--mode json`: each `message_update` line carries a
+                // `thinking_delta` (reasoning, forwarded live) or `text_delta`
+                // (answer, reconstructed post-run). No startup milestones —
+                // pi's cold start is fast, so the loading frame covers the
+                // brief pre-thinking gap and the first `thinking_delta` flips
+                // to the reasoning window.
+                let mut forward = |raw: &str| {
+                    if let Some(PiDelta::Thinking(t)) = decode_pi_stream_line(raw) {
+                        on_output(&t);
+                    }
+                };
+                let out = self.runner.run(&spec, timeout, &mut forward).await?;
+                if !out.success {
+                    return out.into_result(&self.spec.command);
+                }
+                match decode_pi_answer(&out.stdout) {
+                    Some(answer) if !answer.trim().is_empty() => Ok(answer),
+                    _ => Err(anyhow::Error::new(LlmError::NonZeroExit {
+                        program: self.spec.command.clone(),
+                        code: out.code,
+                        stderr: format!(
+                            "pi --mode json produced no answer text; stderr: {}",
+                            out.stderr
+                        ),
+                    })),
+                }
+            }
         }
     }
 
@@ -916,6 +1016,18 @@ mod tests {
     }
 
     #[test]
+    fn preset_migration_rewrites_legacy_pi_to_mode_json() {
+        // Stale pi: plain `--no-tools -p {prompt}` (pre-`--mode json` streaming).
+        let (name, new_args) = cli_preset_migration(
+            "pi",
+            &["--no-tools".into(), "-p".into(), "{prompt}".into()],
+        )
+        .expect("legacy pi fingerprint must migrate");
+        assert_eq!(name, "pi");
+        assert!(new_args.windows(2).any(|w| w[0] == "--mode" && w[1] == "json"));
+    }
+
+    #[test]
     fn preset_migration_is_noop_for_current_preset_and_custom() {
         // A config already on the current claude preset matches no legacy
         // fingerprint → None (idempotent: re-running migration is a no-op).
@@ -975,7 +1087,7 @@ mod tests {
         // --no-tools disables all tools so print mode is text-only.
         assert!(pi.args.iter().any(|a| a == "--no-tools"));
         assert!(pi.args.iter().any(|a| a == "-p"));
-        assert_eq!(pi.encoding, Encoding::Plain);
+        assert_eq!(pi.encoding, Encoding::PiStreamJson);
         assert!(cli_preset("nope").is_none());
         assert_eq!(PRESETS, &["claude", "codex", "pi"]);
     }
@@ -1317,5 +1429,74 @@ mod tests {
         .join("\n");
         assert_eq!(decode_claude_answer(&noise), None);
         assert_eq!(decode_claude_answer(""), None);
+    }
+
+    // ---- pi `--mode json` decoding -------------------------------------------
+    //
+    // Shapes captured from a real `pi --no-tools --mode json -p` run: every
+    // delta is a `message_update` carrying an `assistantMessageEvent`.
+
+    #[test]
+    fn decode_pi_extracts_thinking_delta() {
+        let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"User"}}"#;
+        assert_eq!(
+            decode_pi_stream_line(line),
+            Some(PiDelta::Thinking("User".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_pi_extracts_text_delta() {
+        let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Fore"}}"#;
+        assert_eq!(
+            decode_pi_stream_line(line),
+            Some(PiDelta::Text("Fore".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_pi_drops_lifecycle_and_session_noise() {
+        // session/agent_start/turn_start/message lifecycle markers carry no
+        // delta and must not reach the reasoning window or the answer.
+        let session = r#"{"type":"session","version":3,"id":"s"}"#;
+        let turn = r#"{"type":"turn_start"}"#;
+        let thinking_start = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}"#;
+        let text_end = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1}}"#;
+        let settled = r#"{"type":"agent_settled"}"#;
+        for l in [session, turn, thinking_start, text_end, settled] {
+            assert_eq!(decode_pi_stream_line(l), None, "noise leaked: {l}");
+        }
+    }
+
+    #[test]
+    fn decode_pi_tolerates_non_json_and_missing_fields() {
+        assert_eq!(decode_pi_stream_line("not json"), None);
+        assert_eq!(decode_pi_stream_line(""), None);
+        // Valid JSON, wrong type → None.
+        assert_eq!(decode_pi_stream_line(r#"{"type":"session"}"#), None);
+        // message_update missing the event → None.
+        assert_eq!(decode_pi_stream_line(r#"{"type":"message_update"}"#), None);
+    }
+
+    #[test]
+    fn pi_answer_concatenates_text_deltas() {
+        // pi emits no terminal "result" event; the answer is the concatenation
+        // of every text_delta, in arrival order. thinking deltas are ignored
+        // for the answer (they stream to the reasoning window instead).
+        let blob = [
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"t"}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"hello "}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"world"}}"#,
+            r#"{"type":"agent_end"}"#,
+        ]
+        .join("\n");
+        assert_eq!(decode_pi_answer(&blob).as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn pi_answer_returns_none_when_only_thinking_or_noise() {
+        let thinking_only = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"t"}}"#;
+        assert_eq!(decode_pi_answer(thinking_only), None);
+        assert_eq!(decode_pi_answer(""), None);
     }
 }

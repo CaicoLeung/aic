@@ -918,6 +918,11 @@ fn resolve_cli(config: &crate::config::Config) -> CliSpec {
         .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
     let encoding = if args.iter().any(|a| a == "stream-json") {
         crate::cli_agent::Encoding::ClaudeStreamJson
+    } else if args
+        .windows(2)
+        .any(|w| w[0] == "--mode" && w[1] == "json")
+    {
+        crate::cli_agent::Encoding::PiStreamJson
     } else {
         crate::cli_agent::Encoding::Plain
     };
@@ -1024,6 +1029,25 @@ mod tests {
         };
         let spec = resolve_cli(&cfg);
         assert_eq!(spec.encoding, crate::cli_agent::Encoding::Plain);
+    }
+
+    /// pi's `--mode json` argv (the current preset) selects the pi stream
+    /// decoder, the same way claude's `stream-json` token selects claude's.
+    #[test]
+    fn resolve_cli_infers_pi_stream_json_from_mode_json() {
+        let cfg = crate::config::Config {
+            command: Some("pi".into()),
+            args: Some(vec![
+                "--no-tools".into(),
+                "--mode".into(),
+                "json".into(),
+                "-p".into(),
+                "{prompt}".into(),
+            ]),
+            ..Default::default()
+        };
+        let spec = resolve_cli(&cfg);
+        assert_eq!(spec.encoding, crate::cli_agent::Encoding::PiStreamJson);
     }
 
     /// AIC-12: the five Phase-1 providers (xAI, Mistral, OpenRouter,
