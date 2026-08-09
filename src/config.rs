@@ -122,13 +122,66 @@ pub struct ProviderProfile {
 }
 
 impl ProviderProfile {
-    /// Upsert by `backend`: replace the existing entry in place, or append.
-    /// The single "remember this provider" primitive shared by the setup
-    /// wizard (on provider switch and on save) and `aic use`'s load path, so
-    /// there is one site that decides what a remembered profile contains.
+    /// Build a profile from a provider name and its active key/model/base_url
+    /// — the one shape every "remember the active provider" site captures
+    /// (setup save, setup switch, `aic use` switch), so the field bundle is
+    /// assembled in one place instead of three.
+    pub fn new(
+        backend: impl Into<String>,
+        api_key: Option<String>,
+        model: Option<String>,
+        base_url: Option<String>,
+    ) -> Self {
+        Self {
+            backend: backend.into(),
+            api_key,
+            model,
+            base_url,
+        }
+    }
+
+    /// This profile's key/model/base_url as a tuple ready to destructure onto
+    /// the active fields of a [`Config`] (in `aic use`) or a `setup::Draft`
+    /// (in the wizard's provider switch). The projection lives on the profile
+    /// — which owns the fields — instead of each caller reaching in
+    /// field-by-field.
+    pub fn project_fields(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.api_key.clone(),
+            self.model.clone(),
+            self.base_url.clone(),
+        )
+    }
+
+    /// Upsert by `backend` with full replace: overwrite the existing entry in
+    /// place, or append. Use when the source is an explicit commit (the setup
+    /// wizard's save), where a deliberately cleared field must be honoured.
+    /// For transient switches use [`ProviderProfile::bank_active`].
     pub fn upsert(list: &mut Vec<Self>, profile: Self) {
         if let Some(slot) = list.iter_mut().find(|p| p.backend == profile.backend) {
             *slot = profile;
+        } else {
+            list.push(profile);
+        }
+    }
+
+    /// Remember a provider into the bank with merge semantics: update an
+    /// existing entry in place (or append), taking each field from `profile`
+    /// only when it is `Some`, so an inattentive switch never erases a
+    /// previously remembered key/model/base_url. Used by both switch paths
+    /// (`aic use` and the wizard's provider step), where the active row is
+    /// just passing through and a blank field is not a deliberate deletion.
+    pub fn bank_active(list: &mut Vec<Self>, profile: Self) {
+        if let Some(slot) = list.iter_mut().find(|p| p.backend == profile.backend) {
+            if profile.api_key.is_some() {
+                slot.api_key = profile.api_key;
+            }
+            if profile.model.is_some() {
+                slot.model = profile.model;
+            }
+            if profile.base_url.is_some() {
+                slot.base_url = profile.base_url;
+            }
         } else {
             list.push(profile);
         }
