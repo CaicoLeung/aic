@@ -22,20 +22,27 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
 git2 = "0.21"
-indicatif = "0.17"
+indicatif = "0.18"
 console = "0.16"
-rig-core = "0.36"
+rig = "0.41"
 schemars = "1"
-similar = "2"
+similar = "3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-toml = "0.8"
-self_update = { version = "0.42", features = ["archive-tar", "archive-zip", "compression-flate2", "signatures"] }
+toml = "1"
+# Archive features must cover BOTH release formats cargo-dist ships:
+#   unix-archive = ".tar.gz"  -> compression-tar-gz (archive-tar + flate2 + zipsign verify-tar)
+#   windows        = ".zip"   -> archive-zip + compression-zip-deflate (zipsign verify-zip)
+# Dropping compression-tar-gz compiles out the Tar extraction arm in
+# self_update::extract_into, so `aic update` on a shell-installed Unix binary
+# would download the .tar.gz and fail to extract it. See dist-workspace.toml
+# and docs/adr/0002-signed-self-update.md.
+self_update = { version = "1.0.0-rc.6", features = ["signatures", "compression-tar-gz", "archive-zip", "compression-zip-deflate"] }
 clap_complete = "4.6.8"
 clap_complete_nushell = "4.6.1"
 edit = "0.1"
-inquire = "0.7"
+inquire = "0.9"
 
 [dev-dependencies]
 parking_lot = "0.12"

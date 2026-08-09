@@ -78,10 +78,12 @@ pub fn run_update() -> Result<()> {
         .build()?
         .update()?;
     match status {
-        self_update::Status::UpToDate(_) => {
+        self_update::VersionStatus::UpToDate(_) => {
             println!("Already up to date (v{})", cargo_crate_version!())
         }
-        self_update::Status::Updated(v) => println!("Updated to version {v}"),
+        self_update::VersionStatus::Updated(v) => println!("Updated to version {v}"),
+        // `VersionStatus` is `#[non_exhaustive]`; any future variant is reported generically.
+        _ => println!("Update completed (v{})", cargo_crate_version!()),
     }
     Ok(())
 }
