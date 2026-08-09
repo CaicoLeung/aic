@@ -101,6 +101,40 @@ impl CliConfig {
     }
 }
 
+/// One remembered API-provider profile — the key/model/base-url bundle a user
+/// configured once, kept around so switching providers (via `aic setup` or
+/// `aic use`) restores them instead of asking again. The active provider's
+/// values ALSO live as top-level [`Config`] fields (the on-disk shape released
+/// configs already have); this list is the memory bank the active row is
+/// projected from / swapped into.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    /// Canonical provider name (e.g. `"openai"`) — the key this profile is
+    /// looked up by. Matches
+    /// [`Provider::name`](crate::llm::Provider::name).
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+impl ProviderProfile {
+    /// Upsert by `backend`: replace the existing entry in place, or append.
+    /// The single "remember this provider" primitive shared by the setup
+    /// wizard (on provider switch and on save) and `aic use`'s load path, so
+    /// there is one site that decides what a remembered profile contains.
+    pub fn upsert(list: &mut Vec<Self>, profile: Self) {
+        if let Some(slot) = list.iter_mut().find(|p| p.backend == profile.backend) {
+            *slot = profile;
+        } else {
+            list.push(profile);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub backend: Option<String>,
@@ -124,6 +158,13 @@ pub struct Config {
     /// table. See [`CliConfig`].
     #[serde(flatten)]
     pub cli: CliConfig,
+    /// Remembered API-provider profiles — the key/model/base-url bundle per
+    /// provider, so switching providers restores them instead of re-asking.
+    /// Written by `aic setup`, read by `aic use` and by setup's provider
+    /// switch. `#[serde(default)]` so pre-bank configs load with an empty
+    /// list and are folded in by [`setup::seed_draft`] on the next save.
+    #[serde(default)]
+    pub providers: Vec<ProviderProfile>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -786,6 +827,76 @@ mod tests {
         assert_eq!(c.backend.as_deref(), Some("openai"));
         assert_eq!(c.api_key.as_deref(), Some("k"));
         assert_eq!(c.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn provider_profile_upsert_replaces_or_appends() {
+        let mut list = Vec::new();
+        ProviderProfile::upsert(
+            &mut list,
+            ProviderProfile { backend: "openai".into(), api_key: Some("k1".into()), ..Default::default() },
+        );
+        ProviderProfile::upsert(
+            &mut list,
+            ProviderProfile { backend: "anthropic".into(), ..Default::default() },
+        );
+        // Replace openai in place, not append a second openai.
+        ProviderProfile::upsert(
+            &mut list,
+            ProviderProfile { backend: "openai".into(), api_key: Some("k2".into()), ..Default::default() },
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].backend, "openai");
+        assert_eq!(list[0].api_key.as_deref(), Some("k2"));
+        assert_eq!(list[1].backend, "anthropic");
+    }
+
+    /// The `[[providers]]` bank round-trips through TOML so a config saved
+    /// by one aic run loads back with every remembered provider intact — the
+    /// on-disk contract `aic setup`/`aic use` depend on.
+    #[test]
+    fn providers_bank_round_trips_through_toml() {
+        let c = Config {
+            backend: Some("openai".into()),
+            api_key: Some("sk-live".into()),
+            model: Some("gpt-5".into()),
+            providers: vec![
+                ProviderProfile {
+                    backend: "openai".into(),
+                    api_key: Some("sk-live".into()),
+                    model: Some("gpt-5".into()),
+                    base_url: None,
+                },
+                ProviderProfile {
+                    backend: "anthropic".into(),
+                    api_key: Some("sk-ant".into()),
+                    model: Some("claude-x".into()),
+                    base_url: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let s = toml::to_string(&c).unwrap();
+        assert!(s.contains("[[providers]]"));
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.providers.len(), 2);
+        assert_eq!(back.providers[1].backend, "anthropic");
+        assert_eq!(back.providers[1].api_key.as_deref(), Some("sk-ant"));
+    }
+
+    /// A pre-bank config (no `[[providers]]` table) still loads: the field is
+    /// `#[serde(default)]` and comes back empty, ready to be populated on the
+    /// next save by `setup::seed_draft`'s legacy fold.
+    #[test]
+    fn config_without_providers_loads_as_empty() {
+        let raw = r#"
+backend = "openai"
+api_key = "sk-x"
+model = "gpt-5"
+"#;
+        let c: Config = toml::from_str(raw).unwrap();
+        assert_eq!(c.backend.as_deref(), Some("openai"));
+        assert!(c.providers.is_empty());
     }
 
     #[test]
