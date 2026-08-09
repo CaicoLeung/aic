@@ -934,6 +934,11 @@ fn resolve_cli(config: &crate::config::Config) -> CliSpec {
         .any(|w| w[0] == "--mode" && w[1] == "json")
     {
         crate::cli_agent::Encoding::PiStreamJson
+    } else if args
+        .windows(2)
+        .any(|w| w[0] == "--format" && w[1] == "json")
+    {
+        crate::cli_agent::Encoding::OpenCodeJson
     } else {
         crate::cli_agent::Encoding::Plain
     };
@@ -1059,6 +1064,24 @@ mod tests {
         };
         let spec = resolve_cli(&cfg);
         assert_eq!(spec.encoding, crate::cli_agent::Encoding::PiStreamJson);
+    }
+
+    /// opencode's `--format json` argv (the current preset) selects the
+    /// opencode event decoder.
+    #[test]
+    fn resolve_cli_infers_opencode_json_from_format_json() {
+        let cfg = crate::config::Config {
+            command: Some("opencode".into()),
+            args: Some(vec![
+                "run".into(),
+                "--format".into(),
+                "json".into(),
+                "{prompt}".into(),
+            ]),
+            ..Default::default()
+        };
+        let spec = resolve_cli(&cfg);
+        assert_eq!(spec.encoding, crate::cli_agent::Encoding::OpenCodeJson);
     }
 
     /// AIC-12: the five Phase-1 providers (xAI, Mistral, OpenRouter,

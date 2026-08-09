@@ -222,9 +222,14 @@ Notes:
 - **Output is JSON for typed paths.** aic asks the CLI for JSON (the system
   prompts already specify the shape) and tolerant-parses it, the same way the
   batch-plan API path already does.
-- **Custom CLI.** Point `command`/`args` at any print-mode CLI (with
-  `backend_kind = "cli"`). See [ADR 0010](docs/adr/0010-cli-agent-backend.md)
-  for the backend design and
+- **Presets only (claude / codex / pi / opencode).** Each preset ships a
+  dedicated decoder for its CLI's stdout envelope (claude `stream-json`,
+  pi `--mode json`, opencode `--format json`, codex plain), so aic can stream
+  reasoning where the CLI exposes it and cleanly extract the answer. The
+  setup wizard no longer offers a free-form "Custom command…" — a hand-edited
+  `command`/`args` still runs, but in plain-text mode with no reasoning feed
+  and no envelope decoding (unsupported). See
+  [ADR 0010](docs/adr/0010-cli-agent-backend.md) for the backend design and
   [ADR 0011](docs/adr/0011-explicit-backend-discriminator.md) for the
   `backend_kind` discriminator.
 

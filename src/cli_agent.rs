@@ -111,6 +111,13 @@ pub enum Encoding {
     /// observed on a 120-word generation). Decoded per-line by
     /// [`decode_pi_stream_line`].
     PiStreamJson,
+    /// opencode's `run --format json`: stdout is NDJSON of events
+    /// (`step_start`/`reasoning`/`text`/`step_finish`). The `text` event's
+    /// `part.text` carries the **full** answer, arriving whole at completion
+    /// (not token-streamed), so this is clean answer extraction rather than a
+    /// live reasoning feed — the loading frame covers the wait. Decoded by
+    /// [`decode_opencode_stream_line`].
+    OpenCodeJson,
 }
 
 /// Built-in preset templates offered by `aic setup` and the docs. These are
@@ -189,6 +196,24 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
             ],
             Encoding::PiStreamJson,
         ),
+        // `run --format json` emits NDJSON events; the `text` event's
+        // `part.text` is the full answer (arriving whole at completion, not
+        // token-streamed — so aic's loading frame covers the wait and this is
+        // clean answer extraction, not a live reasoning feed). opencode reuses
+        // its own auth (cursor oauth / provider env keys), so no `api_key`
+        // needed. `--thinking` is omitted for model-compatibility: reasoning
+        // arrives at completion anyway (no live value), and some models reject
+        // the flag.
+        "opencode" => (
+            "opencode",
+            vec![
+                "run".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                PROMPT_PLACEHOLDER.to_string(),
+            ],
+            Encoding::OpenCodeJson,
+        ),
         _ => return None,
     };
     Some(CliSpec {
@@ -200,7 +225,7 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
 }
 
 /// Names of the built-in presets, in setup-presentation order.
-pub const PRESETS: &[&str] = &["claude", "codex", "pi"];
+pub const PRESETS: &[&str] = &["claude", "codex", "pi", "opencode"];
 
 /// Known historical preset shapes whose args differ from the current
 /// [`cli_preset`]. Each entry is `(name, command, legacy_args)`. Used by
@@ -667,6 +692,55 @@ fn decode_claude_system_event(v: &serde_json::Value) -> Option<ClaudeDelta> {
     }
 }
 
+/// One decoded chunk from an opencode `run --format json` line. opencode emits
+/// the full answer as a single `text` event's `part.text` at completion (not
+/// token-streamed), and — only when reasoning is produced — a `reasoning`
+/// event the same way. `step_start`/`step_finish` carry metadata only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpenCodeDelta {
+    Thinking(String),
+    Text(String),
+}
+
+/// Decode one opencode `--format json` stdout line into an [`OpenCodeDelta`],
+/// or `None` for non-content events (`step_start`, `step_finish`, `tool_use`,
+/// …). Tolerant like the other decoders: malformed JSON or a missing `text`
+/// field yields `None`, never an error.
+///
+/// Event shapes:
+/// ```text
+/// {"type":"reasoning","part":{"type":"reasoning","text":"…"}}
+/// {"type":"text","part":{"type":"text","text":"…"}}
+/// ```
+fn decode_opencode_stream_line(line: &str) -> Option<OpenCodeDelta> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let typ = v.get("type").and_then(|t| t.as_str())?;
+    let text = v
+        .get("part")
+        .and_then(|p| p.get("text"))
+        .and_then(|t| t.as_str())?;
+    match typ {
+        "reasoning" => Some(OpenCodeDelta::Thinking(text.to_string())),
+        "text" => Some(OpenCodeDelta::Text(text.to_string())),
+        _ => None,
+    }
+}
+
+/// Reconstruct opencode's answer text from a full `--format json` stdout blob.
+/// opencode emits the full answer as one `text` event's `part.text` at
+/// completion; a multi-step agent run may emit several `text` events, in which
+/// case the final answer is the last one. Returns `None` if no `text` event
+/// arrived (e.g. an error turn), so the caller surfaces a typed error.
+fn decode_opencode_answer(raw: &str) -> Option<String> {
+    let mut answer: Option<String> = None;
+    for line in raw.lines() {
+        if let Some(OpenCodeDelta::Text(s)) = decode_opencode_stream_line(line) {
+            answer = Some(s);
+        }
+    }
+    answer.filter(|s| !s.trim().is_empty())
+}
+
 /// One CLI-agent invocation handle. Holds the command template, the system
 /// prompt for the current task, and the (injectable) runner.
 pub struct CliAgent {
@@ -841,6 +915,35 @@ impl CliAgent {
                         code: out.code,
                         stderr: format!(
                             "pi --mode json produced no answer text; stderr: {}",
+                            out.stderr
+                        ),
+                    })),
+                }
+            }
+            Encoding::OpenCodeJson => {
+                // opencode `run --format json`: reasoning (if any) and the full
+                // answer each arrive as one event at completion, not token-
+                // streamed. Forward `reasoning` live in case an opencode build
+                // emits it early (mostly it lands with the answer, so this is
+                // usually a no-op for the UI); the answer is the last `text`
+                // event's `part.text`, extracted post-run.
+                let mut forward = |raw: &str| {
+                    if let Some(OpenCodeDelta::Thinking(t)) = decode_opencode_stream_line(raw)
+                    {
+                        on_output(&t);
+                    }
+                };
+                let out = self.runner.run(&spec, timeout, &mut forward).await?;
+                if !out.success {
+                    return out.into_result(&self.spec.command);
+                }
+                match decode_opencode_answer(&out.stdout) {
+                    Some(answer) if !answer.trim().is_empty() => Ok(answer),
+                    _ => Err(anyhow::Error::new(LlmError::NonZeroExit {
+                        program: self.spec.command.clone(),
+                        code: out.code,
+                        stderr: format!(
+                            "opencode --format json produced no answer text; stderr: {}",
                             out.stderr
                         ),
                     })),
@@ -1088,8 +1191,13 @@ mod tests {
         assert!(pi.args.iter().any(|a| a == "--no-tools"));
         assert!(pi.args.iter().any(|a| a == "-p"));
         assert_eq!(pi.encoding, Encoding::PiStreamJson);
+        let oc = cli_preset("opencode").unwrap();
+        assert_eq!(oc.command, "opencode");
+        // run --format json: NDJSON events for clean answer extraction.
+        assert!(oc.args.windows(2).any(|w| w[0] == "--format" && w[1] == "json"));
+        assert_eq!(oc.encoding, Encoding::OpenCodeJson);
         assert!(cli_preset("nope").is_none());
-        assert_eq!(PRESETS, &["claude", "codex", "pi"]);
+        assert_eq!(PRESETS, &["claude", "codex", "pi", "opencode"]);
     }
 
     #[tokio::test]
@@ -1498,5 +1606,62 @@ mod tests {
         let thinking_only = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"t"}}"#;
         assert_eq!(decode_pi_answer(thinking_only), None);
         assert_eq!(decode_pi_answer(""), None);
+    }
+
+    // ---- opencode `--format json` decoding -----------------------------------
+    //
+    // Shapes captured from a real `opencode run --format json` run: the full
+    // answer arrives as one `text` event's `part.text` at completion.
+
+    #[test]
+    fn decode_opencode_extracts_text_event() {
+        let line = r#"{"type":"text","timestamp":1,"sessionID":"s","part":{"id":"p","type":"text","text":"hello world"}}"#;
+        assert_eq!(
+            decode_opencode_stream_line(line),
+            Some(OpenCodeDelta::Text("hello world".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_opencode_extracts_reasoning_event() {
+        let line = r#"{"type":"reasoning","part":{"type":"reasoning","text":"thinking it over"}}"#;
+        assert_eq!(
+            decode_opencode_stream_line(line),
+            Some(OpenCodeDelta::Thinking("thinking it over".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_opencode_drops_step_lifecycle_noise() {
+        let step_start = r#"{"type":"step_start","part":{"type":"step-start"}}"#;
+        let step_finish = r#"{"type":"step_finish","part":{"type":"step-finish","tokens":{}}}"#;
+        assert_eq!(decode_opencode_stream_line(step_start), None);
+        assert_eq!(decode_opencode_stream_line(step_finish), None);
+        // Non-JSON / missing text field → None.
+        assert_eq!(decode_opencode_stream_line("not json"), None);
+        assert_eq!(decode_opencode_stream_line(r#"{"type":"text","part":{"type":"text"}}"#), None);
+    }
+
+    #[test]
+    fn opencode_answer_takes_last_text_event() {
+        // The answer arrives whole as one `text` event. A multi-step run could
+        // emit several; the final answer is the last one. reasoning events are
+        // ignored for the answer (they stream to the reasoning window).
+        let blob = [
+            r#"{"type":"step_start","part":{"type":"step-start"}}"#,
+            r#"{"type":"reasoning","part":{"type":"reasoning","text":"t"}}"#,
+            r#"{"type":"text","part":{"type":"text","text":"intermediate"}}"#,
+            r#"{"type":"text","part":{"type":"text","text":"final answer"}}"#,
+            r#"{"type":"step_finish","part":{"type":"step-finish"}}"#,
+        ]
+        .join("\n");
+        assert_eq!(decode_opencode_answer(&blob).as_deref(), Some("final answer"));
+    }
+
+    #[test]
+    fn opencode_answer_returns_none_without_text_event() {
+        let no_text = r#"{"type":"step_start","part":{"type":"step-start"}}"#;
+        assert_eq!(decode_opencode_answer(no_text), None);
+        assert_eq!(decode_opencode_answer(""), None);
     }
 }
