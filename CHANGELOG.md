@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-09
+
+> 🎉 **0.5.0** — 4 changes · 1 contributor
 
 ### Features
 
-- Explicit `backend_kind` config discriminator (`"api"` / `"cli"`) selecting the active backend, with strict validation — a mismatched `command`/`api_key` is a hard error, not a silent inference (ADR 0011). The setup wizard is mode-first on first run, shows a persistent active-backend banner, and radio-switches between backends with confirmation; each Run prints which backend it uses.
+- Add musl and ARM Linux targets (#113)
+- WCAG-safe output colors for light & dark terminals (#116)
+- CLI-agent backend — reuse a local agent's auth, no API key (#118)
+- Remember provider profiles and switch with aic use (#120)
 
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.4.8] - 2026-08-08
 
 > 🎉 **0.4.8** — 5 changes · 1 contributor
