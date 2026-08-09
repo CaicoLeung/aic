@@ -636,62 +636,19 @@ fn smoke_check(program: &str) -> String {
 }
 
 /// Configure the CLI-agent backend: pick a preset (claude/codex/pi) or enter a
-/// custom command + args template. Choosing a CLI backend is mutually
-/// exclusive with the API provider path — [`finalize`] drops the provider
-/// fields when a command is set. Returns `true` only on Ctrl-C (cancel setup).
+/// custom command + args template. The other Backend's fields are kept dormant
+/// by [`finalize`], so configuring a CLI here does not wipe an API-provider
+/// config. Returns `true` only on Ctrl-C (cancel setup).
 fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
     loop {
         show_screen()?;
-        let preset_labels: Vec<String> = PRESETS
-            .iter()
-            .map(|name| {
-                let spec = cli_preset(name).unwrap();
-                format!("{name} — `{} {}`", spec.command, spec.args.join(" "))
-            })
-            .collect();
-        let mut items = vec!["Choose a preset:".to_string()];
-        // Clippy: collect then extend to avoid borrowing preset_labels across the closure.
-        items.extend(preset_labels.iter().cloned());
-        items.push("Custom command…".to_string());
-        let command_set = draft.active_cli_command().is_some();
-        if command_set {
-            items.push("Clear CLI backend (use API key instead)".to_string());
-        }
-        if command_set {
-            // Probe install + auth now (mirrors the API path's Verify item) so
-            // an installed-but-unauthenticated CLI is caught at setup, not
-            // mid-Run (ADR 0010 reliability).
-            items.push("Verify (probe the CLI now)".to_string());
-        }
-        items.push("↩️ Done — back to main menu".to_string());
-        let n_presets = PRESETS.len();
-        let custom_idx = 1 + n_presets;
-        // Running index after presets + custom; clear & verify are both gated
-        // on a command being set, so they shift done_idx only then.
-        let mut idx = custom_idx + 1;
-        let clear_idx = if command_set {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let verify_idx = if command_set {
-            let i = idx;
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-        let done_idx = idx;
-
-        match opt_nav("CLI agent backend", &items, 0)? {
+        let rows = cli_menu_rows(draft.active_cli_command().is_some());
+        let labels: Vec<String> = rows.iter().map(CliRow::label).collect();
+        match opt_nav("CLI agent backend", &labels, 0)? {
             OptNav::Back => return Ok(false),
             OptNav::Cancel => return Ok(true),
-            OptNav::Value(i) => {
-                // Preset rows live at indices 1..=n_presets.
-                if i >= 1 && i <= n_presets {
-                    let name = PRESETS[i - 1];
+            OptNav::Value(i) => match rows.get(i).copied() {
+                Some(CliRow::Preset(name)) => {
                     let spec = cli_preset(name).unwrap();
                     println!("\n{}", smoke_check(&spec.command));
                     draft.cli_command = Some(spec.command);
@@ -700,33 +657,72 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
                     pause_done()?;
                     return Ok(false);
                 }
-                if i == custom_idx {
+                Some(CliRow::Custom) => {
                     if step_custom_cli(draft)? == Nav::Cancel {
                         return Ok(true);
                     }
                     continue;
                 }
-                if clear_idx == Some(i) {
-                    draft.cli_command = None;
-                    draft.cli_args = None;
-                    draft.cli_timeout_secs = None;
-                    println!("\nCLI backend cleared — aic will use the API provider.");
-                    pause_done()?;
-                    return Ok(false);
-                }
-                if verify_idx == Some(i) {
+                Some(CliRow::Verify) => {
                     if step_verify_cli(draft)? == Nav::Cancel {
                         return Ok(true);
                     }
                     continue;
                 }
-                if i == done_idx {
-                    return Ok(false);
-                }
-                unreachable!("unmapped CLI menu row {i}");
-            }
+                Some(CliRow::Done) => return Ok(false),
+                // `opt_nav` only ever returns an index inside `labels`, so an
+                // out-of-range row cannot occur in practice; re-show the menu
+                // rather than panic if it ever does.
+                None => continue,
+            },
         }
     }
+}
+
+/// One selectable row of the CLI-agent menu: the label shown to the user and
+/// the action selecting it takes, paired. Building the list once means every
+/// selectable row has an action **by construction** — there is no separate
+/// index arithmetic to drift out of sync, so no row can ever be "unmapped".
+/// (An earlier version put a "Choose a preset:" *label* in as row 0 with no
+/// matching action; selecting it panicked the TUI at the `unreachable!`.)
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CliRow {
+    /// A named preset (an entry of [`PRESETS`]).
+    Preset(&'static str),
+    /// Enter a custom command + args template + timeout.
+    Custom,
+    /// Probe install + auth now — only present when a command is set.
+    Verify,
+    /// Return to the main menu.
+    Done,
+}
+
+impl CliRow {
+    /// The text shown for this row in the [`opt_nav`] menu.
+    fn label(&self) -> String {
+        match self {
+            CliRow::Preset(name) => {
+                let spec = cli_preset(name).unwrap();
+                format!("{name} — `{} {}`", spec.command, spec.args.join(" "))
+            }
+            CliRow::Custom => "Custom command…".to_string(),
+            CliRow::Verify => "Verify (probe the CLI now)".to_string(),
+            CliRow::Done => "↩️ Done — back to main menu".to_string(),
+        }
+    }
+}
+
+/// Build the CLI-agent menu rows in presentation order. `command_set` gates the
+/// Verify row, which only makes sense once a CLI is configured. A label row is
+/// deliberately absent — every row is an actionable [`CliRow`].
+fn cli_menu_rows(command_set: bool) -> Vec<CliRow> {
+    let mut rows: Vec<CliRow> = PRESETS.iter().copied().map(CliRow::Preset).collect();
+    rows.push(CliRow::Custom);
+    if command_set {
+        rows.push(CliRow::Verify);
+    }
+    rows.push(CliRow::Done);
+    rows
 }
 
 /// Enter a custom command + args template + timeout. Args defaults to the
@@ -1922,5 +1918,32 @@ mod tests {
             "(not configured)",
             "whitespace-only command is treated as unset"
         );
+    }
+
+    #[test]
+    fn cli_menu_rows_have_no_unmappable_header() {
+        // Regression: the CLI-agent menu once had a "Choose a preset:" *label*
+        // as row 0 with no action — selecting it panicked the TUI. Now every
+        // row is an actionable CliRow paired with its label, so there is no
+        // separate index to leave unmapped.
+        for command_set in [false, true] {
+            let rows = cli_menu_rows(command_set);
+            // Row 0 must be a real preset, never a bare label.
+            assert!(
+                matches!(rows.first(), Some(CliRow::Preset(_))),
+                "row 0 must be an actionable preset, not a header (command_set={command_set})"
+            );
+            // Presets lead, then Custom, then (only when set) Verify, then
+            // Done — every expected variant present, nothing extra.
+            assert_eq!(
+                rows.len(),
+                PRESETS.len() + 1 + usize::from(command_set) + 1
+            );
+            assert!(rows.contains(&CliRow::Custom));
+            assert!(rows.contains(&CliRow::Done));
+            assert_eq!(rows.contains(&CliRow::Verify), command_set);
+            // Done is always last.
+            assert!(matches!(rows.last(), Some(CliRow::Done)));
+        }
     }
 }
