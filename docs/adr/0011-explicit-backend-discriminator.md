@@ -41,10 +41,13 @@ args         = ["-p", "{prompt}"]
 timeout_secs = 60
 ```
 
-### Semantics — strict, no inference
+### Semantics — authoritative discriminator, dormant fields allowed
 
 The discriminator is authoritative; no field-population is ever silently
-inferred to override it:
+inferred to *override* it. The inactive Backend's fields may coexist in the
+file as **dormant** config — preserved across backend switches and ignored at
+run time — so switching the active Backend never wipes what was entered for
+the other:
 
 | Config | Result |
 | --- | --- |
@@ -52,15 +55,17 @@ inferred to override it:
 | `backend_kind = "api"` | API-provider Backend |
 | `backend_kind = "cli"` | CLI-agent Backend |
 | `backend_kind = "cli"` but no `command` | **error** — "backend_kind = cli but no command set" |
-| `backend_kind = "api"` but `command` set | **error** — conflicting fields |
-| `backend_kind = "cli"` but `api_key` set | **error** — conflicting fields |
-| `backend_kind` absent but `command` set | **error** — "set backend_kind = cli to use a CLI agent" |
+| `backend_kind = "api"` but `command` set | API-provider Backend; `command` is **dormant** (preserved for a later switch back) |
+| `backend_kind = "cli"` but `api_key` set | CLI-agent Backend; `api_key` is **dormant** (preserved for a later switch back) |
+| `backend_kind` absent but `command` set | **error** — ambiguous; the wizard always writes `backend_kind` when a command is present, so this only arises from a manual edit |
 
 The last row is the crux: the lenient "infer CLI from `command`" rule is
 deliberately rejected. Allowing it would let the file *lie* (`backend_kind =
 "api"` silently ignored because a command is present) — recreating the exact
-invisible-mode confusion this ADR exists to fix. Because the CLI-agent Backend
-is unreleased, there is no legacy config to protect, so strictness is free.
+invisible-mode confusion this ADR exists to fix. An *explicit* `backend_kind`
+alongside the other Backend's fields does not lie: it states the active mode
+and keeps the rest dormant, which is exactly what makes non-destructive
+switching possible.
 
 ### Why a discriminator, not a grouped table or a flat rename
 
@@ -91,8 +96,11 @@ replaced by a `backend_kind`-gated read of `command`.
 
 - The active Backend is now a named field — readable in the config file and
   showable directly in `aic setup` (mode-first on first run) and `aic list`.
-- A new `Config::validate()` cross-checks `backend_kind` against populated
-  fields; every disagreement is a hard error naming the conflicting fields.
+- `Config::resolve_backend()` reads `backend_kind` as authoritative. It errors
+  only on a CLI selected but unconfigured (`backend_kind = "cli"` with no
+  `command`) or on an ambiguous `command` with no discriminator; the inactive
+  Backend's fields are allowed as dormant config (preserved across switches),
+  not rejected as conflicts.
 - `backend_kind` absent ⇒ API-provider Backend, so released configs are
   unchanged — **no migration for released configs**. Unreleased `command`
   configs must add `backend_kind = "cli"`.

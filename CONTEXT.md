@@ -63,7 +63,7 @@ _Avoid_: fallback model, base model
 ### Backends
 
 **Backend**:
-How aic obtains LLM answers for a Run. Exactly two kinds exist — the API-provider Backend and the CLI-agent Backend — and they are mutually exclusive; the active one is named explicitly by the `backend_kind` config field (`"api"` or `"cli"`, absent ⇒ `"api"`). "Which mode am I in" = "which Backend is active."
+How aic obtains LLM answers for a Run. Exactly two kinds exist — the API-provider Backend and the CLI-agent Backend — and only one is active at a time, named explicitly by the `backend_kind` config field (`"api"` or `"cli"`, absent ⇒ `"api"`). The inactive Backend's fields may be kept in the config as dormant state (preserved across switches); `backend_kind` is authoritative and the dormant fields are ignored at run time (ADR 0011). "Which mode am I in" = "which Backend is active."
 _Avoid_: mode, engine, provider (overloaded — see Provider)
 
 **API-provider Backend**:

@@ -800,37 +800,51 @@ fn split_args(s: &str) -> Vec<String> {
 }
 
 fn finalize(draft: Draft) -> Config {
-    // The active Backend is the session choice (ADR 0011). The two backends are
-    // mutually exclusive: the inactive one's fields are dropped on save.
-    match draft.active_backend() {
-        BackendKind::Cli => Config {
-            // `backend_kind` is written only for the CLI backend; absent ⇒ API,
-            // so a pure API-provider config stays byte-identical to before this
-            // field existed (no migration for released configs).
-            backend_kind: Some(BackendKind::Cli),
-            backend: None,
-            api_key: None,
-            model: None,
-            base_url: None,
-            confirm_before_commit: draft.confirm_before_commit,
-            command: draft.active_cli_command().map(str::to_owned),
-            args: draft.cli_args,
-            timeout_secs: draft.cli_timeout_secs,
-        },
-        BackendKind::Api => {
-            let provider = draft.provider.unwrap_or(Provider::OpenAI);
-            Config {
-                backend_kind: None,
-                backend: Some(provider.name().to_string()),
-                api_key: draft.api_key,
-                model: draft.model,
-                base_url: draft.base_url,
-                confirm_before_commit: draft.confirm_before_commit,
-                command: None,
-                args: None,
-                timeout_secs: None,
-            }
-        }
+    // Both backends keep their configured fields, so switching the active
+    // Backend never wipes what was entered for the other. `backend_kind`
+    // selects which Backend a Run actually uses; the inactive one's fields
+    // stay dormant on disk and are restored when you switch back (ADR 0011).
+    let active = draft.active_backend();
+    let command = draft.active_cli_command().map(str::to_owned);
+    let has_cli = command.is_some();
+
+    // `backend_kind` is written whenever it is non-default (CLI) or a dormant
+    // CLI command is present, so the discriminator always disambiguates a
+    // config that carries both backends' fields. For a pure API config (API
+    // active, no command) it stays absent — byte-identical to before this
+    // field existed, so released configs need no migration.
+    let backend_kind = match active {
+        BackendKind::Cli => Some(BackendKind::Cli),
+        BackendKind::Api if has_cli => Some(BackendKind::Api),
+        BackendKind::Api => None,
+    };
+
+    // When the API Backend is active, default a missing provider to OpenAI
+    // (historical behavior). When it is dormant (CLI active), preserve the
+    // draft's value verbatim so switching back restores it.
+    let backend = match active {
+        BackendKind::Api => Some(draft.provider.unwrap_or(Provider::OpenAI).name().to_string()),
+        BackendKind::Cli => draft.provider.map(|p| p.name().to_string()),
+    };
+
+    // CLI fields are a unit (command + args + timeout); only persist them when
+    // a command is set, so an unconfigured CLI leaves no orphaned keys.
+    let (args, timeout_secs) = if has_cli {
+        (draft.cli_args, draft.cli_timeout_secs)
+    } else {
+        (None, None)
+    };
+
+    Config {
+        backend_kind,
+        backend,
+        api_key: draft.api_key,
+        model: draft.model,
+        base_url: draft.base_url,
+        confirm_before_commit: draft.confirm_before_commit,
+        command,
+        args,
+        timeout_secs,
     }
 }
 
@@ -1852,23 +1866,26 @@ mod tests {
     }
 
     #[test]
-    fn finalize_cli_backend_drops_provider_fields() {
-        // backend_kind = cli wins (ADR 0011): provider/api_key/model/base_url
-        // are mutually exclusive and dropped on save.
+    fn finalize_cli_backend_preserves_dormant_provider_fields() {
+        // backend_kind = cli is active, but the API-provider fields are kept
+        // dormant on disk so switching back to the API Backend restores them
+        // (ADR 0011) — switching never wipes the other Backend's config.
         let cfg = finalize(draft_with_cli(Some("claude")));
+        // CLI Backend is active:
         assert_eq!(cfg.command.as_deref(), Some("claude"));
         assert_eq!(
             cfg.args.as_deref(),
             Some(&["-p".to_string(), "{prompt}".to_string()][..])
         );
         assert_eq!(cfg.timeout_secs, Some(90));
-        assert!(cfg.backend.is_none());
-        assert!(cfg.api_key.is_none());
-        assert!(cfg.model.is_none());
+        assert_eq!(cfg.backend_kind, Some(BackendKind::Cli));
+        // API-provider fields preserved dormant (not dropped):
+        assert_eq!(cfg.backend.as_deref(), Some("openai"));
+        assert_eq!(cfg.api_key.as_deref(), Some("sk-stale"));
+        assert_eq!(cfg.model.as_deref(), Some("gpt-5"));
         assert!(cfg.base_url.is_none());
         // confirm_before_commit is orthogonal and survives.
         assert_eq!(cfg.confirm_before_commit, Some(true));
-        assert_eq!(cfg.backend_kind, Some(BackendKind::Cli));
     }
 
     #[test]

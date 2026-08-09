@@ -34,16 +34,20 @@ pub struct Config {
     /// generate-and-commit behavior.
     pub confirm_before_commit: Option<bool>,
     /// External coding-agent CLI to drive instead of an API key (ADR 0010).
-    /// When set (non-empty), aic runs in **CLI backend** mode: it shells out
-    /// to `command` in headless/print mode and reuses the CLI's own auth, so
-    /// no `api_key` is needed (and setting both is rejected). Mutually
-    /// exclusive with the API fields below.
+    /// When `backend_kind = "cli"`, aic runs in **CLI backend** mode: it
+    /// shells out to `command` in headless/print mode and reuses the CLI's own
+    /// auth, so no `api_key` is needed. The CLI fields may coexist in the file
+    /// with the API fields (`backend`/`api_key`/`model`/`base_url`) as
+    /// **dormant** config — `backend_kind` selects the active Backend and the
+    /// rest are preserved across switches (ADR 0011).
     pub command: Option<String>,
     /// Argv template for [`Config::command`]. Each element may contain the
     /// literal `{prompt}` placeholder, which is replaced with the full
     /// (system + user) prompt at run time. Defaults to `["{prompt}"]`.
     pub args: Option<Vec<String>>,
-    /// Per-call timeout for the CLI backend, in seconds. Defaults to 60.
+    /// Per-call timeout for the CLI backend, in seconds. Defaults to 240
+    /// (see [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`] for why it is far above
+    /// the API path's latency budget).
     pub timeout_secs: Option<u64>,
 }
 
@@ -89,37 +93,36 @@ impl Config {
     }
 
     /// Resolve the active [`BackendKind`] from the `backend_kind` discriminator
-    /// and validate field consistency (ADR 0011). Strict: the discriminator is
-    /// authoritative — a field populated that the active Backend doesn't use is
-    /// a hard error, never a silent fallback or inference. Absent ⇒
-    /// [`BackendKind::Api`] (the historical default, so released configs need
-    /// no migration).
+    /// (ADR 0011). The discriminator is authoritative — it alone decides which
+    /// Backend a Run uses; the inactive Backend's fields may be present in the
+    /// file as **dormant** config (preserved across backend switches) and are
+    /// simply ignored at run time. Absent ⇒ [`BackendKind::Api`] (the
+    /// historical default, so released configs need no migration).
+    ///
+    /// Two cases still hard-error, both about *ambiguity*, not dormant fields:
+    /// `backend_kind = "cli"` with no `command` (selected but unconfigured),
+    /// and a `command` with no `backend_kind` (the wizard always writes
+    /// `backend_kind` when a command is present, so this only arises from a
+    /// manual edit — refuse rather than guess which Backend is active).
     pub fn resolve_backend(&self) -> Result<BackendKind> {
         // Typed discriminator: serde already rejected any unknown variant at
         // config-parse time, so there is no "unknown value" branch here.
         // Absent ⇒ Api (the historical default; released configs unchanged).
         let kind = self.backend_kind.unwrap_or_default();
         let command_set = self.active_cli_command().is_some();
-        let api_key_set = self
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
         match kind {
-            BackendKind::Api if command_set => anyhow::bail!(
-                "`backend_kind` is `api` (the default) but `command` is set. To use the \
-                 CLI-agent backend, set `backend_kind = \"cli\"`; otherwise remove `command`."
-            ),
             BackendKind::Cli if !command_set => anyhow::bail!(
                 "`backend_kind = \"cli\"` but no `command` is set. Add one via `aic setup` \
                  → CLI agent."
             ),
-            BackendKind::Cli if api_key_set => anyhow::bail!(
-                "`backend_kind = \"cli\"` but `api_key` is set — the CLI-agent backend reuses \
-                 the CLI's own auth and needs no API key. Remove `api_key`, or set \
-                 `backend_kind = \"api\"`."
+            BackendKind::Api if self.backend_kind.is_none() && command_set => anyhow::bail!(
+                "`command` is set but `backend_kind` is absent. Set `backend_kind = \"cli\"` to \
+                 use the CLI-agent backend, or `backend_kind = \"api\"` to keep the command \
+                 dormant (it will not run until you switch)."
             ),
+            // `backend_kind` is authoritative: the inactive Backend's fields
+            // (an `api_key` under CLI, a `command` under API) are dormant and
+            // ignored — never an error.
             _ => Ok(kind),
         }
     }
@@ -422,11 +425,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_backend_enforces_strict_discriminator() {
-        // ADR 0011: `backend_kind` is authoritative; mismatches are hard
-        // errors. Absent ⇒ Api, so released configs resolve unchanged. An
-        // unknown value is no longer representable here — serde rejects it at
-        // parse time (see `unknown_backend_kind_variant_is_rejected_at_parse`).
+    fn resolve_backend_uses_discriminator_and_allows_dormant_fields() {
+        // ADR 0011: `backend_kind` is authoritative — it alone picks the active
+        // Backend. The inactive Backend's fields may sit dormant in the file
+        // (preserved across switches) and are ignored, never an error. Two
+        // cases still hard-error: a CLI selected but unconfigured, and a
+        // `command` with no discriminator (ambiguous; the wizard always writes
+        // `backend_kind` when a command is present).
         assert_eq!(
             cfg("openai", None, None, None).resolve_backend().unwrap(),
             BackendKind::Api
@@ -438,7 +443,7 @@ mod tests {
         };
         assert_eq!(explicit_api.resolve_backend().unwrap(), BackendKind::Api);
 
-        // Cli requires a command and forbids an api_key.
+        // Cli with a command resolves to Cli.
         let cli = Config {
             backend_kind: Some(BackendKind::Cli),
             command: Some("claude".into()),
@@ -446,8 +451,7 @@ mod tests {
         };
         assert_eq!(cli.resolve_backend().unwrap(), BackendKind::Cli);
 
-        // Cli without command, Api (explicit or absent) with a stray command,
-        // and Cli with an api_key are all hard errors.
+        // CLI selected but never configured — can't run.
         assert!(
             Config {
                 backend_kind: Some(BackendKind::Cli),
@@ -456,35 +460,42 @@ mod tests {
             .resolve_backend()
             .is_err()
         );
-        // Explicit Api + command.
-        assert!(
+
+        // Dormant fields are fine: explicit Api + a CLI command kept from a
+        // previous switch resolves to Api (command dormant), and Cli + an
+        // api_key kept from a previous switch resolves to Cli (api_key
+        // dormant). Switching back restores them.
+        assert_eq!(
             Config {
                 backend_kind: Some(BackendKind::Api),
                 command: Some("claude".into()),
                 ..Default::default()
             }
             .resolve_backend()
-            .is_err()
+            .unwrap(),
+            BackendKind::Api
         );
+        assert_eq!(
+            Config {
+                backend_kind: Some(BackendKind::Cli),
+                command: Some("claude".into()),
+                api_key: Some("sk-x".into()),
+                ..Default::default()
+            }
+            .resolve_backend()
+            .unwrap(),
+            BackendKind::Cli
+        );
+
         // Absent backend_kind + command — the crux of ADR 0011: the lenient
         // "infer CLI from command" rule is deliberately rejected so the config
-        // cannot lie about which Backend is active.  A regression here would
+        // cannot lie about which Backend is active. A regression here would
         // silently reintroduce the invisible-mode confusion the discriminator
         // exists to fix.
         assert!(
             Config {
                 backend_kind: None,
                 command: Some("claude".into()),
-                ..Default::default()
-            }
-            .resolve_backend()
-            .is_err()
-        );
-        assert!(
-            Config {
-                backend_kind: Some(BackendKind::Cli),
-                command: Some("claude".into()),
-                api_key: Some("sk-x".into()),
                 ..Default::default()
             }
             .resolve_backend()
