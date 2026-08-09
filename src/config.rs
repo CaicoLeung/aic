@@ -121,6 +121,21 @@ pub struct Config {
 }
 
 pub fn config_path() -> Option<PathBuf> {
+    // ADR 0012: fixed `~/.config/aic/config.toml` on every platform, resolved
+    // from `home_dir()` rather than `dirs::config_dir()`. The OS-native
+    // `config_dir()` put macOS configs at `~/Library/Application Support/aic`,
+    // which contradicted what every doc already claimed; one fixed path makes
+    // the docs truthful. `XDG_CONFIG_HOME` is deliberately ignored. Pre-0012
+    // configs at the old default are adopted by [`Config::migrate_location`].
+    dirs::home_dir().map(|p| p.join(".config").join("aic").join("config.toml"))
+}
+
+/// The legacy config path used before ADR 0012 — `dirs::config_dir()` joined
+/// with `aic/config.toml`. On macOS this is `~/Library/Application
+/// Support/aic/config.toml`; on plain Linux (no `XDG_CONFIG_HOME`) it coincides
+/// with [`config_path`], so there is nothing to migrate. Used only by
+/// [`Config::migrate_location`] to locate a pre-0012 config to adopt.
+fn legacy_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("aic").join("config.toml"))
 }
 
