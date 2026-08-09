@@ -683,9 +683,78 @@ pub fn run_list() -> Result<()> {
                 resolved.base_url.as_deref().unwrap_or("(none)"),
                 resolved.base_url_source
             );
+            let saved: Vec<&str> = config
+                .as_ref()
+                .map(|c| c.providers.iter().map(|p| p.backend.as_str()).collect())
+                .unwrap_or_default();
+            if !saved.is_empty() {
+                println!(
+                    "Saved:   {} (switch with `aic use <name>`)",
+                    saved.join(", ")
+                );
+            }
         }
     }
 
+    Ok(())
+}
+
+/// `aic use <provider>` — switch the active API provider by restoring a
+/// remembered profile, without re-entering the key/model. The provider must
+/// already have been configured via `aic setup` (so it has an entry in the
+/// `providers` bank). Switches the active backend to API (a CLI-agent user
+/// who runs `aic use` is asking for the API path); any stored CLI fields
+/// stay dormant for a switch back via `aic setup`, per ADR 0011.
+pub fn run_use(name: &str) -> Result<()> {
+    let mut config = Config::load()
+        .ok()
+        .flatten()
+        .context("no config found — run `aic setup` to configure a provider first")?;
+
+    if !Provider::is_known_name(name) {
+        anyhow::bail!(
+            "unknown provider '{name}'; pick one of: {}",
+            Provider::all()
+                .iter()
+                .map(|p| p.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    // Normalize via from_name so aliases and case variants match the stored
+    // `backend` key (the canonical name setup writes).
+    let normalized = Provider::from_name(name).name();
+    let profile = config
+        .providers
+        .iter()
+        .find(|p| p.backend == normalized)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "provider '{normalized}' has not been configured yet — run `aic setup` to add it"
+            )
+        })?;
+
+    let had_key = profile
+        .api_key
+        .as_deref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false);
+    config.backend = Some(profile.backend.clone());
+    config.api_key = profile.api_key;
+    config.model = profile.model;
+    config.base_url = profile.base_url;
+    // `aic use` is an API-backend action; make it active. A stored CLI command
+    // (if any) stays dormant, restorable via `aic setup` → Backend.
+    config.backend_kind = Some(BackendKind::Api);
+    config.save()?;
+
+    println!("Switched to {normalized}.");
+    if !had_key {
+        eprintln!(
+            "note: {normalized} has no saved API key — run `aic setup` to add one if it's needed"
+        );
+    }
     Ok(())
 }
 

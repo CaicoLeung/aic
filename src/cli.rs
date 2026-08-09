@@ -21,6 +21,11 @@ pub enum Commands {
     Update,
     /// Resolve git merge conflicts in the working tree via the LLM
     Resolve,
+    /// Switch the active API provider to one already configured via `aic setup`
+    Use {
+        /// Provider name or alias (e.g. openai, anthropic, gemini, deepseek)
+        provider: String,
+    },
     /// Install shell completion script
     ///
     /// Interactively pick a shell and install its completion (the highlight
