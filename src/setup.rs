@@ -815,18 +815,18 @@ fn finalize(draft: Draft) -> Config {
     // Under the CLI backend the API bank is left untouched (dormant), so a
     // later switch back restores every remembered provider.
     let mut providers = draft.known_providers;
-    if active == BackendKind::Api {
-        if let Some(p) = draft.provider {
-            ProviderProfile::upsert(
-                &mut providers,
-                ProviderProfile {
-                    backend: p.name().to_string(),
-                    api_key: draft.api_key.clone(),
-                    model: draft.model.clone(),
-                    base_url: draft.base_url.clone(),
-                },
-            );
-        }
+    if active == BackendKind::Api
+        && let Some(p) = draft.provider
+    {
+        ProviderProfile::upsert(
+            &mut providers,
+            ProviderProfile::new(
+                p.name().to_string(),
+                draft.api_key.clone(),
+                draft.model.clone(),
+                draft.base_url.clone(),
+            ),
+        );
     }
 
     Config {
