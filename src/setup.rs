@@ -387,13 +387,26 @@ fn provider_label(draft: &Draft) -> String {
 /// actually chose (`draft.model`, seeded from the existing config) rather than
 /// the bare default — otherwise re-entering setup makes the selection read as
 /// lost (AIC-15). For every other provider, show its default so the options
+/// One provider's preview model for the `Choose your AI provider` list: the
+/// active draft choice first, then the remembered bank entry, then the
+/// provider default. The detail sub-menu reads the same bank (via
+/// [`step_provider`]'s restore-on-switch into `draft.model`), so the list and
+/// the detail never disagree on which model a provider will use.
+fn preview_model(p: Provider, draft: &Draft) -> String {
+    if draft.provider == Some(p) {
+        return effective_model(p, draft);
+    }
+    draft
+        .known_providers
+        .iter()
+        .find(|kp| kp.backend == p.name())
+        .and_then(|kp| kp.model.as_deref().filter(|m| !m.is_empty()).map(String::from))
+        .unwrap_or_else(|| p.default_model().to_string())
+}
+
 /// stay comparable at a glance.
 fn provider_choice_label(p: Provider, draft: &Draft) -> String {
-    let model = if draft.provider == Some(p) {
-        effective_model(p, draft)
-    } else {
-        p.default_model().to_string()
-    };
+    let model = preview_model(p, draft);
     if model.is_empty() {
         format!("{}  (no default — you'll pick a model)", p.display())
     } else {
@@ -1897,6 +1910,29 @@ mod tests {
         assert!(cfg.cli.args.is_none());
         assert!(cfg.cli.timeout_secs.is_none());
         assert!(cfg.backend_kind.is_none());
+    }
+
+    /// Regression for the list-vs-detail model mismatch: a provider that was
+    /// configured once (so it has a remembered model in the bank) but is not
+    /// currently active must preview its *remembered* model on the
+    /// `Choose your AI provider` list — the same value the detail sub-menu
+    /// shows after switching to it. Before the fix the list showed the bare
+    /// provider default, so picking the provider "changed" the model on entry.
+    #[test]
+    fn provider_choice_label_previews_banked_model_for_non_active() {
+        let mut draft = draft_with_cli(None); // API backend, active = openai
+        draft.provider = Some(Provider::OpenAI);
+        draft.model = Some("gpt-5".into());
+        draft.known_providers.push(ProviderProfile {
+            backend: "anthropic".into(),
+            model: Some("claude-sonnet-4-remembered".into()),
+            ..Default::default()
+        });
+        let label = provider_choice_label(Provider::Anthropic, &draft);
+        assert!(
+            label.contains("claude-sonnet-4-remembered"),
+            "list should preview the remembered model, got: {label}"
+        );
     }
 
     /// `finalize` records the active API provider into the `providers` memory
