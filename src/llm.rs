@@ -888,6 +888,17 @@ impl LlmConfig {
             Self::Rig(_) => None,
         }
     }
+
+    /// The CLI backend's program name (`pi`, `claude`, …), or `None` on the
+    /// API (rig) path. Used by the reasoning-feed loading frame to label the
+    /// cold-start notice with the actual backend instead of a hardcoded name
+    /// — a pi run must say "pi is starting up", not "Claude".
+    pub fn cli_command(&self) -> Option<&str> {
+        match self {
+            Self::Cli(spec) => Some(&spec.command),
+            Self::Rig(_) => None,
+        }
+    }
 }
 
 /// Build the [`CliSpec`] from a config that has `command` set. Defaults the

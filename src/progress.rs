@@ -212,26 +212,34 @@ fn reasoning_rows(
 /// not a capability gap, so it must not be labeled non-streaming; a plain
 /// backend silent past grace is the case the "does not support streaming"
 /// notice was written for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum LoadingNotice {
     /// Pre-grace, or a backend that has not been classified: just spinner +
     /// elapsed, no notice row.
     None,
-    /// A streaming-capable backend (e.g. claude `stream-json`) past grace with
-    /// no reasoning yet — a cold start, not a capability gap. Worded to
-    /// explain the wait (hooks/MCP/first-token) without claiming the CLI
-    /// cannot stream.
-    ColdStart,
+    /// A streaming-capable backend (claude `stream-json`, pi `--mode json`)
+    /// past grace with no reasoning yet — a cold start, not a capability gap.
+    /// Carries the CLI's own program name so the notice labels the actual
+    /// backend (`pi`, `claude`, …), never a hardcoded one. Worded to explain
+    /// the wait (hooks/MCP/first-token) without claiming the CLI cannot stream.
+    ColdStart(String),
     /// A plain backend past grace with no output: assumed non-streaming.
     Silent,
 }
 
-/// The explanatory notice for the [`LoadingNotice::ColdStart`] case: a
-/// streaming-capable CLI that has not yet emitted reasoning. Never claims the
-/// CLI cannot stream — it can, it is just paying its cold-start cost
-/// (SessionStart hooks, MCP handshakes, first-token latency).
-const COLD_START_NOTICE: &str =
-    "Claude is starting up — first reasoning line takes several seconds while hooks and MCP servers initialize";
+/// Build the explanatory notice for the [`LoadingNotice::ColdStart`] case: a
+/// streaming-capable CLI that has not yet emitted reasoning. Interpolates the
+/// CLI's own `program` name so the wait is attributed to the right backend
+/// (`pi`, `claude`, …), not a hardcoded "Claude" — a pi/opencode/custom run
+/// must not be mislabeled. Never claims the CLI cannot stream — it can, it is
+/// just paying its cold-start cost (SessionStart hooks, MCP handshakes,
+/// first-token latency).
+fn cold_start_notice(program: &str) -> String {
+    format!(
+        "{program} is starting up — first reasoning line takes several seconds \
+         while hooks and MCP servers initialize"
+    )
+}
 
 /// The explanatory notice shown under the spinner row once a plain backend
 /// has been silent past [`LOADING_GRACE`]. Worded for the CLI-agent case (the
@@ -258,12 +266,12 @@ fn loading_rows(
     let secs = elapsed.as_secs();
     let mut rows = Vec::with_capacity(2);
     rows.push(format!("{MARGIN}{glyph} {label}… {secs}s"));
-    let text = match notice {
+    let text: String = match &notice {
         LoadingNotice::None => return rows,
-        LoadingNotice::ColdStart => COLD_START_NOTICE,
-        LoadingNotice::Silent => SILENT_NOTICE,
+        LoadingNotice::ColdStart(program) => cold_start_notice(program),
+        LoadingNotice::Silent => SILENT_NOTICE.to_string(),
     };
-    for piece in wrap_line(text, feed_width) {
+    for piece in wrap_line(&text, feed_width) {
         rows.push(format!("{MARGIN}│ {piece}"));
     }
     rows
@@ -736,23 +744,26 @@ mod tests {
     }
 
     /// [`loading_rows`] past the grace deadline for a streaming-capable
-    /// backend (claude `stream-json`) adds the [`COLD_START_NOTICE`] instead —
-    /// a cold start is not a capability gap, so it must not be labeled
-    /// non-streaming.
+    /// backend adds the cold-start notice built from the carried program name
+    /// — a cold start is not a capability gap, so it must not be labeled
+    /// non-streaming. The program name interpolates, so `pi`/`claude`/custom
+    /// backends are each labeled by their own command, never hardcoded
+    /// "Claude".
     #[test]
     fn loading_rows_post_grace_cold_start_adds_notice() {
         let rows = loading_rows(
             "⠹",
             "Analyzing changes",
             Duration::from_secs(7),
-            LoadingNotice::ColdStart,
+            LoadingNotice::ColdStart("claude".to_string()),
             160,
         );
+        let expected = cold_start_notice("claude");
         assert_eq!(
             rows,
             vec![
                 format!("{MARGIN}⠹ Analyzing changes… 7s"),
-                format!("{MARGIN}│ {COLD_START_NOTICE}"),
+                format!("{MARGIN}│ {expected}"),
             ]
         );
     }

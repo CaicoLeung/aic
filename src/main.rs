@@ -102,15 +102,28 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // are the case the non-streaming notice was written for. Defaults to
     // silent-notice on any lookup failure (safer: never falsely claims a
     // streaming capability for an unknown backend).
-    let expects_streaming = crate::llm::LlmConfig::load()
+    // Resolve the streaming-capable backend's program name (e.g. `pi`,
+    // `claude`) in the same pass as whether it streams, so the two facts come
+    // from one config load and cannot disagree. `None` ⇒ not streaming-capable
+    // (rig path, a plain CLI, or a config read glitch) → the silent notice is
+    // used instead, never falsely claiming a streaming capability. The
+    // program name is what the cold-start notice interpolates, so a pi run is
+    // labeled "pi", not hardcoded "Claude".
+    let streaming_program: Option<String> = crate::llm::LlmConfig::load()
         .ok()
-        .and_then(|c| c.cli_encoding())
-        .map(|e| matches!(
-            e,
-            crate::cli_agent::Encoding::ClaudeStreamJson
-                | crate::cli_agent::Encoding::PiStreamJson
-        ))
-        .unwrap_or(false);
+        .and_then(|c| {
+            let streams = matches!(
+                c.cli_encoding()?,
+                crate::cli_agent::Encoding::ClaudeStreamJson
+                    | crate::cli_agent::Encoding::PiStreamJson
+            );
+            if streams {
+                c.cli_command().map(str::to_owned)
+            } else {
+                None
+            }
+        });
+    let expects_streaming = streaming_program.is_some();
 
     // The streaming future owns the `ThinkingView` inside its `on_reasoning`
     // closure; windows are forwarded to the channel rather than rendered
@@ -174,7 +187,14 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
                 if !got_output {
                     let notice = if elapsed >= progress::LOADING_GRACE {
                         if expects_streaming {
-                            progress::LoadingNotice::ColdStart
+                            // `streaming_program` is Some iff expects_streaming;
+                            // the generic fallback is defensive against a
+                            // config-read glitch and never panics.
+                            progress::LoadingNotice::ColdStart(
+                                streaming_program
+                                    .clone()
+                                    .unwrap_or_else(|| "The agent".to_string()),
+                            )
                         } else {
                             progress::LoadingNotice::Silent
                         }
