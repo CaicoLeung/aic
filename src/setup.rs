@@ -386,8 +386,9 @@ fn confirm_label(draft: &Draft) -> String {
     }
 }
 
-/// `CLI agent` menu row: the configured command (or `(API key)` when no CLI
-/// backend is set, so the row still tells the user which backend is active).
+/// `CLI agent` menu row: the configured command, or `(not configured)` when no
+/// CLI-agent backend is set. The active backend is named separately by the
+/// [`backend_banner`] on the main menu.
 fn cli_label(draft: &Draft) -> String {
     match draft.active_cli_command() {
         Some(cmd) => {
@@ -395,7 +396,7 @@ fn cli_label(draft: &Draft) -> String {
             parts.extend(draft.cli_args.clone().unwrap_or_default());
             parts.join(" ")
         }
-        None => "(API key)".to_string(),
+        None => "(not configured)".to_string(),
     }
 }
 
@@ -496,6 +497,10 @@ fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
 fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
     show_screen()?;
     let items = vec![
+        format!(
+            "{ICON_BACKEND} Backend — {}",
+            draft.active_backend().display_name()
+        ),
         format!("{ICON_PROVIDER} AI provider — {}", provider_label(draft)),
         format!("{ICON_CLI} CLI agent — {}", cli_label(draft)),
         format!(
@@ -505,11 +510,12 @@ fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
         format!("{ICON_SAVE} Save & exit"),
     ];
     match opt_nav("What would you like to configure?", &items, default_idx)? {
-        OptNav::Value(0) => Ok(MenuChoice::Provider),
-        OptNav::Value(1) => Ok(MenuChoice::CliAgent),
-        OptNav::Value(2) => Ok(MenuChoice::Confirm),
-        OptNav::Value(3) => Ok(MenuChoice::Save),
-        OptNav::Value(_) => unreachable!("menu has exactly four entries"),
+        OptNav::Value(0) => Ok(MenuChoice::Backend),
+        OptNav::Value(1) => Ok(MenuChoice::Provider),
+        OptNav::Value(2) => Ok(MenuChoice::CliAgent),
+        OptNav::Value(3) => Ok(MenuChoice::Confirm),
+        OptNav::Value(4) => Ok(MenuChoice::Save),
+        OptNav::Value(_) => unreachable!("menu has exactly five entries"),
         OptNav::Back | OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
 }
