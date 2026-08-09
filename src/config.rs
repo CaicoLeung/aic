@@ -446,8 +446,8 @@ mod tests {
         };
         assert_eq!(cli.resolve_backend().unwrap(), BackendKind::Cli);
 
-        // Cli without command, Api with a stray command, and Cli with an
-        // api_key are all hard errors.
+        // Cli without command, Api (explicit or absent) with a stray command,
+        // and Cli with an api_key are all hard errors.
         assert!(
             Config {
                 backend_kind: Some(BackendKind::Cli),
@@ -456,9 +456,24 @@ mod tests {
             .resolve_backend()
             .is_err()
         );
+        // Explicit Api + command.
         assert!(
             Config {
                 backend_kind: Some(BackendKind::Api),
+                command: Some("claude".into()),
+                ..Default::default()
+            }
+            .resolve_backend()
+            .is_err()
+        );
+        // Absent backend_kind + command — the crux of ADR 0011: the lenient
+        // "infer CLI from command" rule is deliberately rejected so the config
+        // cannot lie about which Backend is active.  A regression here would
+        // silently reintroduce the invisible-mode confusion the discriminator
+        // exists to fix.
+        assert!(
+            Config {
+                backend_kind: None,
                 command: Some("claude".into()),
                 ..Default::default()
             }

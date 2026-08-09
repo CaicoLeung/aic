@@ -638,11 +638,8 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
         let preset_labels: Vec<String> = PRESETS
             .iter()
             .map(|name| {
-                format!(
-                    "{name} — `{} {}`",
-                    cli_preset(name).unwrap().command,
-                    cli_preset(name).unwrap().args.join(" ")
-                )
+                let spec = cli_preset(name).unwrap();
+                format!("{name} — `{} {}`", spec.command, spec.args.join(" "))
             })
             .collect();
         let mut items = vec!["Choose a preset:".to_string()];
@@ -751,7 +748,7 @@ fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
         .map(|a| a.join(" "))
         .unwrap_or_else(|| PROMPT_PLACEHOLDER.to_string());
     let args_str = match prompt_text(
-        &format!("Args template (use {PROMPT_PLACEHOLDER} for the prompt)"),
+        &format!("Args template (space-separated, use {PROMPT_PLACEHOLDER} for the prompt)"),
         false,
         Some(&initial_args),
         true,
@@ -762,7 +759,7 @@ fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
         TextAct::Back => return Ok(Nav::Back),
         TextAct::Cancel => return Ok(Nav::Cancel),
     };
-    let args: Vec<String> = shlex_split(&args_str);
+    let args: Vec<String> = split_args(&args_str);
     let initial_to = draft
         .cli_timeout_secs
         .map(|t| t.to_string())
@@ -792,10 +789,13 @@ fn pause_done() -> Result<()> {
     Ok(())
 }
 
-/// Minimal whitespace splitter for the args template (avoids pulling in a
-/// shell-parsing crate). Quotes are not honored — preset/custom args are
-/// simple tokens, and `{prompt}` carries the full prompt as one arg anyway.
-fn shlex_split(s: &str) -> Vec<String> {
+/// Whitespace-only splitter for the custom-CLI args template. This is **not**
+/// shell parsing: quotes are not honored and multi-word values cannot be
+/// expressed as a single argument. Use it only for simple flags where each
+/// whitespace-delimited token is one argv element, and let `{prompt}` carry
+/// the full prompt as one arg anyway. (Avoids pulling in a shell-parsing crate
+/// for a handful of simple tokens.)
+fn split_args(s: &str) -> Vec<String> {
     s.split_whitespace().map(String::from).collect()
 }
 
