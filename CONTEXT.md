@@ -74,6 +74,20 @@ _Avoid_: api_key mode (`api_key` is the credential, not the Backend), API mode, 
 The Backend that shells out to an external coding-agent CLI (`claude`, `codex`, `pi`, …) in headless/print mode and reuses that CLI's own auth, so no `api_key` is needed. Selected by `backend_kind = "cli"` with a `command`/`args`/`timeout_secs` template (ADR 0010; selection mechanism superseded by ADR 0011).
 _Avoid_: cli_agent mode, command mode
 
+### Config
+
+**Config file location**:
+The on-disk path aic reads and writes the config from: `~/.config/aic/config.toml`, resolved from `dirs::home_dir()` (not `dirs::config_dir()`) so the path is identical on macOS, Linux, and Windows and matches what the README and module docs have always claimed (ADR 0012). ADR 0008 still holds: the config file is the single source of truth.
+_Avoid_: config dir, app-support path, settings path
+
+**Location migration**:
+The one-time move (`Config::migrate_location`, ADR 0012) of a pre-0012 config written to the old OS-native default (`dirs::config_dir()`, i.e. `~/Library/Application Support/aic/config.toml` on macOS) into the Config file location. Copy old → new, then delete old (move semantics); **skipped silently when the new file already exists** (new wins); a no-op when the two paths coincide (plain Linux) or the old file is absent. Runs every startup, idempotent; prints a one-line notice only when it actually moves a file. Distinct from preset migration.
+_Avoid_: config move, relocation, migration (overloaded — see Preset migration)
+
+**Preset migration**:
+What `Config::migrate_if_stale` does — rewrites a stale CLI-agent preset's `args` _in place_, at the same file path. Improves a preset snapshot frozen at setup time (e.g. claude before `stream-json`). Never moves the file. The older of the two "migrations"; keep the qualifier when prose could confuse them.
+_Avoid_: args migration, preset refresh
+
 ### Conflict resolution
 
 **Conflict**:
