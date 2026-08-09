@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub backend: Option<String>,
     pub api_key: Option<String>,
@@ -27,6 +27,18 @@ pub struct Config {
     /// before each commit. Absent (or `false`) keeps the original
     /// generate-and-commit behavior.
     pub confirm_before_commit: Option<bool>,
+    /// External coding-agent CLI to drive instead of an API key (ADR 0010).
+    /// When set (non-empty), aic runs in **CLI backend** mode: it shells out
+    /// to `command` in headless/print mode and reuses the CLI's own auth, so
+    /// no `api_key` is needed (and setting both is rejected). Mutually
+    /// exclusive with the API fields below.
+    pub command: Option<String>,
+    /// Argv template for [`Config::command`]. Each element may contain the
+    /// literal `{prompt}` placeholder, which is replaced with the full
+    /// (system + user) prompt at run time. Defaults to `["{prompt}"]`.
+    pub args: Option<Vec<String>>,
+    /// Per-call timeout for the CLI backend, in seconds. Defaults to 60.
+    pub timeout_secs: Option<u64>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -103,6 +115,9 @@ impl ResolvedConfig {
             model: None,
             base_url: None,
             confirm_before_commit: None,
+            command: None,
+            args: None,
+            timeout_secs: None,
         });
 
         let (backend, backend_source) = resolve_field(cfg.backend.as_deref(), DEFAULT_PROVIDER);
@@ -201,6 +216,28 @@ pub(crate) fn resolve_base_url(
 
 pub fn run_list() -> Result<()> {
     let config = Config::load()?;
+
+    // CLI backend (ADR 0010): when `command` is set, it wins over the API
+    // provider fields, so show it instead of the rig-resolved defaults.
+    let cli_command = config
+        .as_ref()
+        .and_then(|c| c.command.as_deref().map(str::trim).filter(|s| !s.is_empty()));
+    if let Some(command) = cli_command {
+        let c = config.as_ref().expect("command present implies config");
+        println!("Backend:  CLI agent");
+        println!("Command:  {command}");
+        let args = c
+            .args
+            .clone()
+            .unwrap_or_else(|| vec!["{prompt}".to_string()]);
+        println!("Args:     {}", args.join(" "));
+        println!(
+            "Timeout:  {}s",
+            c.timeout_secs.unwrap_or(60)
+        );
+        return Ok(());
+    }
+
     let resolved = ResolvedConfig::resolve(config.as_ref());
 
     println!(
@@ -241,6 +278,7 @@ mod tests {
             model: model.map(String::from),
             base_url: base_url.map(String::from),
             confirm_before_commit: None,
+            ..Default::default()
         }
     }
 
@@ -253,6 +291,7 @@ mod tests {
             model: None,
             base_url: None,
             confirm_before_commit: Some(true),
+            ..Default::default()
         };
         assert!(on.confirm_before_commit());
     }

@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod cli_agent;
 pub mod completion;
 pub mod config;
 pub mod confirm;

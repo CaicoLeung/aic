@@ -13,6 +13,7 @@
 //! mapping at this boundary, and every seam uses [`RetryPolicy::transient`]
 //! (budget 2, 300 ms linear backoff). Non-content errors are never retried.
 
+use crate::cli_agent::{CliAgent, CliSpec};
 use crate::retry::{RetryPolicy, RetryReason, retry, should_retry};
 use anyhow::Result;
 use futures::StreamExt;
@@ -83,7 +84,7 @@ pub(crate) fn strip_code_fence(mut s: &str) -> &str {
 /// policy ([`classify_retry`]) treats tolerant-parse failures exactly like
 /// typed-path truncation. The raw text rides in an anyhow context (the
 /// downcast in `classify_retry` still finds the underlying error).
-fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
+pub(crate) fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     let body = strip_code_fence(raw);
     let start = body.find(['{', '[']).unwrap_or(0);
     let mut stream =
@@ -106,6 +107,58 @@ fn parse_json_response<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
         ),
     }
 }
+
+/// Failures from the CLI-agent backend (ADR 0010). API-path failures keep
+/// flowing through rig's error types; these only arise when `command` is set.
+/// Surfaced with a human hint, never a raw panic.
+#[derive(Debug)]
+pub enum LlmError {
+    /// The configured CLI binary could not be found on `$PATH`.
+    CliNotInstalled(String),
+    /// The CLI exited with an auth-shaped error — it is installed but not
+    /// logged in / authenticated.
+    CliNotAuthenticated(String),
+    /// The call exceeded `timeout_secs` and was killed.
+    Timeout(u64),
+    /// Non-zero exit for any other reason; carries stderr for the message.
+    NonZeroExit {
+        program: String,
+        code: Option<i32>,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CliNotInstalled(prog) => write!(
+                f,
+                "CLI backend `{prog}` was not found on $PATH — install it, or run `aic setup` "
+            ),
+            Self::CliNotAuthenticated(prog) => write!(
+                f,
+                "CLI backend `{prog}` is not authenticated — run `{prog}` once yourself to log in"
+            ),
+            Self::Timeout(secs) => {
+                write!(f, "CLI backend timed out after {secs}s (raise `timeout_secs` in config)")
+            }
+            Self::NonZeroExit { program, code, stderr } => {
+                let hint = stderr.trim();
+                if let Some(c) = code {
+                    write!(f, "`{program}` exited with code {c}")
+                } else {
+                    write!(f, "`{program}` exited abnormally")
+                }?;
+                if !hint.is_empty() {
+                    write!(f, ": {hint}")?
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -722,6 +775,140 @@ impl LLMAgent {
             RetryPolicy::transient(),
         )
         .await?)
+    }
+}
+
+/// Runtime dispatch over the two backend kinds. Returned by
+/// [`LlmConfig::agent`]; the public methods mirror [`LLMAgent`] so call sites
+/// (`generator.rs`) are backend-agnostic. An enum rather than `Box<dyn>` so
+/// the generic typed methods (`schema<T>`, `stream_typed_with_reasoning<T>`)
+/// stay monomorphized per backend — generic methods are not object-safe.
+pub enum Backend {
+    /// `rig-core` API path (the 12 providers).
+    Rig(LLMAgent),
+    /// External CLI-agent, headless/print mode (ADR 0010).
+    Cli(CliAgent),
+}
+
+impl Backend {
+    pub async fn call(&self, prompt: &str) -> Result<String> {
+        match self {
+            Self::Rig(a) => a.call(prompt).await,
+            Self::Cli(a) => a.call(prompt).await,
+        }
+    }
+
+    pub async fn schema<T>(&self, prompt: &str) -> Result<T>
+    where
+        T: schemars::JsonSchema + serde::de::DeserializeOwned + Send + 'static,
+    {
+        match self {
+            Self::Rig(a) => a.schema::<T>(prompt).await,
+            Self::Cli(a) => a.schema::<T>(prompt).await,
+        }
+    }
+
+    pub async fn stream_typed_with_reasoning<T>(
+        &self,
+        prompt: &str,
+        on_reasoning: impl FnMut(&str),
+    ) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        match self {
+            Self::Rig(a) => a.stream_typed_with_reasoning::<T>(prompt, on_reasoning).await,
+            Self::Cli(a) => a.stream_typed_with_reasoning::<T>(prompt, on_reasoning).await,
+        }
+    }
+
+    pub async fn verify(&self) -> Result<String> {
+        match self {
+            Self::Rig(a) => a.verify().await,
+            Self::Cli(a) => a.verify().await,
+        }
+    }
+}
+
+/// Which backend a run uses, resolved from config. CLI mode wins when
+/// `command` is set; otherwise the rig API path resolves exactly as before
+/// (ADR 0008: the config file is the single source of truth, no env vars).
+pub enum LlmConfig {
+    Rig(LLM),
+    Cli(CliSpec),
+}
+
+impl LlmConfig {
+    /// Load the active backend from the config file.
+    ///
+    /// CLI mode is selected by the `command` field being set — there are no
+    /// magic `backend` names, so nothing collides with the provider registry
+    /// (e.g. `claude` stays an Anthropic alias). A `command` set alongside an
+    /// `api_key` is rejected as contradictory (the two backends are mutually
+    /// exclusive).
+    pub fn load() -> Result<Self> {
+        let config = crate::config::Config::load().ok().flatten();
+        let cli_command = config
+            .as_ref()
+            .and_then(|c| c.command.as_deref().map(str::trim).filter(|s| !s.is_empty()));
+
+        if cli_command.is_some() {
+            let has_api_key = config
+                .as_ref()
+                .and_then(|c| c.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+                .is_some();
+            if has_api_key {
+                anyhow::bail!(
+                    "config has both `command` (CLI backend) and `api_key` (API backend) set — \
+                     these are mutually exclusive. Remove one (run `aic setup`)."
+                );
+            }
+            let spec = resolve_cli(config.as_ref().expect("command present implies config"));
+            return Ok(Self::Cli(spec));
+        }
+
+        let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
+        resolved.validate()?;
+        Ok(Self::Rig(LLM {
+            provider: Provider::from_name(&resolved.backend),
+            model: resolved.model,
+            api_key: resolved.api_key,
+            base_url: resolved.base_url,
+        }))
+    }
+
+    /// Build an agent for one task. Dispatches to [`LLMAgent`] on the API path
+    /// or to [`CliAgent`] on the CLI path; the returned [`Backend`] exposes the
+    /// same methods either way.
+    pub fn agent(&self, system_prompt: impl Into<String>) -> Backend {
+        match self {
+            Self::Rig(llm) => Backend::Rig(llm.agent(system_prompt)),
+            Self::Cli(spec) => Backend::Cli(CliAgent::new(spec.clone(), system_prompt.into())),
+        }
+    }
+}
+
+/// Build the [`CliSpec`] from a config that has `command` set. Defaults the
+/// args template to a single `{prompt}` placeholder and the timeout to
+/// [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`].
+fn resolve_cli(config: &crate::config::Config) -> CliSpec {
+    let command = config
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .expect("resolve_cli only called when command is set")
+        .to_string();
+    let args = config.args.clone().unwrap_or_else(|| {
+        vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]
+    });
+    let timeout_secs = config
+        .timeout_secs
+        .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
+    CliSpec {
+        command,
+        args,
+        timeout_secs,
     }
 }
 
