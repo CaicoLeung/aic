@@ -670,6 +670,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Setup) => setup::run_setup(),
         Some(Commands::List) => config::run_list(),
+        Some(Commands::Use { provider }) => config::run_use(&provider),
         Some(Commands::Update) => update::run_update(),
         Some(Commands::Resolve) => run_resolve_workflow().await,
         Some(Commands::Completion) => {

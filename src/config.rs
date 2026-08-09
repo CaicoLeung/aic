@@ -101,6 +101,93 @@ impl CliConfig {
     }
 }
 
+/// One remembered API-provider profile — the key/model/base-url bundle a user
+/// configured once, kept around so switching providers (via `aic setup` or
+/// `aic use`) restores them instead of asking again. The active provider's
+/// values ALSO live as top-level [`Config`] fields (the on-disk shape released
+/// configs already have); this list is the memory bank the active row is
+/// projected from / swapped into.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    /// Canonical provider name (e.g. `"openai"`) — the key this profile is
+    /// looked up by. Matches
+    /// [`Provider::name`](crate::llm::Provider::name).
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+impl ProviderProfile {
+    /// Build a profile from a provider name and its active key/model/base_url
+    /// — the one shape every "remember the active provider" site captures
+    /// (setup save, setup switch, `aic use` switch), so the field bundle is
+    /// assembled in one place instead of three.
+    pub fn new(
+        backend: impl Into<String>,
+        api_key: Option<String>,
+        model: Option<String>,
+        base_url: Option<String>,
+    ) -> Self {
+        Self {
+            backend: backend.into(),
+            api_key,
+            model,
+            base_url,
+        }
+    }
+
+    /// This profile's key/model/base_url as a tuple ready to destructure onto
+    /// the active fields of a [`Config`] (in `aic use`) or a `setup::Draft`
+    /// (in the wizard's provider switch). The projection lives on the profile
+    /// — which owns the fields — instead of each caller reaching in
+    /// field-by-field.
+    pub fn project_fields(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.api_key.clone(),
+            self.model.clone(),
+            self.base_url.clone(),
+        )
+    }
+
+    /// Upsert by `backend` with full replace: overwrite the existing entry in
+    /// place, or append. Use when the source is an explicit commit (the setup
+    /// wizard's save), where a deliberately cleared field must be honoured.
+    /// For transient switches use [`ProviderProfile::bank_active`].
+    pub fn upsert(list: &mut Vec<Self>, profile: Self) {
+        if let Some(slot) = list.iter_mut().find(|p| p.backend == profile.backend) {
+            *slot = profile;
+        } else {
+            list.push(profile);
+        }
+    }
+
+    /// Remember a provider into the bank with merge semantics: update an
+    /// existing entry in place (or append), taking each field from `profile`
+    /// only when it is `Some`, so an inattentive switch never erases a
+    /// previously remembered key/model/base_url. Used by both switch paths
+    /// (`aic use` and the wizard's provider step), where the active row is
+    /// just passing through and a blank field is not a deliberate deletion.
+    pub fn bank_active(list: &mut Vec<Self>, profile: Self) {
+        if let Some(slot) = list.iter_mut().find(|p| p.backend == profile.backend) {
+            if profile.api_key.is_some() {
+                slot.api_key = profile.api_key;
+            }
+            if profile.model.is_some() {
+                slot.model = profile.model;
+            }
+            if profile.base_url.is_some() {
+                slot.base_url = profile.base_url;
+            }
+        } else {
+            list.push(profile);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub backend: Option<String>,
@@ -124,6 +211,13 @@ pub struct Config {
     /// table. See [`CliConfig`].
     #[serde(flatten)]
     pub cli: CliConfig,
+    /// Remembered API-provider profiles — the key/model/base-url bundle per
+    /// provider, so switching providers restores them instead of re-asking.
+    /// Written by `aic setup`, read by `aic use` and by setup's provider
+    /// switch. `#[serde(default)]` so pre-bank configs load with an empty
+    /// list and are folded in by [`setup::seed_draft`] on the next save.
+    #[serde(default)]
+    pub providers: Vec<ProviderProfile>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -642,9 +736,110 @@ pub fn run_list() -> Result<()> {
                 resolved.base_url.as_deref().unwrap_or("(none)"),
                 resolved.base_url_source
             );
+            let saved: Vec<&str> = config
+                .as_ref()
+                .map(|c| c.providers.iter().map(|p| p.backend.as_str()).collect())
+                .unwrap_or_default();
+            if !saved.is_empty() {
+                println!(
+                    "Saved:   {} (switch with `aic use <name>`)",
+                    saved.join(", ")
+                );
+            }
         }
     }
 
+    Ok(())
+}
+
+/// Pure core of `aic use <name>`: validate the name, bank the currently
+/// active provider's live top-level state into the memory bank, then activate
+/// the target profile (restore its key/model/base_url and force the API
+/// backend). Split from [`run_use`] (which owns the load/save/print IO) so the
+/// switch contract — source banked, target restored, backend forced to API —
+/// is unit-testable without the real config file.
+///
+/// Errors: unknown provider name; a known name with no banked profile (run
+/// `aic setup` to add one).
+fn apply_use(mut config: Config, name: &str) -> Result<Config> {
+    if !Provider::is_known_name(name) {
+        anyhow::bail!(
+            "unknown provider '{name}'; pick one of: {}",
+            Provider::all()
+                .iter()
+                .map(|p| p.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    // Normalize via from_name so aliases and case variants match the stored
+    // `backend` key (the canonical name setup writes).
+    let normalized = Provider::from_name(name).name();
+    let target = config
+        .providers
+        .iter()
+        .find(|p| p.backend == normalized)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "provider '{normalized}' has not been configured yet — run `aic setup` to add it"
+            )
+        })?;
+
+    // Bank the provider we're leaving first (its live top-level state), so a
+    // later switch back restores what was active — not whatever `finalize`
+    // last happened to write. Merge semantics, so a blank top-level field
+    // never erases a previously remembered value.
+    if let Some(leaving) = config.backend.as_deref()
+        && leaving != normalized
+    {
+        ProviderProfile::bank_active(
+            &mut config.providers,
+            ProviderProfile::new(
+                leaving.to_string(),
+                config.api_key.clone(),
+                config.model.clone(),
+                config.base_url.clone(),
+            ),
+        );
+    }
+
+    (config.api_key, config.model, config.base_url) = target.project_fields();
+    config.backend = Some(normalized.to_string());
+    // `aic use` is an API-backend action; make it active. A stored CLI command
+    // (if any) stays dormant, restorable via `aic setup` → Backend.
+    config.backend_kind = Some(BackendKind::Api);
+    Ok(config)
+}
+
+/// `aic use <provider>` — switch the active API provider by restoring a
+/// remembered profile, without re-entering the key/model. The provider must
+/// already have been configured via `aic setup` (so it has an entry in the
+/// `providers` bank). Switches the active backend to API (a CLI-agent user
+/// who runs `aic use` is asking for the API path); any stored CLI fields
+/// stay dormant for a switch back via `aic setup`, per ADR 0011.
+pub fn run_use(name: &str) -> Result<()> {
+    let mut config = Config::load()
+        .ok()
+        .flatten()
+        .context("no config found — run `aic setup` to configure a provider first")?;
+    config = apply_use(config, name)?;
+
+    // The activated profile's key (now in the top-level row after apply_use).
+    let normalized = config.backend.as_deref().unwrap_or(name);
+    let had_key = config
+        .api_key
+        .as_deref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false);
+    config.save()?;
+
+    println!("Switched to {normalized}.");
+    if !had_key {
+        eprintln!(
+            "note: {normalized} has no saved API key — run `aic setup` to add one if it's needed"
+        );
+    }
     Ok(())
 }
 
@@ -786,6 +981,213 @@ mod tests {
         assert_eq!(c.backend.as_deref(), Some("openai"));
         assert_eq!(c.api_key.as_deref(), Some("k"));
         assert_eq!(c.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn provider_profile_upsert_replaces_or_appends() {
+        let mut list = Vec::new();
+        ProviderProfile::upsert(
+            &mut list,
+            ProviderProfile {
+                backend: "openai".into(),
+                api_key: Some("k1".into()),
+                ..Default::default()
+            },
+        );
+        ProviderProfile::upsert(
+            &mut list,
+            ProviderProfile {
+                backend: "anthropic".into(),
+                ..Default::default()
+            },
+        );
+        // Replace openai in place, not append a second openai.
+        ProviderProfile::upsert(
+            &mut list,
+            ProviderProfile {
+                backend: "openai".into(),
+                api_key: Some("k2".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].backend, "openai");
+        assert_eq!(list[0].api_key.as_deref(), Some("k2"));
+        assert_eq!(list[1].backend, "anthropic");
+    }
+
+    /// The `[[providers]]` bank round-trips through TOML so a config saved
+    /// by one aic run loads back with every remembered provider intact — the
+    /// on-disk contract `aic setup`/`aic use` depend on.
+    #[test]
+    fn providers_bank_round_trips_through_toml() {
+        let c = Config {
+            backend: Some("openai".into()),
+            api_key: Some("sk-live".into()),
+            model: Some("gpt-5".into()),
+            providers: vec![
+                ProviderProfile {
+                    backend: "openai".into(),
+                    api_key: Some("sk-live".into()),
+                    model: Some("gpt-5".into()),
+                    base_url: None,
+                },
+                ProviderProfile {
+                    backend: "anthropic".into(),
+                    api_key: Some("sk-ant".into()),
+                    model: Some("claude-x".into()),
+                    base_url: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let s = toml::to_string(&c).unwrap();
+        assert!(s.contains("[[providers]]"));
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.providers.len(), 2);
+        assert_eq!(back.providers[1].backend, "anthropic");
+        assert_eq!(back.providers[1].api_key.as_deref(), Some("sk-ant"));
+    }
+
+    /// A pre-bank config (no `[[providers]]` table) still loads: the field is
+    /// `#[serde(default)]` and comes back empty, ready to be populated on the
+    /// next save by `setup::seed_draft`'s legacy fold.
+    #[test]
+    fn config_without_providers_loads_as_empty() {
+        let raw = r#"
+backend = "openai"
+api_key = "sk-x"
+model = "gpt-5"
+"#;
+        let c: Config = toml::from_str(raw).unwrap();
+        assert_eq!(c.backend.as_deref(), Some("openai"));
+        assert!(c.providers.is_empty());
+    }
+
+    #[test]
+    fn provider_profile_new_builds_from_active_fields() {
+        let p = ProviderProfile::new("openai", Some("k".into()), Some("m".into()), None);
+        assert_eq!(p.backend, "openai");
+        assert_eq!(p.api_key.as_deref(), Some("k"));
+        assert_eq!(p.model.as_deref(), Some("m"));
+        assert!(p.base_url.is_none());
+    }
+
+    /// `bank_active` is the merge upsert the switch paths depend on: an
+    /// existing entry is updated field-by-field only where the incoming value
+    /// is set (so a blank never erases a remembered key/model), and an unknown
+    /// provider is appended.
+    #[test]
+    fn provider_profile_bank_active_merges_and_appends() {
+        let mut list = vec![ProviderProfile::new(
+            "openai",
+            Some("k1".into()),
+            Some("m1".into()),
+            None,
+        )];
+        // Merge: incoming key set (overwrites), incoming model None (keeps m1).
+        ProviderProfile::bank_active(
+            &mut list,
+            ProviderProfile::new("openai", Some("k2".into()), None, None),
+        );
+        assert_eq!(list[0].api_key.as_deref(), Some("k2"));
+        assert_eq!(list[0].model.as_deref(), Some("m1"));
+        // Append when the backend is not in the bank.
+        ProviderProfile::bank_active(
+            &mut list,
+            ProviderProfile::new("anthropic", Some("ka".into()), None, None),
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].backend, "anthropic");
+    }
+
+    #[test]
+    fn provider_profile_project_fields_returns_active_tuple() {
+        let p = ProviderProfile::new(
+            "openai",
+            Some("k".into()),
+            Some("m".into()),
+            Some("u".into()),
+        );
+        let (k, m, u) = p.project_fields();
+        assert_eq!(k.as_deref(), Some("k"));
+        assert_eq!(m.as_deref(), Some("m"));
+        assert_eq!(u.as_deref(), Some("u"));
+    }
+
+    /// `aic use`'s pure core rejects an unknown provider name.
+    #[test]
+    fn apply_use_rejects_unknown_provider() {
+        let c = cfg("openai", None, None, None);
+        let err = super::apply_use(c, "not-a-provider").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"), "got: {err}");
+    }
+
+    /// A known name with no banked profile is unconfigured — `aic use` must
+    /// refuse rather than activate blanks.
+    #[test]
+    fn apply_use_rejects_unconfigured_provider() {
+        let c = cfg("openai", Some("sk"), None, None); // bank empty
+        let err = super::apply_use(c, "anthropic").unwrap_err();
+        assert!(
+            err.to_string().contains("has not been configured"),
+            "got: {err}"
+        );
+    }
+
+    /// The headline `aic use` contract: activate the target (restore its
+    /// key/model/base_url, force the API backend) AND bank the provider being
+    /// left with its live top-level state — so a hand-edited key is not lost.
+    #[test]
+    fn apply_use_banks_source_and_activates_target() {
+        // Active openai with a hand-edited top-level key not yet in the bank.
+        let mut c = cfg("openai", Some("sk-handedited"), Some("gpt-5"), None);
+        c.providers = vec![
+            ProviderProfile::new("openai", Some("sk-old".into()), Some("gpt-5".into()), None),
+            ProviderProfile::new(
+                "anthropic",
+                Some("sk-a".into()),
+                Some("claude-x".into()),
+                None,
+            ),
+        ];
+        let out = super::apply_use(c, "anthropic").unwrap();
+        // Source (openai) banked with the live top-level key, not left stale.
+        let openai = out
+            .providers
+            .iter()
+            .find(|p| p.backend == "openai")
+            .expect("openai kept in bank");
+        assert_eq!(openai.api_key.as_deref(), Some("sk-handedited"));
+        // Target activated.
+        assert_eq!(out.backend.as_deref(), Some("anthropic"));
+        assert_eq!(out.api_key.as_deref(), Some("sk-a"));
+        assert_eq!(out.model.as_deref(), Some("claude-x"));
+        assert_eq!(out.backend_kind, Some(BackendKind::Api));
+    }
+
+    /// Merge contract on the switch path: a blank top-level field must not
+    /// erase a value the bank already remembers (the blank-overwrite bug).
+    #[test]
+    fn apply_use_merge_keeps_banked_value_when_source_field_blank() {
+        // Active openai with NO top-level key, but the bank remembers one.
+        let mut c = cfg("openai", None, Some("gpt-5"), None);
+        c.providers = vec![
+            ProviderProfile::new(
+                "openai",
+                Some("sk-remembered".into()),
+                Some("gpt-5".into()),
+                None,
+            ),
+            ProviderProfile::new("anthropic", Some("sk-a".into()), None, None),
+        ];
+        let out = super::apply_use(c, "anthropic").unwrap();
+        let openai = out
+            .providers
+            .iter()
+            .find(|p| p.backend == "openai")
+            .unwrap();
+        assert_eq!(openai.api_key.as_deref(), Some("sk-remembered"));
     }
 
     #[test]
