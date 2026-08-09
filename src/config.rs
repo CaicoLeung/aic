@@ -1054,6 +1054,132 @@ model = "gpt-5"
     }
 
     #[test]
+    fn provider_profile_new_builds_from_active_fields() {
+        let p = ProviderProfile::new("openai", Some("k".into()), Some("m".into()), None);
+        assert_eq!(p.backend, "openai");
+        assert_eq!(p.api_key.as_deref(), Some("k"));
+        assert_eq!(p.model.as_deref(), Some("m"));
+        assert!(p.base_url.is_none());
+    }
+
+    /// `bank_active` is the merge upsert the switch paths depend on: an
+    /// existing entry is updated field-by-field only where the incoming value
+    /// is set (so a blank never erases a remembered key/model), and an unknown
+    /// provider is appended.
+    #[test]
+    fn provider_profile_bank_active_merges_and_appends() {
+        let mut list = vec![ProviderProfile::new(
+            "openai",
+            Some("k1".into()),
+            Some("m1".into()),
+            None,
+        )];
+        // Merge: incoming key set (overwrites), incoming model None (keeps m1).
+        ProviderProfile::bank_active(
+            &mut list,
+            ProviderProfile::new("openai", Some("k2".into()), None, None),
+        );
+        assert_eq!(list[0].api_key.as_deref(), Some("k2"));
+        assert_eq!(list[0].model.as_deref(), Some("m1"));
+        // Append when the backend is not in the bank.
+        ProviderProfile::bank_active(
+            &mut list,
+            ProviderProfile::new("anthropic", Some("ka".into()), None, None),
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].backend, "anthropic");
+    }
+
+    #[test]
+    fn provider_profile_project_fields_returns_active_tuple() {
+        let p = ProviderProfile::new(
+            "openai",
+            Some("k".into()),
+            Some("m".into()),
+            Some("u".into()),
+        );
+        let (k, m, u) = p.project_fields();
+        assert_eq!(k.as_deref(), Some("k"));
+        assert_eq!(m.as_deref(), Some("m"));
+        assert_eq!(u.as_deref(), Some("u"));
+    }
+
+    /// `aic use`'s pure core rejects an unknown provider name.
+    #[test]
+    fn apply_use_rejects_unknown_provider() {
+        let c = cfg("openai", None, None, None);
+        let err = super::apply_use(c, "not-a-provider").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"), "got: {err}");
+    }
+
+    /// A known name with no banked profile is unconfigured — `aic use` must
+    /// refuse rather than activate blanks.
+    #[test]
+    fn apply_use_rejects_unconfigured_provider() {
+        let c = cfg("openai", Some("sk"), None, None); // bank empty
+        let err = super::apply_use(c, "anthropic").unwrap_err();
+        assert!(
+            err.to_string().contains("has not been configured"),
+            "got: {err}"
+        );
+    }
+
+    /// The headline `aic use` contract: activate the target (restore its
+    /// key/model/base_url, force the API backend) AND bank the provider being
+    /// left with its live top-level state — so a hand-edited key is not lost.
+    #[test]
+    fn apply_use_banks_source_and_activates_target() {
+        // Active openai with a hand-edited top-level key not yet in the bank.
+        let mut c = cfg("openai", Some("sk-handedited"), Some("gpt-5"), None);
+        c.providers = vec![
+            ProviderProfile::new("openai", Some("sk-old".into()), Some("gpt-5".into()), None),
+            ProviderProfile::new(
+                "anthropic",
+                Some("sk-a".into()),
+                Some("claude-x".into()),
+                None,
+            ),
+        ];
+        let out = super::apply_use(c, "anthropic").unwrap();
+        // Source (openai) banked with the live top-level key, not left stale.
+        let openai = out
+            .providers
+            .iter()
+            .find(|p| p.backend == "openai")
+            .expect("openai kept in bank");
+        assert_eq!(openai.api_key.as_deref(), Some("sk-handedited"));
+        // Target activated.
+        assert_eq!(out.backend.as_deref(), Some("anthropic"));
+        assert_eq!(out.api_key.as_deref(), Some("sk-a"));
+        assert_eq!(out.model.as_deref(), Some("claude-x"));
+        assert_eq!(out.backend_kind, Some(BackendKind::Api));
+    }
+
+    /// Merge contract on the switch path: a blank top-level field must not
+    /// erase a value the bank already remembers (the blank-overwrite bug).
+    #[test]
+    fn apply_use_merge_keeps_banked_value_when_source_field_blank() {
+        // Active openai with NO top-level key, but the bank remembers one.
+        let mut c = cfg("openai", None, Some("gpt-5"), None);
+        c.providers = vec![
+            ProviderProfile::new(
+                "openai",
+                Some("sk-remembered".into()),
+                Some("gpt-5".into()),
+                None,
+            ),
+            ProviderProfile::new("anthropic", Some("sk-a".into()), None, None),
+        ];
+        let out = super::apply_use(c, "anthropic").unwrap();
+        let openai = out
+            .providers
+            .iter()
+            .find(|p| p.backend == "openai")
+            .unwrap();
+        assert_eq!(openai.api_key.as_deref(), Some("sk-remembered"));
+    }
+
+    #[test]
     fn resolve_backend_uses_discriminator_and_allows_dormant_fields() {
         // ADR 0011: `backend_kind` is authoritative — it alone picks the active
         // Backend. The inactive Backend's fields may sit dormant in the file
