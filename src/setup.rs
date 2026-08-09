@@ -2027,6 +2027,71 @@ mod tests {
         assert_eq!(draft.known_providers.len(), 1);
     }
 
+    /// The provider-switch step banks the provider being left (its in-session
+    /// key/model) and restores the target's remembered fields — the
+    /// restore-on-switch contract `step_provider` depends on.
+    #[test]
+    fn switch_provider_banks_leaving_and_restores_target() {
+        let mut draft = draft_with_cli(None); // active OpenAI, key sk-stale, model gpt-5
+        draft.known_providers.push(ProviderProfile::new(
+            "anthropic",
+            Some("sk-ant".into()),
+            Some("claude-x".into()),
+            None,
+        ));
+        switch_provider(&mut draft, Provider::Anthropic);
+        // OpenAI banked with the in-session key/model.
+        let openai = draft
+            .known_providers
+            .iter()
+            .find(|p| p.backend == "openai")
+            .unwrap();
+        assert_eq!(openai.api_key.as_deref(), Some("sk-stale"));
+        assert_eq!(openai.model.as_deref(), Some("gpt-5"));
+        // Anthropic restored into the active fields.
+        assert_eq!(draft.api_key.as_deref(), Some("sk-ant"));
+        assert_eq!(draft.model.as_deref(), Some("claude-x"));
+    }
+
+    /// A first-time choice (no current provider) has nothing to save, and a
+    /// target with no bank entry leaves the fields blank.
+    #[test]
+    fn switch_provider_first_choice_has_nothing_to_bank() {
+        let mut draft = draft_with_cli(None);
+        draft.provider = None;
+        draft.known_providers.clear();
+        switch_provider(&mut draft, Provider::OpenAI);
+        assert!(draft.known_providers.is_empty());
+        assert!(draft.api_key.is_none());
+    }
+
+    /// Merge contract on the switch path: a cleared in-session field must not
+    /// erase a value the bank already remembers (the blank-overwrite bug).
+    #[test]
+    fn switch_provider_merge_keeps_banked_key_when_field_blank() {
+        let mut draft = draft_with_cli(None); // active OpenAI
+        draft.api_key = None; // cleared in-session
+        draft.known_providers.push(ProviderProfile::new(
+            "openai",
+            Some("sk-remembered".into()),
+            Some("gpt-5".into()),
+            None,
+        ));
+        draft.known_providers.push(ProviderProfile::new(
+            "anthropic",
+            Some("sk-a".into()),
+            None,
+            None,
+        ));
+        switch_provider(&mut draft, Provider::Anthropic);
+        let openai = draft
+            .known_providers
+            .iter()
+            .find(|p| p.backend == "openai")
+            .unwrap();
+        assert_eq!(openai.api_key.as_deref(), Some("sk-remembered"));
+    }
+
     #[test]
     fn cli_label_shows_command_or_not_configured() {
         assert_eq!(
