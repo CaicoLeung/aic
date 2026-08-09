@@ -93,37 +93,23 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     let start = Instant::now();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
 
-    // A streaming-capable backend (claude `stream-json`) that has not yet
-    // produced reasoning is in a cold start — SessionStart hooks, MCP
-    // handshakes, and a network TTFT often total 6–10 s before the first
-    // `thinking_delta`. That is NOT "does not support streaming", so past
-    // [`progress::LOADING_GRACE`] its loading frame shows a cold-start notice
-    // rather than the non-streaming claim. Plain backends silent past grace
-    // are the case the non-streaming notice was written for. Defaults to
-    // silent-notice on any lookup failure (safer: never falsely claims a
-    // streaming capability for an unknown backend).
-    // Resolve the streaming-capable backend's program name (e.g. `pi`,
-    // `claude`) in the same pass as whether it streams, so the two facts come
-    // from one config load and cannot disagree. `None` ⇒ not streaming-capable
-    // (rig path, a plain CLI, or a config read glitch) → the silent notice is
-    // used instead, never falsely claiming a streaming capability. The
-    // program name is what the cold-start notice interpolates, so a pi run is
-    // labeled "pi", not hardcoded "Claude".
-    let streaming_program: Option<String> = crate::llm::LlmConfig::load()
-        .ok()
-        .and_then(|c| {
-            let streams = matches!(
-                c.cli_encoding()?,
-                crate::cli_agent::Encoding::ClaudeStreamJson
-                    | crate::cli_agent::Encoding::PiStreamJson
-            );
-            if streams {
-                c.cli_command().map(str::to_owned)
-            } else {
-                None
-            }
-        });
-    let expects_streaming = streaming_program.is_some();
+    // A streaming-capable backend (claude `stream-json`, pi `--mode json`)
+    // that has not yet produced reasoning is in a cold start — SessionStart
+    // hooks, MCP handshakes, and a network TTFT often total 6–10 s before
+    // the first `thinking_delta`. That is NOT "does not support streaming",
+    // so past [`progress::LOADING_GRACE`] its loading frame shows a
+    // cold-start notice rather than the non-streaming claim. Plain backends
+    // (and opencode/codex, whose reasoning arrives whole at completion) are
+    // the case the non-streaming notice was written for.
+    //
+    // The decision — "is this a streaming-capable cold start, and what name
+    // labels the notice" — is decided behind the Backend seam by
+    // [`LlmConfig::cold_start_program`], so this frame never branches on
+    // backend kind or encoding. `None` ⇒ not streaming-capable → the silent
+    // notice. Defaults to `None` on any config-read glitch (safer: never
+    // falsely claims a streaming capability).
+    let cold_start: Option<String> =
+        crate::llm::LlmConfig::load().ok().and_then(|c| c.cold_start_program());
 
     // The streaming future owns the `ThinkingView` inside its `on_reasoning`
     // closure; windows are forwarded to the channel rather than rendered
@@ -186,17 +172,11 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
                 let elapsed = start.elapsed();
                 if !got_output {
                     let notice = if elapsed >= progress::LOADING_GRACE {
-                        if expects_streaming {
-                            // `streaming_program` is Some iff expects_streaming;
-                            // the generic fallback is defensive against a
-                            // config-read glitch and never panics.
-                            progress::LoadingNotice::ColdStart(
-                                streaming_program
-                                    .clone()
-                                    .unwrap_or_else(|| "The agent".to_string()),
-                            )
-                        } else {
-                            progress::LoadingNotice::Silent
+                        match &cold_start {
+                            Some(program) => {
+                                progress::LoadingNotice::ColdStart(program.clone())
+                            }
+                            None => progress::LoadingNotice::Silent,
                         }
                     } else {
                         progress::LoadingNotice::None

@@ -879,30 +879,23 @@ impl LlmConfig {
         }
     }
 
-    /// The CLI backend's stdout encoding, or `None` on the API (rig) path.
-    /// Used by the reasoning-feed UI ([`crate::analyze_changes`]) to
-    /// distinguish a streaming-capable CLI (claude `stream-json`, which emits
-    /// `thinking_delta` once the model reasons) from a plain CLI whose silence
-    /// past the loading grace may mean "does not support streaming" rather
-    /// than "still cold-starting". A streaming-capable CLI that has not yet
-    /// produced reasoning is in a cold start (hooks/MCP/TTFT, often 6–10 s),
-    /// not a capability gap — so its loading notice must not claim it cannot
-    /// stream.
-    pub fn cli_encoding(&self) -> Option<crate::cli_agent::Encoding> {
+    /// The program name to label a cold-start notice with, when the active
+    /// backend expects a live reasoning stream but has not produced one yet.
+    /// `Some(name)` for a CLI-agent backend whose envelope
+    /// [`streams_reasoning_live`](crate::cli_agent::Encoding::streams_reasoning_live)
+    /// (claude `stream-json`, pi `--mode json`: both emit a live
+    /// `thinking_delta` feed whose pre-first-delta wait is a cold start —
+    /// hooks/MCP/TTFT, often 6–10 s — not a capability gap); `None`
+    /// otherwise (the API/rig path; a CLI whose reasoning arrives whole at
+    /// completion like opencode/codex; or a config-read glitch). The
+    /// reasoning-feed loading frame crosses this one seam instead of
+    /// reaching through the backend kind and encoding separately.
+    pub fn cold_start_program(&self) -> Option<String> {
         match self {
-            Self::Cli(spec) => Some(spec.encoding),
-            Self::Rig(_) => None,
-        }
-    }
-
-    /// The CLI backend's program name (`pi`, `claude`, …), or `None` on the
-    /// API (rig) path. Used by the reasoning-feed loading frame to label the
-    /// cold-start notice with the actual backend instead of a hardcoded name
-    /// — a pi run must say "pi is starting up", not "Claude".
-    pub fn cli_command(&self) -> Option<&str> {
-        match self {
-            Self::Cli(spec) => Some(&spec.command),
-            Self::Rig(_) => None,
+            Self::Cli(spec) if spec.encoding.streams_reasoning_live() => {
+                Some(spec.command.clone())
+            }
+            _ => None,
         }
     }
 }
@@ -910,6 +903,49 @@ impl LlmConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_agent::{CliSpec, Encoding};
+
+    #[test]
+    fn cold_start_program_behind_the_backend_seam() {
+        // The loading frame crosses ONE seam: cold_start_program composes the
+        // envelope's streams_reasoning_live policy with the CLI command name.
+        // A live-token-streaming CLI (claude/pi) labels the cold-start notice;
+        // anything else (whole-at-completion codex/opencode, plain, or the
+        // API/rig path) returns None → the silent notice.
+        let claude = LlmConfig::Cli(CliSpec {
+            command: "claude".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            timeout_secs: 10,
+            encoding: Encoding::ClaudeStreamJson,
+        });
+        assert_eq!(claude.cold_start_program().as_deref(), Some("claude"));
+
+        let pi = LlmConfig::Cli(CliSpec {
+            command: "pi".into(),
+            args: vec!["-p".into(), "{prompt}".into()],
+            timeout_secs: 10,
+            encoding: Encoding::PiStreamJson,
+        });
+        assert_eq!(pi.cold_start_program().as_deref(), Some("pi"));
+
+        // codex reasons whole-at-completion (no live stream) → None.
+        let codex = LlmConfig::Cli(CliSpec {
+            command: "codex".into(),
+            args: vec!["exec".into(), "{prompt}".into()],
+            timeout_secs: 10,
+            encoding: Encoding::CodexJson,
+        });
+        assert_eq!(codex.cold_start_program(), None);
+
+        // The API/rig path never cold-starts a reasoning feed → None.
+        let rig = LlmConfig::Rig(LLM {
+            provider: Provider::OpenAI,
+            model: String::new(),
+            api_key: String::new(),
+            base_url: None,
+        });
+        assert_eq!(rig.cold_start_program(), None);
+    }
 
     #[test]
     fn all_providers_have_a_registry_row() {

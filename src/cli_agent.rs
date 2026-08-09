@@ -161,6 +161,20 @@ pub enum Encoding {
     CodexJson,
 }
 
+impl Encoding {
+    /// Whether this envelope emits a **live, token-streamed** reasoning feed
+    /// (`thinking_delta` chunk by chunk) that a loading frame can wait on.
+    /// True only for claude `stream-json` and pi `--mode json` — the two
+    /// envelopes whose pre-first-delta wait is a *cold start* (hooks/MCP/TTFT,
+    /// often 6–10 s) rather than a "does not support streaming" gap. opencode
+    /// and codex arrive **whole at completion** (no live stream to cold-start
+    /// into), so they are `false`: past the loading grace their silence is
+    /// treated like a plain backend's, not a delayed reasoning feed.
+    pub fn streams_reasoning_live(self) -> bool {
+        matches!(self, Self::ClaudeStreamJson | Self::PiStreamJson)
+    }
+}
+
 /// Built-in preset templates offered by `aic setup` and the docs. These are
 /// **not** reserved `backend` names — `aic setup` writes the resolved
 /// `command`/`args` into config, and selection is purely "`command` is set".
@@ -1493,8 +1507,24 @@ mod tests {
                 .any(|w| w[0] == "--format" && w[1] == "json")
         );
         assert_eq!(oc.encoding, Encoding::OpenCodeJson);
+        // opencode is batch too (answer arrives whole at completion).
+        assert_eq!(oc.timeout_secs, BATCH_TIMEOUT_SECS);
         assert!(cli_preset("nope").is_none());
         assert_eq!(PRESETS, &["claude", "codex", "pi", "opencode"]);
+    }
+
+    #[test]
+    fn streams_reasoning_live_only_for_token_streamers() {
+        // The cold-start-notice policy lives here, on the envelope: only the
+        // two live-token-streamers (claude `thinking_delta`, pi
+        // `thinking_delta`) expect a reasoning feed whose pre-first-delta wait
+        // is a cold start. opencode/codex arrive whole at completion → false
+        // (no live stream to cold-start into); plain never streams.
+        assert!(Encoding::ClaudeStreamJson.streams_reasoning_live());
+        assert!(Encoding::PiStreamJson.streams_reasoning_live());
+        assert!(!Encoding::OpenCodeJson.streams_reasoning_live());
+        assert!(!Encoding::CodexJson.streams_reasoning_live());
+        assert!(!Encoding::Plain.streams_reasoning_live());
     }
 
     #[tokio::test]
