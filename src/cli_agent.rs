@@ -876,117 +876,112 @@ impl CliAgent {
         // The runner surfaces a timeout (and not-installed) as a typed
         // `LlmError` directly via `?`; auth/non-zero-exit classification on a
         // finished process happens below.
+        // Plain stdout is the answer verbatim (custom commands, codex); the
+        // three streamed envelopes share one run/decode/error tail
+        // ([`Self::run_streamed`]) and differ only in the per-line forward
+        // closure and the answer decoder.
         match self.spec.encoding {
             Encoding::Plain => {
                 let out = self.runner.run(&spec, timeout, on_output).await?;
                 out.into_result(&self.spec.command)
             }
             Encoding::ClaudeStreamJson => {
-                // Decode each raw NDJSON line as it arrives and forward two
-                // kinds to the reasoning window, both as text the UI's
-                // [`ThinkingView`](crate::progress::ThinkingView) renders:
-                //   * `Milestone` (decoded from `system/init` +
-                //     `system/hook_started`) — startup progress, so the cold
-                //     start (hooks + MCP handshake + TTFT) is visible, not a
-                //     bare spinner. Forwarded with a trailing `\n` so each
-                //     commits as its own completed line.
-                //   * `Thinking` — the model's reasoning, streamed live (parity
-                //     with the API path).
-                // Consecutive identical milestones are deduped (claude emits
-                // repeated `SessionStart:startup` pairs). `Text`/`Result`/
-                // other events are handled post-run by `decode_claude_answer`
-                // — this closure forwards reasoning/startup only.
+                // Forward milestones (`system/init`, `system/hook_started`) and
+                // `thinking_delta` live; `Text`/`Result` are decoded post-run
+                // by `decode_claude_answer`. Consecutive identical milestones
+                // are deduped (claude emits repeated `SessionStart:startup`
+                // pairs); a thinking delta clears the dedup window.
                 let mut last_milestone: Option<String> = None;
-                let mut forward = |raw: &str| {
-                    match decode_claude_stream_line(raw) {
-                        Some(ClaudeDelta::Milestone(m)) => {
-                            if last_milestone.as_deref() != Some(m.as_str()) {
-                                on_output(&m);
-                                on_output("\n");
-                                last_milestone = Some(m);
-                            }
+                let mut forward = |raw: &str| match decode_claude_stream_line(raw) {
+                    Some(ClaudeDelta::Milestone(m)) => {
+                        if last_milestone.as_deref() != Some(m.as_str()) {
+                            on_output(&m);
+                            on_output("\n");
+                            last_milestone = Some(m);
                         }
-                        Some(ClaudeDelta::Thinking(t)) => {
-                            on_output(&t);
-                            last_milestone = None;
-                        }
-                        _ => {}
                     }
+                    Some(ClaudeDelta::Thinking(t)) => {
+                        on_output(&t);
+                        last_milestone = None;
+                    }
+                    _ => {}
                 };
-                let out = self.runner.run(&spec, timeout, &mut forward).await?;
-                if !out.success {
-                    // Reuse the auth/exit classification on failure.
-                    return out.into_result(&self.spec.command);
-                }
-                match decode_claude_answer(&out.stdout) {
-                    Some(answer) if !answer.trim().is_empty() => Ok(answer),
-                    _ => Err(anyhow::Error::new(LlmError::NonZeroExit {
-                        program: self.spec.command.clone(),
-                        code: out.code,
-                        stderr: format!(
-                            "claude stream-json produced no answer text; stderr: {}",
-                            out.stderr
-                        ),
-                    })),
-                }
+                self.run_streamed(
+                    &spec,
+                    timeout,
+                    &mut forward,
+                    decode_claude_answer,
+                    "claude stream-json",
+                )
+                .await
             }
             Encoding::PiStreamJson => {
-                // pi `--mode json`: each `message_update` line carries a
-                // `thinking_delta` (reasoning, forwarded live) or `text_delta`
-                // (answer, reconstructed post-run). No startup milestones —
-                // pi's cold start is fast, so the loading frame covers the
-                // brief pre-thinking gap and the first `thinking_delta` flips
-                // to the reasoning window.
+                // pi `--mode json`: forward `thinking_delta` live; the answer
+                // is the post-run concatenation of `text_delta`.
                 let mut forward = |raw: &str| {
                     if let Some(PiDelta::Thinking(t)) = decode_pi_stream_line(raw) {
                         on_output(&t);
                     }
                 };
-                let out = self.runner.run(&spec, timeout, &mut forward).await?;
-                if !out.success {
-                    return out.into_result(&self.spec.command);
-                }
-                match decode_pi_answer(&out.stdout) {
-                    Some(answer) if !answer.trim().is_empty() => Ok(answer),
-                    _ => Err(anyhow::Error::new(LlmError::NonZeroExit {
-                        program: self.spec.command.clone(),
-                        code: out.code,
-                        stderr: format!(
-                            "pi --mode json produced no answer text; stderr: {}",
-                            out.stderr
-                        ),
-                    })),
-                }
+                self.run_streamed(
+                    &spec,
+                    timeout,
+                    &mut forward,
+                    decode_pi_answer,
+                    "pi --mode json",
+                )
+                .await
             }
             Encoding::OpenCodeJson => {
-                // opencode `run --format json`: reasoning (if any) and the full
-                // answer each arrive as one event at completion, not token-
-                // streamed. Forward `reasoning` live in case an opencode build
-                // emits it early (mostly it lands with the answer, so this is
-                // usually a no-op for the UI); the answer is the last `text`
-                // event's `part.text`, extracted post-run.
+                // opencode `--format json`: forward `reasoning` live (usually
+                // lands with the answer, so often a UI no-op); the answer is
+                // the last `text` event's `part.text`, extracted post-run.
                 let mut forward = |raw: &str| {
-                    if let Some(OpenCodeDelta::Thinking(t)) = decode_opencode_stream_line(raw)
-                    {
+                    if let Some(OpenCodeDelta::Thinking(t)) = decode_opencode_stream_line(raw) {
                         on_output(&t);
                     }
                 };
-                let out = self.runner.run(&spec, timeout, &mut forward).await?;
-                if !out.success {
-                    return out.into_result(&self.spec.command);
-                }
-                match decode_opencode_answer(&out.stdout) {
-                    Some(answer) if !answer.trim().is_empty() => Ok(answer),
-                    _ => Err(anyhow::Error::new(LlmError::NonZeroExit {
-                        program: self.spec.command.clone(),
-                        code: out.code,
-                        stderr: format!(
-                            "opencode --format json produced no answer text; stderr: {}",
-                            out.stderr
-                        ),
-                    })),
-                }
+                self.run_streamed(
+                    &spec,
+                    timeout,
+                    &mut forward,
+                    decode_opencode_answer,
+                    "opencode --format json",
+                )
+                .await
             }
+        }
+    }
+
+    /// Shared tail for the three streamed encodings: run the CLI (forwarding
+    /// each line through `forward`, which keeps each encoding's
+    /// reasoning-routing local), classify a failed run via
+    /// [`CommandOutput::into_result`], then decode the answer or surface a
+    /// typed "no answer text" error. Collapses what was three near-identical
+    /// arms — one per envelope, differing only in the forward closure, the
+    /// decoder, and the error label — into one, so a fourth streamed preset
+    /// adds only a closure + decoder, not another copy of the
+    /// run/decode/error scaffolding.
+    async fn run_streamed(
+        &self,
+        spec: &CommandSpec,
+        timeout: Duration,
+        forward: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        decode_answer: impl Fn(&str) -> Option<String>,
+        envelope: &str,
+    ) -> Result<String> {
+        let out = self.runner.run(spec, timeout, forward).await?;
+        if !out.success {
+            // Reuse the auth/exit classification on failure.
+            return out.into_result(&self.spec.command);
+        }
+        match decode_answer(&out.stdout) {
+            Some(answer) if !answer.trim().is_empty() => Ok(answer),
+            _ => Err(anyhow::Error::new(LlmError::NonZeroExit {
+                program: self.spec.command.clone(),
+                code: out.code,
+                stderr: format!("{envelope} produced no answer text; stderr: {}", out.stderr),
+            })),
         }
     }
 
