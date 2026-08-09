@@ -271,6 +271,73 @@ impl Config {
              backend_kind, and API fields were left unchanged."
         )])
     }
+
+    /// One-time **location migration** (ADR 0012): move a pre-0012 config
+    /// written to the old OS-native default ([`legacy_config_path`], i.e.
+    /// `~/Library/Application Support/aic/config.toml` on macOS) into the
+    /// fixed [`config_path`] location (`~/.config/aic/config.toml`), so
+    /// existing macOS users' configs follow the path the docs have always
+    /// claimed.
+    ///
+    /// **Semantics (decided by grilling, see ADR 0012):**
+    /// - old exists, new missing → **copy** old → new, then **delete** old
+    ///   (move semantics — no stale duplicate that a later edit to the old
+    ///   path would desync, per ADR 0008's single source of truth);
+    /// - new already exists → **skip silently** (new wins; old file, if any,
+    ///   is left untouched);
+    /// - old and new resolve to the same path (plain Linux) → no-op;
+    /// - old missing → no-op.
+    ///
+    /// Idempotent: after the first successful move the new path exists, so
+    /// every later call takes the "skip silently" row. Prints one notice per
+    /// file actually moved (transparency, matching [`Self::migrate_if_stale`]);
+    /// a failure is returned for the caller to log without blocking the run.
+    ///
+    /// Designed to be called once early in `main`, **before**
+    /// [`Self::migrate_if_stale`], so the file lands at its new path first and
+    /// preset migration then runs on the relocated file.
+    pub fn migrate_location() -> Result<Vec<String>> {
+        let new_path = match config_path() {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let old_path = match legacy_config_path() {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        // Same path (plain Linux, no XDG) — nothing to migrate.
+        if old_path == new_path {
+            return Ok(Vec::new());
+        }
+        // New wins: if the destination already exists, skip silently. Do not
+        // touch the old file in this case — the user (or a newer aic) owns the
+        // new one.
+        if new_path.exists() {
+            return Ok(Vec::new());
+        }
+        if !old_path.exists() {
+            return Ok(Vec::new());
+        }
+        if let Some(parent) = new_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::copy(&old_path, &new_path).with_context(|| {
+            format!(
+                "failed to copy {} -> {}",
+                old_path.display(),
+                new_path.display()
+            )
+        })?;
+        fs::remove_file(&old_path)
+            .with_context(|| format!("failed to remove old {}", old_path.display()))?;
+        Ok(vec![format!(
+            "moved your config from {} to {} (the config location is now `~/.config/aic` on \
+             all platforms; see ADR 0012).",
+            old_path.display(),
+            new_path.display()
+        )])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
