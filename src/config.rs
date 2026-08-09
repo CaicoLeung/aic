@@ -752,18 +752,16 @@ pub fn run_list() -> Result<()> {
     Ok(())
 }
 
-/// `aic use <provider>` — switch the active API provider by restoring a
-/// remembered profile, without re-entering the key/model. The provider must
-/// already have been configured via `aic setup` (so it has an entry in the
-/// `providers` bank). Switches the active backend to API (a CLI-agent user
-/// who runs `aic use` is asking for the API path); any stored CLI fields
-/// stay dormant for a switch back via `aic setup`, per ADR 0011.
-pub fn run_use(name: &str) -> Result<()> {
-    let mut config = Config::load()
-        .ok()
-        .flatten()
-        .context("no config found — run `aic setup` to configure a provider first")?;
-
+/// Pure core of `aic use <name>`: validate the name, bank the currently
+/// active provider's live top-level state into the memory bank, then activate
+/// the target profile (restore its key/model/base_url and force the API
+/// backend). Split from [`run_use`] (which owns the load/save/print IO) so the
+/// switch contract — source banked, target restored, backend forced to API —
+/// is unit-testable without the real config file.
+///
+/// Errors: unknown provider name; a known name with no banked profile (run
+/// `aic setup` to add one).
+fn apply_use(mut config: Config, name: &str) -> Result<Config> {
     if !Provider::is_known_name(name) {
         anyhow::bail!(
             "unknown provider '{name}'; pick one of: {}",
@@ -777,7 +775,7 @@ pub fn run_use(name: &str) -> Result<()> {
     // Normalize via from_name so aliases and case variants match the stored
     // `backend` key (the canonical name setup writes).
     let normalized = Provider::from_name(name).name();
-    let profile = config
+    let target = config
         .providers
         .iter()
         .find(|p| p.backend == normalized)
@@ -788,18 +786,52 @@ pub fn run_use(name: &str) -> Result<()> {
             )
         })?;
 
-    let had_key = profile
+    // Bank the provider we're leaving first (its live top-level state), so a
+    // later switch back restores what was active — not whatever `finalize`
+    // last happened to write. Merge semantics, so a blank top-level field
+    // never erases a previously remembered value.
+    if let Some(leaving) = config.backend.as_deref()
+        && leaving != normalized
+    {
+        ProviderProfile::bank_active(
+            &mut config.providers,
+            ProviderProfile::new(
+                leaving.to_string(),
+                config.api_key.clone(),
+                config.model.clone(),
+                config.base_url.clone(),
+            ),
+        );
+    }
+
+    (config.api_key, config.model, config.base_url) = target.project_fields();
+    config.backend = Some(normalized.to_string());
+    // `aic use` is an API-backend action; make it active. A stored CLI command
+    // (if any) stays dormant, restorable via `aic setup` → Backend.
+    config.backend_kind = Some(BackendKind::Api);
+    Ok(config)
+}
+
+/// `aic use <provider>` — switch the active API provider by restoring a
+/// remembered profile, without re-entering the key/model. The provider must
+/// already have been configured via `aic setup` (so it has an entry in the
+/// `providers` bank). Switches the active backend to API (a CLI-agent user
+/// who runs `aic use` is asking for the API path); any stored CLI fields
+/// stay dormant for a switch back via `aic setup`, per ADR 0011.
+pub fn run_use(name: &str) -> Result<()> {
+    let mut config = Config::load()
+        .ok()
+        .flatten()
+        .context("no config found — run `aic setup` to configure a provider first")?;
+    config = apply_use(config, name)?;
+
+    // The activated profile's key (now in the top-level row after apply_use).
+    let normalized = config.backend.as_deref().unwrap_or(name);
+    let had_key = config
         .api_key
         .as_deref()
         .map(|k| !k.is_empty())
         .unwrap_or(false);
-    config.backend = Some(profile.backend.clone());
-    config.api_key = profile.api_key;
-    config.model = profile.model;
-    config.base_url = profile.base_url;
-    // `aic use` is an API-backend action; make it active. A stored CLI command
-    // (if any) stays dormant, restorable via `aic setup` → Backend.
-    config.backend_kind = Some(BackendKind::Api);
     config.save()?;
 
     println!("Switched to {normalized}.");
