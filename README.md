@@ -153,11 +153,12 @@ Environment variables are **not** read for provider settings — the values
 
 | Field          | Purpose                                        | Default          |
 | -------------- | ---------------------------------------------- | ---------------- |
-| `backend`      | Provider name                                  | `openai`         |
-| `api_key`      | API key                                        | —                |
-| `model`        | Model ID                                       | Provider default |
-| `base_url`     | Endpoint base URL (Ollama / OpenAI-compatible) | Provider default |
-| `command`      | CLI-agent backend (overrides the API provider) | —                |
+| `backend_kind` | Active backend: `"api"` (default) or `"cli"`   | `"api"`          |
+| `backend`      | Provider name — API backend                    | `openai`         |
+| `api_key`      | API key — API backend                          | —                |
+| `model`        | Model ID — API backend                         | Provider default |
+| `base_url`     | Endpoint base URL — Ollama / OpenAI-compatible | Provider default |
+| `command`      | CLI-agent backend command — CLI backend        | —                |
 | `args`         | Argv template for `command` (use `{prompt}`)   | `["{prompt}"]`   |
 | `timeout_secs` | Per-call timeout for the CLI backend           | `60`             |
 
@@ -176,28 +177,33 @@ If you already have a coding-agent CLI installed and authenticated —
 [pi](https://pi.dev), GitHub Copilot, Opencode, … — aic can drive it in
 **headless/print mode** and reuse its auth, so **no API key is needed**.
 
-Set `command` and aic runs in CLI-backend mode. It shells out to that CLI with
-a single prompt (the `{prompt}` placeholder in `args` is replaced by the full
-system + user prompt) and reads the answer from stdout. The provider fields
-(`backend`, `api_key`, `model`, `base_url`) are ignored — and setting both
-`command` and `api_key` is rejected as contradictory.
+Set `backend_kind = "cli"` to switch to the CLI-agent backend, and `command`
+to the CLI to drive. aic shells out to that CLI with a single prompt (the
+`{prompt}` placeholder in `args` is replaced by the full system + user prompt)
+and reads the answer from stdout. The API-provider fields (`backend`,
+`api_key`, `model`, `base_url`) are not used by the CLI backend and must be
+unset — `backend_kind = "cli"` with an `api_key`, or `backend_kind = "api"`
+with a `command`, is rejected as contradictory (ADR 0011).
 
 Presets are offered by `aic setup` (→ **CLI agent**); you can also edit the
 config directly:
 
 ```toml
 # Claude Code — print mode (skip-permissions is opt-in, so no auto tool-use)
+backend_kind = "cli"
 command = "claude"
 args = ["-p", "{prompt}"]
 timeout_secs = 120
 ```
 ```toml
 # OpenAI Codex — exec pinned to a read-only sandbox
+backend_kind = "cli"
 command = "codex"
 args = ["exec", "-s", "read-only", "{prompt}"]
 ```
 ```toml
 # pi — --no-tools disables all tools so print mode is text-only
+backend_kind = "cli"
 command = "pi"
 args = ["--no-tools", "-p", "{prompt}"]
 ```
@@ -216,8 +222,11 @@ Notes:
 - **Output is JSON for typed paths.** aic asks the CLI for JSON (the system
   prompts already specify the shape) and tolerant-parses it, the same way the
   batch-plan API path already does.
-- **Custom CLI.** Point `command`/`args` at any print-mode CLI. See
-  [ADR 0010](docs/adr/0010-cli-agent-backend.md) for the full design.
+- **Custom CLI.** Point `command`/`args` at any print-mode CLI (with
+  `backend_kind = "cli"`). See [ADR 0010](docs/adr/0010-cli-agent-backend.md)
+  for the backend design and
+  [ADR 0011](docs/adr/0011-explicit-backend-discriminator.md) for the
+  `backend_kind` discriminator.
 
 ### Pre-commit confirmation
 

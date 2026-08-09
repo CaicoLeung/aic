@@ -45,7 +45,7 @@ A Commit-confirmation menu action that lets the user modify the full Drafted Mes
 _Avoid_: message tweak, inline edit (overloaded), editor step
 
 **Provider**:
-A named LLM backend the user can route a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from env, then config, then default.
+A named LLM service the API-provider Backend routes a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from config, then default. Meaningful only on the API-provider Backend; the CLI-agent Backend ignores it.
 _Avoid_: backend, engine
 
 **Base URL**:
@@ -59,6 +59,20 @@ _Avoid_: custom provider, generic provider, passthrough
 **Default Model**:
 The model used for a Provider when the user has not set one (env/config). Chosen for speed and cost, since aic's workload (commit messages) is lightweight.
 _Avoid_: fallback model, base model
+
+### Backends
+
+**Backend**:
+How aic obtains LLM answers for a Run. Exactly two kinds exist — the API-provider Backend and the CLI-agent Backend — and they are mutually exclusive; the active one is named explicitly by the `backend_kind` config field (`"api"` or `"cli"`, absent ⇒ `"api"`). "Which mode am I in" = "which Backend is active."
+_Avoid_: mode, engine, provider (overloaded — see Provider)
+
+**API-provider Backend**:
+The Backend that calls a Provider over HTTP, authenticated by an `api_key`. The original path; the default when `backend_kind` is unset.
+_Avoid_: api_key mode (`api_key` is the credential, not the Backend), API mode, rig path
+
+**CLI-agent Backend**:
+The Backend that shells out to an external coding-agent CLI (`claude`, `codex`, `pi`, …) in headless/print mode and reuses that CLI's own auth, so no `api_key` is needed. Selected by `backend_kind = "cli"` with a `command`/`args`/`timeout_secs` template (ADR 0010; selection mechanism superseded by ADR 0011).
+_Avoid_: cli_agent mode, command mode
 
 ### Conflict resolution
 
