@@ -333,15 +333,15 @@ fn seed_draft(existing: &Option<Config>) -> Draft {
         // the active provider only as top-level fields; fold it into the bank
         // so the first save persists it and a later switch restores it. A
         // no-op when the active provider is already in the list.
-        if let Some(name) = c.backend.as_deref() {
-            if !draft.known_providers.iter().any(|p| p.backend == name) {
-                draft.known_providers.push(ProviderProfile {
-                    backend: name.to_string(),
-                    api_key: c.api_key.clone(),
-                    model: c.model.clone(),
-                    base_url: c.base_url.clone(),
-                });
-            }
+        if let Some(name) = c.backend.as_deref()
+            && !draft.known_providers.iter().any(|p| p.backend == name)
+        {
+            draft.known_providers.push(ProviderProfile {
+                backend: name.to_string(),
+                api_key: c.api_key.clone(),
+                model: c.model.clone(),
+                base_url: c.base_url.clone(),
+            });
         }
     }
     draft
