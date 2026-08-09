@@ -905,6 +905,47 @@ mod tests {
     }
 
     #[test]
+    fn preset_migration_rewrites_legacy_claude_to_stream_json() {
+        // The exact stale shape from the regression: plain `-p {prompt}`.
+        let (name, new_args) =
+            cli_preset_migration("claude", &["-p".into(), "{prompt}".into()])
+                .expect("legacy claude fingerprint must migrate");
+        assert_eq!(name, "claude");
+        assert!(new_args.iter().any(|a| a == "stream-json"));
+        assert!(new_args.iter().any(|a| a == "--include-partial-messages"));
+    }
+
+    #[test]
+    fn preset_migration_is_noop_for_current_preset_and_custom() {
+        // A config already on the current claude preset matches no legacy
+        // fingerprint → None (idempotent: re-running migration is a no-op).
+        let current = cli_preset("claude").unwrap();
+        assert_eq!(
+            cli_preset_migration(&current.command, &current.args),
+            None,
+            "current preset must not re-migrate"
+        );
+        // A custom command (even one close to a preset, with an extra flag) is
+        // left alone — exact-match only.
+        assert_eq!(
+            cli_preset_migration("claude", &["-p".into(), "{prompt}".into(), "--model".into(), "x".into()]),
+            None,
+            "customized args must never be silently rewritten"
+        );
+        // A wholly custom command is untouched too.
+        assert_eq!(cli_preset_migration("my-agent", &["run".into()]), None);
+    }
+
+    #[test]
+    fn preset_migration_rejects_wrong_command_for_legacy_args() {
+        // Same args as legacy claude, but a different command — not a match.
+        assert_eq!(
+            cli_preset_migration("codex", &["-p".into(), "{prompt}".into()]),
+            None
+        );
+    }
+
+    #[test]
     fn presets_use_print_mode_and_known_programs() {
         let c = cli_preset("claude").unwrap();
         assert_eq!(c.command, "claude");
