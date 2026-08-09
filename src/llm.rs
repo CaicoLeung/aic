@@ -442,21 +442,6 @@ pub struct LLM {
 }
 
 impl LLM {
-    /// Load the runtime [`LLM`] from the resolved config file. aic reads only
-    /// the config file — no environment variables — so it is the single source
-    /// of truth (ADR 0008).
-    pub fn load() -> Result<Self> {
-        let config = crate::config::Config::load().ok().flatten();
-        let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
-        resolved.validate()?;
-        Ok(Self {
-            provider: Provider::from_name(&resolved.backend),
-            model: resolved.model,
-            api_key: resolved.api_key,
-            base_url: resolved.base_url,
-        })
-    }
-
     pub fn agent(&self, system_prompt: impl Into<String>) -> LLMAgent {
         LLMAgent {
             llm: self.clone(),
@@ -832,13 +817,6 @@ impl Backend {
                 a.stream_typed_with_reasoning::<T>(prompt, on_reasoning)
                     .await
             }
-        }
-    }
-
-    pub async fn verify(&self) -> Result<String> {
-        match self {
-            Self::Rig(a) => a.verify().await,
-            Self::Cli(a) => a.verify().await,
         }
     }
 }

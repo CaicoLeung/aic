@@ -220,14 +220,15 @@ impl CommandRunner for TokioRunner {
             Ok(c) => c,
         };
 
+        let secs = timeout.as_secs().max(1);
         match tokio::time::timeout(timeout, child.wait_with_output()).await {
             // Timed out: the future (and thus `child`) is dropped → killed.
-            Err(_) => Ok(CommandOutput {
-                success: false,
-                code: None,
-                stdout: String::new(),
-                stderr: format!("timed out after {}s", timeout.as_secs().max(1)),
-            }),
+            // Surface as a typed error directly — NOT encoded as a string in a
+            // `CommandOutput` — so timeout classification never depends on
+            // sniffing stderr (a custom CLI that legitimately prints "timed
+            // out" could otherwise be misclassified). Auth/non-zero-exit
+            // classification still lives in `CommandOutput::into_result`.
+            Err(_) => Err(anyhow::Error::new(LlmError::Timeout(secs))),
             Ok(Err(e)) => Err(e).with_context(|| format!("`{}` failed", spec.program)),
             Ok(Ok(out)) => Ok(CommandOutput {
                 success: out.status.success(),
@@ -328,22 +329,10 @@ impl CliAgent {
             args,
         };
         let timeout = Duration::from_secs(self.spec.timeout_secs.max(1));
+        // The runner surfaces a timeout (and not-installed) as a typed
+        // `LlmError` directly via `?`; only auth/non-zero-exit classification
+        // happens here, on a finished process.
         let out = self.runner.run(&spec, timeout).await?;
-
-        if out.success && out.stdout.is_empty() {
-            // Distinguish a timeout (stderr carries the timeout note) from a
-            // genuinely-empty but successful run.
-            if out.stderr.contains("timed out") {
-                return Err(anyhow::Error::new(LlmError::Timeout(
-                    self.spec.timeout_secs,
-                )));
-            }
-        }
-        if !out.success && out.stderr.contains("timed out") {
-            return Err(anyhow::Error::new(LlmError::Timeout(
-                self.spec.timeout_secs,
-            )));
-        }
         out.into_result(&self.spec.command)
     }
 
@@ -606,16 +595,14 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_is_classified() {
-        let (agent, _) = agent_with(vec![Ok(CommandOutput {
-            success: false,
-            code: None,
-            stdout: String::new(),
-            stderr: "timed out after 60s".into(),
-        })]);
+        // The runner now surfaces a timeout as a typed error directly (not as
+        // a CommandOutput carrying a magic stderr string), so classification
+        // cannot be fooled by a CLI that happens to print "timed out".
+        let (agent, _) = agent_with(vec![Err(anyhow::Error::new(LlmError::Timeout(60)))]);
         let res = agent.call("x").await;
         assert!(matches!(
             res.unwrap_err().downcast_ref::<LlmError>(),
-            Some(LlmError::Timeout(_))
+            Some(LlmError::Timeout(n)) if *n == 60
         ));
     }
 

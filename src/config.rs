@@ -21,8 +21,10 @@ pub struct Config {
     pub backend: Option<String>,
     /// Which Backend is active: `"api"` (the API-provider Backend, default
     /// when absent) or `"cli"` (the CLI-agent Backend). Authoritative — see
-    /// [`BackendKind`] / [`Config::resolve_backend`] (ADR 0011).
-    pub backend_kind: Option<String>,
+    /// [`BackendKind`] / [`Config::resolve_backend`] (ADR 0011). Typed (not a
+    /// raw string) so an unknown value is rejected at config-parse time and an
+    /// invalid discriminator can never exist in a parsed [`Config`].
+    pub backend_kind: Option<BackendKind>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
@@ -93,13 +95,10 @@ impl Config {
     /// [`BackendKind::Api`] (the historical default, so released configs need
     /// no migration).
     pub fn resolve_backend(&self) -> Result<BackendKind> {
-        let kind = match self.backend_kind.as_deref().map(str::trim) {
-            None | Some("") | Some("api") => BackendKind::Api,
-            Some("cli") => BackendKind::Cli,
-            Some(other) => anyhow::bail!(
-                "unknown `backend_kind` value `{other}` (expected \"api\" or \"cli\")"
-            ),
-        };
+        // Typed discriminator: serde already rejected any unknown variant at
+        // config-parse time, so there is no "unknown value" branch here.
+        // Absent ⇒ Api (the historical default; released configs unchanged).
+        let kind = self.backend_kind.unwrap_or_default();
         let command_set = self.active_cli_command().is_some();
         let api_key_set = self
             .api_key
@@ -154,12 +153,16 @@ impl std::fmt::Display for Source {
 
 /// Which Backend a Run uses to obtain LLM answers (ADR 0011). The active kind
 /// is the `backend_kind` config value, resolved and validated by
-/// [`Config::resolve_backend`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`Config::resolve_backend`]. Serialized as the lowercase variant name
+/// (`"api"` / `"cli"`); an unknown value is rejected at config-parse time, so
+/// an invalid `backend_kind` cannot exist in a parsed [`Config`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BackendKind {
     /// The API-provider Backend: calls a [`Provider`](crate::llm::Provider) over
     /// HTTP, authenticated by an `api_key`. The default when `backend_kind` is
     /// absent.
+    #[default]
     Api,
     /// The CLI-agent Backend: shells out to an external coding-agent CLI in
     /// headless/print mode, reusing that CLI's own auth (ADR 0010).
@@ -167,29 +170,11 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    /// The canonical `backend_kind` config string for this kind.
-    pub fn config_str(self) -> &'static str {
-        match self {
-            Self::Api => "api",
-            Self::Cli => "cli",
-        }
-    }
-
     /// Human-facing name for banners / run indicators.
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Api => "API provider",
             Self::Cli => "CLI agent",
-        }
-    }
-
-    /// Lenient parse for display/seeding: absent/empty/unknown ⇒ `None`. The
-    /// strict error for an unknown value is raised by [`Config::resolve_backend`].
-    pub fn parse_lenient(value: Option<&str>) -> Option<Self> {
-        match value.map(str::trim) {
-            Some("api") => Some(Self::Api),
-            Some("cli") => Some(Self::Cli),
-            _ => None,
         }
     }
 }
@@ -207,17 +192,10 @@ pub struct ResolvedConfig {
 
 impl ResolvedConfig {
     pub fn resolve(config: Option<&Config>) -> Self {
-        let cfg = config.cloned().unwrap_or(Config {
-            backend_kind: None,
-            backend: None,
-            api_key: None,
-            model: None,
-            base_url: None,
-            confirm_before_commit: None,
-            command: None,
-            args: None,
-            timeout_secs: None,
-        });
+        // `Config` derives `Default` (every field is `Option`), so the
+        // no-config case is just the default — no hand-maintained field list
+        // that must be edited whenever a field is added.
+        let cfg = config.cloned().unwrap_or_default();
 
         let (backend, backend_source) = resolve_field(cfg.backend.as_deref(), DEFAULT_PROVIDER);
 
@@ -446,51 +424,80 @@ mod tests {
     #[test]
     fn resolve_backend_enforces_strict_discriminator() {
         // ADR 0011: `backend_kind` is authoritative; mismatches are hard
-        // errors. Absent ⇒ Api, so released configs resolve unchanged.
-        assert_eq!(cfg("openai", None, None, None).resolve_backend().unwrap(), BackendKind::Api);
+        // errors. Absent ⇒ Api, so released configs resolve unchanged. An
+        // unknown value is no longer representable here — serde rejects it at
+        // parse time (see `unknown_backend_kind_variant_is_rejected_at_parse`).
+        assert_eq!(
+            cfg("openai", None, None, None).resolve_backend().unwrap(),
+            BackendKind::Api
+        );
 
         let explicit_api = Config {
-            backend_kind: Some("api".into()),
+            backend_kind: Some(BackendKind::Api),
             ..cfg("openai", Some("k"), None, None)
         };
         assert_eq!(explicit_api.resolve_backend().unwrap(), BackendKind::Api);
 
         // Cli requires a command and forbids an api_key.
         let cli = Config {
-            backend_kind: Some("cli".into()),
+            backend_kind: Some(BackendKind::Cli),
             command: Some("claude".into()),
             ..Default::default()
         };
         assert_eq!(cli.resolve_backend().unwrap(), BackendKind::Cli);
 
-        // Unknown discriminator, Cli without command, Api with a stray
-        // command, and Cli with an api_key are all hard errors.
-        assert!(Config {
-            backend_kind: Some("ollama".into()),
+        // Cli without command, Api with a stray command, and Cli with an
+        // api_key are all hard errors.
+        assert!(
+            Config {
+                backend_kind: Some(BackendKind::Cli),
+                ..Default::default()
+            }
+            .resolve_backend()
+            .is_err()
+        );
+        assert!(
+            Config {
+                backend_kind: Some(BackendKind::Api),
+                command: Some("claude".into()),
+                ..Default::default()
+            }
+            .resolve_backend()
+            .is_err()
+        );
+        assert!(
+            Config {
+                backend_kind: Some(BackendKind::Cli),
+                command: Some("claude".into()),
+                api_key: Some("sk-x".into()),
+                ..Default::default()
+            }
+            .resolve_backend()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_backend_kind_variant_is_rejected_at_parse() {
+        // The discriminator is typed, so an invalid value fails at TOML parse
+        // time (it cannot exist in a parsed Config) rather than being deferred
+        // to `resolve_backend`.
+        let err = toml::from_str::<Config>("backend_kind = \"ollama\"\n");
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("backend_kind") || msg.contains("ollama"));
+    }
+
+    #[test]
+    fn backend_kind_round_trips_through_toml() {
+        // "cli" serializes + deserializes; absent stays absent (⇒ default Api).
+        let c = Config {
+            backend_kind: Some(BackendKind::Cli),
             ..Default::default()
-        }
-        .resolve_backend()
-        .is_err());
-        assert!(Config {
-            backend_kind: Some("cli".into()),
-            ..Default::default()
-        }
-        .resolve_backend()
-        .is_err());
-        assert!(Config {
-            backend_kind: Some("api".into()),
-            command: Some("claude".into()),
-            ..Default::default()
-        }
-        .resolve_backend()
-        .is_err());
-        assert!(Config {
-            backend_kind: Some("cli".into()),
-            command: Some("claude".into()),
-            api_key: Some("sk-x".into()),
-            ..Default::default()
-        }
-        .resolve_backend()
-        .is_err());
+        };
+        let s = toml::to_string(&c).unwrap();
+        assert!(s.contains("backend_kind = \"cli\""));
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.backend_kind, Some(BackendKind::Cli));
     }
 }

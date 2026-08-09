@@ -318,7 +318,7 @@ fn seed_draft(existing: &Option<Config>) -> Draft {
     let mut draft = Draft::default();
     if let Some(c) = existing {
         draft.provider = c.backend.as_deref().map(Provider::from_name);
-        draft.backend_kind = BackendKind::parse_lenient(c.backend_kind.as_deref());
+        draft.backend_kind = c.backend_kind;
         draft.api_key = c.api_key.clone();
         draft.base_url = c.base_url.clone();
         draft.model = c.model.clone();
@@ -649,23 +649,37 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
         // Clippy: collect then extend to avoid borrowing preset_labels across the closure.
         items.extend(preset_labels.iter().cloned());
         items.push("Custom command…".to_string());
-        if draft.active_cli_command().is_some() {
+        let command_set = draft.active_cli_command().is_some();
+        if command_set {
             items.push("Clear CLI backend (use API key instead)".to_string());
+        }
+        if command_set {
+            // Probe install + auth now (mirrors the API path's Verify item) so
+            // an installed-but-unauthenticated CLI is caught at setup, not
+            // mid-Run (ADR 0010 reliability).
+            items.push("Verify (probe the CLI now)".to_string());
         }
         items.push("↩️ Done — back to main menu".to_string());
         let n_presets = PRESETS.len();
         let custom_idx = 1 + n_presets;
-        let has_clear = draft.active_cli_command().is_some();
-        let clear_idx = if has_clear {
-            Some(custom_idx + 1)
+        // Running index after presets + custom; clear & verify are both gated
+        // on a command being set, so they shift done_idx only then.
+        let mut idx = custom_idx + 1;
+        let clear_idx = if command_set {
+            let i = idx;
+            idx += 1;
+            Some(i)
         } else {
             None
         };
-        let done_idx = if has_clear {
-            custom_idx + 2
+        let verify_idx = if command_set {
+            let i = idx;
+            idx += 1;
+            Some(i)
         } else {
-            custom_idx + 1
+            None
         };
+        let done_idx = idx;
 
         match opt_nav("CLI agent backend", &items, 0)? {
             OptNav::Back => return Ok(false),
@@ -695,6 +709,12 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
                     println!("\nCLI backend cleared — aic will use the API provider.");
                     pause_done()?;
                     return Ok(false);
+                }
+                if verify_idx == Some(i) {
+                    if step_verify_cli(draft)? == Nav::Cancel {
+                        return Ok(true);
+                    }
+                    continue;
                 }
                 if i == done_idx {
                     return Ok(false);
@@ -787,7 +807,7 @@ fn finalize(draft: Draft) -> Config {
             // `backend_kind` is written only for the CLI backend; absent ⇒ API,
             // so a pure API-provider config stays byte-identical to before this
             // field existed (no migration for released configs).
-            backend_kind: Some(BackendKind::Cli.config_str().to_string()),
+            backend_kind: Some(BackendKind::Cli),
             backend: None,
             api_key: None,
             model: None,
@@ -1251,6 +1271,88 @@ fn show_verify_result(
             term.write_line(&format!("  Error: {e}"))?;
             term.write_line("")?;
             term.write_line("  Common causes: wrong API key, model name, base URL, or network.")?;
+        }
+    }
+    term.write_line("")?;
+    term.write_line("Press Enter to return to the menu…")?;
+    let _ = term.read_char();
+    Ok(())
+}
+
+/// The CLI analogue of [`step_verify`] (AIC-23): probe the configured CLI with a
+/// minimal prompt using the **effective** draft values, so a missing binary or
+/// an unauthenticated CLI is caught here — at setup time — rather than failing
+/// mid-Run. The CLI runs in headless/print mode; the probe sends "Reply with
+/// exactly: OK" and checks for a reply. Install / auth / timeout errors surface
+/// as the matching [`LlmError`](crate::llm::LlmError); success reports the
+/// trimmed reply.
+///
+/// Runs on a dedicated current-thread runtime like [`step_verify`] — `aic
+/// setup` is already inside `#[tokio::main]`, so `block_in_place` parks the
+/// outer task while the nested runtime drives the async probe.
+fn step_verify_cli(draft: &Draft) -> Result<Nav> {
+    let command = match draft.active_cli_command() {
+        Some(c) => c.to_string(),
+        None => {
+            // Defensive: the menu only offers Verify when a command is set.
+            show_cli_verify_result(Err(anyhow::anyhow!("no CLI command is set yet")))?;
+            return Ok(Nav::Next);
+        }
+    };
+    let args = draft
+        .cli_args
+        .clone()
+        .unwrap_or_else(|| vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
+    let timeout_secs = draft
+        .cli_timeout_secs
+        .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);
+    let spec = crate::cli_agent::CliSpec {
+        command,
+        args,
+        timeout_secs,
+    };
+    let label = format!("Probing `{}` (print mode)…", spec.command);
+    let agent = crate::cli_agent::CliAgent::new(
+        spec,
+        "You are a connectivity checker. Follow the user's instruction exactly.".to_string(),
+    );
+    let result = tokio::task::block_in_place(|| -> Result<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build verify runtime")?;
+        rt.block_on(crate::progress::with_spinner(&label, async {
+            agent.verify().await
+        }))
+    });
+    show_cli_verify_result(result)?;
+    Ok(Nav::Next)
+}
+
+/// Render the CLI Verify result on a fresh screen and pause for a keypress,
+/// mirroring [`show_verify_result`] for the API path. `result` carries the
+/// trimmed reply on success, or the propagated
+/// [`LlmError`](crate::llm::LlmError) on failure (its `Display` already
+/// carries a human hint).
+fn show_cli_verify_result(result: Result<String>) -> Result<()> {
+    let term = Term::stdout();
+    term.clear_screen()?;
+    term.move_cursor_to(0, 0)?;
+    term.write_line("Verify — CLI agent")?;
+    term.write_line("")?;
+    match result {
+        Ok(reply) => {
+            term.write_line("✅ Success — the CLI responded.")?;
+            if !reply.is_empty() {
+                term.write_line(&format!("  Reply: {reply}"))?;
+            }
+        }
+        Err(e) => {
+            term.write_line("❌ Failed — the CLI did not answer.")?;
+            term.write_line(&format!("  Error: {e}"))?;
+            term.write_line("")?;
+            term.write_line("  Common causes: the CLI is not installed, not")?;
+            term.write_line("  authenticated, or timed out. Run the CLI once to log in.")?;
         }
     }
     term.write_line("")?;
@@ -1766,7 +1868,7 @@ mod tests {
         assert!(cfg.base_url.is_none());
         // confirm_before_commit is orthogonal and survives.
         assert_eq!(cfg.confirm_before_commit, Some(true));
-        assert_eq!(cfg.backend_kind.as_deref(), Some("cli"));
+        assert_eq!(cfg.backend_kind, Some(BackendKind::Cli));
     }
 
     #[test]
