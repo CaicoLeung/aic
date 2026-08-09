@@ -120,26 +120,65 @@ pub enum Encoding {
     OpenCodeJson,
 }
 
+impl Encoding {
+    /// Infer the stdout encoding from a CLI's argv template, so a preset's
+    /// own flags are the **single source of truth** for which decoder runs —
+    /// there is no separate "name → encoding" map to keep in sync (a new
+    /// preset just needs argv this recognizes). Called both at run time
+    /// ([`crate::config::CliConfig::to_spec`]) and at `aic setup` verify, so
+    /// the two paths can never disagree on which decoder a given config
+    /// gets (the regression that left a claude-preset verify decoding raw
+    /// NDJSON as plain text).
+    ///
+    /// Priority is unambiguous in practice — no real preset combines two
+    /// envelopes: claude's `--output-format stream-json` token, then pi's
+    /// `--mode json` pair, then opencode's `--format json` pair; anything
+    /// else is plain text. A custom command with none of these runs plain,
+    /// which is correct: it has no envelope aic can decode, so stdout is the
+    /// answer verbatim.
+    pub fn from_args(args: &[String]) -> Self {
+        // Priority order: stream-json > --mode json > --format json > plain.
+        // This is ordered only to break ties deterministically — in practice
+        // no preset carries two envelopes' flags, so the order never actually
+        // decides anything. IF a future preset ever combines two (e.g. a
+        // wrapper that pipes claude through a `--format json` harness), this
+        // would silently pick the first match — at that point promote
+        // `Encoding` to an explicit config field instead of sniffing argv.
+        if args.iter().any(|a| a == "stream-json") {
+            Self::ClaudeStreamJson
+        } else if args.windows(2).any(|w| w[0] == "--mode" && w[1] == "json") {
+            Self::PiStreamJson
+        } else if args
+            .windows(2)
+            .any(|w| w[0] == "--format" && w[1] == "json")
+        {
+            Self::OpenCodeJson
+        } else {
+            Self::Plain
+        }
+    }
+}
+
 /// Built-in preset templates offered by `aic setup` and the docs. These are
 /// **not** reserved `backend` names — `aic setup` writes the resolved
 /// `command`/`args` into config, and selection is purely "`command` is set".
 ///
-/// Every preset uses print/headless mode. The default encoding is plain text
-/// (the system prompt instructs JSON where a typed result is needed); the
-/// `claude` preset is the lone exception — it uses `--output-format
-/// stream-json --include-partial-messages` so claude's `thinking_delta`
-/// reasoning streams live (plain `-p` returns only the final answer, leaving
-/// the reasoning window empty). Its NDJSON envelope is decoded centrally in
-/// [`CliAgent::run_once`] (see [`Encoding::ClaudeStreamJson`]), so the typed
-/// paths still receive the plain JSON text they parse. Other CLIs' envelopes
-/// stay avoided: codex `--json` exposes no reasoning feed, so plain text is
-/// strictly simpler there.
+/// Every preset uses print/headless mode. The stdout [`Encoding`] is
+/// **inferred from the argv** via [`Encoding::from_args`] (the preset's own
+/// flags are the source of truth), never hard-coded per arm — so a preset's
+/// args and its decoder can never disagree. claude's `--output-format
+/// stream-json --include-partial-messages` selects [`Encoding::ClaudeStreamJson`]
+/// so claude's `thinking_delta` reasoning streams live (plain `-p` returns
+/// only the final answer, leaving the reasoning window empty); its NDJSON
+/// envelope is decoded centrally in [`CliAgent::run_once`], so the typed
+/// paths still receive the plain JSON text they parse. codex exposes no
+/// reasoning feed, so its argv yields [`Encoding::Plain`] (strictly simpler).
 pub fn cli_preset(name: &str) -> Option<CliSpec> {
     // Least-permission defaults (ADR 0010): each preset pins itself to a
     // text-only / read-only stance so the "never agentic / no tool use"
     // promise is enforced by the invocation itself, not by trusting each
     // CLI's default.
-    let (command, args, encoding) = match name {
+    let (command, args) = match name {
         // Stream-JSON + partial messages: the only invocation that surfaces
         // claude's reasoning (`thinking_delta`) as a live stream. Plain `-p`
         // print mode returns only the final answer with no thinking feed, so
@@ -161,7 +200,6 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
                 "stream-json".to_string(),
                 "--include-partial-messages".to_string(),
             ],
-            Encoding::ClaudeStreamJson,
         ),
         // `exec` runs non-interactively; pin the sandbox to `read-only` so
         // model-generated shell commands cannot write or mutate the repo,
@@ -176,7 +214,6 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
                 "read-only".to_string(),
                 PROMPT_PLACEHOLDER.to_string(),
             ],
-            Encoding::Plain,
         ),
         // `--mode json` emits `message_update` events whose
         // `assistantMessageEvent` carries `thinking_delta` (reasoning) and
@@ -194,7 +231,6 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
                 "-p".to_string(),
                 PROMPT_PLACEHOLDER.to_string(),
             ],
-            Encoding::PiStreamJson,
         ),
         // `run --format json` emits NDJSON events; the `text` event's
         // `part.text` is the full answer (arriving whole at completion, not
@@ -212,10 +248,12 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
                 "json".to_string(),
                 PROMPT_PLACEHOLDER.to_string(),
             ],
-            Encoding::OpenCodeJson,
         ),
         _ => return None,
     };
+    // Inferred from the argv (single source of truth with run-time
+    // resolution and setup verify) — see `Encoding::from_args`.
+    let encoding = Encoding::from_args(&args);
     Some(CliSpec {
         command: command.to_string(),
         args,
