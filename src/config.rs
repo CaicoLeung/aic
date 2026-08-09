@@ -19,6 +19,10 @@ use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub backend: Option<String>,
+    /// Which Backend is active: `"api"` (the API-provider Backend, default
+    /// when absent) or `"cli"` (the CLI-agent Backend). Authoritative — see
+    /// [`BackendKind`] / [`Config::resolve_backend`] (ADR 0011).
+    pub backend_kind: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
@@ -69,16 +73,56 @@ impl Config {
         self.confirm_before_commit.unwrap_or(false)
     }
 
-    /// The CLI-agent `command` when the CLI backend is active: the `command`
-    /// field, trimmed and non-empty. `None` means the API provider path is
-    /// active (ADR 0010 — selection is purely "`command` is set"). Centralizes
-    /// the trim-and-non-empty test so every call site agrees on what "set"
-    /// means (used by `aic list`, `LlmConfig::load`, `resolve_cli`).
+    /// The CLI-agent `command` value when set: the `command` field, trimmed
+    /// and non-empty; `None` when unset. Centralizes the trim-and-non-empty
+    /// test so every reader agrees on what "set" means. NOTE: as of ADR 0011
+    /// this is no longer the *selection* lever — which Backend is active is
+    /// decided by [`Self::resolve_backend`] reading `backend_kind`. This only
+    /// reads the value.
     pub fn active_cli_command(&self) -> Option<&str> {
         self.command
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
+    }
+
+    /// Resolve the active [`BackendKind`] from the `backend_kind` discriminator
+    /// and validate field consistency (ADR 0011). Strict: the discriminator is
+    /// authoritative — a field populated that the active Backend doesn't use is
+    /// a hard error, never a silent fallback or inference. Absent ⇒
+    /// [`BackendKind::Api`] (the historical default, so released configs need
+    /// no migration).
+    pub fn resolve_backend(&self) -> Result<BackendKind> {
+        let kind = match self.backend_kind.as_deref().map(str::trim) {
+            None | Some("") | Some("api") => BackendKind::Api,
+            Some("cli") => BackendKind::Cli,
+            Some(other) => anyhow::bail!(
+                "unknown `backend_kind` value `{other}` (expected \"api\" or \"cli\")"
+            ),
+        };
+        let command_set = self.active_cli_command().is_some();
+        let api_key_set = self
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        match kind {
+            BackendKind::Api if command_set => anyhow::bail!(
+                "`backend_kind` is `api` (the default) but `command` is set. To use the \
+                 CLI-agent backend, set `backend_kind = \"cli\"`; otherwise remove `command`."
+            ),
+            BackendKind::Cli if !command_set => anyhow::bail!(
+                "`backend_kind = \"cli\"` but no `command` is set. Add one via `aic setup` \
+                 → CLI agent."
+            ),
+            BackendKind::Cli if api_key_set => anyhow::bail!(
+                "`backend_kind = \"cli\"` but `api_key` is set — the CLI-agent backend reuses \
+                 the CLI's own auth and needs no API key. Remove `api_key`, or set \
+                 `backend_kind = \"api\"`."
+            ),
+            _ => Ok(kind),
+        }
     }
 
     pub fn save(&self) -> Result<()> {
@@ -108,6 +152,48 @@ impl std::fmt::Display for Source {
     }
 }
 
+/// Which Backend a Run uses to obtain LLM answers (ADR 0011). The active kind
+/// is the `backend_kind` config value, resolved and validated by
+/// [`Config::resolve_backend`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// The API-provider Backend: calls a [`Provider`](crate::llm::Provider) over
+    /// HTTP, authenticated by an `api_key`. The default when `backend_kind` is
+    /// absent.
+    Api,
+    /// The CLI-agent Backend: shells out to an external coding-agent CLI in
+    /// headless/print mode, reusing that CLI's own auth (ADR 0010).
+    Cli,
+}
+
+impl BackendKind {
+    /// The canonical `backend_kind` config string for this kind.
+    pub fn config_str(self) -> &'static str {
+        match self {
+            Self::Api => "api",
+            Self::Cli => "cli",
+        }
+    }
+
+    /// Human-facing name for banners / run indicators.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Api => "API provider",
+            Self::Cli => "CLI agent",
+        }
+    }
+
+    /// Lenient parse for display/seeding: absent/empty/unknown ⇒ `None`. The
+    /// strict error for an unknown value is raised by [`Config::resolve_backend`].
+    pub fn parse_lenient(value: Option<&str>) -> Option<Self> {
+        match value.map(str::trim) {
+            Some("api") => Some(Self::Api),
+            Some("cli") => Some(Self::Cli),
+            _ => None,
+        }
+    }
+}
+
 pub struct ResolvedConfig {
     pub backend: String,
     pub backend_source: Source,
@@ -122,6 +208,7 @@ pub struct ResolvedConfig {
 impl ResolvedConfig {
     pub fn resolve(config: Option<&Config>) -> Self {
         let cfg = config.cloned().unwrap_or(Config {
+            backend_kind: None,
             backend: None,
             api_key: None,
             model: None,
@@ -347,5 +434,56 @@ mod tests {
         assert_eq!(c.backend.as_deref(), Some("openai"));
         assert_eq!(c.api_key.as_deref(), Some("k"));
         assert_eq!(c.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn resolve_backend_enforces_strict_discriminator() {
+        // ADR 0011: `backend_kind` is authoritative; mismatches are hard
+        // errors. Absent ⇒ Api, so released configs resolve unchanged.
+        assert_eq!(cfg("openai", None, None, None).resolve_backend().unwrap(), BackendKind::Api);
+
+        let explicit_api = Config {
+            backend_kind: Some("api".into()),
+            ..cfg("openai", Some("k"), None, None)
+        };
+        assert_eq!(explicit_api.resolve_backend().unwrap(), BackendKind::Api);
+
+        // Cli requires a command and forbids an api_key.
+        let cli = Config {
+            backend_kind: Some("cli".into()),
+            command: Some("claude".into()),
+            ..Default::default()
+        };
+        assert_eq!(cli.resolve_backend().unwrap(), BackendKind::Cli);
+
+        // Unknown discriminator, Cli without command, Api with a stray
+        // command, and Cli with an api_key are all hard errors.
+        assert!(Config {
+            backend_kind: Some("ollama".into()),
+            ..Default::default()
+        }
+        .resolve_backend()
+        .is_err());
+        assert!(Config {
+            backend_kind: Some("cli".into()),
+            ..Default::default()
+        }
+        .resolve_backend()
+        .is_err());
+        assert!(Config {
+            backend_kind: Some("api".into()),
+            command: Some("claude".into()),
+            ..Default::default()
+        }
+        .resolve_backend()
+        .is_err());
+        assert!(Config {
+            backend_kind: Some("cli".into()),
+            command: Some("claude".into()),
+            api_key: Some("sk-x".into()),
+            ..Default::default()
+        }
+        .resolve_backend()
+        .is_err());
     }
 }
