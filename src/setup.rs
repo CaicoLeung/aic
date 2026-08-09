@@ -1986,7 +1986,11 @@ mod tests {
         });
         let cfg = finalize(draft);
         // One openai entry (updated), anthropic preserved — no duplicate.
-        let openai = cfg.providers.iter().filter(|p| p.backend == "openai").count();
+        let openai = cfg
+            .providers
+            .iter()
+            .filter(|p| p.backend == "openai")
+            .count();
         assert_eq!(openai, 1);
         assert_eq!(cfg.providers[0].api_key.as_deref(), Some("sk-new"));
         assert_eq!(cfg.providers[0].model.as_deref(), Some("gpt-5"));

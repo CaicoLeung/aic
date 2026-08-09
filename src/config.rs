@@ -988,16 +988,27 @@ mod tests {
         let mut list = Vec::new();
         ProviderProfile::upsert(
             &mut list,
-            ProviderProfile { backend: "openai".into(), api_key: Some("k1".into()), ..Default::default() },
+            ProviderProfile {
+                backend: "openai".into(),
+                api_key: Some("k1".into()),
+                ..Default::default()
+            },
         );
         ProviderProfile::upsert(
             &mut list,
-            ProviderProfile { backend: "anthropic".into(), ..Default::default() },
+            ProviderProfile {
+                backend: "anthropic".into(),
+                ..Default::default()
+            },
         );
         // Replace openai in place, not append a second openai.
         ProviderProfile::upsert(
             &mut list,
-            ProviderProfile { backend: "openai".into(), api_key: Some("k2".into()), ..Default::default() },
+            ProviderProfile {
+                backend: "openai".into(),
+                api_key: Some("k2".into()),
+                ..Default::default()
+            },
         );
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].backend, "openai");
