@@ -644,7 +644,13 @@ mod tests {
     #[test]
     fn reasoning_rows_wraps_long_lines_to_multiple_rows() {
         let prefix = format!("{MARGIN}│ ");
-        let rows = reasoning_rows("⠹", "Analyzing", &["the quick brown fox".to_string()], 10, None);
+        let rows = reasoning_rows(
+            "⠹",
+            "Analyzing",
+            &["the quick brown fox".to_string()],
+            10,
+            None,
+        );
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
         // every row after the spinner carries the `│ ` indent…
         for row in &rows[1..] {
@@ -779,7 +785,10 @@ mod tests {
             LoadingNotice::Silent,
             12,
         );
-        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing changes… 9s")));
+        assert_eq!(
+            rows.first(),
+            Some(&format!("{MARGIN}⠹ Analyzing changes… 9s"))
+        );
         // every body row is indented and the wrapped pieces rejoin losslessly.
         let prefix = format!("{MARGIN}│ ");
         let body: String = rows[1..]

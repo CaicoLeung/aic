@@ -339,14 +339,30 @@ impl Provider {
             .expect("every Provider variant has a registry row")
     }
 
-    pub fn from_name(s: &str) -> Self {
+    /// Case-insensitive registry lookup by canonical name or alias. The single
+    /// search shared by [`Self::from_name`] (infallible — used by the setup
+    /// wizard, which only ever offers known names) and [`Self::is_known_name`]
+    /// (the strict check config validation uses).
+    fn find_meta(s: &str) -> Option<&'static ProviderMeta> {
         let lower = s.to_lowercase();
-        for m in REGISTRY {
-            if m.name == lower || m.aliases.iter().any(|a| *a == lower) {
-                return m.provider;
-            }
-        }
-        Provider::OpenAI
+        REGISTRY
+            .iter()
+            .find(|m| m.name == lower || m.aliases.iter().any(|a| *a == lower))
+    }
+
+    pub fn from_name(s: &str) -> Self {
+        Self::find_meta(s)
+            .map(|m| m.provider)
+            .unwrap_or(Provider::OpenAI)
+    }
+
+    /// Whether `s` is a recognized provider name or alias. The strict check
+    /// behind [`ResolvedConfig::validate`](crate::config::ResolvedConfig::validate):
+    /// a hand-edited config with a typo'd `backend` is rejected at load time
+    /// rather than silently routed to the OpenAI default and the wrong
+    /// provider's endpoint.
+    pub fn is_known_name(s: &str) -> bool {
+        Self::find_meta(s).is_some()
     }
 
     pub fn name(&self) -> &'static str {
@@ -983,6 +999,19 @@ mod tests {
     #[test]
     fn from_name_unknown_falls_back_to_openai() {
         assert_eq!(Provider::from_name("nope"), Provider::OpenAI);
+    }
+
+    #[test]
+    fn is_known_name_recognizes_canonical_names_and_aliases() {
+        assert!(Provider::is_known_name("openai"));
+        assert!(Provider::is_known_name("Anthropic"));
+        assert!(Provider::is_known_name("claude"));
+        assert!(Provider::is_known_name("openai-compatible"));
+        assert!(Provider::is_known_name("custom"));
+        // The typo the strict check exists to catch.
+        assert!(!Provider::is_known_name("anthpopic"));
+        assert!(!Provider::is_known_name("nope"));
+        assert!(!Provider::is_known_name(""));
     }
 
     #[test]
