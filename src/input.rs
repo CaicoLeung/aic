@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use inquire::list_option::ListOption;
 use inquire::validator::Validation;
-use inquire::{InquireError, Password, Select, Text};
+use inquire::{InquireError, Select, Text};
 use std::io;
 
 /// Outcome of a single-choice menu ([`opt_nav`]): the chosen row index, or
@@ -84,60 +84,35 @@ pub(crate) enum TextAct {
 }
 
 /// Read a line of text via the `inquire` crate, which intercepts Esc (back)
-/// and Ctrl-C (cancel) natively as error variants. `masked` hides each typed
-/// char (for secrets). `initial` is offered as the kept value when the user
-/// submits an empty line. `allow_empty` admits an empty submit; otherwise
-/// `empty_hint` is shown (via inquire's validator) and the prompt retries until
-/// non-empty.
+/// and Ctrl-C (cancel) natively as error variants. `initial` is offered as the
+/// kept value when the user submits an empty line (shown as a "current" help
+/// line). `allow_empty` admits an empty submit; otherwise `empty_hint` is
+/// shown (via inquire's validator) and the prompt retries until non-empty.
 pub(crate) fn prompt_text(
     prompt: &str,
-    masked: bool,
     initial: Option<&str>,
     allow_empty: bool,
     empty_hint: &str,
 ) -> Result<TextAct> {
     // Show the current value as a help line; an empty submit keeps it.
-    let help = match (initial, masked) {
-        (Some(_), true) => Some("current: •••• (leave blank to keep)".to_string()),
-        (Some(d), false) => Some(format!("current: {d} (leave blank to keep)")),
-        _ => None,
-    };
+    let help = initial.map(|d| format!("current: {d} (leave blank to keep)"));
 
-    let prompt_result = if masked {
-        let mut p = Password::new(prompt);
-        if let Some(h) = help.as_deref() {
-            p = p.with_help_message(h);
-        }
-        if !allow_empty {
-            let hint = empty_hint.to_string();
-            p = p.with_validator(move |v: &str| {
-                if v.trim().is_empty() {
-                    Ok(Validation::Invalid(hint.clone().into()))
-                } else {
-                    Ok(Validation::Valid)
-                }
-            });
-        }
-        p.prompt()
-    } else {
-        let mut t = Text::new(prompt);
-        if let Some(h) = help.as_deref() {
-            t = t.with_help_message(h);
-        }
-        if !allow_empty {
-            let hint = empty_hint.to_string();
-            t = t.with_validator(move |v: &str| {
-                if v.trim().is_empty() {
-                    Ok(Validation::Invalid(hint.clone().into()))
-                } else {
-                    Ok(Validation::Valid)
-                }
-            });
-        }
-        t.prompt()
-    };
+    let mut t = Text::new(prompt);
+    if let Some(h) = help.as_deref() {
+        t = t.with_help_message(h);
+    }
+    if !allow_empty {
+        let hint = empty_hint.to_string();
+        t = t.with_validator(move |v: &str| {
+            if v.trim().is_empty() {
+                Ok(Validation::Invalid(hint.clone().into()))
+            } else {
+                Ok(Validation::Valid)
+            }
+        });
+    }
 
-    match prompt_result {
+    match t.prompt() {
         Ok(v) => {
             let trimmed = v.trim().to_string();
             if trimmed.is_empty() {

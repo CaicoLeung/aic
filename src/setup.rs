@@ -729,7 +729,6 @@ fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
     let initial_cmd = draft.cli_command.as_deref().unwrap_or("");
     let command = match prompt_text(
         "Command (e.g. claude, codex, pi)",
-        false,
         if initial_cmd.is_empty() {
             None
         } else {
@@ -749,7 +748,6 @@ fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
         .unwrap_or_else(|| PROMPT_PLACEHOLDER.to_string());
     let args_str = match prompt_text(
         &format!("Args template (space-separated, use {PROMPT_PLACEHOLDER} for the prompt)"),
-        false,
         Some(&initial_args),
         true,
         "",
@@ -764,7 +762,7 @@ fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
         .cli_timeout_secs
         .map(|t| t.to_string())
         .unwrap_or_else(|| DEFAULT_TIMEOUT_SECS.to_string());
-    let to_str = match prompt_text("Timeout in seconds", false, Some(&initial_to), true, "")? {
+    let to_str = match prompt_text("Timeout in seconds", Some(&initial_to), true, "")? {
         TextAct::Value(v) if v.trim().is_empty() => initial_to.clone(),
         TextAct::Value(v) => v.trim().to_string(),
         TextAct::Back => return Ok(Nav::Back),
@@ -901,58 +899,31 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
 
 fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
-    // Effective key for editing: the draft (a user edit or the seeded config value).
+    // Effective key for editing + keep semantics: the draft (a user edit or
+    // the seeded config value).
     let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
     match provider.requires_key() {
-        // Cloud provider — key required.
+        // Cloud provider — key required. A single visible, editable prompt:
+        // type a new key (shown in the clear) or leave it blank to keep the
+        // current one. No masked input and no keep/replace menu, so the user
+        // always sees what they enter — the masked Password left no visible
+        // field and gave no feedback after pasting.
         true => {
-            if !key.is_empty() {
-                // A key already exists (from config): keep or replace it — a
-                // choice, so offer an option list instead of a typed prompt.
-                // The replace path is a sub-mode: Esc there returns to the
-                // keep/replace choice.
-                let masked = mask_key(&key);
-                let items = vec![
-                    "Keep current key".to_string(),
-                    "Enter a new key…".to_string(),
-                ];
-                loop {
-                    show_screen()?;
-                    match opt_nav(&format!("API key (current: {masked})"), &items, 0)? {
-                        OptNav::Value(0) => return Ok(Nav::Next),
-                        OptNav::Value(1) => {
-                            show_screen()?;
-                            match prompt_text(
-                                "API key (paste — input stays hidden)",
-                                true,
-                                None,
-                                false,
-                                "API key cannot be empty",
-                            )? {
-                                TextAct::Value(v) => {
-                                    draft.api_key = Some(v);
-                                    return Ok(Nav::Next);
-                                }
-                                TextAct::Back => continue,
-                                TextAct::Cancel => return Ok(Nav::Cancel),
-                            }
-                        }
-                        OptNav::Value(_) => unreachable!("two api key options"),
-                        OptNav::Back => return Ok(Nav::Back),
-                        OptNav::Cancel => return Ok(Nav::Cancel),
-                    }
-                }
-            }
-            // No key at all — it must be entered; there is no choice to offer.
+            let prompt = if key.is_empty() {
+                "API key".to_string()
+            } else {
+                format!(
+                    "API key (current: {} — leave blank to keep)",
+                    mask_key(&key)
+                )
+            };
+            // Blank is accepted only when there is a current key to keep;
+            // otherwise the validator enforces a non-empty entry.
+            let allow_empty = !key.is_empty();
             show_screen()?;
-            match prompt_text(
-                "API key (paste — input stays hidden)",
-                true,
-                None,
-                false,
-                "API key cannot be empty",
-            )? {
+            match prompt_text(&prompt, None, allow_empty, "API key cannot be empty")? {
                 TextAct::Value(v) => {
+                    let v = if v.is_empty() { key } else { v };
                     draft.api_key = Some(v);
                     Ok(Nav::Next)
                 }
@@ -960,7 +931,10 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
                 TextAct::Cancel => Ok(Nav::Cancel),
             }
         }
-        // OpenAI-compatible — key optional (keyless servers allowed).
+        // OpenAI-compatible — key optional (keyless servers allowed). "No key"
+        // is a first-class choice a single text field cannot express, so keep
+        // it as a menu option; but enter the key in the clear (not masked) so
+        // the user sees what they type.
         false if provider == Provider::OpenAiCompatible => {
             let has_key = !key.is_empty();
             let items: Vec<String> = if has_key {
@@ -977,17 +951,23 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             };
             let no_key_idx = if has_key { 2 } else { 0 };
             let enter_idx = 1;
+            // Row 0 is "Keep current key" only when a key is already set; with
+            // no key, row 0 is the "No API key" option instead.
+            let keep_idx = if has_key { Some(0) } else { None };
             loop {
                 show_screen()?;
                 match opt_nav("API key", &items, 0)? {
+                    OptNav::Value(i) if keep_idx == Some(i) => {
+                        // Keep current key — draft.api_key already holds it.
+                        return Ok(Nav::Next);
+                    }
                     OptNav::Value(i) if i == no_key_idx => {
                         draft.api_key = None;
                         return Ok(Nav::Next);
                     }
                     OptNav::Value(i) if i == enter_idx => {
                         show_screen()?;
-                        match prompt_text("API key (blank = keyless server)", true, None, true, "")?
-                        {
+                        match prompt_text("API key (blank = keyless server)", None, true, "")? {
                             TextAct::Value(v) => {
                                 draft.api_key = if v.is_empty() { None } else { Some(v) };
                                 return Ok(Nav::Next);
@@ -1028,7 +1008,6 @@ fn step_base_url(
             show_screen()?;
             match prompt_text(
                 "Base URL (e.g. http://localhost:1234/v1)",
-                false,
                 initial.as_deref(),
                 false,
                 "base URL cannot be empty",
@@ -1062,9 +1041,16 @@ fn step_base_url(
             };
             let use_default_idx = if has_url { 1 } else { 0 };
             let custom_idx = if has_url { 2 } else { 1 };
+            // Row 0 is "Keep current URL" only when a URL is already set; with
+            // none, row 0 is the "Use default" option instead.
+            let keep_idx = if has_url { Some(0) } else { None };
             loop {
                 show_screen()?;
                 match opt_nav("Base URL", &items, 0)? {
+                    OptNav::Value(i) if keep_idx == Some(i) => {
+                        // Keep current URL — draft.base_url already holds it.
+                        return Ok(Nav::Next);
+                    }
                     OptNav::Value(i) if i == use_default_idx => {
                         draft.base_url = None;
                         return Ok(Nav::Next);
@@ -1073,7 +1059,6 @@ fn step_base_url(
                         show_screen()?;
                         match prompt_text(
                             &format!("Custom base URL (e.g. {default})"),
-                            false,
                             None,
                             false,
                             "base URL cannot be empty",
@@ -1110,7 +1095,6 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         show_screen()?;
         return match prompt_text(
             "Model (required)",
-            false,
             initial.as_deref(),
             false,
             "model cannot be empty",
@@ -1143,7 +1127,7 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         match opt_nav("Model", &items, highlight)? {
             OptNav::Value(i) if i == custom_idx => {
                 show_screen()?;
-                match prompt_text("Custom model", false, None, false, "model cannot be empty")? {
+                match prompt_text("Custom model", None, false, "model cannot be empty")? {
                     TextAct::Value(v) => {
                         draft.model = Some(v);
                         return Ok(Nav::Next);
