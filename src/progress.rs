@@ -29,6 +29,22 @@ const MIN_PROGRESS_WIDTH: usize = 20;
 /// 20 fps, down from the previous 80 ms.
 pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 
+/// Grace window before the silent-CLI notice appears in the loading frame.
+/// Streaming CLIs (claude `-p` w/ `stream-json`, codex exec, pi) usually emit
+/// their first reasoning line within 1–3 s of first token, but **first token
+/// itself** is gated by the CLI's cold start — claude loads SessionStart
+/// hooks, an `init` payload, MCP handshakes, then pays a network TTFT, often
+/// 6–10 s in total before any `thinking_delta`. A backend still entirely
+/// silent past this deadline is assumed to be a non-streaming CLI (or a
+/// wedged one) and the loading frame gains an explanatory notice so the user
+/// is not left staring at a bare spinner. Streaming-capable backends
+/// ([`Encoding::ClaudeStreamJson`]) get a different, cold-start notice past
+/// the same deadline — they ARE streaming, just not reasoning yet. Tunable:
+/// the only effect of changing it is how long a slow-to-first-token backend
+/// lingers in the generic loading state before the notice appears — the first
+/// delta cancels loading regardless.
+pub(crate) const LOADING_GRACE: Duration = Duration::from_secs(5);
+
 /// How many reasoning rows stay visible at once — a *rendered-row* cap. The
 /// window rolls: each new completed line enters at the bottom and the oldest
 /// is dropped once the count exceeds this, so the reasoning block never grows
@@ -159,9 +175,24 @@ const REASONING_GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 /// capped to [`REASONING_WINDOW`]: a long line wraps to several rows, so the
 /// newest [`REASONING_WINDOW`] *rendered rows* are kept and the oldest drop
 /// out — the top row may start mid-line, exactly like a terminal tail window.
-fn reasoning_rows(glyph: &str, label: &str, window: &[String], feed_width: usize) -> Vec<String> {
+fn reasoning_rows(
+    glyph: &str,
+    label: &str,
+    window: &[String],
+    feed_width: usize,
+    elapsed: Option<Duration>,
+) -> Vec<String> {
     let mut rows = Vec::with_capacity(window.len() + 1);
-    rows.push(format!("{MARGIN}{glyph} {label}"));
+    // Spinner row: when `elapsed` is `Some` (the live feed is ticking), append
+    // a rising seconds count so the wait is visible even while the model is
+    // silent between deltas — the same feedback the loading frame gives, kept
+    // through the transition into reasoning so the user never loses the
+    // clock. `None` is the tests' stable snapshot (no clock).
+    let spinner = match elapsed {
+        Some(e) => format!("{MARGIN}{glyph} {label}… {}s", e.as_secs()),
+        None => format!("{MARGIN}{glyph} {label}"),
+    };
+    rows.push(spinner);
     for line in window {
         for piece in wrap_line(line, feed_width) {
             rows.push(format!("{MARGIN}│ {piece}"));
@@ -172,6 +203,69 @@ fn reasoning_rows(glyph: &str, label: &str, window: &[String], feed_width: usize
     // the newest REASONING_WINDOW rows below the spinner row.
     let start = 1 + (rows.len() - 1).saturating_sub(REASONING_WINDOW);
     rows.drain(1..start);
+    rows
+}
+
+/// Which explanatory notice (if any) to show under the spinner row of a
+/// loading frame. The choice is the caller's: a streaming-capable backend
+/// that has not yet produced reasoning is in a cold start (hooks/MCP/TTFT),
+/// not a capability gap, so it must not be labeled non-streaming; a plain
+/// backend silent past grace is the case the "does not support streaming"
+/// notice was written for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LoadingNotice {
+    /// Pre-grace, or a backend that has not been classified: just spinner +
+    /// elapsed, no notice row.
+    None,
+    /// A streaming-capable backend (e.g. claude `stream-json`) past grace with
+    /// no reasoning yet — a cold start, not a capability gap. Worded to
+    /// explain the wait (hooks/MCP/first-token) without claiming the CLI
+    /// cannot stream.
+    ColdStart,
+    /// A plain backend past grace with no output: assumed non-streaming.
+    Silent,
+}
+
+/// The explanatory notice for the [`LoadingNotice::ColdStart`] case: a
+/// streaming-capable CLI that has not yet emitted reasoning. Never claims the
+/// CLI cannot stream — it can, it is just paying its cold-start cost
+/// (SessionStart hooks, MCP handshakes, first-token latency).
+const COLD_START_NOTICE: &str =
+    "Claude is starting up — first reasoning line takes several seconds while hooks and MCP servers initialize";
+
+/// The explanatory notice shown under the spinner row once a plain backend
+/// has been silent past [`LOADING_GRACE`]. Worded for the CLI-agent case (the
+/// common silent-backend source) but accurate for any backend that returns a
+/// full answer with no reasoning deltas — it never claims the *model* cannot
+/// think, only that aic is not receiving a stream to show.
+const SILENT_NOTICE: &str =
+    "This CLI agent does not stream its thinking process — aic is waiting for the final answer";
+
+/// Build the visual rows for one loading frame: the spinner+label row on top
+/// annotated with `elapsed` seconds, then — depending on `notice` — an
+/// explanatory row greedy-wrapped under the shared `│ ` indent. Pure (no
+/// I/O) so the layout is unit-testable; [`ReasoningRenderer::paint_loading`]
+/// paints exactly what this returns. Mirrors [`reasoning_rows`]'s shape so a
+/// loading frame and a reasoning frame hand off cleanly through [`draw_rows`]
+/// (same spinner row prefix, same indent for body rows).
+fn loading_rows(
+    glyph: &str,
+    label: &str,
+    elapsed: Duration,
+    notice: LoadingNotice,
+    feed_width: usize,
+) -> Vec<String> {
+    let secs = elapsed.as_secs();
+    let mut rows = Vec::with_capacity(2);
+    rows.push(format!("{MARGIN}{glyph} {label}… {secs}s"));
+    let text = match notice {
+        LoadingNotice::None => return rows,
+        LoadingNotice::ColdStart => COLD_START_NOTICE,
+        LoadingNotice::Silent => SILENT_NOTICE,
+    };
+    for piece in wrap_line(text, feed_width) {
+        rows.push(format!("{MARGIN}│ {piece}"));
+    }
     rows
 }
 
@@ -344,14 +438,38 @@ impl ReasoningRenderer {
     }
 
     /// Paint one frame for the reasoning `window`. Safe to call on every
-    /// delta; a no-op off a terminal.
-    pub(crate) fn paint(&mut self, window: &[String]) {
+    /// delta AND on every idle tick — the latter via `Some(elapsed)` keeps the
+    /// spinner animating and the elapsed count rising while the model is
+    /// silent between deltas, so the reasoning frame never freezes the way a
+    /// paint-only-on-delta renderer would during a long TTFT gap. A no-op off
+    /// a terminal.
+    pub(crate) fn paint(&mut self, window: &[String], elapsed: Option<Duration>) {
         if !self.term.is_term() {
             return;
         }
         let glyph = REASONING_GLYPHS[self.glyph % REASONING_GLYPHS.len()];
         self.glyph = self.glyph.wrapping_add(1);
-        let rows = reasoning_rows(glyph, self.label, window, self.feed_width);
+        let rows = reasoning_rows(glyph, self.label, window, self.feed_width, elapsed);
+        self.draw_rows(&rows);
+    }
+
+    /// Paint one loading frame for the silent/cold-start backend state: the
+    /// spinner row annotated with `elapsed` seconds, plus — once `notice` is
+    /// past [`LOADING_GRACE`]/classified — an explanatory row. Used by
+    /// [`analyze_changes`](crate::analyze_changes) between stream start and
+    /// the first reasoning delta so a non-streaming or cold-starting backend
+    /// is not a silent dead zone: the user always sees motion (the spinning
+    /// glyph) and a rising elapsed count. The first delta swaps this frame for
+    /// the normal reasoning window via [`paint`](Self::paint); both go through
+    /// [`draw_rows`], so the in-place repaint handles the height transition
+    /// with no special-casing. A no-op off a terminal.
+    pub(crate) fn paint_loading(&mut self, elapsed: Duration, notice: LoadingNotice) {
+        if !self.term.is_term() {
+            return;
+        }
+        let glyph = REASONING_GLYPHS[self.glyph % REASONING_GLYPHS.len()];
+        self.glyph = self.glyph.wrapping_add(1);
+        let rows = loading_rows(glyph, self.label, elapsed, notice, self.feed_width);
         self.draw_rows(&rows);
     }
 
@@ -473,11 +591,28 @@ mod tests {
         assert_eq!(window.last(), Some(&"in progress".to_string()));
     }
 
+    /// [`reasoning_rows`] with `Some(elapsed)` appends a rising seconds
+    /// count to the spinner row, so the wait stays visible while the model
+    /// is silent between deltas (the steady-tick repaint path). The window
+    /// rows are unchanged.
+    #[test]
+    fn reasoning_rows_spinner_shows_elapsed_when_ticking() {
+        let rows = reasoning_rows(
+            "⠙",
+            "Analyzing",
+            &["a line".to_string()],
+            80,
+            Some(Duration::from_secs(7)),
+        );
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠙ Analyzing… 7s")));
+        assert_eq!(rows[1], format!("{MARGIN}│ a line"));
+    }
+
     /// [`reasoning_rows`] always leads with the spinner+label row, even when
     /// the window is empty (the stream just started).
     #[test]
     fn reasoning_rows_leads_with_spinner_for_empty_window() {
-        let rows = reasoning_rows("⠋", "Analyzing", &[], 80);
+        let rows = reasoning_rows("⠋", "Analyzing", &[], 80, None);
         assert_eq!(rows, vec![format!("{MARGIN}⠋ Analyzing")]);
     }
 
@@ -485,7 +620,7 @@ mod tests {
     #[test]
     fn reasoning_rows_indents_each_line() {
         let window = vec!["line 1".to_string(), "line 2".to_string()];
-        let rows = reasoning_rows("⠙", "Analyzing", &window, 80);
+        let rows = reasoning_rows("⠙", "Analyzing", &window, 80, None);
         assert_eq!(
             rows,
             vec![
@@ -501,7 +636,7 @@ mod tests {
     #[test]
     fn reasoning_rows_wraps_long_lines_to_multiple_rows() {
         let prefix = format!("{MARGIN}│ ");
-        let rows = reasoning_rows("⠹", "Analyzing", &["the quick brown fox".to_string()], 10);
+        let rows = reasoning_rows("⠹", "Analyzing", &["the quick brown fox".to_string()], 10, None);
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
         // every row after the spinner carries the `│ ` indent…
         for row in &rows[1..] {
@@ -525,7 +660,7 @@ mod tests {
         let prefix = format!("{MARGIN}│ ");
         // 12 lines × 2 wrap pieces = 24 rendered rows, over the 12-row budget.
         let window: Vec<String> = (1..=12).map(|i| format!("line {i} with words")).collect();
-        let rows = reasoning_rows("⠹", "Analyzing", &window, 10);
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 10, None);
         assert_eq!(rows.len(), REASONING_WINDOW + 1);
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
         for row in &rows[1..] {
@@ -553,7 +688,7 @@ mod tests {
     fn reasoning_rows_caps_single_long_line() {
         let prefix = format!("{MARGIN}│ ");
         let long = "word ".repeat(60); // 300 chars → 30 wrap pieces at width 10
-        let rows = reasoning_rows("⠹", "Analyzing", &[long], 10);
+        let rows = reasoning_rows("⠹", "Analyzing", &[long], 10, None);
         assert_eq!(rows.len(), REASONING_WINDOW + 1);
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
         // 12 rows of "word word" = 24 words of the 60 — the newest tail only.
@@ -562,6 +697,86 @@ mod tests {
             .map(|r| r.strip_prefix(&prefix).unwrap().split_whitespace().count())
             .sum();
         assert_eq!(words, 24);
+    }
+
+    /// [`loading_rows`] before the grace deadline: just the spinner row with
+    /// the elapsed count, no notice — a slow-to-first-token backend is never
+    /// falsely labeled.
+    #[test]
+    fn loading_rows_pre_grace_is_spinner_plus_elapsed_only() {
+        let rows = loading_rows(
+            "⠋",
+            "Analyzing changes",
+            Duration::from_secs(3),
+            LoadingNotice::None,
+            120,
+        );
+        assert_eq!(rows, vec![format!("{MARGIN}⠋ Analyzing changes… 3s")]);
+    }
+
+    /// [`loading_rows`] past the grace deadline for a plain backend adds the
+    /// [`SILENT_NOTICE`] as an indented body row, mirroring a reasoning
+    /// frame's shape so the in-place repaint hands off cleanly later.
+    #[test]
+    fn loading_rows_post_grace_silent_adds_notice() {
+        let rows = loading_rows(
+            "⠙",
+            "Analyzing changes",
+            Duration::from_secs(8),
+            LoadingNotice::Silent,
+            120,
+        );
+        assert_eq!(
+            rows,
+            vec![
+                format!("{MARGIN}⠙ Analyzing changes… 8s"),
+                format!("{MARGIN}│ {SILENT_NOTICE}"),
+            ]
+        );
+    }
+
+    /// [`loading_rows`] past the grace deadline for a streaming-capable
+    /// backend (claude `stream-json`) adds the [`COLD_START_NOTICE`] instead —
+    /// a cold start is not a capability gap, so it must not be labeled
+    /// non-streaming.
+    #[test]
+    fn loading_rows_post_grace_cold_start_adds_notice() {
+        let rows = loading_rows(
+            "⠹",
+            "Analyzing changes",
+            Duration::from_secs(7),
+            LoadingNotice::ColdStart,
+            160,
+        );
+        assert_eq!(
+            rows,
+            vec![
+                format!("{MARGIN}⠹ Analyzing changes… 7s"),
+                format!("{MARGIN}│ {COLD_START_NOTICE}"),
+            ]
+        );
+    }
+
+    /// The notice wraps under the same `│ ` indent as reasoning rows once it
+    /// exceeds the budget, so a narrow terminal cannot overflow the frame.
+    #[test]
+    fn loading_rows_wraps_notice_to_budget() {
+        let rows = loading_rows(
+            "⠹",
+            "Analyzing changes",
+            Duration::from_secs(9),
+            LoadingNotice::Silent,
+            12,
+        );
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing changes… 9s")));
+        // every body row is indented and the wrapped pieces rejoin losslessly.
+        let prefix = format!("{MARGIN}│ ");
+        let body: String = rows[1..]
+            .iter()
+            .filter_map(|r| r.strip_prefix(&prefix))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(body, SILENT_NOTICE);
     }
 
     /// First paint (no previous frame) hides the cursor and clears+writes its

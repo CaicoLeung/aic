@@ -70,19 +70,124 @@ pub(crate) type CommitMessenger =
 /// instant has at most one blank row) and repaints only on a reasoning change,
 /// so the window is flicker-free. See [`progress::ReasoningRenderer`] for the
 /// redraw contract.
+///
+/// **Silent-backend fallback.** A backend that emits no reasoning deltas at
+/// all (a CLI agent in single-shot print mode, or an API cold start) would
+/// leave the renderer's first frame unpainted — a dead silent screen for the
+/// whole run. To avoid that, a loading frame
+/// ([`progress::ReasoningRenderer::paint_loading`]) is painted on a
+/// [`progress::SPINNER_TICK`] cadence between stream start and the first
+/// delta: a spinner + elapsed-seconds counter immediately, and after
+/// [`progress::LOADING_GRACE`] an explanatory notice that this CLI agent does
+/// not stream its thinking process. The first delta cancels loading and hands
+/// off to the normal reasoning window; both frames go through the same
+/// [`progress::ReasoningRenderer`] so the in-place repaint handles the height
+/// transition with no flicker. Reasoning deltas flow through an unbounded
+/// channel so the streaming future (which owns the [`progress::ThinkingView`]
+/// inside its callback closure) and the repaint loop never borrow-conflict —
+/// the future writes windows, the loop paints them.
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    let mut view = progress::ThinkingView::new();
+    use std::time::Instant;
+
     let mut renderer = progress::ReasoningRenderer::new("Analyzing changes");
+    let start = Instant::now();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
 
-    let result = generator::Generator::split_patch_streaming(diff, |delta| {
-        let window = view.push(delta);
-        renderer.paint(&window);
-    })
-    .await;
+    // A streaming-capable backend (claude `stream-json`) that has not yet
+    // produced reasoning is in a cold start — SessionStart hooks, MCP
+    // handshakes, and a network TTFT often total 6–10 s before the first
+    // `thinking_delta`. That is NOT "does not support streaming", so past
+    // [`progress::LOADING_GRACE`] its loading frame shows a cold-start notice
+    // rather than the non-streaming claim. Plain backends silent past grace
+    // are the case the non-streaming notice was written for. Defaults to
+    // silent-notice on any lookup failure (safer: never falsely claims a
+    // streaming capability for an unknown backend).
+    let expects_streaming = crate::llm::LlmConfig::load()
+        .ok()
+        .and_then(|c| c.cli_encoding())
+        .map(|e| matches!(e, crate::cli_agent::Encoding::ClaudeStreamJson))
+        .unwrap_or(false);
 
-    // Thinking is over: `finish` erases the reasoning block (in-place all
-    // along, so nothing ever hit the scrollback) and parks the cursor below
-    // it. The renderer's Drop is a backstop if the stream aborted first.
+    // The streaming future owns the `ThinkingView` inside its `on_reasoning`
+    // closure; windows are forwarded to the channel rather than rendered
+    // inline, so the repaint loop below holds the renderer with no overlapping
+    // borrow of the view. `tokio::pin!` lets us poll it across `select!`
+    // arms without re-creating it each iteration.
+    let fut = async {
+        let mut view = progress::ThinkingView::new();
+        generator::Generator::split_patch_streaming(diff, |delta| {
+            let window = view.push(delta);
+            // Channel send only fails if the receiver was dropped — which
+            // happens after `fut` completes, when pending windows no longer
+            // matter — so the error is silently swallowed.
+            let _ = tx.send(window);
+        })
+        .await
+    };
+    tokio::pin!(fut);
+
+    let mut got_output = false;
+    let mut last_window: Vec<String> = Vec::new();
+    let mut ticker = tokio::time::interval(progress::SPINNER_TICK);
+    // The interval's first tick fires immediately; we want the first painted
+    // frame to reflect a real (even if 0 s) elapsed, so the immediate tick is
+    // welcome — it gives sub-second feedback before any LLM round-trip.
+
+    let result = loop {
+        tokio::select! {
+            biased;
+            // Completion wins over everything: a fast backend never paints a
+            // loading frame at all.
+            res = &mut fut => {
+                break res;
+            }
+            // A reasoning delta or startup milestone hands the rolling window
+            // to the renderer and latches `got_output` so no later tick can
+            // repaint a loading frame over the feed. The same window is
+            // retained for the steady-tick repaint below.
+            window = rx.recv() => {
+                if let Some(window) = window {
+                    got_output = true;
+                    last_window = window.clone();
+                    renderer.paint(&window, Some(start.elapsed()));
+                }
+            }
+            // Steady tick — two roles by mode:
+            //  * Before the first line (genuinely silent backend, e.g. codex
+            //    plain): the loading frame keeps the screen alive — spinner +
+            //    elapsed, plus the silent/cold-start notice once past
+            //    [`LOADING_GRACE`].
+            //  * After the first line (startup milestones or reasoning are
+            //    flowing): repaint the retained window with a fresh elapsed so
+            //    the spinner keeps animating and the clock keeps rising while
+            //    the model is silent between deltas — e.g. claude's post-init
+            //    TTFT gap. The loading grace never trips in this mode, because
+            //    startup milestones arrive within ~1 s and each resets
+            //    `got_output`; the grace therefore measures only true
+            //    no-output-at-all backends, not cold starts.
+            _ = ticker.tick() => {
+                let elapsed = start.elapsed();
+                if !got_output {
+                    let notice = if elapsed >= progress::LOADING_GRACE {
+                        if expects_streaming {
+                            progress::LoadingNotice::ColdStart
+                        } else {
+                            progress::LoadingNotice::Silent
+                        }
+                    } else {
+                        progress::LoadingNotice::None
+                    };
+                    renderer.paint_loading(elapsed, notice);
+                } else {
+                    renderer.paint(&last_window, Some(elapsed));
+                }
+            }
+        }
+    };
+
+    // Thinking is over: `finish` erases the reasoning/loading block (in-place
+    // all along, so nothing ever hit the scrollback) and parks the cursor
+    // below it. The renderer's Drop is a backstop if the stream aborted first.
     renderer.finish();
     result
 }
