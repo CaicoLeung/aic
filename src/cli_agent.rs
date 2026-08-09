@@ -619,31 +619,6 @@ fn decode_claude_stream_line(line: &str) -> Option<ClaudeDelta> {
     }
 }
 
-/// Reconstruct the assistant's answer text from a full `stream-json` stdout
-/// blob. Prefers the terminal `result` event's `result` field (authoritative
-/// on success); otherwise concatenates every `text_delta` in arrival order
-/// (the path taken when claude omits the `result` event, e.g. an error turn).
-/// Returns `None` if neither yields non-empty text, so the caller can surface
-/// a typed error rather than feeding an empty string to JSON parsing.
-fn decode_claude_answer(raw: &str) -> Option<String> {
-    let mut text = String::new();
-    let mut result: Option<String> = None;
-    for line in raw.lines() {
-        match decode_claude_stream_line(line) {
-            Some(ClaudeDelta::Text(s)) => text.push_str(&s),
-            Some(ClaudeDelta::Result(s)) => result = Some(s),
-            _ => {}
-        }
-    }
-    result.or_else(|| {
-        if text.trim().is_empty() {
-            None
-        } else {
-            Some(text)
-        }
-    })
-}
-
 /// One decoded chunk from a pi `--mode json` line. pi's stream is simpler
 /// than claude's: every delta is a `message_update` carrying an
 /// `assistantMessageEvent` of type `thinking_delta` (reasoning) or
@@ -679,25 +654,6 @@ fn decode_pi_stream_line(line: &str) -> Option<PiDelta> {
         "thinking_delta" => Some(PiDelta::Thinking(delta.to_string())),
         "text_delta" => Some(PiDelta::Text(delta.to_string())),
         _ => None,
-    }
-}
-
-/// Reconstruct pi's answer text from a full `--mode json` stdout blob by
-/// concatenating every `text_delta` in arrival order. pi emits no terminal
-/// "result" event, so concatenation is the only source. Returns `None` if no
-/// text deltas arrived (e.g. an error turn), so the caller surfaces a typed
-/// error rather than feeding empty to JSON parsing.
-fn decode_pi_answer(raw: &str) -> Option<String> {
-    let mut text = String::new();
-    for line in raw.lines() {
-        if let Some(PiDelta::Text(s)) = decode_pi_stream_line(line) {
-            text.push_str(&s);
-        }
-    }
-    if text.trim().is_empty() {
-        None
-    } else {
-        Some(text)
     }
 }
 
@@ -782,19 +738,247 @@ fn decode_opencode_stream_line(line: &str) -> Option<OpenCodeDelta> {
     }
 }
 
-/// Reconstruct opencode's answer text from a full `--format json` stdout blob.
-/// opencode emits the full answer as one `text` event's `part.text` at
-/// completion; a multi-step agent run may emit several `text` events, in which
-/// case the final answer is the last one. Returns `None` if no `text` event
-/// arrived (e.g. an error turn), so the caller surfaces a typed error.
-fn decode_opencode_answer(raw: &str) -> Option<String> {
-    let mut answer: Option<String> = None;
-    for line in raw.lines() {
-        if let Some(OpenCodeDelta::Text(s)) = decode_opencode_stream_line(line) {
-            answer = Some(s);
+// ---- codex `--json` decoding ----------------------------------------------
+//
+// codex `exec --json` emits one JSON object per stdout line. Only
+// `item.completed` events carry text we care about; `thread.*`, `turn.*`,
+// `item.started`, `item.updated`, and item types like `command_execution` /
+// `file_change` are noise. Tolerant of the documented `agent_message` ↔
+// `assistant_message` drift (Issue #4776) and of missing fields (→ None,
+// never an error), matching the other decoders.
+
+/// One decoded chunk from a codex `--json` line. codex emits reasoning and
+/// answer text only at `item.completed`, so each variant carries the full
+/// text for that item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodexDelta {
+    /// A `reasoning` item's `text` — the model's reasoning summary, forwarded
+    /// live when present (best-effort: account/org dependent, often absent —
+    /// Issue #10746).
+    Thinking(String),
+    /// An `agent_message` (or drifted `assistant_message`) item's `text` —
+    /// the assistant's answer. Multiple → last wins.
+    Text(String),
+}
+
+/// Decode one codex `--json` stdout line into a [`CodexDelta`], or `None` for
+/// any non-`item.completed` event or non-text item type (`command_execution`,
+/// `file_change`, `mcp_tool_call`, …). Tolerant: a malformed line or a missing
+/// field yields `None`, never an error.
+///
+/// Event shapes:
+/// ```text
+/// {"type":"item.completed","item":{"id":"…","type":"agent_message","text":"…"}}
+/// {"type":"item.completed","item":{"id":"…","type":"reasoning","text":"…"}}
+/// ```
+///
+/// Both `agent_message` (codex ≥ v0.44.0) and its documented alias
+/// `assistant_message` are accepted — Issue #4776 records this drift, and a
+/// tolerant parse here is load-bearing against version skew.
+fn decode_codex_stream_line(line: &str) -> Option<CodexDelta> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(|t| t.as_str())? != "item.completed" {
+        return None;
+    }
+    let item = v.get("item")?;
+    let ityp = item.get("type").and_then(|t| t.as_str())?;
+    let text = item.get("text").and_then(|t| t.as_str())?.to_string();
+    match ityp {
+        "agent_message" | "assistant_message" => Some(CodexDelta::Text(text)),
+        "reasoning" => Some(CodexDelta::Thinking(text)),
+        _ => None,
+    }
+}
+
+// ---- the decode seam ------------------------------------------------------
+//
+// One private, object-safe interface per streamed envelope. The four free
+// `decode_*_stream_line` helpers above stay as the line-shape source (and the
+// drift-lock tests exercise them directly); each `Decoder` impl owns the
+// per-envelope *state* — the answer accumulator, claude's milestone-dedup
+// window, opencode/codex's last-wins — behind a two-method surface:
+//
+//   - `decode_line` returns what to forward to the reasoning window this line
+//     (a thinking delta, a claude milestone, …), or `None`. It also folds any
+//     answer text into its internal accumulator. Subsumes both live reasoning
+//     deltas (claude/pi) and whole-blob reasoning (opencode/codex): a
+//     milestone and a thinking fragment are both "a string to show", so the
+//     caller never needs to tell them apart.
+//   - `finish` returns the assembled answer, or `None` (→ a typed error).
+//
+// This collapses the old `run_once` closure-per-envelope plus the double-walk
+// (`decode_*_answer` re-parsing stdout the forward closure had already seen)
+// into a single pass: `run_streamed` forwards each `decode_line` result, then
+// calls `finish`. Plain (`Encoding::Plain`) stays a special case in
+// `run_once` — its run path differs (raw stdout via `into_result`, no
+// decode), so forcing it through a no-op decoder would be a leak, not
+// uniformity.
+trait Decoder: Send {
+    /// Fold one stdout/stderr line: return what to forward to the reasoning
+    /// window (if anything), and accumulate any answer text internally.
+    fn decode_line(&mut self, line: &str) -> Option<String>;
+    /// Return the assembled answer after all lines, or `None` if none arrived.
+    fn finish(&mut self) -> Option<String>;
+}
+
+/// Claude `stream-json` decoder. Owns the concatenated `text_delta` answer,
+/// the terminal `result` event's text (preferred at `finish`), and the
+/// milestone-dedup window (claude emits repeated `SessionStart:startup` hook
+/// pairs; a `thinking_delta` clears the window so a milestone re-fires after
+/// reasoning resumes). Milestones carry their own trailing newline; thinking
+/// does not — a decoder-internal formatting choice the caller never sees.
+struct ClaudeDecoder {
+    text: String,
+    result: Option<String>,
+    last_milestone: Option<String>,
+}
+
+impl ClaudeDecoder {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            result: None,
+            last_milestone: None,
         }
     }
-    answer.filter(|s| !s.trim().is_empty())
+}
+
+impl Decoder for ClaudeDecoder {
+    fn decode_line(&mut self, line: &str) -> Option<String> {
+        match decode_claude_stream_line(line) {
+            Some(ClaudeDelta::Milestone(m)) => {
+                if self.last_milestone.as_deref() == Some(m.as_str()) {
+                    None // dedup'd duplicate of the previous milestone
+                } else {
+                    self.last_milestone = Some(m.clone());
+                    Some(format!("{m}\n"))
+                }
+            }
+            Some(ClaudeDelta::Thinking(t)) => {
+                self.last_milestone = None; // reasoning clears the dedup window
+                Some(t)
+            }
+            Some(ClaudeDelta::Text(s)) => {
+                self.text.push_str(&s);
+                None
+            }
+            Some(ClaudeDelta::Result(s)) => {
+                self.result = Some(s);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        // Terminal `result` event wins (authoritative on success); otherwise
+        // the concatenated `text_delta` (the error-turn path where claude
+        // omits `result`). Empty → None so the caller surfaces a typed error.
+        self.result.take().or_else(|| {
+            if self.text.trim().is_empty() {
+                None
+            } else {
+                Some(std::mem::take(&mut self.text))
+            }
+        })
+    }
+}
+
+/// pi `--mode json` decoder. The answer is the concatenation of every
+/// `text_delta` in arrival order (pi emits no terminal result event);
+/// `thinking_delta` streams live to the reasoning window.
+struct PiDecoder {
+    text: String,
+}
+
+impl PiDecoder {
+    fn new() -> Self {
+        Self { text: String::new() }
+    }
+}
+
+impl Decoder for PiDecoder {
+    fn decode_line(&mut self, line: &str) -> Option<String> {
+        match decode_pi_stream_line(line) {
+            Some(PiDelta::Thinking(t)) => Some(t),
+            Some(PiDelta::Text(s)) => {
+                self.text.push_str(&s);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if self.text.trim().is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.text))
+        }
+    }
+}
+
+/// opencode `--format json` decoder. The answer arrives whole as one `text`
+/// event's `part.text` at completion; a multi-step run may emit several, in
+/// which case the last wins. `reasoning` events forward live (usually a UI
+/// no-op — they land with the answer).
+struct OpenCodeDecoder {
+    answer: Option<String>,
+}
+
+impl OpenCodeDecoder {
+    fn new() -> Self {
+        Self { answer: None }
+    }
+}
+
+impl Decoder for OpenCodeDecoder {
+    fn decode_line(&mut self, line: &str) -> Option<String> {
+        match decode_opencode_stream_line(line) {
+            Some(OpenCodeDelta::Thinking(t)) => Some(t),
+            Some(OpenCodeDelta::Text(s)) => {
+                self.answer = Some(s); // last wins
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        self.answer.take().filter(|s| !s.trim().is_empty())
+    }
+}
+
+/// codex `--json` decoder. opencode-shaped: the answer arrives whole as one
+/// `agent_message` (or drifted `assistant_message`) item's `text` at
+/// `item.completed`; the last one wins. `reasoning` items forward live when
+/// present — best-effort, since they are account/org dependent and often
+/// absent (Issue #10746); their absence is normal, never an error.
+struct CodexDecoder {
+    answer: Option<String>,
+}
+
+impl CodexDecoder {
+    fn new() -> Self {
+        Self { answer: None }
+    }
+}
+
+impl Decoder for CodexDecoder {
+    fn decode_line(&mut self, line: &str) -> Option<String> {
+        match decode_codex_stream_line(line) {
+            Some(CodexDelta::Thinking(t)) => Some(t),
+            Some(CodexDelta::Text(s)) => {
+                self.answer = Some(s); // last wins
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        self.answer.take().filter(|s| !s.trim().is_empty())
+    }
 }
 
 /// One CLI-agent invocation handle. Holds the command template, the system
@@ -894,106 +1078,73 @@ impl CliAgent {
         // The runner surfaces a timeout (and not-installed) as a typed
         // `LlmError` directly via `?`; auth/non-zero-exit classification on a
         // finished process happens below.
-        // Plain stdout is the answer verbatim (custom commands, codex); the
-        // three streamed envelopes share one run/decode/error tail
-        // ([`Self::run_streamed`]) and differ only in the per-line forward
-        // closure and the answer decoder.
+        // Plain stdout is the answer verbatim (custom commands only — every
+        // built-in preset now carries a decodable envelope). The four
+        // streamed envelopes each pick a [`Decoder`] and share one
+        // run/decode/error tail ([`Self::run_streamed`]).
         match self.spec.encoding {
             Encoding::Plain => {
                 let out = self.runner.run(&spec, timeout, on_output).await?;
                 out.into_result(&self.spec.command)
             }
             Encoding::ClaudeStreamJson => {
-                // Forward milestones (`system/init`, `system/hook_started`) and
-                // `thinking_delta` live; `Text`/`Result` are decoded post-run
-                // by `decode_claude_answer`. Consecutive identical milestones
-                // are deduped (claude emits repeated `SessionStart:startup`
-                // pairs); a thinking delta clears the dedup window.
-                let mut last_milestone: Option<String> = None;
-                let mut forward = |raw: &str| match decode_claude_stream_line(raw) {
-                    Some(ClaudeDelta::Milestone(m)) => {
-                        if last_milestone.as_deref() != Some(m.as_str()) {
-                            on_output(&m);
-                            on_output("\n");
-                            last_milestone = Some(m);
-                        }
-                    }
-                    Some(ClaudeDelta::Thinking(t)) => {
-                        on_output(&t);
-                        last_milestone = None;
-                    }
-                    _ => {}
-                };
-                self.run_streamed(
-                    &spec,
-                    timeout,
-                    &mut forward,
-                    decode_claude_answer,
-                    "claude stream-json",
-                )
-                .await
+                let mut dec = ClaudeDecoder::new();
+                self.run_streamed(&spec, timeout, &mut dec, on_output, "claude stream-json")
+                    .await
             }
             Encoding::PiStreamJson => {
-                // pi `--mode json`: forward `thinking_delta` live; the answer
-                // is the post-run concatenation of `text_delta`.
-                let mut forward = |raw: &str| {
-                    if let Some(PiDelta::Thinking(t)) = decode_pi_stream_line(raw) {
-                        on_output(&t);
-                    }
-                };
-                self.run_streamed(
-                    &spec,
-                    timeout,
-                    &mut forward,
-                    decode_pi_answer,
-                    "pi --mode json",
-                )
-                .await
+                let mut dec = PiDecoder::new();
+                self.run_streamed(&spec, timeout, &mut dec, on_output, "pi --mode json")
+                    .await
             }
             Encoding::OpenCodeJson => {
-                // opencode `--format json`: forward `reasoning` live (usually
-                // lands with the answer, so often a UI no-op); the answer is
-                // the last `text` event's `part.text`, extracted post-run.
-                let mut forward = |raw: &str| {
-                    if let Some(OpenCodeDelta::Thinking(t)) = decode_opencode_stream_line(raw) {
-                        on_output(&t);
-                    }
-                };
-                self.run_streamed(
-                    &spec,
-                    timeout,
-                    &mut forward,
-                    decode_opencode_answer,
-                    "opencode --format json",
-                )
-                .await
+                let mut dec = OpenCodeDecoder::new();
+                self.run_streamed(&spec, timeout, &mut dec, on_output, "opencode --format json")
+                    .await
+            }
+            Encoding::CodexJson => {
+                let mut dec = CodexDecoder::new();
+                self.run_streamed(&spec, timeout, &mut dec, on_output, "codex --json")
+                    .await
             }
         }
     }
 
-    /// Shared tail for the three streamed encodings: run the CLI (forwarding
-    /// each line through `forward`, which keeps each encoding's
-    /// reasoning-routing local), classify a failed run via
-    /// [`CommandOutput::into_result`], then decode the answer or surface a
-    /// typed "no answer text" error. Collapses what was three near-identical
-    /// arms — one per envelope, differing only in the forward closure, the
-    /// decoder, and the error label — into one, so a fourth streamed preset
-    /// adds only a closure + decoder, not another copy of the
-    /// run/decode/error scaffolding.
+    /// Shared tail for the streamed encodings: run the CLI forwarding each
+    /// line through `decoder.decode_line` (which routes reasoning to
+    /// `on_output` and folds answer text into its own state), classify a
+    /// failed run via [`CommandOutput::into_result`], then ask the decoder for
+    /// the assembled answer — or surface a typed "no answer text" error. One
+    /// method serves all four streamed envelopes; a new envelope is a new
+    /// [`Decoder`] impl plus one `match` arm in [`Self::run_once`], nothing
+    /// more.
     async fn run_streamed(
         &self,
         spec: &CommandSpec,
         timeout: Duration,
-        forward: &mut (dyn for<'a> FnMut(&'a str) + Send),
-        decode_answer: impl Fn(&str) -> Option<String>,
+        decoder: &mut dyn Decoder,
+        on_output: &mut (dyn for<'a> FnMut(&'a str) + Send),
         envelope: &str,
     ) -> Result<String> {
-        let out = self.runner.run(spec, timeout, forward).await?;
+        // Scope `forward` so its borrow of `decoder` releases before
+        // `finish()`. The closure is the bridge between the line-oriented
+        // runner and the stateful decoder: each line the runner emits (stdout
+        // or stderr) is offered to the decoder; whatever it returns is
+        // forwarded to the reasoning window. Single pass — the decoder
+        // accumulates the answer as it goes, so stdout is never re-walked.
+        let out = {
+            let mut forward = |line: &str| {
+                if let Some(fwd) = decoder.decode_line(line) {
+                    on_output(&fwd);
+                }
+            };
+            self.runner.run(spec, timeout, &mut forward).await?
+        };
         if !out.success {
             // Reuse the auth/exit classification on failure.
             return out.into_result(&self.spec.command);
         }
-        match decode_answer(&out.stdout) {
+        match decoder.finish() {
             Some(answer) if !answer.trim().is_empty() => Ok(answer),
             _ => Err(anyhow::Error::new(LlmError::NonZeroExit {
                 program: self.spec.command.clone(),
@@ -1576,11 +1727,25 @@ mod tests {
         assert_eq!(decode_claude_stream_line(r#"{"type":"unknown"}"#), None);
     }
 
+    /// Feed `blob` through a decoder line-by-line, collecting what each
+    /// `decode_line` returns (what would be forwarded to the reasoning window)
+    /// and the `finish()` answer. The decoder-interface analogue of the old
+    /// `decode_*_answer(blob)` single-shot helpers.
+    fn run_decoder<D: Decoder>(mut dec: D, blob: &str) -> (Vec<String>, Option<String>) {
+        let mut forwarded = Vec::new();
+        for line in blob.lines() {
+            if let Some(f) = dec.decode_line(line) {
+                forwarded.push(f);
+            }
+        }
+        (forwarded, dec.finish())
+    }
+
     #[test]
-    fn answer_prefers_terminal_result_over_text_deltas() {
-        // Hook noise + a thinking delta (ignored for the answer) + a partial
-        // text-delta fragment + the terminal result event with the full
-        // authoritative answer. `result` wins over the partial fragment.
+    fn claude_decoder_finish_prefers_terminal_result_over_text_deltas() {
+        // Hook noise (a milestone, forwarded live) + a thinking delta (also
+        // forwarded) + a partial text-delta fragment + the terminal result
+        // event with the full authoritative answer. `result` wins at finish.
         let blob = [
             r#"{"type":"system","subtype":"hook_started","hook_id":"h"}"#,
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"t"}}}"#,
@@ -1588,11 +1753,15 @@ mod tests {
             r#"{"type":"result","result":"full answer","subtype":"success"}"#,
         ]
         .join("\n");
-        assert_eq!(decode_claude_answer(&blob).as_deref(), Some("full answer"));
+        let (fwd, ans) = run_decoder(ClaudeDecoder::new(), &blob);
+        assert_eq!(ans.as_deref(), Some("full answer"));
+        // Reasoning streamed live; the answer text did not.
+        assert!(fwd.iter().any(|s| s == "t"), "thinking forwarded: {fwd:?}");
+        assert!(!fwd.iter().any(|s| s.contains("partial")), "answer not forwarded: {fwd:?}");
     }
 
     #[test]
-    fn answer_falls_back_to_concatenated_text_deltas_without_result() {
+    fn claude_decoder_finish_falls_back_to_concatenated_text_deltas() {
         // An error turn may omit the `result` event; the concatenated
         // `text_delta`s still reconstruct the answer.
         let blob = [
@@ -1600,11 +1769,12 @@ mod tests {
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}}"#,
         ]
         .join("\n");
-        assert_eq!(decode_claude_answer(&blob).as_deref(), Some("hello world"));
+        let (_, ans) = run_decoder(ClaudeDecoder::new(), &blob);
+        assert_eq!(ans.as_deref(), Some("hello world"));
     }
 
     #[test]
-    fn answer_returns_none_when_only_noise_or_empty() {
+    fn claude_decoder_finish_returns_none_for_only_noise_or_empty() {
         // Pure noise (hooks/init/thinking) carries no answer text → None so
         // the caller surfaces a typed error rather than feeding empty to JSON.
         let noise = [
@@ -1612,8 +1782,26 @@ mod tests {
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"t"}}}"#,
         ]
         .join("\n");
-        assert_eq!(decode_claude_answer(&noise), None);
-        assert_eq!(decode_claude_answer(""), None);
+        assert_eq!(run_decoder(ClaudeDecoder::new(), &noise).1, None);
+        assert_eq!(run_decoder(ClaudeDecoder::new(), "").1, None);
+    }
+
+    #[test]
+    fn claude_decoder_dedups_repeated_milestones_and_resets_on_thinking() {
+        // claude emits repeated `SessionStart:startup` hook pairs; the decoder
+        // forwards a milestone once, then suppresses its immediate repeat. A
+        // thinking delta clears the dedup window, so a milestone re-fires
+        // after reasoning resumes. Milestones carry a trailing newline.
+        let init = r#"{"type":"system","subtype":"init","model":"m","tools":[],"mcp_servers":[]}"#;
+        let think = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"x"}}}"#;
+        let blob = [init, init, think, init].join("\n");
+        let (fwd, _) = run_decoder(ClaudeDecoder::new(), &blob);
+        // Two milestone forwards (the first init, then the post-thinking
+        // re-fire) — not three; the consecutive duplicate was deduped.
+        let milestones = fwd.iter().filter(|s| s.ends_with('\n')).count();
+        assert_eq!(milestones, 2, "dedup: {fwd:?}");
+        // The thinking delta reset the window → the trailing init re-fired.
+        assert!(fwd.iter().any(|s| s == "x"), "thinking forwarded + reset: {fwd:?}");
     }
 
     // ---- pi `--mode json` decoding -------------------------------------------
@@ -1664,10 +1852,10 @@ mod tests {
     }
 
     #[test]
-    fn pi_answer_concatenates_text_deltas() {
+    fn pi_decoder_concatenates_text_deltas() {
         // pi emits no terminal "result" event; the answer is the concatenation
-        // of every text_delta, in arrival order. thinking deltas are ignored
-        // for the answer (they stream to the reasoning window instead).
+        // of every text_delta, in arrival order. thinking deltas stream live
+        // to the reasoning window (and are ignored for the answer).
         let blob = [
             r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"t"}}"#,
             r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"hello "}}"#,
@@ -1675,14 +1863,16 @@ mod tests {
             r#"{"type":"agent_end"}"#,
         ]
         .join("\n");
-        assert_eq!(decode_pi_answer(&blob).as_deref(), Some("hello world"));
+        let (fwd, ans) = run_decoder(PiDecoder::new(), &blob);
+        assert_eq!(ans.as_deref(), Some("hello world"));
+        assert!(fwd.iter().any(|s| s == "t"), "thinking forwarded: {fwd:?}");
     }
 
     #[test]
-    fn pi_answer_returns_none_when_only_thinking_or_noise() {
+    fn pi_decoder_returns_none_when_only_thinking_or_noise() {
         let thinking_only = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"t"}}"#;
-        assert_eq!(decode_pi_answer(thinking_only), None);
-        assert_eq!(decode_pi_answer(""), None);
+        assert_eq!(run_decoder(PiDecoder::new(), thinking_only).1, None);
+        assert_eq!(run_decoder(PiDecoder::new(), "").1, None);
     }
 
     // ---- opencode `--format json` decoding -----------------------------------
@@ -1723,10 +1913,10 @@ mod tests {
     }
 
     #[test]
-    fn opencode_answer_takes_last_text_event() {
+    fn opencode_decoder_takes_last_text_event() {
         // The answer arrives whole as one `text` event. A multi-step run could
-        // emit several; the final answer is the last one. reasoning events are
-        // ignored for the answer (they stream to the reasoning window).
+        // emit several; the final answer is the last one. reasoning events
+        // stream live to the reasoning window.
         let blob = [
             r#"{"type":"step_start","part":{"type":"step-start"}}"#,
             r#"{"type":"reasoning","part":{"type":"reasoning","text":"t"}}"#,
@@ -1735,16 +1925,114 @@ mod tests {
             r#"{"type":"step_finish","part":{"type":"step-finish"}}"#,
         ]
         .join("\n");
+        let (fwd, ans) = run_decoder(OpenCodeDecoder::new(), &blob);
+        assert_eq!(ans.as_deref(), Some("final answer"));
+        assert!(fwd.iter().any(|s| s == "t"), "reasoning forwarded: {fwd:?}");
+    }
+
+    #[test]
+    fn opencode_decoder_returns_none_without_text_event() {
+        let no_text = r#"{"type":"step_start","part":{"type":"step-start"}}"#;
+        assert_eq!(run_decoder(OpenCodeDecoder::new(), no_text).1, None);
+        assert_eq!(run_decoder(OpenCodeDecoder::new(), "").1, None);
+    }
+
+    // ---- codex `--json` decoding ---------------------------------------------
+    //
+    // Shapes per the codex `exec --json` event stream (openai/codex). Reasoning
+    // and answer text arrive only at `item.completed`; `agent_message` (codex
+    // ≥ v0.44.0) and its documented alias `assistant_message` (Issue #4776)
+    // are both accepted — a tolerant parse that is load-bearing against
+    // version skew.
+
+    #[test]
+    fn decode_codex_extracts_agent_message() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"hello world"}}"#;
         assert_eq!(
-            decode_opencode_answer(&blob).as_deref(),
-            Some("final answer")
+            decode_codex_stream_line(line),
+            Some(CodexDelta::Text("hello world".to_string()))
         );
     }
 
     #[test]
-    fn opencode_answer_returns_none_without_text_event() {
-        let no_text = r#"{"type":"step_start","part":{"type":"step-start"}}"#;
-        assert_eq!(decode_opencode_answer(no_text), None);
-        assert_eq!(decode_opencode_answer(""), None);
+    fn decode_codex_accepts_drifted_assistant_message_alias() {
+        // Docs say `assistant_message`; codex v0.44.0 emits `agent_message`
+        // (Issue #4776). Both must decode so a version skew never breaks the
+        // answer extraction.
+        let line = r#"{"type":"item.completed","item":{"id":"item_1","type":"assistant_message","text":"hi"}}"#;
+        assert_eq!(
+            decode_codex_stream_line(line),
+            Some(CodexDelta::Text("hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_codex_extracts_reasoning_when_present() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_2","type":"reasoning","text":"thinking it over"}}"#;
+        assert_eq!(
+            decode_codex_stream_line(line),
+            Some(CodexDelta::Thinking("thinking it over".to_string()))
+        );
+    }
+
+    #[test]
+    fn decode_codex_drops_lifecycle_and_non_text_items() {
+        // thread.*/turn.*/item.started/item.updated carry no final text;
+        // command_execution/file_change are non-text item types.
+        let thread = r#"{"type":"thread.started","id":"t"}"#;
+        let turn = r#"{"type":"turn.completed","id":"t"}"#;
+        let started = r#"{"type":"item.started","item":{"type":"agent_message"}}"#;
+        let updated = r#"{"type":"item.updated","item":{"type":"agent_message","text":"partial"}}"#;
+        let cmd = r#"{"type":"item.completed","item":{"id":"c","type":"command_execution","text":"ls"}}"#;
+        for l in [thread, turn, started, updated, cmd] {
+            assert_eq!(decode_codex_stream_line(l), None, "noise leaked: {l}");
+        }
+    }
+
+    #[test]
+    fn decode_codex_tolerates_non_json_and_missing_fields() {
+        assert_eq!(decode_codex_stream_line("not json"), None);
+        assert_eq!(decode_codex_stream_line(""), None);
+        // item.completed missing the item → None.
+        assert_eq!(decode_codex_stream_line(r#"{"type":"item.completed"}"#), None);
+        // item with an unknown type → None.
+        assert_eq!(
+            decode_codex_stream_line(r#"{"type":"item.completed","item":{"type":"mystery","text":"x"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_decoder_takes_last_agent_message() {
+        // A multi-step run may emit several agent_message items; the last is
+        // the final answer. reasoning forwards live when present.
+        let blob = [
+            r#"{"type":"item.started","item":{"type":"agent_message"}}"#,
+            r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"intermediate"}}"#,
+            r#"{"type":"item.completed","item":{"id":"i2","type":"reasoning","text":"deliberating"}}"#,
+            r#"{"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"final answer"}}"#,
+        ]
+        .join("\n");
+        let (fwd, ans) = run_decoder(CodexDecoder::new(), &blob);
+        assert_eq!(ans.as_deref(), Some("final answer"));
+        assert!(fwd.iter().any(|s| s == "deliberating"), "reasoning forwarded: {fwd:?}");
+    }
+
+    #[test]
+    fn codex_decoder_reasoning_absence_is_normal() {
+        // Issue #10746: with API-key auth codex emits NO reasoning items —
+        // only agent_message. That must not be an error; the answer still
+        // extracts and the reasoning window simply stayed empty.
+        let blob = r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"just the answer"}}"#;
+        let (fwd, ans) = run_decoder(CodexDecoder::new(), blob);
+        assert_eq!(ans.as_deref(), Some("just the answer"));
+        assert!(fwd.is_empty(), "no reasoning forwarded when none emitted: {fwd:?}");
+    }
+
+    #[test]
+    fn codex_decoder_returns_none_without_agent_message() {
+        let noise = r#"{"type":"item.completed","item":{"id":"c","type":"command_execution","text":"ls"}}"#;
+        assert_eq!(run_decoder(CodexDecoder::new(), noise).1, None);
+        assert_eq!(run_decoder(CodexDecoder::new(), "").1, None);
     }
 }
