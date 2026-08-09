@@ -109,20 +109,17 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // used instead, never falsely claiming a streaming capability. The
     // program name is what the cold-start notice interpolates, so a pi run is
     // labeled "pi", not hardcoded "Claude".
-    let streaming_program: Option<String> = crate::llm::LlmConfig::load()
-        .ok()
-        .and_then(|c| {
-            let streams = matches!(
-                c.cli_encoding()?,
-                crate::cli_agent::Encoding::ClaudeStreamJson
-                    | crate::cli_agent::Encoding::PiStreamJson
-            );
-            if streams {
-                c.cli_command().map(str::to_owned)
-            } else {
-                None
-            }
-        });
+    let streaming_program: Option<String> = crate::llm::LlmConfig::load().ok().and_then(|c| {
+        let streams = matches!(
+            c.cli_encoding()?,
+            crate::cli_agent::Encoding::ClaudeStreamJson | crate::cli_agent::Encoding::PiStreamJson
+        );
+        if streams {
+            c.cli_command().map(str::to_owned)
+        } else {
+            None
+        }
+    });
     let expects_streaming = streaming_program.is_some();
 
     // The streaming future owns the `ThinkingView` inside its `on_reasoning`
