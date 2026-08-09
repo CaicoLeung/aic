@@ -180,19 +180,20 @@ If you already have a coding-agent CLI installed and authenticated —
 Set `backend_kind = "cli"` to switch to the CLI-agent backend, and `command`
 to the CLI to drive. aic shells out to that CLI with a single prompt (the
 `{prompt}` placeholder in `args` is replaced by the full system + user prompt)
-and reads the answer from stdout. The API-provider fields (`backend`,
-`api_key`, `model`, `base_url`) are not used by the CLI backend and must be
-unset — `backend_kind = "cli"` with an `api_key`, or `backend_kind = "api"`
-with a `command`, is rejected as contradictory (ADR 0011).
+and reads the answer from stdout. The two backends' fields may coexist in
+the file: `backend_kind` selects the active one and the other's fields are
+kept **dormant** (preserved across switches, ignored at run time) — so
+switching never wipes what you entered for the other (ADR 0011).
 
 Presets are offered by `aic setup` (→ **CLI agent**); you can also edit the
 config directly:
 
 ```toml
-# Claude Code — print mode (skip-permissions is opt-in, so no auto tool-use)
+# Claude Code — print mode + stream-json so reasoning streams live
+# (skip-permissions is opt-in, so no auto tool-use)
 backend_kind = "cli"
 command = "claude"
-args = ["-p", "{prompt}"]
+args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
 timeout_secs = 120
 ```
 ```toml
@@ -202,10 +203,10 @@ command = "codex"
 args = ["exec", "-s", "read-only", "{prompt}"]
 ```
 ```toml
-# pi — --no-tools disables all tools so print mode is text-only
+# pi — --no-tools disables all tools; --mode json streams reasoning + answer
 backend_kind = "cli"
 command = "pi"
-args = ["--no-tools", "-p", "{prompt}"]
+args = ["--no-tools", "--mode", "json", "-p", "{prompt}"]
 ```
 
 Notes:

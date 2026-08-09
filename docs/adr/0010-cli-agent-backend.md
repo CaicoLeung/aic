@@ -33,8 +33,12 @@ naïve design would have introduced: `claude` is already an **alias for the
 Anthropic provider** in the registry (ADR 0003), so making `claude` mean "Claude
 Code CLI" would silently break users who set `backend = "claude"` for the
 Anthropic API. "`command` is set" is unambiguous and matches the **generic
-command-template** shape (see below). A `command` set alongside an `api_key` is
-rejected as contradictory — the two backends are mutually exclusive.
+command-template** shape (see below). The two backends' fields may coexist
+in the file: `backend_kind` selects the active one and the other's fields are
+kept **dormant** (preserved across switches, ignored at run time), so
+switching never wipes what was entered for the other — see ADR 0011. (The
+earlier "`command` + `api_key` is rejected as contradictory" rule was
+superseded by dormant fields.)
 
 New optional config fields: `command`, `args` (template with a `{prompt}`
 placeholder), `timeout_secs`. All optional, so existing configs are unchanged —
@@ -58,9 +62,12 @@ dispatch per variant. The original grilling decision named a `LlmBackend` trait
 with `Box<dyn>` dispatch; **refined to an enum** because `schema<T>` /
 `stream_typed_with_reasoning<T>` are generic methods, and generic methods are
 not object-safe. An enum keeps them monomorphized per backend with identical
-behavior. `LLM` / `LLMAgent` (the rig path) are **unchanged**, so `setup.rs`'s
-verify flow and the `with_agent!` macro are untouched — the CLI path is purely
-additive. `LlmConfig::load()` decides `Cli` vs `Rig` from config.
+behavior. The `LLMAgent` type and the `with_agent!` macro are unchanged, so the
+provider registry and per-provider clients are untouched — the CLI path is
+additive to them. Backend selection moved from the old `LLM::load()`
+constructor to `LlmConfig::load()`, which reads `backend_kind` and returns
+`Rig` or `Cli`; the call sites in `generator.rs` use `LlmConfig::agent()` and
+are backend-agnostic.
 
 ### Headless/print only
 
@@ -75,12 +82,29 @@ text-only / read-only stance, because defaults differ and one (pi) is unsafe:
 
 | Preset | Pinned flags | Why |
 | --- | --- | --- |
-| `claude` | `-p` (print) | `--dangerously-skip-permissions` is opt-in and print mode cannot prompt, so no privileged tool auto-executes. claude has no reliable `--no-tools` flag (`--allowedTools` is variadic and greedily consumes the prompt), so print mode's conservative default is the lever. |
+| `claude` | `-p` + `--output-format stream-json --include-partial-messages` | `-p` is print mode (cannot prompt). The `stream-json` flags surface claude's `thinking_delta` as a live reasoning stream — without them, plain `-p` returns only the final answer and the batch-plan reasoning window stays empty. claude has no reliable `--no-tools` flag (`--allowedTools` is variadic and greedily consumes the prompt), so print mode's conservative default (it cannot prompt → no privileged tool auto-executes; `--dangerously-skip-permissions` stays opt-in) is the lever. The NDJSON envelope is decoded centrally, so the typed paths still receive plain JSON text. |
 | `codex` | `exec -s read-only` | `exec` runs non-interactively; the sandbox is pinned to `read-only` so model-generated shell commands cannot write, even if a global config widens the default. `--dangerously-bypass-approvals-and-sandbox` is opt-in. |
 | `pi` | `--no-tools -p` | **Required.** pi enables `read/bash/edit/write` tools by default; in print mode on a *trusted* project it can auto-run them (it cannot prompt) — effectively yolo. `--no-tools` disables all tools so print mode is genuinely text-only. |
 
-Custom `command`/`args` backends are the user's responsibility to harden; the
-presets are the safe defaults.
+Custom `command`/`args` backends are the user's responsibility to harden. The
+`aic setup` wizard offers **only the four presets** (claude / codex / pi /
+opencode) — each ships a dedicated decoder for its CLI's stdout envelope, so
+aic can stream reasoning where the CLI exposes it and cleanly extract the
+answer. A hand-edited custom `command`/`args` still runs, but in plain-text mode
+with no reasoning feed and no envelope decoding; it is the config-edit escape
+hatch for a CLI without a preset, not a wizard option.
+
+### Preset auto-migration
+
+A preset improvement (e.g. claude's switch to `stream-json` for a live
+reasoning feed) reaches existing users via `Config::migrate_if_stale`: on every
+load, a CLI-backend config whose `(command, args)` is byte-identical to a known
+*legacy* preset snapshot is rewritten to that preset's current `args` (only
+`args`; `command`, `timeout_secs`, `backend_kind`, and all API fields are
+preserved). It is idempotent (a migrated config matches no legacy fingerprint on
+the next run) and conservative (a customized command matches no fingerprint and
+is left alone), with a stderr notice so the rewrite is transparent. This keeps
+stale preset snapshots from stranding users on args they set once and forgot.
 
 ### Typed output via prompt-for-JSON + lenient parse
 
