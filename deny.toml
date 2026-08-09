@@ -14,16 +14,11 @@ yanked = "deny"
 # unmaintained crates warn but do not fail; scope to workspace members so
 # transitive unmaintained deps don't gate the build
 unmaintained = "workspace"
-ignore = [
-    # quick-xml 0.37.x is pinned by `self_update = "0.42"` (it requires
-    # quick-xml "0.37"); the fixes live in >=0.41 and cannot be reached without
-    # a self_update release that bumps the requirement. self_update feeds
-    # quick-xml only GitHub release-API responses, so exploitation requires a
-    # compromised github.com serving malicious data to this client — low
-    # practical risk. Revisit when self_update publishes a quick-xml >=0.41 build.
-    { id = "RUSTSEC-2026-0194", reason = "upstream-pinned by self_update 0.42 (quick-xml 0.37); only trusted GitHub API input reaches the parser" },
-    { id = "RUSTSEC-2026-0195", reason = "upstream-pinned by self_update 0.42 (quick-xml 0.37); only trusted GitHub API input reaches the parser" },
-]
+# No ignored advisories. The two quick-xml RUSTSEC entries (2026-0194/0195,
+# DoS via quadratic attribute check + unbounded namespace alloc) were retired
+# when self_update moved to 1.0.0-rc: its quick-xml dependency is now behind the
+# unused `s3` feature, so quick-xml left the tree entirely. Re-add an `ignore`
+# entry only if a future dep reintroduces an unfixable advisory.
 
 [licenses]
 version = 2
