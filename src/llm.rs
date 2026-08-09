@@ -843,9 +843,10 @@ impl Backend {
     }
 }
 
-/// Which backend a run uses, resolved from config. CLI mode wins when
-/// `command` is set; otherwise the rig API path resolves exactly as before
-/// (ADR 0008: the config file is the single source of truth, no env vars).
+/// Which backend a run uses, resolved from config (ADR 0011). The active kind
+/// is the `backend_kind` discriminator (`"cli"` ⇒ [`Cli`], absent / `"api"` ⇒
+/// [`Rig`]); resolved and consistency-validated by
+/// [`crate::config::Config::resolve_backend`].
 pub enum LlmConfig {
     Rig(LLM),
     Cli(CliSpec),
@@ -854,43 +855,32 @@ pub enum LlmConfig {
 impl LlmConfig {
     /// Load the active backend from the config file.
     ///
-    /// CLI mode is selected by the `command` field being set — there are no
-    /// magic `backend` names, so nothing collides with the provider registry
-    /// (e.g. `claude` stays an Anthropic alias). A `command` set alongside an
-    /// `api_key` is rejected as contradictory (the two backends are mutually
-    /// exclusive).
+    /// Which backend is active is decided by the `backend_kind` discriminator
+    /// (ADR 0011), resolved and consistency-validated by
+    /// [`Config::resolve_backend`]. `"cli"` ⇒ the CLI-agent backend;
+    /// absent / `"api"` ⇒ the rig API path, resolved exactly as before
+    /// (ADR 0008: the config file is the single source of truth, no env vars).
     pub fn load() -> Result<Self> {
         let config = crate::config::Config::load().ok().flatten();
-        let cli_command = config.as_ref().and_then(|c| c.active_cli_command());
-
-        if cli_command.is_some() {
-            let has_api_key = config
-                .as_ref()
-                .and_then(|c| {
-                    c.api_key
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                })
-                .is_some();
-            if has_api_key {
-                anyhow::bail!(
-                    "config has both `command` (CLI backend) and `api_key` (API backend) set — \
-                     these are mutually exclusive. Remove one (run `aic setup`)."
-                );
+        let kind = match &config {
+            Some(c) => c.resolve_backend()?,
+            None => crate::config::BackendKind::Api,
+        };
+        match kind {
+            crate::config::BackendKind::Cli => Ok(Self::Cli(resolve_cli(
+                config.as_ref().expect("cli backend implies config present"),
+            ))),
+            crate::config::BackendKind::Api => {
+                let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
+                resolved.validate()?;
+                Ok(Self::Rig(LLM {
+                    provider: Provider::from_name(&resolved.backend),
+                    model: resolved.model,
+                    api_key: resolved.api_key,
+                    base_url: resolved.base_url,
+                }))
             }
-            let spec = resolve_cli(config.as_ref().expect("command present implies config"));
-            return Ok(Self::Cli(spec));
         }
-
-        let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
-        resolved.validate()?;
-        Ok(Self::Rig(LLM {
-            provider: Provider::from_name(&resolved.backend),
-            model: resolved.model,
-            api_key: resolved.api_key,
-            base_url: resolved.base_url,
-        }))
     }
 
     /// Build an agent for one task. Dispatches to [`LLMAgent`] on the API path

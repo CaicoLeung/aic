@@ -315,50 +315,57 @@ pub(crate) fn resolve_base_url(
 
 pub fn run_list() -> Result<()> {
     let config = Config::load()?;
+    let kind = config
+        .as_ref()
+        .map(|c| c.resolve_backend())
+        .transpose()?
+        .unwrap_or(BackendKind::Api);
 
-    // CLI backend (ADR 0010): when `command` is set, it wins over the API
-    // provider fields, so show it instead of the rig-resolved defaults.
-    let cli_command = config.as_ref().and_then(Config::active_cli_command);
-    if let Some(command) = cli_command {
-        let c = config.as_ref().expect("command present implies config");
-        println!("Backend:  CLI agent");
-        println!("Command:  {command} (source: {})", Source::Config);
-        let (args, args_src) = match &c.args {
-            Some(a) => (a.join(" "), Source::Config),
-            None => (
-                crate::cli_agent::PROMPT_PLACEHOLDER.to_string(),
-                Source::Default,
-            ),
-        };
-        println!("Args:     {args} (source: {args_src})");
-        let (timeout, to_src) = match c.timeout_secs {
-            Some(t) => (t, Source::Config),
-            None => (crate::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
-        };
-        println!("Timeout:  {timeout}s (source: {to_src})");
-        return Ok(());
+    println!("Backend:  {}", kind.display_name());
+    match kind {
+        BackendKind::Cli => {
+            // resolve_backend guarantees a command is set for the CLI backend.
+            let c = config.as_ref().expect("cli backend implies config present");
+            let command = c
+                .active_cli_command()
+                .expect("cli backend implies command set");
+            println!("Command:  {command} (source: {})", Source::Config);
+            let (args, args_src) = match &c.args {
+                Some(a) => (a.join(" "), Source::Config),
+                None => (
+                    crate::cli_agent::PROMPT_PLACEHOLDER.to_string(),
+                    Source::Default,
+                ),
+            };
+            println!("Args:     {args} (source: {args_src})");
+            let (timeout, to_src) = match c.timeout_secs {
+                Some(t) => (t, Source::Config),
+                None => (crate::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
+            };
+            println!("Timeout:  {timeout}s (source: {to_src})");
+        }
+        BackendKind::Api => {
+            let resolved = ResolvedConfig::resolve(config.as_ref());
+            println!(
+                "Provider: {} (source: {})",
+                resolved.backend, resolved.backend_source
+            );
+            println!(
+                "Model:    {} (source: {})",
+                resolved.model, resolved.model_source
+            );
+            println!(
+                "API key:  {} (source: {})",
+                resolved.mask_api_key(),
+                resolved.api_key_source
+            );
+            println!(
+                "Base URL: {} (source: {})",
+                resolved.base_url.as_deref().unwrap_or("(none)"),
+                resolved.base_url_source
+            );
+        }
     }
-
-    let resolved = ResolvedConfig::resolve(config.as_ref());
-
-    println!(
-        "Provider: {} (source: {})",
-        resolved.backend, resolved.backend_source
-    );
-    println!(
-        "Model:    {} (source: {})",
-        resolved.model, resolved.model_source
-    );
-    println!(
-        "API key:  {} (source: {})",
-        resolved.mask_api_key(),
-        resolved.api_key_source
-    );
-    println!(
-        "Base URL: {} (source: {})",
-        resolved.base_url.as_deref().unwrap_or("(none)"),
-        resolved.base_url_source
-    );
 
     Ok(())
 }
