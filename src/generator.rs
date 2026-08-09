@@ -115,7 +115,10 @@ pub fn validate_batch_plan(
 impl Generator {
     pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
         let p = PromptConfig::default().git_message;
-        LlmConfig::load()?.agent(&p).schema::<CommitOutput>(diff).await
+        LlmConfig::load()?
+            .agent(&p)
+            .schema::<CommitOutput>(diff)
+            .await
     }
 
     /// Split the workdir diff into logical commit batches, streaming the

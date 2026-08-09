@@ -140,9 +140,16 @@ impl std::fmt::Display for LlmError {
                 "CLI backend `{prog}` is not authenticated — run `{prog}` once yourself to log in"
             ),
             Self::Timeout(secs) => {
-                write!(f, "CLI backend timed out after {secs}s (raise `timeout_secs` in config)")
+                write!(
+                    f,
+                    "CLI backend timed out after {secs}s (raise `timeout_secs` in config)"
+                )
             }
-            Self::NonZeroExit { program, code, stderr } => {
+            Self::NonZeroExit {
+                program,
+                code,
+                stderr,
+            } => {
                 let hint = stderr.trim();
                 if let Some(c) = code {
                     write!(f, "`{program}` exited with code {c}")
@@ -817,8 +824,14 @@ impl Backend {
         T: serde::de::DeserializeOwned,
     {
         match self {
-            Self::Rig(a) => a.stream_typed_with_reasoning::<T>(prompt, on_reasoning).await,
-            Self::Cli(a) => a.stream_typed_with_reasoning::<T>(prompt, on_reasoning).await,
+            Self::Rig(a) => {
+                a.stream_typed_with_reasoning::<T>(prompt, on_reasoning)
+                    .await
+            }
+            Self::Cli(a) => {
+                a.stream_typed_with_reasoning::<T>(prompt, on_reasoning)
+                    .await
+            }
         }
     }
 
@@ -848,14 +861,17 @@ impl LlmConfig {
     /// exclusive).
     pub fn load() -> Result<Self> {
         let config = crate::config::Config::load().ok().flatten();
-        let cli_command = config
-            .as_ref()
-            .and_then(|c| c.command.as_deref().map(str::trim).filter(|s| !s.is_empty()));
+        let cli_command = config.as_ref().and_then(|c| c.active_cli_command());
 
         if cli_command.is_some() {
             let has_api_key = config
                 .as_ref()
-                .and_then(|c| c.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+                .and_then(|c| {
+                    c.api_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
                 .is_some();
             if has_api_key {
                 anyhow::bail!(
@@ -893,15 +909,13 @@ impl LlmConfig {
 /// [`crate::cli_agent::DEFAULT_TIMEOUT_SECS`].
 fn resolve_cli(config: &crate::config::Config) -> CliSpec {
     let command = config
-        .command
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .active_cli_command()
         .expect("resolve_cli only called when command is set")
         .to_string();
-    let args = config.args.clone().unwrap_or_else(|| {
-        vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]
-    });
+    let args = config
+        .args
+        .clone()
+        .unwrap_or_else(|| vec![crate::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
     let timeout_secs = config
         .timeout_secs
         .unwrap_or(crate::cli_agent::DEFAULT_TIMEOUT_SECS);

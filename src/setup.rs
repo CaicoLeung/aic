@@ -13,11 +13,12 @@
 use anyhow::{Context, Result};
 use console::Term;
 use std::io::{self, IsTerminal};
+use std::time::Duration;
 
+use crate::cli_agent::{DEFAULT_TIMEOUT_SECS, PRESETS, PROMPT_PLACEHOLDER, cli_preset};
 use crate::config::{
     Config, Source, config_path, resolve_api_key, resolve_base_url, resolve_field,
 };
-use crate::cli_agent::{DEFAULT_TIMEOUT_SECS, PRESETS, PROMPT_PLACEHOLDER, cli_preset};
 use crate::input::{OptNav, TextAct, opt_nav, prompt_text};
 use crate::llm::{BaseUrlRequirement, Provider};
 
@@ -101,6 +102,19 @@ struct Draft {
     cli_command: Option<String>,
     cli_args: Option<Vec<String>>,
     cli_timeout_secs: Option<u64>,
+}
+
+impl Draft {
+    /// The active CLI command (trimmed, non-empty) from the in-progress draft,
+    /// or `None` when the API provider path is selected. Mirrors
+    /// [`Config::active_cli_command`] so "is the CLI backend set?" has one
+    /// definition across the wizard.
+    fn active_cli_command(&self) -> Option<&str> {
+        self.cli_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,12 +290,7 @@ fn confirm_label(draft: &Draft) -> String {
 /// `CLI agent` menu row: the configured command (or `(API key)` when no CLI
 /// backend is set, so the row still tells the user which backend is active).
 fn cli_label(draft: &Draft) -> String {
-    match draft
-        .cli_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    match draft.active_cli_command() {
         Some(cmd) => {
             let mut parts = vec![cmd.to_string()];
             parts.extend(draft.cli_args.clone().unwrap_or_default());
@@ -466,22 +475,51 @@ fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool
     }
 }
 
-/// Best-effort check that `program` is installed. Never blocks: a miss yields a
-/// warning the user can ignore (ADR 0010 — aic never installs or authenticates
-/// a CLI on the user's behalf). Returns a human one-liner.
+/// Best-effort check that `program` is installed. Runs `program --version`
+/// with **stdin detached** and a hard 3 s cap, so a misconfigured custom CLI
+/// that ignores `--version` and tries to read stdin or enter an interactive
+/// loop cannot hang `aic setup`. Never blocks longer than the cap; a miss or
+/// timeout yields a warning the user can ignore (ADR 0010 — aic never installs
+/// or authenticates a CLI on the user's behalf). Returns a human one-liner.
 fn smoke_check(program: &str) -> String {
-    match std::process::Command::new(program)
+    const SMOKE_TIMEOUT: Duration = Duration::from_secs(3);
+    let mut cmd = match std::process::Command::new(program)
         .arg("--version")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
     {
-        Ok(s) if s.success() => format!("✅ `{program}` found"),
-        Ok(_) => format!("⚠️  `{program}` ran but `--version` exited non-zero — it may still work"),
+        Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            format!("⚠️  `{program}` not found on $PATH — install + authenticate it before using aic")
+            return format!(
+                "⚠️  `{program}` not found on $PATH — install + authenticate it before using aic"
+            );
         }
-        Err(_) => format!("⚠️  could not verify `{program}`"),
+        Err(_) => return format!("⚠️  could not verify `{program}`"),
+    };
+    let deadline = std::time::Instant::now() + SMOKE_TIMEOUT;
+    loop {
+        match cmd.try_wait() {
+            Ok(Some(status)) if status.success() => return format!("✅ `{program}` found"),
+            Ok(Some(_)) => {
+                return format!(
+                    "⚠️  `{program}` ran but `--version` exited non-zero — it may still work"
+                );
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                // Exceeded the cap: kill + reap the child, then report.
+                let _ = cmd.kill();
+                let _ = cmd.wait();
+                return format!(
+                    "⚠️  `{program}` did not respond to `--version` within 3s — it may not support print mode, or is not installed"
+                );
+            }
+            Err(_) => return format!("⚠️  could not verify `{program}`"),
+        }
     }
 }
 
@@ -494,21 +532,35 @@ fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
         show_screen()?;
         let preset_labels: Vec<String> = PRESETS
             .iter()
-            .map(|name| format!("{name} — `{} {}`", cli_preset(name).unwrap().command, cli_preset(name).unwrap().args.join(" ")))
+            .map(|name| {
+                format!(
+                    "{name} — `{} {}`",
+                    cli_preset(name).unwrap().command,
+                    cli_preset(name).unwrap().args.join(" ")
+                )
+            })
             .collect();
         let mut items = vec!["Choose a preset:".to_string()];
         // Clippy: collect then extend to avoid borrowing preset_labels across the closure.
         items.extend(preset_labels.iter().cloned());
         items.push("Custom command…".to_string());
-        if draft.cli_command.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some() {
+        if draft.active_cli_command().is_some() {
             items.push("Clear CLI backend (use API key instead)".to_string());
         }
         items.push("↩️ Done — back to main menu".to_string());
         let n_presets = PRESETS.len();
         let custom_idx = 1 + n_presets;
-        let has_clear = draft.cli_command.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
-        let clear_idx = if has_clear { Some(custom_idx + 1) } else { None };
-        let done_idx = if has_clear { custom_idx + 2 } else { custom_idx + 1 };
+        let has_clear = draft.active_cli_command().is_some();
+        let clear_idx = if has_clear {
+            Some(custom_idx + 1)
+        } else {
+            None
+        };
+        let done_idx = if has_clear {
+            custom_idx + 2
+        } else {
+            custom_idx + 1
+        };
 
         match opt_nav("CLI agent backend", &items, 0)? {
             OptNav::Back => return Ok(false),
@@ -556,7 +608,11 @@ fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
     let command = match prompt_text(
         "Command (e.g. claude, codex, pi)",
         false,
-        if initial_cmd.is_empty() { None } else { Some(initial_cmd) },
+        if initial_cmd.is_empty() {
+            None
+        } else {
+            Some(initial_cmd)
+        },
         false,
         "command is required",
     )? {
@@ -586,13 +642,7 @@ fn step_custom_cli(draft: &mut Draft) -> Result<Nav> {
         .cli_timeout_secs
         .map(|t| t.to_string())
         .unwrap_or_else(|| DEFAULT_TIMEOUT_SECS.to_string());
-    let to_str = match prompt_text(
-        "Timeout in seconds",
-        false,
-        Some(&initial_to),
-        true,
-        "",
-    )? {
+    let to_str = match prompt_text("Timeout in seconds", false, Some(&initial_to), true, "")? {
         TextAct::Value(v) if v.trim().is_empty() => initial_to.clone(),
         TextAct::Value(v) => v.trim().to_string(),
         TextAct::Back => return Ok(Nav::Back),
@@ -627,13 +677,7 @@ fn shlex_split(s: &str) -> Vec<String> {
 fn finalize(draft: Draft) -> Config {
     // CLI backend wins when a command is set: the provider/api-key fields are
     // mutually exclusive with it (ADR 0010), so they are dropped on save.
-    if let Some(command) = draft
-        .cli_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-    {
+    if let Some(command) = draft.active_cli_command().map(str::to_owned) {
         return Config {
             backend: None,
             api_key: None,
@@ -1600,9 +1644,7 @@ mod tests {
         assert_eq!(cfg.command.as_deref(), Some("claude"));
         assert_eq!(
             cfg.args.as_deref(),
-            Some(
-                &["-p".to_string(), "{prompt}".to_string()][..]
-            )
+            Some(&["-p".to_string(), "{prompt}".to_string()][..])
         );
         assert_eq!(cfg.timeout_secs, Some(90));
         assert!(cfg.backend.is_none());
@@ -1626,7 +1668,10 @@ mod tests {
 
     #[test]
     fn cli_label_shows_command_or_api_hint() {
-        assert_eq!(cli_label(&draft_with_cli(Some("claude"))), "claude -p {prompt}");
+        assert_eq!(
+            cli_label(&draft_with_cli(Some("claude"))),
+            "claude -p {prompt}"
+        );
         assert_eq!(cli_label(&draft_with_cli(None)), "(API key)");
     }
 
@@ -1634,6 +1679,10 @@ mod tests {
     fn cli_label_ignores_blank_command() {
         let mut d = draft_with_cli(Some("   "));
         d.cli_command = Some("   ".into());
-        assert_eq!(cli_label(&d), "(API key)", "whitespace-only command is treated as unset");
+        assert_eq!(
+            cli_label(&d),
+            "(API key)",
+            "whitespace-only command is treated as unset"
+        );
     }
 }

@@ -83,7 +83,10 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // `--allowedTools` is variadic and greedily consumes the prompt), so
         // we rely on print mode's conservative default rather than a brittle
         // flag.
-        "claude" => ("claude", vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()]),
+        "claude" => (
+            "claude",
+            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
+        ),
         // `exec` runs non-interactively; pin the sandbox to `read-only` so
         // model-generated shell commands cannot write or mutate the repo,
         // even if a user's global config widens the default.
@@ -167,13 +170,6 @@ impl CommandOutput {
                 program.to_string(),
             )));
         }
-        if self.code.is_none() {
-            return Err(anyhow::Error::new(LlmError::NonZeroExit {
-                program: program.to_string(),
-                code: None,
-                stderr: self.stderr,
-            }));
-        }
         Err(anyhow::Error::new(LlmError::NonZeroExit {
             program: program.to_string(),
             code: self.code,
@@ -210,12 +206,13 @@ impl CommandRunner for TokioRunner {
 
         let child = match cmd.spawn() {
             Err(e) if e.kind() == NotFound => {
-                return Ok(CommandOutput {
-                    success: false,
-                    code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
+                // A missing binary surfaces distinctly, not as an empty
+                // CommandOutput: a signal-killed process also yields
+                // `code: None` + no output, so overloading the empty shape
+                // would misreport a crash as "not installed" (ADR 0010).
+                return Err(anyhow::Error::new(LlmError::CliNotInstalled(
+                    spec.program.clone(),
+                )));
             }
             Err(e) => {
                 return Err(e).with_context(|| format!("failed to spawn `{}`", spec.program));
@@ -229,10 +226,7 @@ impl CommandRunner for TokioRunner {
                 success: false,
                 code: None,
                 stdout: String::new(),
-                stderr: format!(
-                    "timed out after {}s",
-                    timeout.as_secs().max(1)
-                ),
+                stderr: format!("timed out after {}s", timeout.as_secs().max(1)),
             }),
             Ok(Err(e)) => Err(e).with_context(|| format!("`{}` failed", spec.program)),
             Ok(Ok(out)) => Ok(CommandOutput {
@@ -316,7 +310,11 @@ impl CliAgent {
             .iter()
             .map(|a| a.replace(PROMPT_PLACEHOLDER, &full_prompt))
             .collect();
-        let contains_placeholder = self.spec.args.iter().any(|a| a.contains(PROMPT_PLACEHOLDER));
+        let contains_placeholder = self
+            .spec
+            .args
+            .iter()
+            .any(|a| a.contains(PROMPT_PLACEHOLDER));
         let args = if contains_placeholder {
             args
         } else {
@@ -332,12 +330,6 @@ impl CliAgent {
         let timeout = Duration::from_secs(self.spec.timeout_secs.max(1));
         let out = self.runner.run(&spec, timeout).await?;
 
-        if !out.success && out.code.is_none() && out.stdout.is_empty() && out.stderr.is_empty() {
-            // spawn returned NotFound → classify as not-installed.
-            return Err(anyhow::Error::new(LlmError::CliNotInstalled(
-                self.spec.command.clone(),
-            )));
-        }
         if out.success && out.stdout.is_empty() {
             // Distinguish a timeout (stderr carries the timeout note) from a
             // genuinely-empty but successful run.
@@ -355,12 +347,13 @@ impl CliAgent {
         out.into_result(&self.spec.command)
     }
 
-    /// Plain-text completion (the conflict-resolve path). Runs once, strips an
-    /// accidental code fence. Marker/empty handling lives in the resolve
-    /// workflow's own retry loop, mirroring the API path's contract.
+    /// Plain-text completion (the conflict-resolve path). Returns the **raw**
+    /// assistant text — matching [`LLMAgent::call`](crate::llm::LLMAgent::call),
+    /// which also returns raw. The resolve workflow (the only caller) strips an
+    /// accidental code fence itself; stripping here would double-strip on the
+    /// CLI path. Marker/empty handling lives in that workflow's own retry loop.
     pub async fn call(&self, user_prompt: &str) -> Result<String> {
-        let raw = self.run_once(user_prompt, Mode::Text).await?;
-        Ok(strip_code_fence(&raw).to_string())
+        self.run_once(user_prompt, Mode::Text).await
     }
 
     /// Typed (JSON) completion — the commit-message path. Prompt-for-JSON +
@@ -500,11 +493,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_strips_fence_and_returns_text() {
-        let (agent, _) =
-            agent_with(vec![ok("```\nresolved file body\n```")]);
+    async fn call_returns_raw_text() {
+        // `call` mirrors LLMAgent::call and returns raw assistant text; the
+        // resolve workflow strips the fence itself.
+        let (agent, _) = agent_with(vec![ok("```\nresolved file body\n```")]);
         let out = agent.call("conflicted file").await.unwrap();
-        assert_eq!(out, "resolved file body");
+        assert_eq!(out, "```\nresolved file body\n```");
     }
 
     #[tokio::test]
@@ -542,10 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn schema_gives_up_after_one_retry() {
-        let (agent, runner) = agent_with(vec![
-            ok("still not json"),
-            ok("not json either"),
-        ]);
+        let (agent, runner) = agent_with(vec![ok("still not json"), ok("not json either")]);
         let res: Result<serde_json::Value> = agent.schema("diff").await;
         assert!(res.is_err());
         assert_eq!(runner.calls().len(), 2);
@@ -553,13 +544,11 @@ mod tests {
 
     #[tokio::test]
     async fn not_installed_surfaces_immediately_no_retry() {
-        // Empty output + empty stderr + no code == NotFound shape from TokioRunner.
-        let (agent, runner) = agent_with(vec![Ok(CommandOutput {
-            success: false,
-            code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-        })]);
+        // A missing binary surfaces as CliNotInstalled directly from the
+        // runner; run_once propagates it before any parse retry.
+        let (agent, runner) = agent_with(vec![Err(anyhow::Error::new(LlmError::CliNotInstalled(
+            "claude".into(),
+        )))]);
         let res: Result<serde_json::Value> = agent.schema("diff").await;
         assert!(res.is_err());
         assert_eq!(runner.calls().len(), 1, "infra errors are never retried");
@@ -570,8 +559,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signal_death_is_not_misreported_as_not_installed() {
+        // A spawned agent killed by a signal (ExitStatus::code() == None) with
+        // no output must surface as NonZeroExit, NOT CliNotInstalled — the
+        // binary was found and ran. Distinct from the NotFound path above.
+        let (agent, _) = agent_with(vec![Ok(CommandOutput {
+            success: false,
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        })]);
+        let res = agent.call("x").await;
+        match res.unwrap_err().downcast_ref::<LlmError>() {
+            Some(LlmError::NonZeroExit { code, .. }) => assert_eq!(*code, None),
+            other => panic!("expected NonZeroExit(code None) for signal death, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn auth_failure_is_classified() {
-        let (agent, _) = agent_with(vec![fail("Error: not logged in. Run `claude` to authenticate.", Some(1))]);
+        let (agent, _) = agent_with(vec![fail(
+            "Error: not logged in. Run `claude` to authenticate.",
+            Some(1),
+        )]);
         let res = agent.call("x").await;
         let err = res.unwrap_err();
         assert!(matches!(

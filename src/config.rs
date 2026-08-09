@@ -69,6 +69,18 @@ impl Config {
         self.confirm_before_commit.unwrap_or(false)
     }
 
+    /// The CLI-agent `command` when the CLI backend is active: the `command`
+    /// field, trimmed and non-empty. `None` means the API provider path is
+    /// active (ADR 0010 — selection is purely "`command` is set"). Centralizes
+    /// the trim-and-non-empty test so every call site agrees on what "set"
+    /// means (used by `aic list`, `LlmConfig::load`, `resolve_cli`).
+    pub fn active_cli_command(&self) -> Option<&str> {
+        self.command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = config_path().context("could not determine config directory")?;
         if let Some(parent) = path.parent() {
@@ -219,22 +231,24 @@ pub fn run_list() -> Result<()> {
 
     // CLI backend (ADR 0010): when `command` is set, it wins over the API
     // provider fields, so show it instead of the rig-resolved defaults.
-    let cli_command = config
-        .as_ref()
-        .and_then(|c| c.command.as_deref().map(str::trim).filter(|s| !s.is_empty()));
+    let cli_command = config.as_ref().and_then(Config::active_cli_command);
     if let Some(command) = cli_command {
         let c = config.as_ref().expect("command present implies config");
         println!("Backend:  CLI agent");
-        println!("Command:  {command}");
-        let args = c
-            .args
-            .clone()
-            .unwrap_or_else(|| vec!["{prompt}".to_string()]);
-        println!("Args:     {}", args.join(" "));
-        println!(
-            "Timeout:  {}s",
-            c.timeout_secs.unwrap_or(60)
-        );
+        println!("Command:  {command} (source: {})", Source::Config);
+        let (args, args_src) = match &c.args {
+            Some(a) => (a.join(" "), Source::Config),
+            None => (
+                crate::cli_agent::PROMPT_PLACEHOLDER.to_string(),
+                Source::Default,
+            ),
+        };
+        println!("Args:     {args} (source: {args_src})");
+        let (timeout, to_src) = match c.timeout_secs {
+            Some(t) => (t, Source::Config),
+            None => (crate::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
+        };
+        println!("Timeout:  {timeout}s (source: {to_src})");
         return Ok(());
     }
 
