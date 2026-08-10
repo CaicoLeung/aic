@@ -56,20 +56,29 @@ pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live. The reasoning is shown as a rolling
-/// [`progress::REASONING_WINDOW`]-row block that redraws in place as the
-/// model thinks — newest rows at the bottom, oldest scrolled out of the
-/// window — and is erased when thinking ends, so the reasoning never lingers
-/// on screen or in the scrollback. The cap bounds the in-place block while
-/// it streams, even when a line wraps long.
+/// reasoning live. The reasoning is shown as a rolling window sized to the
+/// space below the cursor ([`progress::reasoning_window_rows`]) that redraws
+/// in place as the model thinks — newest rows at the bottom, oldest scrolled
+/// out of the window — and is erased when thinking ends, so the reasoning
+/// never lingers on screen or in the scrollback. When the cursor sits in the
+/// bottom rows (the usual shell-prompt position) the renderer grows the frame
+/// past the bottom margin by scrolling the screen, so the reasoning is
+/// visible even there instead of collapsing. Markdown is rendered inline
+/// (bold headings, coloured code blocks — fence state tracked across the
+/// whole stream, so code keeps its colour even after its opener scrolls out
+/// of the window), and at the end of analysis the final frame **dissolves**
+/// one row at a time so each line stays readable as it exits, rather than
+/// blinking out wholesale.
 ///
 /// Rendering is hand-rolled via [`progress::ReasoningRenderer`] rather than an
 /// indicatif multi-line spinner: indicatif repaints by blanking every row then
 /// redrawing them, and its steady tick forced that ~20×/s, so a multi-row
-/// window flickered. The renderer clears and rewrites one row at a time (any
-/// instant has at most one blank row) and repaints only on a reasoning change,
-/// so the window is flicker-free. See [`progress::ReasoningRenderer`] for the
-/// redraw contract.
+/// window flickered. This renderer rewrites **only the row that changed** on
+/// each token — the in-progress line grows fluidly while the rows above stay
+/// untouched — and falls back to a full anti-flicker repaint only when the
+/// window rolls. Idle ticks are suppressed while streaming is active so the
+/// feed never flashes; the spinner animates only once the model goes silent.
+/// See [`progress::ReasoningRenderer`] for the redraw contract.
 ///
 /// **Silent-backend fallback.** A backend that emits no reasoning deltas at
 /// all (a CLI agent in single-shot print mode, or an API cold start) would
@@ -89,9 +98,21 @@ pub(crate) type CommitMessenger =
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     use std::time::Instant;
 
-    let mut renderer = progress::ReasoningRenderer::new("Analyzing changes");
+    // The DSR cursor-row query does up to ~200 ms of blocking tty I/O (poll
+    // + raw-mode byte reads against a deadline). Run it on the blocking pool
+    // so it stalls a worker, not the async reactor. A task panic degrades to
+    // the no-scroll [`progress::WindowSizing::fallback`] — decoration must
+    // never break the commit.
+    let sizing = tokio::task::spawn_blocking(progress::reasoning_window_rows)
+        .await
+        .unwrap_or_else(|_| progress::WindowSizing::fallback());
+    let mut renderer =
+        progress::ReasoningRenderer::new("Analyzing changes", sizing.max_rows, sizing.cursor_row);
     let start = Instant::now();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    // Windows travel with the markdown fence state entering them (tracked by
+    // `ThinkingView` over the whole stream), so the repaint loop classifies
+    // the visible window exactly as a full-stream scan would.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<String>, bool)>();
 
     // A streaming-capable backend (claude `stream-json`, pi `--mode json`)
     // that has not yet produced reasoning is in a cold start — SessionStart
@@ -118,13 +139,13 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // borrow of the view. `tokio::pin!` lets us poll it across `select!`
     // arms without re-creating it each iteration.
     let fut = async {
-        let mut view = progress::ThinkingView::new();
+        let mut view = progress::ThinkingView::new(sizing.max_rows);
         generator::Generator::split_patch_streaming(diff, |delta| {
-            let window = view.push(delta);
+            let (window, in_code_start) = view.push(delta);
             // Channel send only fails if the receiver was dropped — which
             // happens after `fut` completes, when pending windows no longer
             // matter — so the error is silently swallowed.
-            let _ = tx.send(window);
+            let _ = tx.send((window, in_code_start));
         })
         .await
     };
@@ -132,6 +153,7 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
 
     let mut got_output = false;
     let mut last_window: Vec<String> = Vec::new();
+    let mut last_in_code_start = false;
     let mut ticker = tokio::time::interval(progress::SPINNER_TICK);
     // The interval's first tick fires immediately; we want the first painted
     // frame to reflect a real (even if 0 s) elapsed, so the immediate tick is
@@ -147,13 +169,14 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
             }
             // A reasoning delta or startup milestone hands the rolling window
             // to the renderer and latches `got_output` so no later tick can
-            // repaint a loading frame over the feed. The same window is
-            // retained for the steady-tick repaint below.
+            // repaint a loading frame over the feed. The same window and its
+            // fence state are retained for the steady-tick repaint below.
             window = rx.recv() => {
-                if let Some(window) = window {
+                if let Some((window, in_code_start)) = window {
                     got_output = true;
                     last_window = window.clone();
-                    renderer.paint(&window, Some(start.elapsed()));
+                    last_in_code_start = in_code_start;
+                    renderer.paint(&window, in_code_start);
                 }
             }
             // Steady tick — two roles by mode:
@@ -184,7 +207,7 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
                     };
                     renderer.paint_loading(elapsed, notice);
                 } else {
-                    renderer.paint(&last_window, Some(elapsed));
+                    renderer.refresh(&last_window, last_in_code_start, elapsed);
                 }
             }
         }

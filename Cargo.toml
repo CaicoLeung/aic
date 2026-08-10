@@ -43,6 +43,7 @@ self_update = { version = "1.0.0-rc.6", features = ["signatures", "compression-t
 clap_complete = "4.6.8"
 clap_complete_nushell = "4.6.1"
 edit = "0.1"
+libc = "0.2"
 inquire = "0.9"
 
 [dev-dependencies]

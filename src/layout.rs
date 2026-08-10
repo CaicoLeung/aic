@@ -37,6 +37,11 @@ const HARD_CAP: usize = 100;
 /// lands on the same width the resolver would.
 pub(crate) const FALLBACK_COLS: usize = 80;
 
+/// Terminal row count assumed when the real height is unknown (`rows == 0`,
+/// i.e. piped / non-TTY output). Mirrors [`FALLBACK_COLS`] for the vertical
+/// budget the reasoning window sizes against.
+const FALLBACK_ROWS: usize = 24;
+
 /// Resolve a raw terminal column count into a usable width — the single
 /// resolution shared by the panel engine's text width and the progress
 /// surface's [`terminal_width`]. `cols == 0` (non-TTY / piped, where
@@ -47,6 +52,16 @@ pub(crate) const FALLBACK_COLS: usize = 80;
 pub(crate) fn resolve_cols(cols: usize) -> usize {
     let cols = if cols == 0 { FALLBACK_COLS } else { cols };
     cols.min(HARD_CAP)
+}
+
+/// Resolve a raw terminal row count into a usable height — the vertical
+/// counterpart of [`resolve_cols`]. `rows == 0` (non-TTY / piped, where
+/// `Term::stderr()` reports no size) falls back to [`FALLBACK_ROWS`]; unlike
+/// columns there is no hard cap — an oversized reading is harmless (the
+/// reasoning window caps itself at [`crate::progress::MAX_REASONING_ROWS`]).
+/// Pure, so the fallback is unit-testable independently of the live terminal.
+fn resolve_rows(rows: usize) -> usize {
+    if rows == 0 { FALLBACK_ROWS } else { rows }
 }
 
 /// Greedy word-wrap of a single line (no embedded newlines) to `width` display
@@ -105,6 +120,17 @@ pub(crate) fn terminal_width() -> usize {
     resolve_cols(Term::stderr().size().1 as usize)
 }
 
+/// Read the real terminal's row count via [`resolve_rows`] (`0` →
+/// [`FALLBACK_ROWS`] on a non-TTY/pipe — parity with width's [`resolve_cols`]).
+/// No cap: unlike columns, an oversized reading is harmless (the reasoning
+/// window caps itself at [`crate::progress::MAX_REASONING_ROWS`], and the
+/// renderer only uses the height to find the bottom margin). The single
+/// geometry entry point for in-place rendering's vertical budget, shared by
+/// the reasoning window sizing and the renderer's bottom-margin detection.
+pub(crate) fn terminal_height() -> usize {
+    resolve_rows(Term::stderr().size().0 as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +178,17 @@ mod tests {
             w <= HARD_CAP,
             "terminal_width {w} exceeds hard cap {HARD_CAP}"
         );
+    }
+
+    /// [`resolve_rows`] is [`terminal_height`]'s resolution core: `0` falls
+    /// back to the non-TTY default, a real reading passes through uncapped
+    /// (the reasoning window applies its own cap). Mirrors the column-
+    /// resolution test — the fallback is the function's only logic and is now
+    /// asserted directly rather than inferred from a live-terminal bounds check.
+    #[test]
+    fn resolve_rows_falls_back_uncapped() {
+        assert_eq!(resolve_rows(0), FALLBACK_ROWS);
+        assert_eq!(resolve_rows(24), 24);
+        assert_eq!(resolve_rows(200), 200); // no hard cap — oversized is harmless
     }
 }
