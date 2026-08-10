@@ -816,6 +816,24 @@ pub(crate) struct ReasoningRenderer {
     /// per stream — but the flag is retained as a contract guard against a
     /// future caller that paints before any row exists.
     cursor_hidden: bool,
+    /// The last frame's rows, for incremental repaint. On a typical delta only
+    /// the in-progress partial line (the bottom row) grows; everything above is
+    /// byte-identical, so redrawing just that one row — instead of clearing and
+    /// rewriting the whole block — is what makes streaming read as fluid growth
+    /// rather than a flashing block. Structural changes (a line completing and
+    /// the window rolling, a row expiring, a height change) fall back to a full
+    /// [`frame_bytes`] repaint.
+    prev_rows: Vec<String>,
+    /// Frozen spinner elapsed-time shown while streaming is active. The spinner
+    /// must NOT change between deltas (or the bottom-row-only diff would see a
+    /// changed top row and fall back to a full repaint, reintroducing the
+    /// flash), so it advances only on a stall tick via [`Self::refresh`].
+    shown_elapsed: Duration,
+    /// Wall-clock of the last content delta. While `Instant::now() - this` <
+    /// [`ACTIVE_THRESHOLD`], [`Self::refresh`] is a no-op — the stream is the
+    /// motion, a tick repaint would only flash stable rows. `None` until the
+    /// first paint.
+    last_delta: Option<std::time::Instant>,
 }
 
 /// ANSI escapes for the in-place repaint. Hand-written (rather than via
