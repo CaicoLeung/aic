@@ -452,8 +452,12 @@ where
 }
 
 /// A rolling window over the model's streamed reasoning, sized to the caller's
-/// `cap` logical lines (the retention window; the rendered-row cap lives in
-/// [`reasoning_rows`]). The caller renders [`push`](Self::push)'s returned
+/// `cap` — the rendered-row budget from [`reasoning_window_rows`], reused as
+/// the line-storage bound. Each line renders to at least one row, so at most
+/// `cap` lines are ever visible at once; that makes `cap` an exact upper
+/// bound on retained lines, not an approximation. The post-wrap rendered-row
+/// cap (one line can wrap to several rows) is applied separately in
+/// [`reasoning_rows`]. The caller renders [`push`](Self::push)'s returned
 /// window into the spinner's in-place multi-line message, so the block redraws
 /// in place — never printed as permanent lines that linger in the scrollback —
 /// and is erased once thinking ends ([`ReasoningRenderer::finish`]), leaving
