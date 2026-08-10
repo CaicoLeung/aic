@@ -45,7 +45,7 @@ printf "  ${DIM}proposed resolutions:${R}\n"
 sleep 0.25
 printf "  ${CYAN_B}src/config.rs${R}\n"
 printf "  ${RED}-timeout_secs = 30${R}\n"
-printf "  ${GREEN}+timeout_secs = 120${R}\n"
+printf "  ${GREEN}+timeout_secs = 60${R}\n"
 sleep 0.2
 printf "  ${CYAN_B}src/parser.rs${R}\n"
 printf "  ${RED}-fn parse(input: &str) -> Vec<String> {${R}\n"

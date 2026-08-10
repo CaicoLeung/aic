@@ -4,6 +4,7 @@
 set -euo pipefail
 
 DEMO_DIR=$(mktemp -d /tmp/aic-demo-XXXXXX)
+trap 'rm -rf "$DEMO_DIR" /tmp/aic-demo-path' EXIT
 BIN_DIR="$DEMO_DIR/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -18,6 +19,7 @@ git init -q "$DEMO_DIR"
 cd "$DEMO_DIR"
 git config user.email "dev@example.com"
 git config user.name "Demo Dev"
+echo "bin/" > .gitignore
 
 cat > src/auth.rs <<'RUST'
 use std::collections::HashMap;
@@ -51,11 +53,7 @@ pub fn check_token(token: &str) -> bool {
 }
 
 fn get_expiry(token: &str) -> u64 { 0 }
-
-fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs()).unwrap_or(0)
-}
+fn now() -> u64 { 0 }
 
 pub fn login_oauth2(provider: &str) -> Option<String> { None }
 RUST
@@ -64,3 +62,4 @@ RUST
 export PATH="$BIN_DIR:$PATH"
 export PS1='❯ '
 echo "$DEMO_DIR" > /tmp/aic-demo-path
+set +e +u +o pipefail

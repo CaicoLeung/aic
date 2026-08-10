@@ -4,6 +4,7 @@
 set -euo pipefail
 
 DEMO_DIR=$(mktemp -d /tmp/aic-resolve-demo-XXXXXX)
+trap 'rm -rf "$DEMO_DIR" /tmp/aic-resolve-demo-path' EXIT
 BIN_DIR="$DEMO_DIR/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -18,6 +19,7 @@ git -C "$DEMO_DIR" symbolic-ref HEAD refs/heads/main
 cd "$DEMO_DIR"
 git config user.email "dev@example.com"
 git config user.name "Demo Dev"
+echo "bin/" > .gitignore
 
 # Shared base: a config + parser
 mkdir -p src
@@ -101,3 +103,4 @@ git merge -q feature-a 2>/dev/null || true
 export PATH="$BIN_DIR:$PATH"
 export PS1='❯ '
 echo "$DEMO_DIR" > /tmp/aic-resolve-demo-path
+set +e +u +o pipefail

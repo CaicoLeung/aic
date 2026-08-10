@@ -28,7 +28,7 @@ printf "  ${DIM}│ 3 hunks in src/auth.rs — splitting by concern${R}\n"
 sleep 0.4
 printf "  ${DIM}│ hunk 1 (L5): token-expiry check is inverted${R}\n"
 sleep 0.4
-printf "  ${DIM}│ hunk 2 (L16): new OAuth2 login function${R}\n"
+printf "  ${DIM}│ hunk 2 (L14): new OAuth2 login function${R}\n"
 sleep 0.4
 printf "  ${DIM}│ hunk 3 (L2): unused import addition${R}\n"
 sleep 0.6
