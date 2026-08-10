@@ -56,12 +56,13 @@ pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live. The reasoning is shown as a rolling
-/// [`progress::REASONING_WINDOW`]-row block that redraws in place as the
-/// model thinks — newest rows at the bottom, oldest scrolled out of the
-/// window — and is erased when thinking ends, so the reasoning never lingers
-/// on screen or in the scrollback. The cap bounds the in-place block while
-/// it streams, even when a line wraps long.
+/// reasoning live. The reasoning is shown as a terminal-height rolling window
+/// ([`progress::reasoning_window_rows`] rows, not a fixed cap) that redraws in
+/// place as the model thinks — newest rows at the bottom, oldest scrolled out
+/// of the window — and is erased when thinking ends, so the reasoning never
+/// lingers on screen or in the scrollback. Markdown is rendered inline (bold
+/// headings, coloured code blocks), and the final frame lingers
+/// [`progress::READ_TAIL`] before erase so the last lines are readable.
 ///
 /// Rendering is hand-rolled via [`progress::ReasoningRenderer`] rather than an
 /// indicatif multi-line spinner: indicatif repaints by blanking every row then
@@ -89,7 +90,8 @@ pub(crate) type CommitMessenger =
 async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
     use std::time::Instant;
 
-    let mut renderer = progress::ReasoningRenderer::new("Analyzing changes");
+    let max_rows = progress::reasoning_window_rows();
+    let mut renderer = progress::ReasoningRenderer::new("Analyzing changes", max_rows);
     let start = Instant::now();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
 
@@ -118,7 +120,7 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // borrow of the view. `tokio::pin!` lets us poll it across `select!`
     // arms without re-creating it each iteration.
     let fut = async {
-        let mut view = progress::ThinkingView::new();
+        let mut view = progress::ThinkingView::new(max_rows);
         generator::Generator::split_patch_streaming(diff, |delta| {
             let window = view.push(delta);
             // Channel send only fails if the receiver was dropped — which
