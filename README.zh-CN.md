@@ -15,28 +15,6 @@ AI 驱动的 git commit 工具，写出 **真正原子化** 的提交信息 —�
 
 ---
 
-## 快速上手
-
-```sh
-# 1. 安装（macOS / Linux）
-curl --proto '=https' --tlsv1.2 -sSfL \
-  https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
-
-# 2. 配置 —— 选择 API provider 或 CLI agent
-aic setup
-
-# 3. 提交
-git add src/main.rs && aic
-# → feat: add CLI argument parsing
-#   Created commit abc1234
-```
-
-> 💡 **没有 API key？** 跳过 provider 配置 —— 直接使用 [Claude Code、Codex、pi 或 opencode](#-没有-api-key复用你的-ai-agent)，aic 会复用它们的登录认证。
-
-> **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
-
----
-
 ## ✨ hunk 级别的提交，而非 file 级别
 
 多数 AI commit 工具把 **file** 当作原子单位。aic 则把 **hunk**（一段连续的代码改动）当作原子单位。
@@ -57,6 +35,27 @@ src/auth.rs  （一个文件，三处改动）
 什么都不 stage 直接运行 `aic`，它会自动检测所有未暂存的 hunk，按逻辑 concern 分组，逐组提交 —— 分组时模型的推理过程实时流式输出。
 
 不会丢失或重复提交：每个 hunk 恰好落在一个 commit 中，否则整个 plan 会被拒绝。
+
+---
+
+## 快速上手
+
+```sh
+# 1. 安装（macOS / Linux）
+curl --proto '=https' --tlsv1.2 -sSfL \
+  https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
+
+# 2. 配置 —— 选择 API provider 或 CLI agent
+aic setup
+
+# 3. 提交 —— 无需手动 stage，直接运行 aic
+aic
+# → 从你的工作区生成 3 个原子提交
+```
+
+> 💡 **没有 API key？** 跳过 provider 配置 —— 直接使用 [Claude Code、Codex、pi 或 opencode](#-没有-api-key复用你的-ai-agent)，aic 会复用它们的登录认证。
+
+> **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
 
 ---
 

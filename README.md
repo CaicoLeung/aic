@@ -15,28 +15,6 @@ AI commit messages that are **actually atomic** — and work with your existing 
 
 ---
 
-## Quick Start
-
-```sh
-# 1. Install (macOS / Linux)
-curl --proto '=https' --tlsv1.2 -sSfL \
-  https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
-
-# 2. Configure — pick an API provider OR a CLI agent
-aic setup
-
-# 3. Commit
-git add src/main.rs && aic
-# → feat: add CLI argument parsing
-#   Created commit abc1234
-```
-
-> 💡 **No API key?** Skip the provider setup — use [Claude Code, Codex, pi, or opencode](#-no-api-key-use-your-ai-agent) instead. aic reuses their auth.
-
-> **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
-
----
-
 ## ✨ Hunk-level commits, not file-level
 
 Most AI commit tools treat a **file** as the atomic unit. aic treats a **hunk** — a single contiguous change — as the unit.
@@ -57,6 +35,27 @@ src/auth.rs  (one file, three changes)
 Run `aic` with **nothing staged** and it auto-detects every unstaged hunk, groups them by concern, and commits each group separately — with the model's reasoning streamed live as it plans the split.
 
 Nothing gets lost or double-committed: every hunk lands in exactly one commit, or the plan is rejected.
+
+---
+
+## Quick Start
+
+```sh
+# 1. Install (macOS / Linux)
+curl --proto '=https' --tlsv1.2 -sSfL \
+  https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
+
+# 2. Configure — pick an API provider OR a CLI agent
+aic setup
+
+# 3. Commit — no need to stage, just run aic
+aic
+# → 3 atomic commits from your working tree
+```
+
+> 💡 **No API key?** Skip the provider setup — use [Claude Code, Codex, pi, or opencode](#-no-api-key-use-your-ai-agent) instead. aic reuses their auth.
+
+> **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
 
 ---
 
