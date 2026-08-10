@@ -997,6 +997,20 @@ fn clear_frame_bytes(prev_height: usize, cursor_hidden: bool) -> String {
     out
 }
 
+/// Whether `new` differs from `prev` only in its last row — same length, same
+/// every row above. This is the common streaming case: one token grew the
+/// in-progress partial line (the bottom row) and nothing else moved. When true,
+/// [`ReasoningRenderer::draw_rows`] rewrites just that bottom row in place
+/// instead of clearing and rewriting the whole block, which is what makes the
+/// feed read as fluid character growth rather than a flashing block. A roll
+/// (a line completed and the window shifted), a row count change, or any change
+/// above the bottom row all return `false` → full [`frame_bytes`] repaint.
+fn incremental_bottom(new: &[String], prev: &[String]) -> bool {
+    !new.is_empty()
+        && new.len() == prev.len()
+        && prev[new.len() - 1] != new[new.len() - 1]
+        && prev[..new.len() - 1] == new[..new.len() - 1]
+}
 impl ReasoningRenderer {
     /// Bind a renderer to stderr with `label` on the spinner row. `max_rows`
     /// is the reasoning window's rendered-row cap and `cursor_row` the
@@ -1609,6 +1623,38 @@ mod tests {
         assert_eq!(out, format!("\r{CLR_LINE}{UP}\r{CLR_LINE}{SHOW}"));
         // 1-row frame: a single clear, no movement.
         assert_eq!(clear_frame_bytes(1, true), format!("\r{CLR_LINE}{SHOW}"));
+    }
+    /// The incremental-repaint guard: only a lone change to the bottom row
+    /// (the in-progress line growing by one token) qualifies for the cheap
+    /// single-row rewrite. A roll (window shifted), a height change, a change
+    /// above the bottom, or identical frames all fall back to a full repaint —
+    /// the cases that would corrupt the screen if redrawn as a single row.
+    #[test]
+    fn incremental_bottom_only_when_lone_bottom_row_grew() {
+        let row = |s: &str| s.to_string();
+        // Bottom row grew, everything above identical → incremental.
+        assert!(incremental_bottom(
+            &[row("a"), row("b"), row("grow")],
+            &[row("a"), row("b"), row("gr")]
+        ));
+        // Identical → not incremental (a no-op write, handled before this fn,
+        // but the predicate must not claim a phantom bottom change either).
+        assert!(!incremental_bottom(
+            &[row("a"), row("b")],
+            &[row("a"), row("b")]
+        ));
+        // A row ABOVE the bottom changed (e.g. the spinner unfroze) → full
+        // repaint, never a lone bottom rewrite.
+        assert!(!incremental_bottom(
+            &[row("A"), row("b"), row("c")],
+            &[row("a"), row("b"), row("c")]
+        ));
+        // Height changed (a line completed, window rolled/grew) → full repaint.
+        assert!(!incremental_bottom(&[row("a"), row("b")], &[row("a")]));
+        assert!(!incremental_bottom(&[row("a")], &[row("a"), row("b")]));
+        // Empty is never incremental.
+        assert!(!incremental_bottom(&[], &[row("a")]));
+        assert!(!incremental_bottom(&[row("a")], &[]));
     }
 
     /// Regression: the reasoning stream must leave NO trace — neither a blank
