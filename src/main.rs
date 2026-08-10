@@ -4,6 +4,7 @@ pub mod completion;
 pub mod config;
 pub mod confirm;
 pub mod conflict;
+pub mod cursor;
 pub mod diff;
 pub mod display;
 pub mod generator;
@@ -101,11 +102,11 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // The DSR cursor-row query does up to ~200 ms of blocking tty I/O (poll
     // + raw-mode byte reads against a deadline). Run it on the blocking pool
     // so it stalls a worker, not the async reactor. A task panic degrades to
-    // the no-scroll [`progress::WindowSizing::fallback`] — decoration must
+    // the no-scroll [`cursor::WindowSizing::fallback`] — decoration must
     // never break the commit.
-    let sizing = tokio::task::spawn_blocking(progress::reasoning_window_rows)
+    let sizing = tokio::task::spawn_blocking(cursor::reasoning_window_rows)
         .await
-        .unwrap_or_else(|_| progress::WindowSizing::fallback());
+        .unwrap_or_else(|_| cursor::WindowSizing::fallback());
     let mut renderer =
         progress::ReasoningRenderer::new("Analyzing changes", sizing.max_rows, sizing.cursor_row);
     let start = Instant::now();
