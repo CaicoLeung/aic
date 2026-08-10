@@ -44,15 +44,25 @@ pub(crate) const SPINNER_TICK: Duration = Duration::from_millis(50);
 /// lingers in the generic loading state before the notice appears — the first
 /// delta cancels loading regardless.
 pub(crate) const LOADING_GRACE: Duration = Duration::from_secs(5);
-/// How long the final reasoning frame lingers after the analysis completes,
-/// before [`ReasoningRenderer::finish`] erases it — a guaranteed minimum dwell
-/// so the last lines are readable. The live stream is NOT paced to reading
-/// speed (that would block the commit — the tool's actual job — on
-/// decoration), so this tail is the only forced pause: small, bounded, and
-/// paid only when the final frame actually shows reasoning rows (a bare
-/// spinner — whitespace-only deltas that [`ThinkingView`] dropped — owes no
-/// dwell, since there is nothing to read).
-pub(crate) const READ_TAIL: Duration = Duration::from_millis(1500);
+/// While reasoning is actively streaming, idle-tick repaints are suppressed:
+/// the flowing text is itself the motion, so a tick repaint would only
+/// re-flash the stable rows (the original "chunky" cause). Once the model
+/// goes silent for longer than this, ticks resume repainting so the spinner
+/// keeps animating and the elapsed count keeps rising — the stall feedback.
+/// Roughly three tick periods: short enough that a stall is noticed promptly,
+/// long enough that a normal inter-delta gap (TTFT between tokens) never trips
+/// it.
+// ponytail: tuned by eye; raise if streaming still flashes, lower if the
+// spinner feels sluggish to restart after a stall.
+pub(crate) const ACTIVE_THRESHOLD: Duration = Duration::from_millis(150);
+
+/// Per-row stagger of the dissolution at [`ReasoningRenderer::finish`]: each
+/// row is erased one tick apart so the block visibly *dissolves* row-by-row
+/// (oldest last, bottom-up) rather than blinking out wholesale. Total dissolve
+/// ≈ `rows × DISSOLVE_STEP`, bounded because the row cap is bounded.
+// ponytail: visual tuning — raise for a slower, more legible dissolve, lower
+// if it drags the end of a fast commit.
+const DISSOLVE_STEP: Duration = Duration::from_millis(70);
 
 /// Hard ceiling on the reasoning window. A very tall terminal could otherwise
 /// paint dozens of rows, pushing the in-place region toward the bottom edge
@@ -1032,33 +1042,62 @@ impl ReasoningRenderer {
             prev_height: 0,
             active: false,
             cursor_hidden: false,
+            prev_rows: Vec::new(),
+            shown_elapsed: Duration::ZERO,
+            last_delta: None,
         }
     }
 
-    /// Paint one frame for the reasoning `window`. Safe to call on every
-    /// delta AND on every idle tick — the latter via `Some(elapsed)` keeps the
-    /// spinner animating and the elapsed count rising while the model is
-    /// silent between deltas, so the reasoning frame never freezes the way a
-    /// paint-only-on-delta renderer would during a long TTFT gap. A no-op off
-    /// a terminal. `in_code_start` is the markdown fence state entering the
-    /// window's first line, as tracked by [`ThinkingView`].
-    pub(crate) fn paint(
-        &mut self,
-        window: &[String],
-        in_code_start: bool,
-        elapsed: Option<Duration>,
-    ) {
+    /// Paint one frame for a content delta. The spinner is **frozen** here —
+    /// neither the glyph nor its elapsed count advances — so between tokens
+    /// only the in-progress line grows, and [`draw_rows`] can rewrite just that
+    /// one bottom row. That single-row update (vs. clearing and rewriting the
+    /// whole block every token) is the difference between fluid character
+    /// growth and the flashing "block-by-block" feed. The spinner animates
+    /// instead on stall ticks via [`Self::refresh`]. A no-op off a terminal.
+    pub(crate) fn paint(&mut self, window: &[String], in_code_start: bool) {
         if !self.term.is_term() {
             return;
         }
         let glyph = REASONING_GLYPHS[self.glyph % REASONING_GLYPHS.len()];
-        self.glyph = self.glyph.wrapping_add(1);
         let rows = reasoning_rows(
             glyph,
             self.label,
             window,
             self.feed_width,
-            elapsed,
+            Some(self.shown_elapsed),
+            self.max_rows,
+            in_code_start,
+        );
+        self.draw_rows(&rows);
+        self.last_delta = Some(std::time::Instant::now());
+    }
+
+    /// Idle-tick repaint. While streaming is active (`last_delta` within
+    /// [`ACTIVE_THRESHOLD`]) this is a no-op: the flowing text is itself the
+    /// motion, and a repaint would only re-flash the stable rows above it — the
+    /// original chunky symptom. Once the model falls silent past the threshold,
+    /// the spinner advances and the elapsed count rises so the wait stays
+    /// visible across a long TTFT gap without the feed ever freezing. A no-op
+    /// off a terminal.
+    pub(crate) fn refresh(&mut self, window: &[String], in_code_start: bool, elapsed: Duration) {
+        if !self.term.is_term() {
+            return;
+        }
+        if let Some(t) = self.last_delta
+            && t.elapsed() < ACTIVE_THRESHOLD
+        {
+            return;
+        }
+        self.glyph = self.glyph.wrapping_add(1);
+        self.shown_elapsed = elapsed;
+        let glyph = REASONING_GLYPHS[self.glyph % REASONING_GLYPHS.len()];
+        let rows = reasoning_rows(
+            glyph,
+            self.label,
+            window,
+            self.feed_width,
+            Some(elapsed),
             self.max_rows,
             in_code_start,
         );
@@ -1085,42 +1124,97 @@ impl ReasoningRenderer {
         self.draw_rows(&rows);
     }
 
-    /// Repaint `rows` in place via [`frame_bytes`]: one write of the assembled
-    /// escape sequence, then a flush. Pure byte assembly lives in
-    /// [`frame_bytes`] so the anti-flicker interleaving is unit-testable.
+    /// Repaint `rows` in place. The common streaming case — only the bottom
+    /// row grew — rewrites that one row where the cursor already sits, skipping
+    /// the full clear+rewrite entirely. Structural changes (first frame, a line
+    /// completing so the window rolls, a row expiring, a height change) fall
+    /// back to [`frame_bytes`]'s anti-flicker full repaint. Pure byte assembly
+    /// lives in [`frame_bytes`] / [`incremental_bottom`] so it stays unit-testable.
     fn draw_rows(&mut self, rows: &[String]) {
-        let first_frame = self.prev_height == 0;
-        // Record the cursor-hidden state BEFORE the write: the flag mirrors
-        // exactly when frame_bytes emits HIDE (prev_height == 0), so finishing
-        // the in-memory tracking ahead of the side effect means a hidden cursor
-        // can never be stranded — even if a future insertion between here and
-        // the write panicked, Drop's finish would still see cursor_hidden and
-        // emit the owed SHOW.
+        let first_frame = self.prev_rows.is_empty();
+        // Identical frame (a whitespace-only delta ThinkingView dropped, or a
+        // stall tick whose window hadn't moved): writing it would only flash.
+        if !first_frame && rows == self.prev_rows.as_slice() {
+            return;
+        }
+        // Record cursor-hidden BEFORE the write: the flag mirrors exactly when
+        // frame_bytes emits HIDE (first frame), so tracking it ahead of the
+        // side effect means a hidden cursor can never be stranded — even a
+        // panic between here and the write leaves Drop seeing the owed SHOW.
         self.cursor_hidden |= first_frame;
-        let (bytes, end_row) = frame_bytes(rows, self.prev_height, self.row, self.height);
-        let _ = self.term.write_str(&bytes);
-        let _ = self.term.flush();
+        if !first_frame && incremental_bottom(rows, &self.prev_rows) {
+            // The cursor already rests on the bottom row (every paint ends
+            // there), so a bare CR + clear + rewrite of just that row is the
+            // entire update — no ascent, no descent, stable rows untouched.
+            let last = rows.last().expect("non-empty by incremental_bottom");
+            let mut buf = String::from("\r");
+            buf.push_str(CLR_LINE);
+            buf.push_str(last);
+            let _ = self.term.write_str(&buf);
+            let _ = self.term.flush();
+        } else {
+            let (bytes, end_row) = frame_bytes(rows, self.prev_height, self.row, self.height);
+            let _ = self.term.write_str(&bytes);
+            let _ = self.term.flush();
+            self.row = end_row;
+        }
+        self.prev_rows.clear();
+        self.prev_rows.extend_from_slice(rows);
         self.prev_height = rows.len();
-        // The cursor now rests on the frame's bottom row; that absolute row is
-        // the next paint's start (frames scroll at the bottom margin, so the
-        // top drifts and cannot be derived from the row count alone).
-        self.row = end_row;
         self.active = true;
     }
 
-    /// End the reasoning stream: erase the whole frame — spinner row and
-    /// reasoning rows — so the block vanishes once thinking is done, and
-    /// restore the cursor to the line where the frame began (the cursor's
-    /// position at stream start), so the rest of the run's stderr continues
-    /// with no blank gap above or below. Idempotent; also the [`Drop`]
-    /// backstop for an aborted stream.
+    /// End the reasoning stream by **dissolving** the frame one row at a time,
+    /// each erased [`DISSOLVE_STEP`] apart, so the block visibly retreats
+    /// row-by-row instead of blinking out wholesale — the "linger then exit
+    /// one-by-one" close. The erase runs bottom-up (matching the terminal's
+    /// scroll direction) and, like the old one-shot clear, ends on the frame's
+    /// top row — exactly where the first frame began — so the cursor is
+    /// restored to the prompt's line and the next stderr output continues with
+    /// no gap above or below. Idempotent.
+    ///
+    /// The staggered waits are decoration at the *end* of analysis (the stream
+    /// is already complete), replacing the old fixed read-tail hold-then-erase:
+    /// the dissolve itself is the readability window. An *aborted* stream takes
+    /// the fast path in [`Drop`] instead, never blocking on decoration.
     pub(crate) fn finish(&mut self) {
         if !self.active {
             return;
         }
+        let n = self.prev_height;
+        for i in 0..n {
+            // Erase the lowest remaining row, flush so it shows, then ascend to
+            // the next — ending on the top row after n-1 ascents.
+            let mut buf = String::from("\r");
+            buf.push_str(CLR_LINE);
+            let _ = self.term.write_str(&buf);
+            let _ = self.term.flush();
+            if i + 1 < n {
+                let _ = self.term.write_str(UP);
+                let _ = self.term.flush();
+                std::thread::sleep(DISSOLVE_STEP);
+            }
+        }
+        if self.cursor_hidden {
+            let _ = self.term.write_str(SHOW);
+            let _ = self.term.flush();
+        }
+        self.prev_rows.clear();
+        self.prev_height = 0;
+        self.active = false;
+        self.cursor_hidden = false;
+    }
+
+    /// Fast wholesale erase — the [`Drop`] backstop for a stream that aborted
+    /// before [`finish`](Self::finish). Same byte sequence as the legacy
+    /// one-shot clear (bottom-up, ending on the top row, [`SHOW`] if the cursor
+    /// was hidden) but with no staggered waits, so an error or panic path never
+    /// hangs on decoration.
+    fn erase_frame(&mut self) {
         let bytes = clear_frame_bytes(self.prev_height, self.cursor_hidden);
         let _ = self.term.write_str(&bytes);
         let _ = self.term.flush();
+        self.prev_rows.clear();
         self.prev_height = 0;
         self.active = false;
         self.cursor_hidden = false;
@@ -1129,9 +1223,11 @@ impl ReasoningRenderer {
 
 impl Drop for ReasoningRenderer {
     fn drop(&mut self) {
-        // Backstop: if the stream aborted before `finish`, still erase the
-        // frame so the rest of the run's stderr is clean.
-        self.finish();
+        // Backstop: if the stream aborted before finish(), erase the frame fast
+        // (no staggered dissolve) so the rest of the run's stderr is clean.
+        if self.active {
+            self.erase_frame();
+        }
     }
 }
 

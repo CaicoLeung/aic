@@ -173,7 +173,7 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
                     got_output = true;
                     last_window = window.clone();
                     last_in_code_start = in_code_start;
-                    renderer.paint(&window, in_code_start, Some(start.elapsed()));
+                    renderer.paint(&window, in_code_start);
                 }
             }
             // Steady tick — two roles by mode:
@@ -204,22 +204,12 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
                     };
                     renderer.paint_loading(elapsed, notice);
                 } else {
-                    renderer.paint(&last_window, last_in_code_start, Some(elapsed));
+                    renderer.refresh(&last_window, last_in_code_start, elapsed);
                 }
             }
         }
     };
 
-    // Read-tail: hold the final reasoning frame for [`progress::READ_TAIL`] so
-    // the last lines are readable before `finish` erases the block. Skipped
-    // when there is nothing to read: a silent backend (`got_output` false)
-    // or a final frame whose window is empty (only the spinner row showed —
-    // whitespace-only deltas that `ThinkingView` dropped). The live stream is
-    // not paced — that would block the commit on decoration; this bounded
-    // tail is the only forced pause.
-    if got_output && !last_window.is_empty() {
-        tokio::time::sleep(progress::READ_TAIL).await;
-    }
     // Thinking is over: `finish` erases the reasoning/loading block (in-place
     // all along, so nothing ever hit the scrollback) and parks the cursor
     // below it. The renderer's Drop is a backstop if the stream aborted first.
