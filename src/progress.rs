@@ -255,6 +255,25 @@ impl Drop for RawTermios {
     }
 }
 
+/// Upper bound on the bytes consumed for one DSR reply (`ESC[<row>;<col>R`).
+/// Generous over any real reply, but finite so a runaway/malformed stream
+/// can't pin the cursor-row query or its late-reply drain in an unbounded
+/// read. Shared by [`query_cursor_row_core`] and [`drain_dsr_reply`] so the
+/// two stay in lockstep.
+const MAX_DSR_REPLY: usize = 32;
+
+/// Read exactly one byte from `fd`. Returns `None` on EOF or read error. The
+/// shared read primitive of the cursor-row query and its late-reply drain —
+/// both consume the DSR reply one byte at a time, each read preceded by a
+/// bounded `poll` whose timeout and retry policy the caller owns (they differ
+/// between the deadline-bounded query and the single-shot drain, so the poll
+/// stays at the call sites; only the byte read is shared).
+#[cfg(unix)]
+fn read_byte(fd: std::os::fd::RawFd) -> Option<u8> {
+    let mut byte = 0u8;
+    (unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) } == 1).then_some(byte)
+}
+
 /// The cursor-row query itself, against an already-validated tty `fd` (the
 /// caller checks `isatty` and that stderr is a terminal). Split from
 /// [`query_cursor_row`] so the full I/O path — pre-check, raw mode, byte
@@ -314,11 +333,9 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
         if ready <= 0 {
             continue;
         }
-        let mut byte = 0u8;
-        let n = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
-        if n != 1 {
+        let Some(byte) = read_byte(fd) else {
             break None;
-        }
+        };
         // 2. A byte that can't be part of `ESC[<row>;<col>R` is not the reply
         //    (user input, or garbage): bail immediately instead of waiting
         //    out the deadline in raw mode.
@@ -329,7 +346,7 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
         if byte == b'R' {
             break parse_dsr(&resp);
         }
-        if resp.len() > 32 {
+        if resp.len() > MAX_DSR_REPLY {
             break None;
         }
     };
@@ -349,10 +366,7 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
         if resp.is_empty() {
             while Instant::now() < drain_deadline {
                 if unsafe { libc::poll(&mut pfd, 1, 10) } > 0 {
-                    let mut first = 0u8;
-                    if unsafe { libc::read(fd, (&mut first as *mut u8).cast(), 1) } == 1
-                        && first == b'\x1b'
-                    {
+                    if read_byte(fd) == Some(b'\x1b') {
                         drain_dsr_reply(fd);
                     }
                     break;
@@ -405,14 +419,13 @@ fn drain_dsr_reply(fd: std::os::fd::RawFd) {
         revents: 0,
     };
     let mut n = 0usize;
-    while Instant::now() < deadline && n < 32 {
+    while Instant::now() < deadline && n < MAX_DSR_REPLY {
         if unsafe { libc::poll(&mut pfd, 1, 10) } <= 0 {
             break;
         }
-        let mut byte = 0u8;
-        if unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) } != 1 {
+        let Some(byte) = read_byte(fd) else {
             break;
-        }
+        };
         n += 1;
         if byte == b'R' {
             break;
@@ -635,18 +648,27 @@ fn classify_line(line: &str, in_code: bool) -> (LineKind, String, bool) {
     }
 }
 
+/// The [`Style`] for a [`LineKind`], or `None` for the plain passthrough
+/// ([`LineKind::Normal`]). Pure routing — split from [`style_kind`] so the
+/// per-kind mapping is unit-testable independently of TTY-gated ANSI emission.
+fn kind_style(kind: LineKind) -> Option<Style> {
+    match kind {
+        LineKind::Normal => None,
+        LineKind::Heading => Some(Style::new().bold()),
+        LineKind::Code => Some(Style::new().fg(Color::Cyan)),
+        LineKind::CodeFence => Some(Style::new().dim()),
+    }
+}
+
 /// Apply the kind's ANSI style to an already-wrapped piece. `Normal` is a
 /// no-op (plain text); the others go through `console`, which strips the ANSI
 /// on a non-TTY so piped output stays clean. Styling is applied *after* wrap
 /// so the width math in [`crate::layout::wrap_line`] never counts escape bytes.
 fn style_kind(piece: &str, kind: LineKind) -> String {
-    let style = match kind {
-        LineKind::Normal => return piece.to_string(),
-        LineKind::Heading => Style::new().bold(),
-        LineKind::Code => Style::new().fg(Color::Cyan),
-        LineKind::CodeFence => Style::new().dim(),
-    };
-    style.apply_to(piece).to_string()
+    match kind_style(kind) {
+        Some(style) => style.apply_to(piece).to_string(),
+        None => piece.to_string(),
+    }
 }
 
 /// Build the visual rows for one reasoning frame: the spinner+label row on
@@ -1550,10 +1572,11 @@ mod tests {
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
     }
 
-    /// The styling path is live: a bold style actually emits ANSI when forced
-    /// (in the real run `paint`'s `is_term` guard is what gates emission; this
-    /// forces it so the test process — not a TTY — still observes the escape,
-    /// guarding against style_kind ever silently becoming a no-op).
+    /// The style-emission path is live: a bold style actually emits ANSI when
+    /// forced (in the real run `paint`'s `is_term` guard gates emission; this
+    /// forces it so the test process — not a TTY — still observes the escape).
+    /// Guards the *apply* half of styling; the per-kind routing is covered by
+    /// [`kind_style_routes_each_line_kind`].
     #[test]
     fn styling_path_emits_ansi_when_forced() {
         let s = Style::new().bold().force_styling(true);
@@ -1561,6 +1584,30 @@ mod tests {
         assert!(
             styled.contains("\x1b["),
             "no ANSI escape emitted: {styled:?}"
+        );
+    }
+
+    /// [`kind_style`] routes each [`LineKind`] to its style: the three content
+    /// kinds each select a style, `Normal` selects none (the plain passthrough).
+    /// Catches a routing regression — e.g. `Code` returning `None` — that would
+    /// silently strip styling from a whole line kind, which the TTY-gated
+    /// emission test above cannot see (ANSI is stripped in a non-TTY test run).
+    #[test]
+    fn kind_style_routes_each_line_kind() {
+        assert!(kind_style(LineKind::Normal).is_none());
+        assert!(kind_style(LineKind::Heading).is_some());
+        assert!(kind_style(LineKind::Code).is_some());
+        assert!(kind_style(LineKind::CodeFence).is_some());
+    }
+
+    /// [`style_kind`] leaves plain reasoning lines untouched: `Normal`
+    /// short-circuits before any [`Style`], so unstyled prose round-trips
+    /// verbatim and is never accidentally bolded or coloured.
+    #[test]
+    fn style_kind_normal_is_verbatim_passthrough() {
+        assert_eq!(
+            style_kind("plain reasoning", LineKind::Normal),
+            "plain reasoning"
         );
     }
 
