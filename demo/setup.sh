@@ -30,17 +30,8 @@ pub fn check_token(token: &str) -> bool {
     true
 }
 
-fn get_expiry(token: &str) -> u64 {
-    0
-}
-
-fn now() -> u64 {
-    0
-}
-
-pub fn login(user: &str, pass: &str) -> Option<String> {
-    None
-}
+fn get_expiry(token: &str) -> u64 { 0 }
+fn now() -> u64 { 0 }
 RUST
 
 git add -A
@@ -59,34 +50,14 @@ pub fn check_token(token: &str) -> bool {
     true
 }
 
-fn get_expiry(token: &str) -> u64 {
-    0
-}
+fn get_expiry(token: &str) -> u64 { 0 }
 
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0)
 }
 
-pub fn login(user: &str, pass: &str) -> Option<String> {
-    let token = verify_credentials(user, pass)?;
-    Some(token)
-}
-
-fn verify_credentials(user: &str, pass: &str) -> Option<String> {
-    None
-}
-
-pub fn login_oauth2(provider: &str, code: &str) -> Option<String> {
-    let token = exchange_code(provider, code)?;
-    Some(token)
-}
-
-fn exchange_code(provider: &str, code: &str) -> Option<String> {
-    None
-}
+pub fn login_oauth2(provider: &str) -> Option<String> { None }
 RUST
 
 # Leave changes unstaged — aic will detect and split them
