@@ -168,6 +168,60 @@ fn query_cursor_row() -> Option<usize> {
     query_cursor_row_core(in_fd)
 }
 
+/// RAII guard that switches a tty fd into raw input mode on construction and
+/// restores the original termios on Drop — on every exit path, including
+/// unwinding. The cursor-row query must never leave the user's terminal in
+/// raw mode (canonical off, echo off — an unrecoverable-from-the-keyboard
+/// state the user would have to `stty sane` out of), so the restore is tied
+/// to the guard's lifetime rather than a manual `tcsetattr` at the end of
+/// [`query_cursor_row_core`]. A panic or an early return inserted between
+/// entering raw mode and that final call still unwinds the guard and
+/// restores the terminal — the property the bare trailing restore could not
+/// guarantee.
+#[cfg(unix)]
+struct RawTermios {
+    fd: std::os::fd::RawFd,
+    old: libc::termios,
+}
+
+#[cfg(unix)]
+impl RawTermios {
+    /// Read the current termios, switch the fd to raw input (canonical mode
+    /// off so the DSR reply is not buffered until a newline it never
+    /// carries), and preserve output processing (OPOST) so stderr stays
+    /// translated during the brief raw window. Returns `None` if either
+    /// termios call fails (not a tty, or permission denied) — the caller
+    /// then skips the query without having entered raw mode.
+    fn enter(fd: std::os::fd::RawFd) -> Option<Self> {
+        unsafe {
+            let mut old: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut old) != 0 {
+                return None;
+            }
+            let mut raw = old;
+            libc::cfmakeraw(&mut raw);
+            raw.c_oflag = old.c_oflag;
+            if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
+                return None;
+            }
+            Some(Self { fd, old })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawTermios {
+    fn drop(&mut self) {
+        // Best-effort restore: a failure here is ignored (nothing useful
+        // can be done from Drop without aborting, and `old` was read
+        // successfully by `enter` so the value is sound). TCSANOW, not
+        // TCSAFLUSH, so any input the drain left pending is preserved.
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.old);
+        }
+    }
+}
+
 /// The cursor-row query itself, against an already-validated tty `fd` (the
 /// caller checks `isatty` and that stderr is a terminal). Split from
 /// [`query_cursor_row`] so the full I/O path — pre-check, raw mode, byte
@@ -212,22 +266,11 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
         return None;
     }
 
-    // Raw input for the reply: canonical mode would buffer it until a
-    // newline the response never carries. Output processing (OPOST) is kept
-    // so stderr output stays translated during the brief raw window.
-    let restore = unsafe {
-        let mut old: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut old) != 0 {
-            return None;
-        }
-        let mut raw = old;
-        libc::cfmakeraw(&mut raw);
-        raw.c_oflag = old.c_oflag;
-        if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
-            return None;
-        }
-        old
-    };
+    // Raw input for the reply, held by `_raw` whose Drop restores termios on
+    // every path — including a panic between here and the end of the
+    // function — so the terminal can never be stranded in raw mode. See
+    // [`RawTermios::enter`] for the mode flags (canonical off, OPOST kept).
+    let _raw = RawTermios::enter(fd)?;
     let deadline = Instant::now() + Duration::from_millis(200);
     let mut resp: Vec<u8> = Vec::with_capacity(16);
     let result = loop {
@@ -286,9 +329,9 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
             drain_dsr_reply(fd);
         }
     }
-    unsafe {
-        libc::tcsetattr(fd, libc::TCSANOW, &restore);
-    }
+    // `_raw` restores termios as it goes out of scope here — the guard's
+    // Drop is the single restore point, so every path (timeout, garbage,
+    // drain, panic) unwinds it.
     result
 }
 
@@ -1978,6 +2021,33 @@ mod pty_tests {
         unsafe { libc::poll(&mut pfd, 1, timeout_ms as libc::c_int) > 0 }
     }
 
+    /// Snapshot a fd's termios, for asserting the query restored it.
+    fn termios_of(fd: RawFd) -> libc::termios {
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(fd, &mut t), 0, "tcgetattr failed");
+            t
+        }
+    }
+
+    /// Like [`spawn_terminal`] but leaves the slave in its default canonical
+    /// mode (no [`make_raw`]). The query enters raw mode itself to read the
+    /// reply, so canonical mode does not block the Reply/Silent scripts; and
+    /// leaving the slave canonical makes a successful termios restore
+    /// observable as a return to canonical-with-echo, whereas raw-to-raw
+    /// (what [`spawn_terminal`] produces) would hide a missing restore.
+    fn spawn_canonical_terminal(script: Script) -> (RawFd, RawFd, i32) {
+        let (master, slave) = open_pty();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe { libc::close(slave) };
+            let code = terminal_script(master, script);
+            unsafe { libc::_exit(code) };
+        }
+        (master, slave, pid)
+    }
+
     /// The full DSR round trip over a real PTY: the fake terminal sees the
     /// query and answers `ESC[21;1R`; the query reports row 21.
     #[test]
@@ -2057,5 +2127,40 @@ mod pty_tests {
             libc::close(slave);
         }
         assert_eq!(reap(pid), 0);
+    }
+
+    /// termios restore is panic-safe via the RAII guard: the query enters raw
+    /// mode to read the reply, and the guard's Drop must restore the original
+    /// mode on every path — including the timeout path (the one most likely
+    /// to skip cleanup back when restore was a manual trailing `tcsetattr`).
+    /// The slave starts canonical (no [`make_raw`]), so a successful restore
+    /// is observable as ICANON set afterwards; a stranded-raw regression
+    /// leaves ICANON clear.
+    #[test]
+    fn dsr_restores_termios_even_on_timeout_path() {
+        let (master, slave, pid) = spawn_canonical_terminal(Script::Silent);
+        let before = termios_of(slave);
+        assert!(
+            before.c_lflag & libc::ICANON != 0,
+            "slave must start canonical for the restore to be observable"
+        );
+        let row = query_cursor_row_core(slave);
+        assert_eq!(row, None, "Silent script times out");
+        let after = termios_of(slave);
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(reap(pid), 0);
+        assert_eq!(
+            after.c_lflag & libc::ICANON,
+            before.c_lflag & libc::ICANON,
+            "ICANON not restored — slave left stranded in raw mode"
+        );
+        assert_eq!(
+            after.c_lflag & libc::ECHO,
+            before.c_lflag & libc::ECHO,
+            "ECHO not restored"
+        );
     }
 }
