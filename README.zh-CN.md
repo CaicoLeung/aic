@@ -2,7 +2,7 @@
 
 > **English:** [README.md](./README.md)
 
-AI 驱动的 git commit 工具，帮你写 Conventional Commit message —— 并把你的改动拆成 **hunk 级别**的 atomic commit，而不是 file 级别。
+AI 驱动的 git commit 工具，写出 **真正原子化** 的提交信息 —— 而且可以直接复用你已有的 AI 工具，**无需 API key**。
 
 🌐 **官网:** <https://caicoleung.github.io/aic-web/>
 
@@ -11,206 +11,202 @@ AI 驱动的 git commit 工具，帮你写 Conventional Commit message —— �
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
+![aic 把一个文件拆成三个原子提交](docs/demo.gif)
+
 ---
 
-## ✨ 核心亮点：hunk 级别的 commit，而非 file 级别
-
-多数 AI commit 工具把 **file** 当作 atomic 单位。aic 则把 **hunk**（一段连续的代码改动）当作 atomic 单位。
-
-在一个文件里做了三处互不相关的改动，`aic` 会产出三个干净、atomic 的 commit —— 无需手动 `git add -p`，也不会出现 concern 混杂的 commit。
-
-```
-你在同一个文件里做了三处互不相关的改动：
-
-  src/auth.rs
-    ├─ hunk 1  修复 token-expiry 检查    →  fix(auth): correct token expiry check
-    ├─ hunk 2  新增 OAuth2 login provider →  feat(auth): add OAuth2 login provider
-    └─ hunk 3  整理 import               →  style(auth): tidy imports
-
-其他工具:  1 个 commit  "update src/auth.rs"     ❌ concern 混杂，history 模糊
-aic:       3 个 commit，每个对应一处逻辑改动      ✅
-```
-
-**为什么安全：**
-
-- **Exact-partition 校验** —— 每个 hunk 精确分配到恰好一个 commit，无重叠、无遗漏，因此不会丢失或重复 commit。只要有任何一个 hunk 缺失或越界，整个 plan 就会被拒绝。
-- **Context-aware 的 staging** —— 选中的 hunk 会重建为 patch，再用 `git apply --cached` stage；该命令会依据周围的 context 行重新定位每个 hunk，因此即便前一个 commit 改变了行号，hunk 依然能正确落地。
-- **Live reasoning** —— aic 会在 model 决定拆分方案时实时流式输出它的思考过程，让你在 commit 落地前看清每个 hunk *为何* 被归到一起。
-
-## Features
-
-- **Hunk 级别的批量拆分** —— 一个文件、多种 concern？aic 按 hunk 拆成多个 atomic commit（`git add -p` 风格，完全非交互）
-- **Multi-provider** —— OpenAI、Anthropic、Gemini、DeepSeek、Groq、xAI、Mistral、OpenRouter、Perplexity、Together、Ollama，以及任何 OpenAI-compatible server
-- **Conflict resolution** —— 正处于 merge 中？`aic resolve` 会逐文件给出解决方案供你 review 和批准，然后完成 merge
-- **Interactive setup** —— `aic setup` 引导你完成 provider、API key、model 的选择，并可开启提交前确认开关
-- **Conventional Commits** —— message 遵循 [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) 规范
-- **可配置** —— config 文件，或单次运行 override
-
-## Installation
-
-### Binary（推荐）
-
-**macOS / Linux:**
+## 快速上手
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
-```
+# 1. 安装（macOS / Linux）
+curl --proto '=https' --tlsv1.2 -sSfL \
+  https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh | sh
 
-**Windows (PowerShell):**
-
-```powershell
-irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex
-```
-
-### Homebrew
-
-**macOS / Linux:**
-
-```sh
-brew tap CaicoLeung/aic
-brew install aic
-```
-
-用 `brew upgrade aic` 更新。Homebrew 安装会被自动识别，因此 `aic update` 会直接引导你使用 brew，不会改动任何东西。
-
-### Build from source
-
-```sh
-git clone https://github.com/CaicoLeung/aic.git
-cd aic
-cargo build --release
-# binary 位于 target/release/aic
-```
-
-### Shell 补全（Tab 自动补全）
-
-一条命令即可安装补全 —— `aic` 会交互式让你选择 shell（默认高亮 `$SHELL` 探测到的），并把脚本写入约定位置：
-
-```sh
-aic completion            # 交互式选择 shell 并安装
-```
-
-重载 shell（`exec $SHELL`）后 Tab 补全即生效。支持：`bash`、`fish`、`zsh`、`nushell`。`bash` 和 `fish` 重载即自动生效；`zsh` 需将 `site-functions` 目录加入 `$fpath`（安装后会打印该条目）——Homebrew 自带的 zsh 已包含该目录，而 macOS 系统 zsh 则不含；`nushell` 需在 `config.nu` 加一行 `source`（安装后会打印）。
-
-## Quick Start
-
-```sh
-# 1. 配置你的 LLM provider
+# 2. 配置 —— 选择 API provider 或 CLI agent
 aic setup
 
-# 2. stage 一些文件并 commit
-git add src/main.rs
-aic
+# 3. 提交
+git add src/main.rs && aic
 # → feat: add CLI argument parsing
 #   Created commit abc1234
-
-# 3. 或者什么都不 stage 直接运行 —— aic 会把你的 workdir 改动
-#    自动拆分为 hunk 级别的 atomic commit
-aic
 ```
 
-## Usage
+> 💡 **没有 API key？** 跳过 provider 配置 —— 直接使用 [Claude Code、Codex、pi 或 opencode](#-没有-api-key复用你的-ai-agent)，aic 会复用它们的登录认证。
 
-| 命令           | 说明                                                                                                                  |
-| -------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `aic`          | 用一条 message commit 已 stage 的文件。若没有 stage 任何内容，则把所有未 stage 的改动批量规划为 **hunk 级别**的 atomic commit。 |
-| `aic resolve`  | 通过 LLM 解决 git merge conflict。逐文件给出方案供 review，然后完成 merge。                                            |
-| `aic setup`    | Interactive 向导，选择 provider、输入 API key、选择 model；也可切换提交前确认。                                          |
-| `aic list`     | 展示已 resolve 的 config：provider、model，以及每个值来自哪里（config / default）。                                     |
-| `aic update`   | 从 GitHub Releases 把 aic 更新到最新版本。                                                                             |
+> **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
 
-## How It Works
+---
+
+## ✨ hunk 级别的提交，而非 file 级别
+
+多数 AI commit 工具把 **file** 当作原子单位。aic 则把 **hunk**（一段连续的代码改动）当作原子单位。
+
+在一个文件里做了三处互不相关的改动，`aic` 会产出三个干净的提交 —— 无需手动 `git add -p`，也不会出现 concern 混杂的历史。
 
 ```
-aic
-  ├─ 有 staged 文件？ → diff staged 文件 → LLM 写 message → commit
-  └─ 没有 stage？     → diff workdir → LLM 把每个 hunk 划分到不同 batch：
-        对每个 batch（model 思考时实时流式输出 reasoning）：
-          通过 `git apply --cached` stage 其 hunk（按 context 重新定位）
-          → LLM 写 message → commit
+src/auth.rs  （一个文件，三处改动）
 
-aic resolve
-  └─ 处于 conflict 的 repo？ → 对每个冲突文件：
-        LLM 提出解决方案 → 校验 marker（重试一次）
-        → review diff → apply? [y/n] → git add
-        → 全部解决后完成 merge（git --continue）
+  其他工具:  1 个 commit  "update src/auth.rs"        ❌ concern 混杂
+  aic:       3 个 commit，每个对应一处逻辑改动          ✅
+
+    ├─ hunk 1  →  fix(auth): correct token expiry check
+    ├─ hunk 2  →  feat(auth): add OAuth2 login provider
+    └─ hunk 3  →  style(auth): tidy imports
 ```
 
-所有 commit message 遵循 Conventional Commits（`feat:`、`fix:`、`refactor:` 等），可带可选 body。
+什么都不 stage 直接运行 `aic`，它会自动检测所有未暂存的 hunk，按逻辑 concern 分组，逐组提交 —— 分组时模型的推理过程实时流式输出。
 
-### Hunk splitter 内部流程
+不会丢失或重复提交：每个 hunk 恰好落在一个 commit 中，否则整个 plan 会被拒绝。
 
-1. **Diff 一次** —— aic 取出每个文件 workdir 对比 HEAD 的 diff，并给其 hunk 编号（1、2、3 ……）。
-2. **Partition** —— model 把每个 hunk index 分配到恰好一个 batch，按逻辑 concern 分组。一个 batch 可以携带来自多个文件的 hunk；同一个文件的 hunk 也可以分散到多个 batch。
-3. **Validate** —— 校验该 plan 是否为 *exact partition*：每个 hunk 恰好覆盖一次，无重叠，无越界或未知文件引用。校验失败则不会产生任何 commit。
-4. **Stage & commit** —— 对每个 batch，把选中的 hunk 重建为 patch，用 `git apply --cached` apply；该命令会按 context 重新定位 hunk，因此即便前一个 commit 改变了行号也能正确落地。随后生成 message 并创建 commit。
+---
 
-## Configuration
+## 🔑 没有 API key？复用你的 AI agent
 
-Config 文件是唯一的真相来源：`~/.config/aic/config.toml`。provider 设置**不**读取环境变量——`aic setup` 保存的值就是 `aic` 运行时实际使用的值。
+已经安装并登录了 [Claude Code](https://docs.anthropic.com/claude/docs/claude-code)、[OpenAI Codex](https://github.com/openai/codex)、[pi](https://pi.dev) 或 [opencode](https://opencode.ai)？aic 可以在 **headless 模式** 下驱动它 —— 无需 API key。
 
-| 字段       | 用途                                            | 默认值           |
-| ---------- | ----------------------------------------------- | ---------------- |
-| `backend`  | provider 名称                                   | `openai`         |
-| `api_key`  | API key                                         | —                |
-| `model`    | model ID                                        | Provider default |
-| `base_url` | endpoint base URL（Ollama / OpenAI-compatible） | Provider default |
+```sh
+aic setup    # → 选择 "CLI agent" → 选你的工具 → 完成
+```
 
-### Resolution order
-
-对 `backend`、`api_key`、`model`、`base_url` 每一项：
-
-1. Config 文件（`~/.config/aic/config.toml`）
-2. Built-in default
-
-### 提交前确认
-
-默认情况下 `aic` 生成 message 后立即提交——你只能在提交*之后*看到 message。如果你用 GPG 签名提交（签名弹窗在你能看到要签什么之前就会触发），或者你本地跑的是较弱模型、大提交的草稿需要人工检查，可以开启该选项：
+或者直接编辑 `~/.config/aic/config.toml`：
 
 ```toml
-confirm_before_commit = true
+backend_kind = "cli"
+command = "claude"
+args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
 ```
 
-写入 `~/.config/aic/config.toml`，或在 `aic setup` 中切换。开启后，`aic` 会在每次提交前展示草拟的 message（subject + body）以及将落地的文件，然后提供四个选项的菜单：
+aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下运行 agent。每个预设都锁定为只读或纯文本，因此注入的指令无法触碰你的工作区。两个 backend 的字段可以共存于配置文件中；`backend_kind` 决定哪个生效。
 
-- **Commit** — 按草稿提交
-- **Re-generate** — 对同一 diff 重新生成一份草稿
-- **Edit** — 编辑完整 message（用 `$VISUAL`/`$EDITOR` 打开临时文件；未设置时回退到 nano/vim/vi/emacs），然后回到菜单
-- **Abort** — 结束本次运行，不再提交
+其他预设（Codex、pi、opencode）见 [CLI-agent 预设](#cli-agent-预设)。
 
-Batch 模式下 Abort 后，已提交的 batch 保持不变，其余更改留在工作区，重新运行 `aic` 即可继续。
+---
 
-### 支持的 provider
+## 功能特性
 
-| Provider          | 默认 model                                 | API key  | Base URL                                       |
-| ----------------- | ------------------------------------------ | -------- | ---------------------------------------------- |
-| OpenAI            | `gpt-5-mini`                               | required | built-in                                       |
-| Anthropic         | `claude-haiku-4-5`                         | required | built-in                                       |
-| Gemini            | `gemini-2.5-flash`                         | required | built-in                                       |
-| DeepSeek          | `deepseek-v4-flash`                        | required | built-in                                       |
-| Groq              | `llama-3.3-70b-versatile`                  | required | built-in                                       |
-| xAI               | `grok-4.3`                                 | required | built-in                                       |
-| Mistral           | `mistral-small-latest`                     | required | built-in                                       |
-| OpenRouter        | _(必须指定 model)_                         | required | built-in                                       |
-| Perplexity        | `sonar`                                    | required | built-in                                       |
-| Together          | `meta-llama/Llama-3.3-70B-Instruct-Turbo`  | required | built-in                                       |
-| Ollama            | `llama3.3`                                 | none     | optional（默认 `http://localhost:11434`）      |
-| OpenAI-compatible | _(必须指定 model)_                         | optional | required                                       |
+- **Hunk 级别拆分** —— 一个文件、多种 concern？按 hunk 拆成多个原子提交，完全非交互
+- **两种 backend** —— API provider（支持 12+ 家）或 CLI agent（Claude Code、Codex、pi、opencode —— 无需 API key）
+- **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
+- **实时推理** —— 观看模型思考拆分方案的全过程
+- **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
+- **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 之间切换
 
-OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config 中设置 `model`（运行 `aic setup`）。OpenAI-compatible provider 还要求设置 `base_url`，它通过 OpenAI client 路由到任何兼容 OpenAI chat-completions API 的 server（LM Studio、vLLM、各类 gateway）。
+## 安装
 
-## 解决 merge conflict
+| 方式 | 命令 |
+|------|------|
+| **二进制**（macOS/Linux） | `curl -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh \| sh` |
+| **Homebrew** | `brew tap CaicoLeung/aic && brew install aic` |
+| **源码编译** | `git clone … && cargo build --release` → `target/release/aic` |
 
-当你的 repo 处于 merge 中时运行 `aic resolve`。它会读取每个冲突文件，给出一份不含 marker 的解决方案，向你展示 diff，并逐文件询问 `apply?`。批准你信任的部分，其余保持原样。当没有未 merge 的内容残留时，它会替你执行该 merge 的 `--continue`。
+Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 
-你也可以在 conflict 的 repo 里直接运行普通的 `aic` —— 它会察觉并提议移交给 resolve，同时一个 commit guard 会阻止任何仍带有 conflict marker 的 commit。
+## 命令一览
 
-**v1 限制：** `aic resolve` 只处理 conflict 的 **merge** 状态 —— 若检测到 rebase 或 `am` 进行中则会被拒绝。Binary、超大体积、以及 delete/modify 类型的 conflict 会被跳过并给出原因，由你手动解决。Finalize 是 all-or-nothing：只要还有未 merge 的路径，`--continue` 就会被阻塞，hand-off 也会明确告诉你还剩什么。
+| 命令 | 说明 |
+|------|------|
+| `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
+| `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
+| `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
+| `aic use <provider>` | 切换到已通过 `aic setup` 配置过的 provider。 |
+| `aic list` | 展示已 resolve 的 config 及每个值的来源。 |
+| `aic update` | 更新到最新版本。 |
+| `aic completion` | 安装 shell 补全。 |
 
-## Contributing
+## 配置
+
+配置文件位于 `~/.config/aic/config.toml` —— 唯一真相来源（**不**读取环境变量）。
+
+**两种 backend**，通过 `backend_kind` 切换：
+
+| `backend_kind` | 使用什么 | 关键字段 |
+|----------------|---------|---------|
+| `"api"`（默认） | 通过 HTTP 调用 LLM API provider | `backend`、`api_key`、`model`、`base_url` |
+| `"cli"` | 本地 coding-agent CLI | `command`、`args`、`timeout_secs` |
+
+> ⚠️ **想在提交前审核？** 设置 `confirm_before_commit = true`，每次提交前弹出 **提交 / 重新生成 / 编辑 / 中止** 菜单。
+
+完整参考：[provider 表](#支持的-provider) · [CLI-agent 预设](#cli-agent-预设) · [配置字段](#配置字段)。
+
+---
+
+## 解决 merge 冲突
+
+在处于 merge 中的 repo 运行 `aic resolve`。它会读取每个冲突文件，提出不含 marker 的解决方案，展示 diff，并逐文件询问 `apply?`。当没有未 merge 的内容残留时，它会替你执行 merge 的 `--continue`。在冲突 repo 中直接运行 `aic` 也会察觉并提议移交给 resolve。
+
+## 贡献
 
 详见 [CONTRIBUTING.zh-CN.md](./CONTRIBUTING.zh-CN.md) — 分支规则、提交风格、评审预期。(English: [CONTRIBUTING.md](./CONTRIBUTING.md))
 
-## License
+## 许可证
 
 [MIT](https://github.com/CaicoLeung/aic/blob/main/LICENSE)
+
+---
+
+<details>
+<summary><b>📋 完整配置参考</b></summary>
+
+### 支持的 provider
+
+| Provider | 默认 model | API key | Base URL |
+|----------|-----------|---------|----------|
+| OpenAI | `gpt-5-mini` | 必需 | 内置 |
+| Anthropic | `claude-haiku-4-5` | 必需 | 内置 |
+| Gemini | `gemini-2.5-flash` | 必需 | 内置 |
+| DeepSeek | `deepseek-v4-flash` | 必需 | 内置 |
+| Groq | `llama-3.3-70b-versatile` | 必需 | 内置 |
+| xAI | `grok-4.3` | 必需 | 内置 |
+| Mistral | `mistral-small-latest` | 必需 | 内置 |
+| OpenRouter | _(需指定 `model`)_ | 必需 | 内置 |
+| Perplexity | `sonar` | 必需 | 内置 |
+| Together | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | 必需 | 内置 |
+| Ollama | `llama3.3` | 无 | `http://localhost:11434` |
+| OpenAI-compatible | _(需指定 `model`)_ | 可选 | 必需 |
+
+OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config 中设置 `model`。OpenAI-compatible provider 还需要 `base_url`，通过 OpenAI client 路由（LM Studio、vLLM、各类 gateway）。
+
+### CLI-agent 预设
+
+每个预配有专用的解码器来处理对应 CLI 的 stdout 格式，因此 aic 能在 CLI 支持的情况下流式输出推理过程，并干净地提取回答。
+
+```toml
+# OpenAI Codex — exec --json，只读沙箱
+backend_kind = "cli"
+command = "codex"
+args = ["exec", "--json", "-s", "read-only", "{prompt}"]
+```
+
+```toml
+# pi — --no-tools 禁用所有工具；--mode json 流式输出推理 + 回答
+backend_kind = "cli"
+command = "pi"
+args = ["--no-tools", "--mode", "json", "-p", "{prompt}"]
+```
+
+```toml
+# opencode — run --format json；复用自身认证（cursor oauth / provider keys）
+backend_kind = "cli"
+command = "opencode"
+args = ["run", "--format", "json", "{prompt}"]
+```
+
+该 CLI 必须已安装并登录 —— aic 不负责安装或认证。
+
+详见 [ADR 0010](docs/adr/0010-cli-agent-backend.md)（backend 设计）和 [ADR 0011](docs/adr/0011-explicit-backend-discriminator.md)（`backend_kind` 判别字段）。
+
+### 配置字段
+
+| 字段 | 用途 | 默认值 |
+|------|------|--------|
+| `backend_kind` | `"api"` 或 `"cli"` | `"api"` |
+| `backend` | provider 名称（API backend） | `openai` |
+| `api_key` | API key（API backend） | — |
+| `model` | model ID（API backend） | Provider default |
+| `base_url` | endpoint URL（Ollama / OpenAI-compatible） | Provider default |
+| `command` | CLI 命令（CLI backend） | — |
+| `args` | Argv 模板，`{prompt}` 会被替换 | `["{prompt}"]` |
+| `timeout_secs` | 每次调用空闲超时（CLI backend） | `240`（流式）/ `600`（批量） |
+| `confirm_before_commit` | 提交前显示审核菜单 | `false` |
+
+</details>
