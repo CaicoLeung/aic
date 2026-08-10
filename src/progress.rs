@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Duration;
 
-use crate::layout::{MARGIN, terminal_width, wrap_line};
+use crate::layout::{MARGIN, terminal_height, terminal_width, wrap_line};
 
 /// Minimum usable width for in-place progress rendering: the spinner glyph +
 /// its label need at least this much room, so a pathologically narrow terminal
@@ -69,39 +69,76 @@ const MAX_REASONING_ROWS: usize = 40;
 /// was scrolling out of, so growing it is the direct fix.
 ///
 /// But the window is bounded by a hard geometric constraint: the in-place
-/// renderer paints **downward from the cursor** with cursor-down moves that
-/// clamp at the bottom margin instead of scrolling. A region taller than the
-/// rows left below the cursor therefore **collapses** — several frame rows
+/// renderer paints **downward from the cursor**, and cursor-down moves clamp
+/// at the bottom margin instead of scrolling. A region taller than the rows
+/// left below the cursor therefore **collapses** — several frame rows
 /// overwrite the same bottom physical row, so the reasoning is invisible, and
 /// the erase at [`ReasoningRenderer::finish`] cannot reclaim what was never
 /// cleanly painted. Sizing to the *full* terminal height (`h - 3`) assumed the
 /// cursor starts in the top three rows; in reality it sits at the shell prompt
 /// — mid-screen or lower — so a full-height window collapsed in the common
 /// case. The window therefore queries the cursor's actual row (DSR) and sizes
-/// to the rows genuinely available below it — down to a one-line minimum on a
-/// bottom-row cursor, and capped at [`MAX_REASONING_ROWS`]. When the cursor
-/// cannot be queried, [`REASONING_FALLBACK_ROWS`] (the pre-dynamic fixed cap)
-/// is used.
-pub(crate) fn reasoning_window_rows() -> usize {
-    // `Term::size()` -> (rows, cols); height is `.0`. 0 on a non-TTY/pipe ->
-    // assume a conventional 24-row terminal (parity with width's fallback).
-    let h = Term::stderr().size().0 as usize;
-    let h = if h == 0 { 24 } else { h };
-    reasoning_rows_for(h, query_cursor_row())
+/// to the rows genuinely available below it — capped at [`MAX_REASONING_ROWS`].
+///
+/// Two regimes, decided by how much room the cursor actually has below it:
+///
+/// * **Fit** — the cursor is at least a couple of rows off the bottom
+///   (`height - cursor_row >= 2`): the frame (spinner + up to `max_rows`
+///   reasoning rows) fits in the rows from the cursor's row to the bottom
+///   (`height - cursor_row + 1`), so `max_rows = height - cursor_row` and the
+///   screen never moves.
+/// * **Scroll** — the cursor sits in the bottom two rows: there is no room to
+///   fit a readable window, so the renderer grows the frame past the bottom
+///   margin by scrolling the screen (a `\n` at the bottom margin, which the
+///   cursor-down clamp would otherwise swallow). The cap is the pre-dynamic
+///   fixed budget, clamped so the frame still fits on screen — no reasoning
+///   row ever lands in the scrollback. This is the common case: the shell
+///   prompt (and therefore the frame's start row) usually sits on the last
+///   line of a full screen, and the old fixed-12 window simply collapsed
+///   there.
+///
+/// When the cursor cannot be queried, [`REASONING_FALLBACK_ROWS`] (the
+/// pre-dynamic fixed cap) is used and the renderer never scrolls — the
+/// user-visible baseline before the sizing regression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowSizing {
+    /// Rendered-row cap for the reasoning window.
+    pub(crate) max_rows: usize,
+    /// The cursor's 1-based row as reported by the DSR query (`None` when the
+    /// query failed) — lets the renderer scroll the frame at the bottom
+    /// margin. `None` disables scrolling (legacy behavior).
+    pub(crate) cursor_row: Option<usize>,
+}
+
+pub(crate) fn reasoning_window_rows() -> WindowSizing {
+    let h = terminal_height();
+    let cursor_row = query_cursor_row().filter(|r| *r <= h);
+    WindowSizing {
+        max_rows: reasoning_rows_for(h, cursor_row),
+        cursor_row,
+    }
 }
 
 /// The window cap for a `height`-row terminal with the cursor on 1-based row
-/// `cursor_row` (`None` = unknown). With the cursor known, the frame — spinner
-/// row + up to `max_rows` reasoning rows — must fit in the rows from the
-/// cursor's row to the bottom (`height - cursor_row + 1`), so
-/// `max_rows = height - cursor_row`; a bottom-row cursor still gets a
-/// one-line window rather than a collapsing full-height one. With the cursor
-/// unknown, fall back to the fixed cap that predates the dynamic window — the
-/// user-visible baseline before the sizing regression (12 rows was the
-/// original [`ThinkingView`] budget).
+/// `cursor_row` (`None` = unknown). See [`reasoning_window_rows`] for the two
+/// regimes: with the cursor known and at least two rows of room below it, the
+/// frame fits without scrolling (`max_rows = height - cursor_row`); a cursor
+/// in the bottom two rows has no room to fit a readable window, so the
+/// renderer scrolls instead and the pre-dynamic budget applies (clamped so
+/// the frame never exceeds the screen). With the cursor unknown, fall back to
+/// the fixed cap that predates the dynamic window — the user-visible baseline
+/// before the sizing regression (12 rows was the original [`ThinkingView`]
+/// budget).
 fn reasoning_rows_for(height: usize, cursor_row: Option<usize>) -> usize {
     match cursor_row.filter(|r| *r <= height) {
-        Some(r) => height.saturating_sub(r).clamp(1, MAX_REASONING_ROWS),
+        Some(r) => {
+            let space = height - r; // rows below the cursor's own row
+            if space >= 2 {
+                space.min(MAX_REASONING_ROWS)
+            } else {
+                REASONING_FALLBACK_ROWS.min(height.saturating_sub(1))
+            }
+        }
         None => REASONING_FALLBACK_ROWS,
     }
 }
@@ -120,37 +157,78 @@ const REASONING_FALLBACK_ROWS: usize = 12;
 #[cfg(unix)]
 fn query_cursor_row() -> Option<usize> {
     use std::os::fd::AsRawFd;
-    use std::time::Instant;
 
     let in_fd = std::io::stdin().as_raw_fd();
     if unsafe { libc::isatty(in_fd) } != 1 {
         return None;
     }
-    let term = Term::stderr();
-    if !term.is_term() {
+    if !Term::stderr().is_term() {
         return None;
     }
-    term.write_str("\x1b[6n").ok()?;
-    term.flush().ok()?;
+    query_cursor_row_core(in_fd)
+}
+
+/// The cursor-row query itself, against an already-validated tty `fd` (the
+/// caller checks `isatty` and that stderr is a terminal). Split from
+/// [`query_cursor_row`] so the full I/O path — pre-check, raw mode, byte
+/// loop, late-reply drain — is testable over a PTY without touching the test
+/// process's real stdin/stderr.
+///
+/// Input-safety contract, in order:
+///
+/// 1. **Never consume input that was pending before the query.** If anything
+///    is already buffered (the user started typing, or a previous read leaked
+///    bytes), the query is skipped entirely — those bytes are the user's, not
+///    ours to eat.
+/// 2. **Bail the moment a byte can't continue a DSR reply.** Raw mode lasts
+///    only as long as the reply is actually arriving; a keypress (or Ctrl-C)
+///    landing mid-window ends the query immediately and restores the
+///    terminal, so the raw window is a few milliseconds, not the full
+///    deadline — at most one keystroke can be lost, and only in the
+///    millisecond race between the pre-check and the reply.
+/// 3. **Drain a late reply.** A reply that straggles past the deadline is
+///    consumed from stdin (still in raw mode) so it can never surface as
+///    garbage in a later prompt read. The drain only commits once a reply
+///    actually shows up — bytes are never read speculatively past the first
+///    one, which must be ESC to be a reply at all.
+#[cfg(unix)]
+fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
+    use std::time::Instant;
+
+    // 1. Skip if input is already pending: consumed bytes are lost, so a
+    //    quiet queue is a precondition, not an optimization.
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
+        return None;
+    }
+    // The query goes to the same tty the reply comes back on: for a terminal
+    // stdin (the only path that reaches here) that is the user's screen.
+    let query = b"\x1b[6n";
+    if unsafe { libc::write(fd, query.as_ptr().cast(), query.len()) } != query.len() as isize {
+        return None;
+    }
 
     // Raw input for the reply: canonical mode would buffer it until a
     // newline the response never carries. Output processing (OPOST) is kept
     // so stderr output stays translated during the brief raw window.
     let restore = unsafe {
         let mut old: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(in_fd, &mut old) != 0 {
+        if libc::tcgetattr(fd, &mut old) != 0 {
             return None;
         }
         let mut raw = old;
         libc::cfmakeraw(&mut raw);
         raw.c_oflag = old.c_oflag;
-        if libc::tcsetattr(in_fd, libc::TCSANOW, &raw) != 0 {
+        if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
             return None;
         }
         old
     };
     let deadline = Instant::now() + Duration::from_millis(200);
-    let mut pfd = libc::pollfd { fd: in_fd, events: libc::POLLIN, revents: 0 };
     let mut resp: Vec<u8> = Vec::with_capacity(16);
     let result = loop {
         if Instant::now() >= deadline {
@@ -161,8 +239,14 @@ fn query_cursor_row() -> Option<usize> {
             continue;
         }
         let mut byte = 0u8;
-        let n = unsafe { libc::read(in_fd, (&mut byte as *mut u8).cast(), 1) };
+        let n = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
         if n != 1 {
+            break None;
+        }
+        // 2. A byte that can't be part of `ESC[<row>;<col>R` is not the reply
+        //    (user input, or garbage): bail immediately instead of waiting
+        //    out the deadline in raw mode.
+        if !dsr_byte_ok(&resp, byte) {
             break None;
         }
         resp.push(byte);
@@ -173,10 +257,87 @@ fn query_cursor_row() -> Option<usize> {
             break None;
         }
     };
+    // 3. Late-reply drain, still in raw mode. A reply that straggles past the
+    //    deadline would otherwise sit in the kernel queue and surface as
+    //    garbage in a later prompt read (canonical mode holds it until a
+    //    newline that never comes — the worst kind of leak), so a short grace
+    //    waits for its first byte. A partial reply (`resp` holds a real
+    //    ESC-led prefix) drains straight to its closing `R`; a query that
+    //    never saw its first byte only consumes a byte once one actually
+    //    arrives, and only when it is ESC — a non-ESC byte ends the drain
+    //    immediately (that one keystroke, typed in the millisecond race
+    //    between pre-check and reply, is lost — the alternative, an undrained
+    //    reply corrupting the next prompt read, is worse).
+    if result.is_none() {
+        let drain_deadline = Instant::now() + DRAIN_GRACE;
+        if resp.is_empty() {
+            while Instant::now() < drain_deadline {
+                if unsafe { libc::poll(&mut pfd, 1, 10) } > 0 {
+                    let mut first = 0u8;
+                    if unsafe { libc::read(fd, (&mut first as *mut u8).cast(), 1) } == 1
+                        && first == b'\x1b'
+                    {
+                        drain_dsr_reply(fd);
+                    }
+                    break;
+                }
+            }
+        } else {
+            drain_dsr_reply(fd);
+        }
+    }
     unsafe {
-        libc::tcsetattr(in_fd, libc::TCSANOW, &restore);
+        libc::tcsetattr(fd, libc::TCSANOW, &restore);
     }
     result
+}
+
+/// How long a reply that missed the query deadline is still waited for, so a
+/// slow terminal's answer cannot leak into later stdin reads. Covers reply
+/// latency up to 200 ms past the deadline (i.e. ~400 ms end to end) — well
+/// past any link RTT that would make the reply genuinely late.
+const DRAIN_GRACE: Duration = Duration::from_millis(200);
+
+/// Whether `b` can continue a DSR reply already accumulated in `resp`
+/// (`ESC[<row>;<col>R`): the first byte must be ESC, the second `[`, then
+/// digits / `;` until the closing `R` (the loop stops there, so `R` only
+/// passes while empty-accumulated checks for the leading bytes apply).
+fn dsr_byte_ok(resp: &[u8], b: u8) -> bool {
+    match resp.len() {
+        0 => b == b'\x1b',
+        1 => b == b'[',
+        _ => b.is_ascii_digit() || b == b';' || b == b'R',
+    }
+}
+
+/// Consume the remainder of a DSR reply from `fd` (still in raw mode) so it
+/// cannot leak into later stdin reads: reads until the closing `R`, a reply-
+/// shaped byte budget, or a short grace — whichever first. Only called once
+/// the reply is known to be in flight (an ESC-led prefix was seen).
+#[cfg(unix)]
+fn drain_dsr_reply(fd: std::os::fd::RawFd) {
+    use std::time::Instant;
+
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut n = 0usize;
+    while Instant::now() < deadline && n < 32 {
+        if unsafe { libc::poll(&mut pfd, 1, 10) } <= 0 {
+            break;
+        }
+        let mut byte = 0u8;
+        if unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) } != 1 {
+            break;
+        }
+        n += 1;
+        if byte == b'R' {
+            break;
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -235,10 +396,24 @@ where
 /// partial line (no trailing `\n` yet) is shown as the window's last line while
 /// it builds and counts against the same budget. Blank lines are dropped to
 /// keep the feed information-dense.
+///
+/// The view also tracks the markdown fence state of the **whole stream**, not
+/// just the visible window: each stored line remembers whether it started
+/// inside a fenced code block. [`push`](Self::push) reports the state entering
+/// the window it returns, so [`reasoning_rows`] classifies the visible lines
+/// exactly as a full-stream scan would — a code block whose opener scrolled
+/// out of the window still colours its content, and a closer seen after the
+/// opener left the window still closes instead of flipping the state open
+/// again (which would render following prose as code).
 pub(crate) struct ThinkingView {
-    lines: VecDeque<String>,
+    /// Completed lines, each with the fence state that was current when the
+    /// line STARTED (before its own classification ran).
+    lines: VecDeque<(String, bool)>,
     cur: String,
     cap: usize,
+    /// Running fence state after the last completed line — the state entering
+    /// the next line, and the state entering the in-progress partial.
+    in_code: bool,
 }
 
 impl ThinkingView {
@@ -247,15 +422,17 @@ impl ThinkingView {
             lines: VecDeque::with_capacity(cap),
             cur: String::new(),
             cap,
+            in_code: false,
         }
     }
 
     /// Ingest a reasoning delta (may be a partial line, many lines, or empty)
-    /// and return the current window: the newest completed lines plus the
-    /// in-progress partial line, oldest-first, capped to `cap` lines. A delta
-    /// that ends mid-line leaves the partial buffered and shown as the window's
-    /// last line until the next `\n`.
-    pub(crate) fn push(&mut self, delta: &str) -> Vec<String> {
+    /// and return the current window — the newest completed lines plus the
+    /// in-progress partial line, oldest-first, capped to `cap` lines — along
+    /// with the fence state entering the window's first line (see the type
+    /// doc). A delta that ends mid-line leaves the partial buffered and shown
+    /// as the window's last line until the next `\n`.
+    pub(crate) fn push(&mut self, delta: &str) -> (Vec<String>, bool) {
         for ch in delta.chars() {
             if ch == '\n' {
                 let line = std::mem::take(&mut self.cur);
@@ -266,15 +443,20 @@ impl ThinkingView {
                 self.cur.push(ch);
             }
         }
-        self.window()
+        (self.window(), self.window_start_in_code())
     }
 
-    /// Append a completed line, then bound *storage* to `cap` — not the
-    /// visible window. This stops a long chain-of-thought from retaining every
-    /// completed line forever; the visible cap lives in [`window`](Self::window),
-    /// which also accounts for the in-progress partial row.
+    /// Append a completed line: classify it against the running fence state,
+    /// store the entering state with the line, then bound *storage* to `cap`
+    /// — not the visible window. This stops a long chain-of-thought from
+    /// retaining every completed line forever; the visible cap lives in
+    /// [`window`](Self::window), which also accounts for the in-progress
+    /// partial row.
     fn push_line(&mut self, line: String) {
-        self.lines.push_back(line);
+        let entering = self.in_code;
+        let (_, _, next) = classify_line(&line, entering);
+        self.in_code = next;
+        self.lines.push_back((line, entering));
         if self.lines.len() > self.cap {
             self.lines.pop_front();
         }
@@ -287,12 +469,25 @@ impl ThinkingView {
     /// (memory); the *visible* row cap is applied by [`reasoning_rows`] after
     /// wrapping, since one line can render to several rows.
     fn window(&self) -> Vec<String> {
-        let mut rows: Vec<String> = self.lines.iter().cloned().collect();
+        let mut rows: Vec<String> = self.lines.iter().map(|(l, _)| l.clone()).collect();
         if !self.cur.trim().is_empty() {
             rows.push(self.cur.clone());
         }
         let start = rows.len().saturating_sub(self.cap);
         rows[start..].to_vec()
+    }
+
+    /// The fence state entering the current window's first line: the state
+    /// stored with that line (captured when it was pushed, i.e. after all
+    /// lines before it — including ones that have since rolled out). A window
+    /// that is only the in-progress partial enters at the running state.
+    fn window_start_in_code(&self) -> bool {
+        let rows = self.lines.len() + usize::from(!self.cur.trim().is_empty());
+        let start = rows.saturating_sub(self.cap);
+        match self.lines.get(start) {
+            Some((_, entering)) => *entering,
+            None => self.in_code,
+        }
     }
 }
 
@@ -306,10 +501,11 @@ const REASONING_GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 /// Markdown render kind for one reasoning line. Streaming markdown can't be
 /// fully parsed (the input is partial), so classification is line-local with a
 /// running fence state — robust where it matters (headings, fenced code
-/// blocks) and degrades gracefully where the opener of a long code block has
-/// already scrolled out of the window (those lines just lose their colour,
-/// never their text). Inline `**bold**` / `` `code` `` are deliberately not
-/// parsed: they can split across wrap boundaries, and the explicit ask was
+/// blocks). The state is carried across the whole stream by
+/// [`ThinkingView`], so a code block whose opener has already scrolled out of
+/// the window still colours its content correctly, and a closer after a long
+/// block still closes it. Inline `**bold**` / `` `code` `` are deliberately
+/// not parsed: they can split across wrap boundaries, and the explicit ask was
 /// line-level "bold titles" and "code blocks", both of which are wrap-safe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LineKind {
@@ -327,12 +523,13 @@ enum LineKind {
     CodeFence,
 }
 
-/// Whether `s` is an ATX heading opener: one to six `#` then a space
-/// (CommonMark). The space requirement keeps `#include`, `#!/bin/bash`, and
-/// similar out of the heading kind — only `# Title`-shaped lines qualify.
+/// Whether `s` is an ATX heading opener: one to six `#`, then end-of-line or
+/// a space (CommonMark — `#` alone is a heading). The space requirement (or
+/// end of line) keeps `#include`, `#!/bin/bash`, and `#tag` out of the
+/// heading kind — only `# Title`-shaped lines qualify.
 fn is_atx_heading(s: &str) -> bool {
     let hashes = s.bytes().take_while(|&b| b == b'#').count();
-    matches!(hashes, 1..=6) && s.as_bytes().get(hashes) == Some(&b' ')
+    matches!(hashes, 1..=6) && matches!(s.as_bytes().get(hashes), None | Some(&b' '))
 }
 
 /// Classify one reasoning line for rendering, given whether the running scan
@@ -379,7 +576,11 @@ fn style_kind(piece: &str, kind: LineKind) -> String {
 /// spinner are kept and the oldest drop out — a long line that wraps to
 /// several rows still cannot grow the region, so the top row may start
 /// mid-line, like a terminal tail window. An empty `window` yields just the
-/// spinner row.
+/// spinner row. `in_code_start` is the markdown fence state entering the
+/// window's first line, as tracked by [`ThinkingView`] over the whole stream
+/// — never assumed `false` here, or a code block whose opener scrolled out of
+/// the window would classify its closer as an opener and colour the following
+/// prose as code.
 fn reasoning_rows(
     glyph: &str,
     label: &str,
@@ -387,6 +588,7 @@ fn reasoning_rows(
     feed_width: usize,
     elapsed: Option<Duration>,
     max_rows: usize,
+    in_code_start: bool,
 ) -> Vec<String> {
     let mut rows = Vec::with_capacity(window.len() + 1);
     // Spinner row: when `elapsed` is `Some` (the live feed is ticking), append
@@ -399,11 +601,9 @@ fn reasoning_rows(
         None => format!("{MARGIN}{glyph} {label}"),
     };
     rows.push(spinner);
-    // Running fence state, assumed `Normal` at the window's top. A code block
-    // whose opener already scrolled out of the window therefore loses its
-    // colour here (graceful — the text survives); the common case, opener
-    // inside the window, classifies correctly.
-    let mut in_code = false;
+    // Running fence state, carried from the stream (see the doc) and advanced
+    // line-by-line across the window.
+    let mut in_code = in_code_start;
     for line in window {
         let (kind, display, next) = classify_line(line, in_code);
         in_code = next;
@@ -518,6 +718,15 @@ pub(crate) struct ReasoningRenderer {
     /// and the renderer share one notion of the window size; a resize
     /// mid-stream only changes wrap widths, never the row budget.
     max_rows: usize,
+    /// Terminal height in rows (same 0→24 fallback as
+    /// [`crate::layout::terminal_height`]) — the bottom margin past which a
+    /// descent scrolls instead of clamping.
+    height: usize,
+    /// Absolute 1-based row of the cursor at the start of the next paint —
+    /// the frame's bottom row after the previous paint, or the DSR-reported
+    /// row before the first. `None` when the cursor could not be queried:
+    /// frames then never scroll (legacy behavior).
+    row: Option<usize>,
     glyph: usize,
     prev_height: usize,
     /// `true` once a frame has been painted and not yet finished — guards
@@ -562,14 +771,40 @@ const SHOW: &str = "\x1b[?25h"; // DECSET — show cursor
 /// rewritten first — the property that kills the flicker indicatif's
 /// "blank-all-then-rewrite-all" repaint suffers from.
 ///
+/// `start_row` is the absolute 1-based terminal row of the cursor when the
+/// paint begins (`None` when the DSR query failed — the legacy no-scroll
+/// behavior, since the bottom margin is then unknowable), and `height` the
+/// terminal's row count. Descending **past** the bottom margin is the one
+/// move the terminal won't make for us: cursor-down clamps at the margin
+/// instead of scrolling, which is exactly the collapse that made tall frames
+/// overwrite the bottom row. So a descent from the last row emits `\n`
+/// instead — a scroll — shifting the screen up one row and giving the frame
+/// a fresh bottom row. The scroll shifts the frame's own top row up with
+/// everything else, so the erase contract still holds: [`clear_frame_bytes`]
+/// walks up `prev_height - 1` rows from the frame's bottom and lands on the
+/// frame's top, which is wherever the prompt (and the frame) drifted to.
+/// Returns the assembled bytes plus the cursor's absolute row afterwards
+/// (`None` when the start was unknown), which the renderer feeds back as the
+/// next paint's `start_row`.
+///
 /// Cursor visibility is a stream-spanning concern, not a per-frame one. The
 /// first repaint emits [`HIDE`] (when `prev_height == 0`) and the caret stays
 /// hidden for the whole stream; only [`clear_frame_bytes`] at
 /// [`ReasoningRenderer::finish`] restores it ([`SHOW`]). Mid-stream repaints
 /// emit neither — the caret stays hidden, so where it sits during the traversal
 /// is irrelevant and can never smear across the repainted rows.
-fn frame_bytes(rows: &[String], prev_height: usize) -> String {
-    let height = rows.len();
+fn frame_bytes(
+    rows: &[String],
+    prev_height: usize,
+    start_row: Option<usize>,
+    height: usize,
+) -> (String, Option<usize>) {
+    let height = height.max(1);
+    // The frame's top row: where the cursor is now, walked up by the repaint
+    // preamble. `prev_height == 0` has no preamble — the frame starts at the
+    // cursor's own row.
+    let top = start_row.map(|r| r.min(height).saturating_sub(prev_height.saturating_sub(1)));
+    let frame_height = rows.len();
     let mut out = String::new();
     if prev_height == 0 {
         // First frame of the stream: hide the cursor for the whole stream
@@ -587,33 +822,58 @@ fn frame_bytes(rows: &[String], prev_height: usize) -> String {
             out.push_str(UP);
         }
     }
-    for (i, row) in rows.iter().enumerate() {
+    // Absolute row of the cursor as we descend; tracked only when known.
+    let mut row = top;
+    for (i, r) in rows.iter().enumerate() {
         out.push('\r');
         out.push_str(CLR_LINE);
-        out.push_str(row);
-        if i + 1 < height {
-            out.push_str(DOWN);
+        out.push_str(r);
+        if i + 1 < frame_height {
+            match row {
+                Some(cur) if cur >= height => {
+                    // At the bottom margin, cursor-down would clamp (the
+                    // collapse) — scroll the screen up instead so the frame
+                    // gains a fresh bottom row. The cursor stays on the last
+                    // row, everything above it shifted up one.
+                    out.push('\n');
+                }
+                _ => {
+                    out.push_str(DOWN);
+                }
+            }
+            if let Some(cur) = row.as_mut()
+                && *cur < height
+            {
+                *cur += 1;
+            }
         }
     }
-    if height < prev_height {
-        for _ in height..prev_height {
+    if frame_height < prev_height {
+        // Stale tail below the shorter frame: blank each row and walk back.
+        // The walk ends at or above the frame's own bottom (the old frame
+        // never painted past the new one's bottom unless both hit the bottom
+        // margin, in which case there is no tail), so it never scrolls.
+        for _ in frame_height..prev_height {
             out.push_str(DOWN);
             out.push('\r');
             out.push_str(CLR_LINE);
         }
-        for _ in height..prev_height {
+        for _ in frame_height..prev_height {
             out.push_str(UP);
         }
     }
-    out
+    let end_row = top.map(|t| (t + frame_height - 1).min(height));
+    (out, end_row)
 }
 
 /// Assemble the byte sequence to erase a `prev_height`-row frame, clearing
 /// each row from the BOTTOM up so the traversal naturally ends on the frame's
 /// TOP row — exactly where the first frame began painting (the cursor's line
-/// at stream start). So once thinking ends the cursor sits back on its
-/// original line, the block is gone, and the next line of stderr overwrites
-/// the blank region from the top with no gap trapped above or below.
+/// at stream start, which scrolled frames carry upward with them, so it is
+/// still the prompt's row when the stream ends). So once thinking ends the
+/// cursor sits back on that line, the block is gone, and the next line of
+/// stderr overwrites the blank region from the top with no gap trapped above
+/// or below.
 ///
 /// Because the frame never opened with a `\n` (see [`frame_bytes`]), there is
 /// no reserved blank line to reclaim and no compensation walk: the bottom-up
@@ -647,17 +907,21 @@ fn clear_frame_bytes(prev_height: usize, cursor_hidden: bool) -> String {
 
 impl ReasoningRenderer {
     /// Bind a renderer to stderr with `label` on the spinner row. `max_rows`
-    /// is the reasoning window's rendered-row cap (from
-    /// [`reasoning_window_rows`]); `feed_width` is resolved once from the
-    /// shared terminal geometry ([`terminal_width`]), floored at the progress
-    /// surface's [`MIN_PROGRESS_WIDTH`] so the spinner and its label keep room.
-    /// A resize mid-stream only changes wrap widths, never correctness.
-    pub(crate) fn new(label: &'static str, max_rows: usize) -> Self {
+    /// is the reasoning window's rendered-row cap and `cursor_row` the
+    /// DSR-reported cursor row (`None` if the query failed — scrolling is
+    /// then disabled), both from [`reasoning_window_rows`]. `feed_width` is
+    /// resolved once from the shared terminal geometry ([`terminal_width`]),
+    /// floored at the progress surface's [`MIN_PROGRESS_WIDTH`] so the
+    /// spinner and its label keep room. A resize mid-stream only changes
+    /// wrap widths, never correctness.
+    pub(crate) fn new(label: &'static str, max_rows: usize, cursor_row: Option<usize>) -> Self {
         Self {
             term: Term::stderr(),
             label,
             feed_width: terminal_width().max(MIN_PROGRESS_WIDTH).saturating_sub(6),
             max_rows,
+            height: terminal_height(),
+            row: cursor_row,
             glyph: 0,
             prev_height: 0,
             active: false,
@@ -670,14 +934,28 @@ impl ReasoningRenderer {
     /// spinner animating and the elapsed count rising while the model is
     /// silent between deltas, so the reasoning frame never freezes the way a
     /// paint-only-on-delta renderer would during a long TTFT gap. A no-op off
-    /// a terminal.
-    pub(crate) fn paint(&mut self, window: &[String], elapsed: Option<Duration>) {
+    /// a terminal. `in_code_start` is the markdown fence state entering the
+    /// window's first line, as tracked by [`ThinkingView`].
+    pub(crate) fn paint(
+        &mut self,
+        window: &[String],
+        in_code_start: bool,
+        elapsed: Option<Duration>,
+    ) {
         if !self.term.is_term() {
             return;
         }
         let glyph = REASONING_GLYPHS[self.glyph % REASONING_GLYPHS.len()];
         self.glyph = self.glyph.wrapping_add(1);
-        let rows = reasoning_rows(glyph, self.label, window, self.feed_width, elapsed, self.max_rows);
+        let rows = reasoning_rows(
+            glyph,
+            self.label,
+            window,
+            self.feed_width,
+            elapsed,
+            self.max_rows,
+            in_code_start,
+        );
         self.draw_rows(&rows);
     }
 
@@ -713,10 +991,14 @@ impl ReasoningRenderer {
         // the write panicked, Drop's finish would still see cursor_hidden and
         // emit the owed SHOW.
         self.cursor_hidden |= first_frame;
-        let bytes = frame_bytes(rows, self.prev_height);
+        let (bytes, end_row) = frame_bytes(rows, self.prev_height, self.row, self.height);
         let _ = self.term.write_str(&bytes);
         let _ = self.term.flush();
         self.prev_height = rows.len();
+        // The cursor now rests on the frame's bottom row; that absolute row is
+        // the next paint's start (frames scroll at the bottom margin, so the
+        // top drifts and cannot be derived from the row count alone).
+        self.row = end_row;
         self.active = true;
     }
 
@@ -776,8 +1058,16 @@ mod tests {
         assert_eq!(reasoning_rows_for(24, Some(1)), 23);
         // Mid-screen cursor on a 40-row terminal: exact-fit case.
         assert_eq!(reasoning_rows_for(40, Some(3)), 37);
-        // Last row: one line minimum rather than a collapsing frame.
-        assert_eq!(reasoning_rows_for(40, Some(40)), 1);
+        // Cursor in the bottom two rows has no room to fit a readable window:
+        // the renderer scrolls instead, and the pre-dynamic budget applies
+        // (clamped so the frame still fits on screen — 12 < 40).
+        assert_eq!(reasoning_rows_for(40, Some(40)), 12);
+        assert_eq!(reasoning_rows_for(40, Some(39)), 12);
+        // Two rows of room below the cursor: exact fit again (no scrolling).
+        assert_eq!(reasoning_rows_for(40, Some(38)), 2);
+        // A tiny terminal clamps the scroll budget so the frame never exceeds
+        // the screen: 1 spinner + 4 rows on a 5-row terminal.
+        assert_eq!(reasoning_rows_for(5, Some(5)), 4);
         // Unknown cursor: the pre-dynamic fixed cap (never worse than before
         // the dynamic-window feature).
         assert_eq!(reasoning_rows_for(24, None), REASONING_FALLBACK_ROWS);
@@ -790,8 +1080,9 @@ mod tests {
     #[test]
     fn thinking_view_window_shows_completed_lines_and_drops_blanks() {
         let mut v = ThinkingView::new(12);
-        let window = v.push("line 1\n\nline 2\n");
+        let (window, in_code) = v.push("line 1\n\nline 2\n");
         assert_eq!(window, vec!["line 1", "line 2"]);
+        assert!(!in_code); // plain prose: no fence state
     }
 
     /// A partial line with no trailing `\n` is the window's last row while it
@@ -799,8 +1090,8 @@ mod tests {
     #[test]
     fn thinking_view_partial_is_last_window_row_until_newline() {
         let mut v = ThinkingView::new(12);
-        assert_eq!(v.push("in progress"), vec!["in progress"]);
-        let window = v.push(" done\n");
+        assert_eq!(v.push("in progress").0, vec!["in progress"]);
+        let (window, _) = v.push(" done\n");
         assert_eq!(window, vec!["in progress done"]);
     }
 
@@ -809,9 +1100,9 @@ mod tests {
     #[test]
     fn thinking_view_assembles_split_chunks() {
         let mut v = ThinkingView::new(12);
-        assert_eq!(v.push("hel"), vec!["hel"]);
-        assert_eq!(v.push("lo"), vec!["hello"]);
-        assert_eq!(v.push(" world\n"), vec!["hello world"]);
+        assert_eq!(v.push("hel").0, vec!["hel"]);
+        assert_eq!(v.push("lo").0, vec!["hello"]);
+        assert_eq!(v.push(" world\n").0, vec!["hello world"]);
     }
 
     /// A delta containing several `\n`-separated lines yields a window with
@@ -819,7 +1110,7 @@ mod tests {
     #[test]
     fn thinking_view_many_lines_one_delta() {
         let mut v = ThinkingView::new(12);
-        assert_eq!(v.push("a\nb\nc\n"), vec!["a", "b", "c"]);
+        assert_eq!(v.push("a\nb\nc\n").0, vec!["a", "b", "c"]);
     }
 
     /// The window rolls: past the cap, the oldest completed
@@ -831,7 +1122,7 @@ mod tests {
         for i in 1..=15 {
             v.push(&format!("line {i}\n"));
         }
-        let window = v.push("");
+        let (window, _) = v.push("");
         assert_eq!(window.len(), 12);
         assert_eq!(window.first(), Some(&"line 4".to_string()));
         assert_eq!(window.last(), Some(&"line 15".to_string()));
@@ -846,7 +1137,7 @@ mod tests {
         for i in 1..=12 {
             v.push(&format!("line {i}\n"));
         }
-        let window = v.push("in progress");
+        let (window, _) = v.push("in progress");
         assert_eq!(window.len(), 12);
         // oldest completed row rolled out to make room for the partial
         assert_eq!(window.first(), Some(&"line 2".to_string()));
@@ -866,6 +1157,7 @@ mod tests {
             80,
             Some(Duration::from_secs(7)),
             12,
+            false,
         );
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠙ Analyzing… 7s")));
         assert_eq!(rows[1], format!("{MARGIN}│ a line"));
@@ -875,7 +1167,7 @@ mod tests {
     /// the window is empty (the stream just started).
     #[test]
     fn reasoning_rows_leads_with_spinner_for_empty_window() {
-        let rows = reasoning_rows("⠋", "Analyzing", &[], 80, None, 12);
+        let rows = reasoning_rows("⠋", "Analyzing", &[], 80, None, 12, false);
         assert_eq!(rows, vec![format!("{MARGIN}⠋ Analyzing")]);
     }
 
@@ -883,7 +1175,7 @@ mod tests {
     #[test]
     fn reasoning_rows_indents_each_line() {
         let window = vec!["line 1".to_string(), "line 2".to_string()];
-        let rows = reasoning_rows("⠙", "Analyzing", &window, 80, None, 12);
+        let rows = reasoning_rows("⠙", "Analyzing", &window, 80, None, 12, false);
         assert_eq!(
             rows,
             vec![
@@ -906,6 +1198,7 @@ mod tests {
             10,
             None,
             12,
+            false,
         );
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
         // every row after the spinner carries the `│ ` indent…
@@ -930,7 +1223,7 @@ mod tests {
         let prefix = format!("{MARGIN}│ ");
         // 12 lines × 2 wrap pieces = 24 rendered rows, over the 12-row budget.
         let window: Vec<String> = (1..=12).map(|i| format!("line {i} with words")).collect();
-        let rows = reasoning_rows("⠹", "Analyzing", &window, 10, None, 12);
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 10, None, 12, false);
         assert_eq!(rows.len(), 13);
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
         for row in &rows[1..] {
@@ -958,7 +1251,7 @@ mod tests {
     fn reasoning_rows_caps_single_long_line() {
         let prefix = format!("{MARGIN}│ ");
         let long = "word ".repeat(60); // 300 chars → 30 wrap pieces at width 10
-        let rows = reasoning_rows("⠹", "Analyzing", &[long], 10, None, 12);
+        let rows = reasoning_rows("⠹", "Analyzing", &[long], 10, None, 12, false);
         assert_eq!(rows.len(), 13);
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
         // 12 rows of "word word" = 24 words of the 60 — the newest tail only.
@@ -977,16 +1270,27 @@ mod tests {
         assert_eq!(text, "just thinking out loud");
     }
 
-    /// An ATX heading (`#` + space) classifies as Heading with the markers
-    /// stripped — the "bold titles". The required space keeps `#include`,
-    /// shebangs, and the like out of the heading kind.
+    /// An ATX heading (`#` + space, or bare hashes at end of line) classifies
+    /// as Heading with the markers stripped — the "bold titles". The space or
+    /// end-of-line requirement keeps `#include`, shebangs, and `#tag` out of
+    /// the heading kind.
     #[test]
     fn classify_atx_heading_strips_markers() {
         let (kind, text, _) = classify_line("## Plan", false);
         assert_eq!(kind, LineKind::Heading);
         assert_eq!(text, "Plan");
-        assert_eq!(classify_line("#include <stdio.h>", false).0, LineKind::Normal);
+        // CommonMark: `#` alone at end of line is still a heading.
+        assert_eq!(classify_line("#", false).0, LineKind::Heading);
+        assert_eq!(classify_line("######", false).0, LineKind::Heading);
+        // No space and content follows: not a heading.
+        assert_eq!(
+            classify_line("#include <stdio.h>", false).0,
+            LineKind::Normal
+        );
         assert_eq!(classify_line("#!/bin/bash", false).0, LineKind::Normal);
+        assert_eq!(classify_line("#tag", false).0, LineKind::Normal);
+        // Seven hashes: past the ATX limit, not a heading.
+        assert_eq!(classify_line("####### deep", false).0, LineKind::Normal);
     }
 
     /// A fenced code block toggles Code state across its lines: the fence line
@@ -1028,7 +1332,7 @@ mod tests {
             "let x = 2;".to_string(),
             "```".to_string(),
         ];
-        let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 2);
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 2, false);
         assert_eq!(rows.len(), 3); // spinner + newest 2 rows
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
     }
@@ -1041,7 +1345,10 @@ mod tests {
     fn styling_path_emits_ansi_when_forced() {
         let s = Style::new().bold().force_styling(true);
         let styled = s.apply_to("hi").to_string();
-        assert!(styled.contains("\x1b["), "no ANSI escape emitted: {styled:?}");
+        assert!(
+            styled.contains("\x1b["),
+            "no ANSI escape emitted: {styled:?}"
+        );
     }
 
     /// [`loading_rows`] before the grace deadline: just the spinner row with
@@ -1133,13 +1440,16 @@ mod tests {
     /// First paint (no previous frame) hides the cursor and clears+writes its
     /// single row in place at the cursor's current line — no leading newline
     /// (which would reserve an unreclaimable blank line above the block) and
-    /// no cursor-up preamble.
+    /// no cursor-up preamble. With the cursor unknown, the paint never
+    /// scrolls (the legacy behavior).
     #[test]
     fn frame_bytes_first_frame_paints_in_place() {
-        let out = frame_bytes(&["only".to_string()], 0);
+        let (out, end_row) = frame_bytes(&["only".to_string()], 0, None, 24);
         assert_eq!(out, format!("{HIDE}\r{CLR_LINE}only"));
         // the first frame never emits a newline: blank lines are unreclaimable.
         assert!(!out.contains('\n'), "first frame must not emit a newline");
+        // unknown start row → unknown end row, and no scroll bytes.
+        assert_eq!(end_row, None);
     }
 
     /// The load-bearing anti-flicker property: a same-height repaint clears
@@ -1150,10 +1460,11 @@ mod tests {
     #[test]
     fn frame_bytes_repaint_is_interleaved_clear_then_write() {
         let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let out = frame_bytes(&rows, 3);
+        let (out, end_row) = frame_bytes(&rows, 3, None, 24);
         // up to top (2 rows), then per row: CR + clear + write, descending.
         let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
         assert_eq!(out, expected);
+        assert_eq!(end_row, None);
         // each cleared row is rewritten before the next is touched: no run of
         // two clears without content between them.
         assert!(
@@ -1166,9 +1477,10 @@ mod tests {
     /// cursor to the last live row, so a shrunken window leaves no ghosts.
     #[test]
     fn frame_bytes_shorter_frame_clears_stale_tail() {
-        let out = frame_bytes(&["a".to_string()], 3);
+        let (out, end_row) = frame_bytes(&["a".to_string()], 3, None, 24);
         let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}{UP}");
         assert_eq!(out, expected);
+        assert_eq!(end_row, None);
     }
 
     /// A taller new frame descends into fresh rows below the previous frame —
@@ -1176,9 +1488,10 @@ mod tests {
     #[test]
     fn frame_bytes_taller_frame_descends_into_new_rows() {
         let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let out = frame_bytes(&rows, 1);
+        let (out, end_row) = frame_bytes(&rows, 1, None, 24);
         let expected = format!("\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
         assert_eq!(out, expected);
+        assert_eq!(end_row, None);
     }
 
     /// Erasing a frame clears each row from the bottom up — clear the current
@@ -1240,7 +1553,9 @@ mod tests {
 
         for height in [1usize, 2, 3, 12, 13] {
             let rows: Vec<String> = (0..height).map(|_| "x".to_string()).collect();
-            let paint = frame_bytes(&rows, 0);
+            // Cursor unknown (`None`): the legacy no-scroll geometry — a
+            // mid-screen stream that never touches the bottom margin.
+            let (paint, _) = frame_bytes(&rows, 0, None, 24);
             // The stream never emits a newline: a `\n` is a permanently blank
             // line the terminal cannot un-scroll, so the whole in-place stream
             // (paint + erase) must be newline-free to leave no trace.
@@ -1275,7 +1590,7 @@ mod tests {
     fn cursor_hidden_for_whole_stream_restored_only_at_finish() {
         // The first frame (prev_height 0) hides the cursor and never restores
         // it — the caret is gone for the entire stream.
-        let first = frame_bytes(&["only".to_string()], 0);
+        let (first, _) = frame_bytes(&["only".to_string()], 0, None, 24);
         assert!(first.starts_with(HIDE), "first frame must hide the cursor");
         assert!(
             !first.contains(SHOW),
@@ -1284,7 +1599,7 @@ mod tests {
 
         // A mid-stream repaint touches neither: the caret stays hidden, so its
         // position during the traversal can't smear across the repainted rows.
-        let repaint = frame_bytes(&["a".to_string(), "b".to_string()], 2);
+        let (repaint, _) = frame_bytes(&["a".to_string(), "b".to_string()], 2, None, 24);
         assert!(
             !repaint.contains(HIDE) && !repaint.contains(SHOW),
             "a mid-stream repaint must not touch cursor visibility"
@@ -1318,5 +1633,429 @@ mod tests {
     #[test]
     fn clear_frame_bytes_restores_cursor_for_zero_row_hidden_frame() {
         assert_eq!(clear_frame_bytes(0, true), SHOW);
+    }
+
+    /// The load-bearing scroll: descending **past** the bottom margin is the
+    /// one move the terminal refuses (cursor-down clamps — the collapse that
+    /// made tall frames overwrite the bottom row), so the renderer emits `\n`
+    /// — a scroll that shifts the screen up and grants the frame a fresh
+    /// bottom row. A first frame at the very bottom of the screen (the usual
+    /// shell-prompt position) thus paints every row, scrolling once per row
+    /// past the first, instead of collapsing.
+    #[test]
+    fn frame_bytes_scrolls_when_descending_past_bottom_margin() {
+        let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let (out, end_row) = frame_bytes(&rows, 0, Some(24), 24);
+        let expected = format!("{HIDE}\r{CLR_LINE}a\n\r{CLR_LINE}b\n\r{CLR_LINE}c");
+        assert_eq!(out, expected);
+        // The frame's bottom row is the screen's last row; the cursor stays
+        // there for the next paint (the top drifted up with the scrolls).
+        assert_eq!(end_row, Some(24));
+        assert_eq!(
+            out.matches('\n').count(),
+            2,
+            "one scroll per descent past the margin"
+        );
+    }
+
+    /// A frame that fits in the rows below the cursor never scrolls — the
+    /// screen stays put and the cursor ends on the frame's bottom row.
+    #[test]
+    fn frame_bytes_fits_without_scroll_when_room_below() {
+        let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let (out, end_row) = frame_bytes(&rows, 0, Some(10), 24);
+        let expected = format!("{HIDE}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
+        assert_eq!(out, expected);
+        assert_eq!(end_row, Some(12));
+    }
+
+    /// A frame already pinned to the bottom margin grows by scrolling exactly
+    /// once for the new row — the repaint preamble still reaches the (drifted)
+    /// frame top, and the cursor reports the bottom row for the next paint.
+    #[test]
+    fn frame_bytes_growth_from_bottom_scrolls_once() {
+        let rows = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let (out, end_row) = frame_bytes(&rows, 3, Some(24), 24);
+        let expected =
+            format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c\n\r{CLR_LINE}d");
+        assert_eq!(out, expected);
+        assert_eq!(end_row, Some(24));
+    }
+
+    /// A frame that shrinks after the screen scrolled clears its stale tail
+    /// and reports the new (higher) bottom row, so the next paint's preamble
+    /// lands on the correct — drifted — frame top.
+    #[test]
+    fn frame_bytes_shrink_after_scroll_clears_tail_and_reports_row() {
+        let (out, end_row) = frame_bytes(&["a".to_string()], 3, Some(24), 24);
+        let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}{UP}");
+        assert_eq!(out, expected);
+        assert_eq!(end_row, Some(22));
+    }
+
+    /// The erase contract holds after scrolling: the frame's top row drifts
+    /// up with the scrolls (it is wherever the prompt line drifted to), and
+    /// [`clear_frame_bytes`]'s bottom-up walk — from the frame's bottom row,
+    /// `prev_height - 1` ascents — lands exactly on that drifted top. The
+    /// next line of stderr therefore continues at the prompt, with the whole
+    /// reasoning region erased above it: no gap, nothing lingering.
+    #[test]
+    fn scrolled_stream_erase_ends_at_drifted_frame_top() {
+        let height = 24usize;
+        let rows: Vec<String> = (0..13).map(|_| "x".to_string()).collect();
+        let (paint, end) = frame_bytes(&rows, 0, Some(height), height);
+        assert_eq!(end, Some(24));
+        // 12 scrolls shift everything — including the prompt and the frame
+        // top — up 12 rows; the frame still fits entirely on screen.
+        assert_eq!(paint.matches('\n').count(), 12);
+        // Erase from the frame's bottom row (24): 13 clears, 12 ascents →
+        // the drifted top row — exactly `height − (rows − 1)`.
+        let drifted_top = height - (rows.len() - 1);
+        assert_eq!(drifted_top, 12);
+        let erase = clear_frame_bytes(13, true);
+        // Bottom-up walk: clear current row, ascend, repeat, ending on the
+        // drifted top; SHOW restores the caret.
+        let expected = format!("\r{CLR_LINE}{UP}").repeat(12) + &format!("\r{CLR_LINE}{SHOW}");
+        assert_eq!(erase, expected);
+        // The next line of stderr writes at the drifted top — the prompt's
+        // new row — with the whole reasoning region erased above it.
+        assert_eq!(end.unwrap() - (13 - 1), drifted_top);
+    }
+
+    /// The fence state survives window rolls: [`ThinkingView`] tracks it over
+    /// the whole stream and reports the state entering the window's first
+    /// line, so a code block whose opener scrolled out of the window keeps
+    /// its colour (and, crucially, its closer still closes).
+    #[test]
+    fn thinking_view_fence_state_persists_across_window_rolls() {
+        let mut v = ThinkingView::new(3);
+        // Stream: opener, 4 code lines, closer, prose — cap 3 keeps only the
+        // tail, so the opener is long gone by the time the closer arrives.
+        v.push("```rust\n");
+        v.push("code 1\ncode 2\ncode 3\ncode 4\n");
+        // Window is [code 2, code 3, code 4] — all entered inside the block.
+        let (window, in_code) = v.push("");
+        assert_eq!(window, vec!["code 2", "code 3", "code 4"]);
+        assert!(
+            in_code,
+            "window starts inside the block, opener already rolled out"
+        );
+        // The closer arrives; the window now starts even deeper in the block
+        // and the closer must still be classified as a closer.
+        let (window, in_code) = v.push("```\n");
+        assert_eq!(window, vec!["code 3", "code 4", "```"]);
+        assert!(in_code);
+        // Prose after the closer: the window now starts even deeper in the
+        // block — `code 4` entered inside it — so its entering state is still
+        // `true`. The closer is IN the window, so a scan from the true state
+        // closes the block and the prose classifies as Normal. This is the
+        // regression: a per-frame scan starting at `false` would classify the
+        // closer as an OPENER (the state resets made it look unopened) and
+        // colour the following prose as code.
+        let (window, in_code) = v.push("plain prose\n");
+        assert_eq!(window, vec!["code 4", "```", "plain prose"]);
+        assert!(
+            in_code,
+            "window starts mid-block (code 4 entered inside it)"
+        );
+        // Full-stream equivalence: scanning the window from its true entering
+        // state yields exactly what a scan of the whole stream would.
+        let mut s = in_code;
+        let kinds: Vec<LineKind> = window
+            .iter()
+            .map(|line| {
+                let (kind, _, next) = classify_line(line, s);
+                s = next;
+                kind
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![LineKind::Code, LineKind::CodeFence, LineKind::Normal],
+            "the closer must close and the prose must not be code"
+        );
+    }
+
+    /// A partial line being typed inside a code block is classified as code
+    /// even before its `\n` arrives: the window's scan reaches it with the
+    /// running state (opened by the in-window fence).
+    #[test]
+    fn thinking_view_partial_enters_at_running_fence_state() {
+        let mut v = ThinkingView::new(12);
+        v.push("```\n");
+        let (window, in_code) = v.push("let x = ");
+        assert_eq!(window, vec!["```", "let x = "]);
+        // The window starts at the fence line (entering state false); the
+        // scan then opens the block, so the partial — the window's last line
+        // — classifies as code.
+        assert!(!in_code);
+        let mut s = in_code;
+        let kinds: Vec<LineKind> = window
+            .iter()
+            .map(|line| {
+                let (kind, _, next) = classify_line(line, s);
+                s = next;
+                kind
+            })
+            .collect();
+        assert_eq!(kinds, vec![LineKind::CodeFence, LineKind::Code]);
+    }
+
+    /// [`reasoning_rows`] honours the stream's fence state entering the
+    /// window: mid-block content stays Code and a closer closes — the
+    /// classification a full-stream scan would give, regardless of how much
+    /// of the block scrolled out of the window.
+    #[test]
+    fn reasoning_rows_classifies_with_running_fence_state() {
+        let prefix = format!("{MARGIN}│ ");
+        // Window whose opener is gone: [code, closer, prose] with entering
+        // state `true`. The closer must close; prose must be Normal.
+        let window = vec![
+            "let x = 1;".to_string(),
+            "```".to_string(),
+            "done".to_string(),
+        ];
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 12, true);
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+        let body: Vec<&str> = rows[1..]
+            .iter()
+            .map(|r| r.strip_prefix(&prefix).unwrap())
+            .collect();
+        assert_eq!(body, vec!["let x = 1;", "```", "done"]);
+        // And a window that starts mid-block with `false` (no opener at all,
+        // e.g. the stream genuinely began outside a block) classifies the
+        // first fence as an opener.
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 12, false);
+        assert_eq!(rows.len(), 4, "spinner + 3 rows survive the cap");
+    }
+}
+
+/// Full-I/O tests for [`query_cursor_row_core`] over a real PTY: a forked
+/// child plays the terminal emulator on the pty master (reads the DSR query,
+/// answers per script), while the parent runs the query against the slave.
+/// This is the committed version of the PR's "deterministic PTY harness"
+/// claim — the input-safety contract (never consume pending input, never
+/// leak a late reply) is exercised end to end, not just the pure parse.
+#[cfg(all(unix, test))]
+mod pty_tests {
+    use super::*;
+    use std::os::fd::RawFd;
+    use std::time::{Duration, Instant};
+
+    /// What the fake terminal does on the pty master.
+    #[derive(Clone, Copy)]
+    enum Script {
+        /// Wait for the query, then reply immediately.
+        Reply(&'static [u8]),
+        /// Wait for the query, sleep `ms`, then reply (a late reply).
+        ReplyLate(&'static [u8], u32),
+        /// Wait for the query, then stay silent (no reply ever).
+        Silent,
+        /// Write bytes immediately without waiting for any query.
+        PreWrite(&'static [u8]),
+    }
+
+    fn open_pty() -> (RawFd, RawFd) {
+        let mut master = 0;
+        let mut slave = 0;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed");
+        (master, slave)
+    }
+
+    /// Child-side terminal emulator. Runs after `fork`, so it must not touch
+    /// the allocator: fixed stack buffer, libc calls only.
+    fn terminal_script(master: RawFd, script: Script) -> i32 {
+        if let Script::PreWrite(bytes) = script {
+            let n = unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) };
+            return if n == bytes.len() as isize { 0 } else { 1 };
+        }
+        // Wait for the DSR query (`ESC[6n`) to arrive on the master.
+        let query = b"\x1b[6n";
+        let mut buf = [0u8; 64];
+        let mut len = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut pfd = libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            if Instant::now() >= deadline {
+                return 2; // query never arrived
+            }
+            let ready = unsafe { libc::poll(&mut pfd, 1, 50) };
+            if ready <= 0 {
+                continue;
+            }
+            let n = unsafe { libc::read(master, buf[len..].as_mut_ptr().cast(), buf.len() - len) };
+            if n <= 0 {
+                return 3;
+            }
+            len += n as usize;
+            if len >= query.len() && buf[..len].windows(query.len()).any(|w| w == query) {
+                break;
+            }
+            if len == buf.len() {
+                return 4; // buffer full without ever seeing the query
+            }
+        }
+        match script {
+            Script::Silent => 0,
+            Script::ReplyLate(bytes, ms) => {
+                unsafe { libc::usleep(ms * 1000) };
+                let n = unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) };
+                if n == bytes.len() as isize { 0 } else { 5 }
+            }
+            Script::Reply(bytes) => {
+                let n = unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) };
+                if n == bytes.len() as isize { 0 } else { 5 }
+            }
+            Script::PreWrite(_) => 0,
+        }
+    }
+
+    /// Put `fd` in raw (non-canonical) mode, like the query does — without
+    /// this, a pty slave buffers input until a newline (canonical mode), so a
+    /// single byte like the PreWrite script's `x` would never make poll
+    /// report it readable.
+    fn make_raw(fd: RawFd) {
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(fd, &mut t), 0, "tcgetattr failed");
+            libc::cfmakeraw(&mut t);
+            assert_eq!(
+                libc::tcsetattr(fd, libc::TCSANOW, &t),
+                0,
+                "tcsetattr failed"
+            );
+        }
+    }
+
+    /// Fork a fake terminal running `script`; returns `(master, slave, pid)`
+    /// — the parent keeps the master open for the test's lifetime so the
+    /// slave never sees EOF/HUP (a closed master would fake "input pending"
+    /// on every later poll). Both fds are closed by the test; `pid` is
+    /// reaped with [`reap`].
+    fn spawn_terminal(script: Script) -> (RawFd, RawFd, i32) {
+        let (master, slave) = open_pty();
+        make_raw(slave);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe { libc::close(slave) };
+            let code = terminal_script(master, script);
+            unsafe { libc::_exit(code) };
+        }
+        (master, slave, pid)
+    }
+
+    fn reap(pid: i32) -> i32 {
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        status
+    }
+
+    fn poll_ready(fd: RawFd, timeout_ms: u32) -> bool {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe { libc::poll(&mut pfd, 1, timeout_ms as libc::c_int) > 0 }
+    }
+
+    /// The full DSR round trip over a real PTY: the fake terminal sees the
+    /// query and answers `ESC[21;1R`; the query reports row 21.
+    #[test]
+    fn dsr_query_roundtrip_over_pty() {
+        let (master, slave, pid) = spawn_terminal(Script::Reply(b"\x1b[21;1R"));
+        let row = query_cursor_row_core(slave);
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(reap(pid), 0);
+        assert_eq!(row, Some(21));
+    }
+
+    /// A garbage reply (not ESC-led) bails the byte loop on its first byte —
+    /// the query fails fast instead of waiting out the 200 ms deadline.
+    #[test]
+    fn dsr_rejects_garbage_reply() {
+        let (master, slave, pid) = spawn_terminal(Script::Reply(b"hello"));
+        let row = query_cursor_row_core(slave);
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(reap(pid), 0);
+        assert_eq!(row, None);
+    }
+
+    /// No reply at all: the query times out and returns `None` (the fallback
+    /// path) instead of hanging.
+    #[test]
+    fn dsr_times_out_without_reply() {
+        let (master, slave, pid) = spawn_terminal(Script::Silent);
+        let row = query_cursor_row_core(slave);
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(reap(pid), 0);
+        assert_eq!(row, None);
+    }
+
+    /// A reply that arrives after the 200 ms deadline (but inside the drain
+    /// grace) is consumed, so it can never sit in the input queue and surface
+    /// as garbage in a later prompt read.
+    #[test]
+    fn dsr_drains_late_reply_so_nothing_leaks() {
+        let (master, slave, pid) = spawn_terminal(Script::ReplyLate(b"\x1b[40;1R", 300));
+        let row = query_cursor_row_core(slave);
+        assert_eq!(row, None, "reply past the deadline must not be reported");
+        // Give the drain grace time to finish, then the queue must be empty.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !poll_ready(slave, 0),
+            "late reply leaked into the input queue — it would corrupt a later prompt read"
+        );
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(reap(pid), 0);
+    }
+
+    /// Input already pending when the query starts is never consumed: the
+    /// pre-check skips the query entirely and the byte survives for the next
+    /// read.
+    #[test]
+    fn dsr_skips_query_when_input_pending() {
+        let (master, slave, pid) = spawn_terminal(Script::PreWrite(b"x"));
+        assert!(poll_ready(slave, 2000), "child never wrote its input");
+        let row = query_cursor_row_core(slave);
+        assert_eq!(row, None, "a busy stdin must not be queried");
+        // The byte is still pending — the pre-check did not consume it.
+        assert!(poll_ready(slave, 2000), "pending input was swallowed");
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(reap(pid), 0);
     }
 }

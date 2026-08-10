@@ -105,6 +105,19 @@ pub(crate) fn terminal_width() -> usize {
     resolve_cols(Term::stderr().size().1 as usize)
 }
 
+/// Read the real terminal's row count, falling back to a conventional
+/// 24-row screen on a non-TTY/pipe (`Term::size()` reports 0 there — parity
+/// with width's [`resolve_cols`] fallback). No cap: unlike columns, an
+/// oversized reading is harmless (the reasoning window caps itself at
+/// [`crate::progress::MAX_REASONING_ROWS`], and the renderer only uses the
+/// height to find the bottom margin). The single geometry entry point for
+/// in-place rendering's vertical budget, shared by the reasoning window
+/// sizing and the renderer's bottom-margin detection.
+pub(crate) fn terminal_height() -> usize {
+    let h = Term::stderr().size().0 as usize;
+    if h == 0 { 24 } else { h }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
