@@ -131,6 +131,8 @@ Full reference: [provider table](#supported-providers) · [CLI-agent presets](#c
 
 ## Resolving merge conflicts
 
+![aic resolve proposes resolutions and finalizes the merge](docs/resolve-demo.gif)
+
 Run `aic resolve` in a repo mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. When nothing's left unmerged, it runs the merge's `--continue` for you. Plain `aic` in a conflicted repo notices and offers to hand off.
 
 ## Contributing

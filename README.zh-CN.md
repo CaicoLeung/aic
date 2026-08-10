@@ -131,6 +131,8 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 
 ## 解决 merge 冲突
 
+![aic resolve 提出解决方案并完成 merge](docs/resolve-demo.gif)
+
 在处于 merge 中的 repo 运行 `aic resolve`。它会读取每个冲突文件，提出不含 marker 的解决方案，展示 diff，并逐文件询问 `apply?`。当没有未 merge 的内容残留时，它会替你执行 merge 的 `--continue`。在冲突 repo 中直接运行 `aic` 也会察觉并提议移交给 resolve。
 
 ## 贡献
