@@ -110,6 +110,22 @@ pub(crate) struct WindowSizing {
     pub(crate) cursor_row: Option<usize>,
 }
 
+impl WindowSizing {
+    /// The no-query fallback: the pre-dynamic fixed cap with scrolling
+    /// disabled — the user-visible baseline before the dynamic-window
+    /// feature, and the graceful degradation when the cursor row cannot be
+    /// queried at all (stdin/stderr not a terminal, query timeout, parse
+    /// failure) or when the offloaded query task panicked off the async
+    /// runtime. Decoration must never break the commit, so a failure here is
+    /// the same as a failure inside [`reasoning_window_rows`].
+    pub(crate) fn fallback() -> Self {
+        Self {
+            max_rows: REASONING_FALLBACK_ROWS,
+            cursor_row: None,
+        }
+    }
+}
+
 pub(crate) fn reasoning_window_rows() -> WindowSizing {
     let h = terminal_height();
     let cursor_row = query_cursor_row().filter(|r| *r <= h);
@@ -1116,6 +1132,17 @@ mod tests {
         assert_eq!(reasoning_rows_for(24, None), REASONING_FALLBACK_ROWS);
         // A bogus cursor row past the terminal height falls back too.
         assert_eq!(reasoning_rows_for(24, Some(99)), REASONING_FALLBACK_ROWS);
+    }
+
+    /// [`WindowSizing::fallback`] is the graceful-degradation shape used when
+    /// the query fails or the offloaded query task panicked: the pre-dynamic
+    /// fixed cap and scrolling disabled — never worse than the pre-feature
+    /// experience, and (critically) never breaks the commit.
+    #[test]
+    fn window_sizing_fallback_is_fixed_cap_no_scroll() {
+        let f = WindowSizing::fallback();
+        assert_eq!(f.max_rows, REASONING_FALLBACK_ROWS);
+        assert_eq!(f.cursor_row, None);
     }
 
     /// [`ThinkingView::push`] returns the current window: completed lines
