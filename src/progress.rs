@@ -10,7 +10,7 @@
 //! inset, [`crate::layout::wrap_line`], [`crate::layout::terminal_width`]); everything
 //! that animates lives here.
 
-use console::Term;
+use console::{Color, Style, Term};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Duration;
@@ -195,43 +195,118 @@ impl ThinkingView {
 /// full-block repaints.
 const REASONING_GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Markdown render kind for one reasoning line. Streaming markdown can't be
+/// fully parsed (the input is partial), so classification is line-local with a
+/// running fence state — robust where it matters (headings, fenced code
+/// blocks) and degrades gracefully where the opener of a long code block has
+/// already scrolled out of the window (those lines just lose their colour,
+/// never their text). Inline `**bold**` / `` `code` `` are deliberately not
+/// parsed: they can split across wrap boundaries, and the explicit ask was
+/// line-level "bold titles" and "code blocks", both of which are wrap-safe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LineKind {
+    /// Plain reasoning prose — no styling.
+    Normal,
+    /// An ATX heading (`#`..`######` + space) — the "bold titles". Rendered
+    /// bold, with the leading `#` markers stripped.
+    Heading,
+    /// A line inside a fenced code block — the "code blocks". Rendered in a
+    /// distinct colour so code reads as code, like the coding-agent UIs aic
+    /// mirrors.
+    Code,
+    /// A ``` / ~~~ fence line itself — rendered dim so it reads as a delimiter
+    /// rather than content.
+    CodeFence,
+}
+
+/// Whether `s` is an ATX heading opener: one to six `#` then a space
+/// (CommonMark). The space requirement keeps `#include`, `#!/bin/bash`, and
+/// similar out of the heading kind — only `# Title`-shaped lines qualify.
+fn is_atx_heading(s: &str) -> bool {
+    let hashes = s.bytes().take_while(|&b| b == b'#').count();
+    matches!(hashes, 1..=6) && s.as_bytes().get(hashes) == Some(&b' ')
+}
+
+/// Classify one reasoning line for rendering, given whether the running scan
+/// is already inside a fenced code block. Returns the line's kind, the text to
+/// wrap (headings have their `#` markers stripped), and the fence state to
+/// carry into the next line. Pure (no I/O) so classification is unit-testable
+/// independently of the ANSI styling.
+fn classify_line(line: &str, in_code: bool) -> (LineKind, String, bool) {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        (LineKind::CodeFence, trimmed.to_string(), !in_code)
+    } else if in_code {
+        (LineKind::Code, line.to_string(), in_code)
+    } else if is_atx_heading(trimmed) {
+        let body = trimmed.trim_start_matches('#').trim_start();
+        (LineKind::Heading, body.to_string(), in_code)
+    } else {
+        (LineKind::Normal, line.to_string(), in_code)
+    }
+}
+
+/// Apply the kind's ANSI style to an already-wrapped piece. `Normal` is a
+/// no-op (plain text); the others go through `console`, which strips the ANSI
+/// on a non-TTY so piped output stays clean. Styling is applied *after* wrap
+/// so the width math in [`crate::layout::wrap_line`] never counts escape bytes.
+fn style_kind(piece: &str, kind: LineKind) -> String {
+    let style = match kind {
+        LineKind::Normal => return piece.to_string(),
+        LineKind::Heading => Style::new().bold(),
+        LineKind::Code => Style::new().fg(Color::Cyan),
+        LineKind::CodeFence => Style::new().dim(),
+    };
+    style.apply_to(piece).to_string()
+}
+
 /// Build the visual rows for one reasoning frame: the spinner+label row on
 /// top, then each retained reasoning line greedy-wrapped under the shared
-/// `│ ` indent. Pure (no I/O) so the layout is unit-testable; the renderer
-/// paints exactly what this returns.
+/// `│ ` indent and styled by its markdown kind (bold headings, coloured code
+/// blocks). Pure (no I/O) so the layout is unit-testable; the renderer paints
+/// exactly what this returns.
 ///
-/// `feed_width` is the per-piece wrap budget. An empty `window` yields just
-/// the spinner row. The reasoning rows (everything below the spinner row) are
-/// capped to [`REASONING_WINDOW`]: a long line wraps to several rows, so the
-/// newest [`REASONING_WINDOW`] *rendered rows* are kept and the oldest drop
-/// out — the top row may start mid-line, exactly like a terminal tail window.
+/// `feed_width` is the per-piece wrap budget. `max_rows` is the rendered-row
+/// cap (from [`reasoning_window_rows`]); the newest `max_rows` rows below the
+/// spinner are kept and the oldest drop out — a long line that wraps to
+/// several rows still cannot grow the region, so the top row may start
+/// mid-line, like a terminal tail window. An empty `window` yields just the
+/// spinner row.
 fn reasoning_rows(
     glyph: &str,
     label: &str,
     window: &[String],
     feed_width: usize,
     elapsed: Option<Duration>,
+    max_rows: usize,
 ) -> Vec<String> {
     let mut rows = Vec::with_capacity(window.len() + 1);
     // Spinner row: when `elapsed` is `Some` (the live feed is ticking), append
     // a rising seconds count so the wait is visible even while the model is
     // silent between deltas — the same feedback the loading frame gives, kept
-    // through the transition into reasoning so the user never loses the
-    // clock. `None` is the tests' stable snapshot (no clock).
+    // through the transition into reasoning so the user never loses the clock.
+    // `None` is the tests' stable snapshot (no clock).
     let spinner = match elapsed {
         Some(e) => format!("{MARGIN}{glyph} {label}… {}s", e.as_secs()),
         None => format!("{MARGIN}{glyph} {label}"),
     };
     rows.push(spinner);
+    // Running fence state, assumed `Normal` at the window's top. A code block
+    // whose opener already scrolled out of the window therefore loses its
+    // colour here (graceful — the text survives); the common case, opener
+    // inside the window, classifies correctly.
+    let mut in_code = false;
     for line in window {
-        for piece in wrap_line(line, feed_width) {
-            rows.push(format!("{MARGIN}│ {piece}"));
+        let (kind, display, next) = classify_line(line, in_code);
+        in_code = next;
+        for piece in wrap_line(&display, feed_width) {
+            rows.push(format!("{MARGIN}│ {}", style_kind(&piece, kind)));
         }
     }
-    // The load-bearing rendered-row cap: the line window alone can't bound
-    // the on-screen region, because one long line wraps to many rows. Keep
-    // the newest REASONING_WINDOW rows below the spinner row.
-    let start = 1 + (rows.len() - 1).saturating_sub(REASONING_WINDOW);
+    // The load-bearing rendered-row cap: the line window alone can't bound the
+    // on-screen region, because one long line wraps to many rows. Keep the
+    // newest `max_rows` rows below the spinner row.
+    let start = 1 + (rows.len() - 1).saturating_sub(max_rows);
     rows.drain(1..start);
     rows
 }
@@ -750,6 +825,81 @@ mod tests {
             .map(|r| r.strip_prefix(&prefix).unwrap().split_whitespace().count())
             .sum();
         assert_eq!(words, 24);
+    }
+
+    /// Plain prose classifies as Normal, leaving the text untouched.
+    #[test]
+    fn classify_plain_prose_is_normal() {
+        let (kind, text, _) = classify_line("just thinking out loud", false);
+        assert_eq!(kind, LineKind::Normal);
+        assert_eq!(text, "just thinking out loud");
+    }
+
+    /// An ATX heading (`#` + space) classifies as Heading with the markers
+    /// stripped — the "bold titles". The required space keeps `#include`,
+    /// shebangs, and the like out of the heading kind.
+    #[test]
+    fn classify_atx_heading_strips_markers() {
+        let (kind, text, _) = classify_line("## Plan", false);
+        assert_eq!(kind, LineKind::Heading);
+        assert_eq!(text, "Plan");
+        assert_eq!(classify_line("#include <stdio.h>", false).0, LineKind::Normal);
+        assert_eq!(classify_line("#!/bin/bash", false).0, LineKind::Normal);
+    }
+
+    /// A fenced code block toggles Code state across its lines: the fence line
+    /// is CodeFence, content lines are Code, and state closes on the matching
+    /// fence. Both ``` and ~~~ open/close.
+    #[test]
+    fn classify_fence_toggles_code_state() {
+        let (k0, _, s0) = classify_line("```rust", false);
+        assert_eq!(k0, LineKind::CodeFence);
+        assert!(s0);
+        let (k1, _, s1) = classify_line("let x = 1;", s0);
+        assert_eq!(k1, LineKind::Code);
+        assert!(s1);
+        let (k2, _, s2) = classify_line("```", s1);
+        assert_eq!(k2, LineKind::CodeFence);
+        assert!(!s2);
+        // Back to Normal after the closer; tilde fences open too.
+        assert_eq!(classify_line("done", s2).0, LineKind::Normal);
+        assert!(classify_line("~~~", false).2);
+    }
+
+    /// An unclosed fence (stream ended mid-block) leaves subsequent lines as
+    /// Code — matching "render as code" for a half-written block.
+    #[test]
+    fn classify_unclosed_fence_keeps_code() {
+        let (_, _, in_code) = classify_line("```python", false);
+        assert_eq!(classify_line("def f():", in_code).0, LineKind::Code);
+    }
+
+    /// [`reasoning_rows`] classifies markdown lines and still honours the
+    /// rendered-row cap + spinner row. Asserts only length and the spinner
+    /// (ANSI is environment-dependent on the test process); kind correctness
+    /// lives in the classify_* tests above.
+    #[test]
+    fn reasoning_rows_handles_markdown_lines_and_caps() {
+        let window = vec![
+            "# Heading".to_string(),
+            "```rs".to_string(),
+            "let x = 2;".to_string(),
+            "```".to_string(),
+        ];
+        let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 2);
+        assert_eq!(rows.len(), 3); // spinner + newest 2 rows
+        assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
+    }
+
+    /// The styling path is live: a bold style actually emits ANSI when forced
+    /// (in the real run `paint`'s `is_term` guard is what gates emission; this
+    /// forces it so the test process — not a TTY — still observes the escape,
+    /// guarding against style_kind ever silently becoming a no-op).
+    #[test]
+    fn styling_path_emits_ansi_when_forced() {
+        let s = Style::new().bold().force_styling(true);
+        let styled = s.apply_to("hi").to_string();
+        assert!(styled.contains("\x1b["), "no ANSI escape emitted: {styled:?}");
     }
 
     /// [`loading_rows`] before the grace deadline: just the spinner row with
