@@ -192,6 +192,14 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
         }
     };
 
+    // Read-tail: hold the final reasoning frame for [`progress::READ_TAIL`] so
+    // the last lines are readable before `finish` erases the block. Skipped for
+    // a silent backend (nothing streamed, nothing to read). The live stream is
+    // not paced — that would block the commit on decoration; this bounded tail
+    // is the only forced pause.
+    if got_output {
+        tokio::time::sleep(progress::READ_TAIL).await;
+    }
     // Thinking is over: `finish` erases the reasoning/loading block (in-place
     // all along, so nothing ever hit the scrollback) and parks the cursor
     // below it. The renderer's Drop is a backstop if the stream aborted first.
