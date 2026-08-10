@@ -56,12 +56,12 @@ pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live. The reasoning is shown as a terminal-height rolling window
-/// ([`progress::reasoning_window_rows`] rows, not a fixed cap) that redraws in
-/// place as the model thinks — newest rows at the bottom, oldest scrolled out
-/// of the window — and is erased when thinking ends, so the reasoning never
-/// lingers on screen or in the scrollback. Markdown is rendered inline (bold
-/// headings, coloured code blocks), and the final frame lingers
+/// reasoning live. The reasoning is shown as a rolling window sized to the
+/// space below the cursor ([`progress::reasoning_window_rows`]) that redraws
+/// in place as the model thinks — newest rows at the bottom, oldest scrolled
+/// out of the window — and is erased when thinking ends, so the reasoning
+/// never lingers on screen or in the scrollback. Markdown is rendered inline
+/// (bold headings, coloured code blocks), and the final frame lingers
 /// [`progress::READ_TAIL`] before erase so the last lines are readable.
 ///
 /// Rendering is hand-rolled via [`progress::ReasoningRenderer`] rather than an

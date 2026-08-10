@@ -52,10 +52,6 @@ pub(crate) const LOADING_GRACE: Duration = Duration::from_secs(5);
 /// paid only when reasoning actually streamed.
 pub(crate) const READ_TAIL: Duration = Duration::from_millis(1500);
 
-/// Minimum rows the reasoning window keeps visible even on a short terminal,
-/// so a small screen still shows a usable slice of the chain-of-thought.
-const MIN_REASONING_ROWS: usize = 4;
-
 /// Hard ceiling on the reasoning window. A very tall terminal could otherwise
 /// paint dozens of rows, pushing the in-place region toward the bottom edge
 /// where further growth would scroll into the scrollback (breaking the discard
@@ -64,25 +60,137 @@ const MIN_REASONING_ROWS: usize = 4;
 const MAX_REASONING_ROWS: usize = 40;
 
 /// How many reasoning rows stay visible at once — a *rendered-row* cap, now
-/// sized to the real terminal instead of a fixed 12.
+/// sized to the space **below the cursor** instead of a fixed 12.
 ///
 /// The old fixed 12 was the root cause of "content scrolls past too fast to
 /// read": at 12 rows a line is visible for only ~12 emission-intervals before
-/// it rolls off the top of the window. Enlarging the window to the terminal
-/// height makes each line linger proportionally longer — the window *is* the
-/// "invisible area" content was scrolling out of, so growing it to fill the
-/// screen is the direct fix. The block is still in-place and erased on
-/// [`ReasoningRenderer::finish`], so the region must stay below the terminal
-/// height or older rows scroll into the scrollback; the budget therefore
-/// reserves the spinner row plus a safety margin and is clamped to
-/// [`MIN_REASONING_ROWS`]..[`MAX_REASONING_ROWS`].
+/// it rolls off the top of the window. Enlarging the window makes each line
+/// linger proportionally longer — the window *is* the "invisible area" content
+/// was scrolling out of, so growing it is the direct fix.
+///
+/// But the window is bounded by a hard geometric constraint: the in-place
+/// renderer paints **downward from the cursor** with cursor-down moves that
+/// clamp at the bottom margin instead of scrolling. A region taller than the
+/// rows left below the cursor therefore **collapses** — several frame rows
+/// overwrite the same bottom physical row, so the reasoning is invisible, and
+/// the erase at [`ReasoningRenderer::finish`] cannot reclaim what was never
+/// cleanly painted. Sizing to the *full* terminal height (`h - 3`) assumed the
+/// cursor starts in the top three rows; in reality it sits at the shell prompt
+/// — mid-screen or lower — so a full-height window collapsed in the common
+/// case. The window therefore queries the cursor's actual row (DSR) and sizes
+/// to the rows genuinely available below it — down to a one-line minimum on a
+/// bottom-row cursor, and capped at [`MAX_REASONING_ROWS`]. When the cursor
+/// cannot be queried, [`REASONING_FALLBACK_ROWS`] (the pre-dynamic fixed cap)
+/// is used.
 pub(crate) fn reasoning_window_rows() -> usize {
     // `Term::size()` -> (rows, cols); height is `.0`. 0 on a non-TTY/pipe ->
     // assume a conventional 24-row terminal (parity with width's fallback).
     let h = Term::stderr().size().0 as usize;
     let h = if h == 0 { 24 } else { h };
-    h.saturating_sub(3) // spinner row + 2-row safety margin
-        .clamp(MIN_REASONING_ROWS, MAX_REASONING_ROWS)
+    reasoning_rows_for(h, query_cursor_row())
+}
+
+/// The window cap for a `height`-row terminal with the cursor on 1-based row
+/// `cursor_row` (`None` = unknown). With the cursor known, the frame — spinner
+/// row + up to `max_rows` reasoning rows — must fit in the rows from the
+/// cursor's row to the bottom (`height - cursor_row + 1`), so
+/// `max_rows = height - cursor_row`; a bottom-row cursor still gets a
+/// one-line window rather than a collapsing full-height one. With the cursor
+/// unknown, fall back to the fixed cap that predates the dynamic window — the
+/// user-visible baseline before the sizing regression (12 rows was the
+/// original [`ThinkingView`] budget).
+fn reasoning_rows_for(height: usize, cursor_row: Option<usize>) -> usize {
+    match cursor_row.filter(|r| *r <= height) {
+        Some(r) => height.saturating_sub(r).clamp(1, MAX_REASONING_ROWS),
+        None => REASONING_FALLBACK_ROWS,
+    }
+}
+
+/// Fallback window cap when the cursor row cannot be queried (stdin or stderr
+/// not a terminal, unresponsive terminal, parse failure): the pre-dynamic
+/// fixed budget. Matching the old behavior exactly means a failed query is
+/// never *worse* than the experience before the dynamic-window feature.
+const REASONING_FALLBACK_ROWS: usize = 12;
+
+/// Query the cursor's current 1-based row via DSR (`ESC[6n`), consuming the
+/// `ESC[<row>;<col>R` response byte-by-byte from stdin so nothing leaks into
+/// later stdin reads (prompts). Returns `None` on any failure: stdin or stderr
+/// not a terminal, no response within 200 ms, or an unparseable reply. The
+/// terminal is restored to its prior mode on every path.
+#[cfg(unix)]
+fn query_cursor_row() -> Option<usize> {
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    let in_fd = std::io::stdin().as_raw_fd();
+    if unsafe { libc::isatty(in_fd) } != 1 {
+        return None;
+    }
+    let term = Term::stderr();
+    if !term.is_term() {
+        return None;
+    }
+    term.write_str("\x1b[6n").ok()?;
+    term.flush().ok()?;
+
+    // Raw input for the reply: canonical mode would buffer it until a
+    // newline the response never carries. Output processing (OPOST) is kept
+    // so stderr output stays translated during the brief raw window.
+    let restore = unsafe {
+        let mut old: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(in_fd, &mut old) != 0 {
+            return None;
+        }
+        let mut raw = old;
+        libc::cfmakeraw(&mut raw);
+        raw.c_oflag = old.c_oflag;
+        if libc::tcsetattr(in_fd, libc::TCSANOW, &raw) != 0 {
+            return None;
+        }
+        old
+    };
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let mut pfd = libc::pollfd { fd: in_fd, events: libc::POLLIN, revents: 0 };
+    let mut resp: Vec<u8> = Vec::with_capacity(16);
+    let result = loop {
+        if Instant::now() >= deadline {
+            break None;
+        }
+        let ready = unsafe { libc::poll(&mut pfd, 1, 50) };
+        if ready <= 0 {
+            continue;
+        }
+        let mut byte = 0u8;
+        let n = unsafe { libc::read(in_fd, (&mut byte as *mut u8).cast(), 1) };
+        if n != 1 {
+            break None;
+        }
+        resp.push(byte);
+        if byte == b'R' {
+            break parse_dsr(&resp);
+        }
+        if resp.len() > 32 {
+            break None;
+        }
+    };
+    unsafe {
+        libc::tcsetattr(in_fd, libc::TCSANOW, &restore);
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn query_cursor_row() -> Option<usize> {
+    None
+}
+
+/// Parse a DSR response `ESC[<row>;<col>R` into the 1-based row. Pure (no
+/// I/O) so the parse is unit-testable without a terminal.
+fn parse_dsr(resp: &[u8]) -> Option<usize> {
+    let s = std::str::from_utf8(resp).ok()?;
+    let body = s.strip_prefix("\x1b[")?.strip_suffix('R')?;
+    let row = body.split(';').next()?.parse::<usize>().ok()?;
+    (row > 0).then_some(row)
 }
 
 /// Shared indicatif spinner style: a braille tick and a prefix matching
@@ -642,6 +750,40 @@ impl Drop for ReasoningRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_dsr_extracts_1based_row() {
+        assert_eq!(parse_dsr(b"\x1b[12;1R"), Some(12));
+        assert_eq!(parse_dsr(b"\x1b[1;80R"), Some(1));
+        assert_eq!(parse_dsr(b"\x1b[40;1R"), Some(40));
+    }
+
+    #[test]
+    fn parse_dsr_rejects_garbage() {
+        assert_eq!(parse_dsr(b"nope"), None);
+        assert_eq!(parse_dsr(b"\x1b[R"), None);
+        assert_eq!(parse_dsr(b"\x1b[0;1R"), None); // row 0 is never valid
+        assert_eq!(parse_dsr(b""), None);
+    }
+
+    #[test]
+    fn window_sizes_to_space_below_cursor() {
+        // 24-row terminal, cursor on row 21 (near the bottom): the frame
+        // (spinner + window) must fit rows 21..24 — a 3-row window, never a
+        // collapsing full-height one.
+        assert_eq!(reasoning_rows_for(24, Some(21)), 3);
+        // Cursor at the very top: the full height is available, capped at MAX.
+        assert_eq!(reasoning_rows_for(24, Some(1)), 23);
+        // Mid-screen cursor on a 40-row terminal: exact-fit case.
+        assert_eq!(reasoning_rows_for(40, Some(3)), 37);
+        // Last row: one line minimum rather than a collapsing frame.
+        assert_eq!(reasoning_rows_for(40, Some(40)), 1);
+        // Unknown cursor: the pre-dynamic fixed cap (never worse than before
+        // the dynamic-window feature).
+        assert_eq!(reasoning_rows_for(24, None), REASONING_FALLBACK_ROWS);
+        // A bogus cursor row past the terminal height falls back too.
+        assert_eq!(reasoning_rows_for(24, Some(99)), REASONING_FALLBACK_ROWS);
+    }
 
     /// [`ThinkingView::push`] returns the current window: completed lines
     /// (blank ones dropped) in arrival order, oldest-first.
