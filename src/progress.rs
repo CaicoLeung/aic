@@ -94,10 +94,15 @@ const MAX_REASONING_ROWS: usize = 40;
 ///   margin by scrolling the screen (a `\n` at the bottom margin, which the
 ///   cursor-down clamp would otherwise swallow). The cap is the pre-dynamic
 ///   fixed budget, clamped so the frame still fits on screen — no reasoning
-///   row ever lands in the scrollback. This is the common case: the shell
-///   prompt (and therefore the frame's start row) usually sits on the last
-///   line of a full screen, and the old fixed-12 window simply collapsed
-///   there.
+///   row ever lands in the scrollback (the block is painted in place and
+///   erased by [`ReasoningRenderer::finish`]). The scrolls DO shift the
+///   screen up one row per descent past the margin, so the user's prior
+///   terminal output above the prompt advances into the scrollback by that
+///   many rows — an unavoidable cost of painting a window at the bottom of a
+///   full screen, and strictly better than the collapse that hid the
+///   reasoning entirely. This is the common case: the shell prompt (and
+///   therefore the frame's start row) usually sits on the last line of a full
+///   screen, and the old fixed-12 window simply collapsed there.
 ///
 /// When the cursor cannot be queried, [`REASONING_FALLBACK_ROWS`] (the
 /// pre-dynamic fixed cap) is used and the renderer never scrolls — the
