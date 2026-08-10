@@ -1,8 +1,8 @@
 Output "docs/demo.gif"
 
-Set FontSize 16
-Set Width 820
-Set Height 440
+Set FontSize 24
+Set Width 1200
+Set Height 880
 Set Padding 20
 Set Theme {
   "background": "#0d1117",
@@ -17,14 +17,14 @@ Enter
 Sleep 2s
 Show
 
-# Show working-tree changes
-Type@30ms "git diff --stat"
+# Show the actual changes so viewer sees what aic will split
+Type@30ms "git diff"
 Sleep 200ms
 Enter
-Sleep 1500ms
+Sleep 3s
 
 # Run aic — the money shot
 Type@50ms "aic"
 Sleep 150ms
 Enter
-Sleep 5s
+Sleep 11s
