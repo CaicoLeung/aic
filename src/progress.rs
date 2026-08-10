@@ -379,7 +379,11 @@ fn dsr_byte_ok(resp: &[u8], b: u8) -> bool {
 fn drain_dsr_reply(fd: std::os::fd::RawFd) {
     use std::time::Instant;
 
-    let deadline = Instant::now() + Duration::from_millis(200);
+    // Same budget as the outer wait-for-first-byte ([`DRAIN_GRACE`]): both
+    // phases of the drain — a late reply beginning to arrive, then its body
+    // following — are bounded by one "slow terminal" timeout, so a single
+    // value covers reply latency past the query deadline end to end.
+    let deadline = Instant::now() + DRAIN_GRACE;
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
