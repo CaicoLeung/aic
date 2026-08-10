@@ -211,11 +211,13 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     };
 
     // Read-tail: hold the final reasoning frame for [`progress::READ_TAIL`] so
-    // the last lines are readable before `finish` erases the block. Skipped for
-    // a silent backend (nothing streamed, nothing to read). The live stream is
-    // not paced — that would block the commit on decoration; this bounded tail
-    // is the only forced pause.
-    if got_output {
+    // the last lines are readable before `finish` erases the block. Skipped
+    // when there is nothing to read: a silent backend (`got_output` false)
+    // or a final frame whose window is empty (only the spinner row showed —
+    // whitespace-only deltas that `ThinkingView` dropped). The live stream is
+    // not paced — that would block the commit on decoration; this bounded
+    // tail is the only forced pause.
+    if got_output && !last_window.is_empty() {
         tokio::time::sleep(progress::READ_TAIL).await;
     }
     // Thinking is over: `finish` erases the reasoning/loading block (in-place

@@ -49,7 +49,9 @@ pub(crate) const LOADING_GRACE: Duration = Duration::from_secs(5);
 /// so the last lines are readable. The live stream is NOT paced to reading
 /// speed (that would block the commit — the tool's actual job — on
 /// decoration), so this tail is the only forced pause: small, bounded, and
-/// paid only when reasoning actually streamed.
+/// paid only when the final frame actually shows reasoning rows (a bare
+/// spinner — whitespace-only deltas that [`ThinkingView`] dropped — owes no
+/// dwell, since there is nothing to read).
 pub(crate) const READ_TAIL: Duration = Duration::from_millis(1500);
 
 /// Hard ceiling on the reasoning window. A very tall terminal could otherwise
