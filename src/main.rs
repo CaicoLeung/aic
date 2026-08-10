@@ -58,7 +58,7 @@ pub(crate) type CommitMessenger =
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling window sized to the
-/// space below the cursor ([`progress::reasoning_window_rows`]) that redraws
+/// space below the cursor ([`cursor::reasoning_window_rows`]) that redraws
 /// in place as the model thinks — newest rows at the bottom, oldest scrolled
 /// out of the window — and is erased when thinking ends, so the reasoning
 /// never lingers on screen or in the scrollback. When the cursor sits in the

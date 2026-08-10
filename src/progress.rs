@@ -9,6 +9,9 @@
 //! only the geometry primitives in [`crate::layout`] (the [`crate::layout::MARGIN`]
 //! inset, [`crate::layout::wrap_line`], [`crate::layout::terminal_width`]); everything
 //! that animates lives here.
+//! The cursor-row probe that sizes the reasoning window to the rows below the
+//! prompt lives in [`crate::cursor`]; the renderer here takes its result as
+//! plain row numbers.
 
 use console::{Color, Style, Term};
 use std::collections::VecDeque;
