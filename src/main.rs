@@ -66,16 +66,19 @@ pub(crate) type CommitMessenger =
 /// visible even there instead of collapsing. Markdown is rendered inline
 /// (bold headings, coloured code blocks — fence state tracked across the
 /// whole stream, so code keeps its colour even after its opener scrolls out
-/// of the window), and the final frame lingers
-/// [`progress::READ_TAIL`] before erase so the last lines are readable.
+/// of the window), and at the end of analysis the final frame **dissolves**
+/// one row at a time so each line stays readable as it exits, rather than
+/// blinking out wholesale.
 ///
 /// Rendering is hand-rolled via [`progress::ReasoningRenderer`] rather than an
 /// indicatif multi-line spinner: indicatif repaints by blanking every row then
 /// redrawing them, and its steady tick forced that ~20×/s, so a multi-row
-/// window flickered. The renderer clears and rewrites one row at a time (any
-/// instant has at most one blank row) and repaints only on a reasoning change,
-/// so the window is flicker-free. See [`progress::ReasoningRenderer`] for the
-/// redraw contract.
+/// window flickered. This renderer rewrites **only the row that changed** on
+/// each token — the in-progress line grows fluidly while the rows above stay
+/// untouched — and falls back to a full anti-flicker repaint only when the
+/// window rolls. Idle ticks are suppressed while streaming is active so the
+/// feed never flashes; the spinner animates only once the model goes silent.
+/// See [`progress::ReasoningRenderer`] for the redraw contract.
 ///
 /// **Silent-backend fallback.** A backend that emits no reasoning deltas at
 /// all (a CLI agent in single-shot print mode, or an API cold start) would
