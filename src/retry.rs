@@ -6,11 +6,13 @@
 //! rig→reason mapping lives at the [`crate::llm`] boundary
 //! ([`crate::llm::classify_retry`]); this module is provider-agnostic.
 //!
-//! Four retry seams share it: the Drafted-Message (`schema`) and
+//! Five retry seams share it: the Drafted-Message (`schema`) and
 //! untyped-completion (`call`) paths via [`retry`] + [`RetryPolicy::transient`],
 //! the batch-plan streaming inline loop via [`should_retry`] +
-//! [`RetryPolicy::transient`], and the resolve conflict-marker workflow via
-//! [`retry`] + [`RetryPolicy::once`].
+//! [`RetryPolicy::transient`], the CLI-agent typed path via [`should_retry`] +
+//! [`RetryPolicy::once`] (inline like the streaming seam — its `on_output`
+//! callback is a borrowed `FnMut`), and the resolve conflict-marker workflow
+//! via [`retry`] + [`RetryPolicy::once`].
 
 use std::time::Duration;
 
@@ -137,9 +139,9 @@ impl std::error::Error for RetryError {
 /// before the next attempt; otherwise return `None`, meaning the caller should
 /// stop retrying and surface the failure.
 ///
-/// This is the single budget gate both [`retry`] and the streaming inline loop
-/// in [`crate::llm::LLMAgent::stream_typed_with_reasoning`] call, so the seams
-/// can't drift.
+/// This is the single budget gate that [`retry`] and every inline retry loop
+/// — the streaming seam ([`crate::llm::LLMAgent::stream_typed_with_reasoning`])
+/// and the CLI-agent typed path — call, so the seams can't drift.
 pub fn should_retry(
     reason: &RetryReason,
     attempts: &mut usize,

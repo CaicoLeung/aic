@@ -44,7 +44,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{LlmError, parse_json_response, strip_code_fence};
+use crate::llm::{LlmError, classify_retry, parse_json_response, strip_code_fence};
+use crate::retry::{RetryPolicy, should_retry};
 
 /// The literal token in an args template that is replaced with the full
 /// (system + user) prompt at run time.
@@ -1274,11 +1275,15 @@ impl CliAgent {
     }
 
     /// Typed (JSON) completion core: run the CLI once, lenient-parse the
-    /// accumulated stdout with [`parse_json_response`], with **one retry** on
-    /// a parse failure (re-running a full CLI agent is expensive; more than one
-    /// retry is wasteful). `on_output` is forwarded to the runner so each line
-    /// streams live; `schema` passes a no-op (no reasoning window is wired on
-    /// the commit-message path), while `stream_typed_with_reasoning` passes
+    /// accumulated stdout with [`parse_json_response`], retrying a parse
+    /// failure once via the shared budget gate
+    /// ([`crate::retry::should_retry`] + [`crate::retry::RetryPolicy::once`] —
+    /// a full CLI re-run is expensive, so budget 1, no backoff). Inline rather
+    /// than [`crate::retry::retry`] for the same reason the streaming seam is:
+    /// `on_output` is a borrowed `FnMut` an escaping async closure can't
+    /// reborrow across attempts. `on_output` is forwarded to the runner so each
+    /// line streams live; `schema` passes a no-op (no reasoning window is wired
+    /// on the commit-message path), while `stream_typed_with_reasoning` passes
     /// the real reasoning callback. Infrastructure errors propagate
     /// immediately.
     async fn typed_internal<T>(
@@ -1294,14 +1299,17 @@ impl CliAgent {
             let raw = self.run_once(user_prompt, Mode::Json, on_output).await?;
             match parse_json_response::<T>(&raw) {
                 Ok(v) => return Ok(v),
-                Err(e) => {
-                    attempts += 1;
-                    // One retry max → 2 total attempts.
-                    if attempts <= 1 {
-                        continue;
+                // Parse failure = unusable content; classify + gate through
+                // the shared budget (once() = no backoff → no sleep).
+                Err(err) => match classify_retry(&err) {
+                    Some(reason) => {
+                        match should_retry(&reason, &mut attempts, RetryPolicy::once()) {
+                            Some(_) => continue,
+                            None => return Err(err),
+                        }
                     }
-                    return Err(e);
-                }
+                    None => return Err(err),
+                },
             }
         }
     }
