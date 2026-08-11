@@ -215,6 +215,17 @@ pub fn group_adjacent(files: &[GroupFile], cfg: &GroupingConfig) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     for file in files {
         if file.hunks.is_empty() {
+            // A changed file with no textual hunks (binary/mode/rename) is an
+            // atomic whole-file change — carry it as a block with empty hunks
+            // so the partition still includes every file (staging stages such
+            // files whole via `git add`).
+            blocks.push(Block {
+                changes: vec![BatchChange {
+                    file: file.path.clone(),
+                    hunks: vec![],
+                }],
+                heuristic: BlockHeuristic::Single,
+            });
             continue;
         }
         let mut run: Vec<usize> = vec![file.hunks[0].index];
@@ -617,6 +628,31 @@ mod tests {
         for b in &plan.batches {
             assert!(b.reason.is_some(), "every batch must carry a reason");
         }
+    }
+
+    /// Regression: a binary/mode/rename file (zero hunks) must still produce a
+    /// whole-file block, not be silently dropped — otherwise the engine's
+    /// "every file lands in exactly one batch" contract breaks and the change
+    /// is left uncommitted.
+    #[test]
+    fn binary_file_produces_whole_file_block() {
+        let files = [
+            file("a.rs", &[hunk(1, "", 1, 2)]),
+            file("blob.bin", &[]),
+        ];
+        let blocks = group(&files, &default_cfg());
+        let plan = blocks_to_plan(&blocks);
+        // Both files appear: validate_batch_plan now rejects an omitted file.
+        let counts = vec![("a.rs".to_string(), 1), ("blob.bin".to_string(), 0)];
+        validate_batch_plan(&plan, &counts)
+            .expect("a binary file must land in the partition");
+        let binary = plan
+            .batches
+            .iter()
+            .flat_map(|b| b.changes.iter())
+            .find(|c| c.file == "blob.bin")
+            .expect("binary file must appear in a batch");
+        assert!(binary.hunks.is_empty(), "binary file stages whole (empty hunks)");
     }
 
     /// Hunk indices are sorted within a change and blocks never repeat a hunk.
