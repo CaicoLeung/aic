@@ -109,6 +109,23 @@ pub fn validate_batch_plan(
         );
     }
 
+    // Every file — including a zero-hunk (binary/mode/rename) one — must be
+    // referenced by at least one batch. The hunk-coverage loop above only
+    // catches files that *have* hunks; a zero-hunk file omitted by the planner
+    // would pass silently and its change be left uncommitted. This forces a
+    // loud error instead.
+    let unreferenced: Vec<&str> = file_hunk_counts
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .filter(|p| !assigned.contains_key(*p))
+        .collect();
+    if !unreferenced.is_empty() {
+        anyhow::bail!(
+            "LLM response did not include every file. Unreferenced: {}",
+            unreferenced.join(", ")
+        );
+    }
+
     Ok(())
 }
 
@@ -281,6 +298,54 @@ mod tests {
         assert!(msg.contains("Missing:"));
         assert!(msg.contains("a.rs:hunk 2"));
         assert!(msg.contains("a.rs:hunk 3"));
+    }
+
+    /// A zero-hunk file (binary/mode/rename) carried whole in one batch with
+    /// an empty hunks array is valid — staging stages it via `git add`.
+    #[test]
+    fn accepts_zero_hunk_binary_file_referenced_whole() {
+        let plan = BatchPlanOutput {
+            batches: vec![batch(&[change("blob.bin", &[])], "update binary")],
+        };
+        assert!(
+            validate_batch_plan(&plan, &counts(&[("blob.bin", 0)])).is_ok(),
+            "a zero-hunk file included whole must pass"
+        );
+    }
+
+    /// Regression: a planner that omits a zero-hunk (binary) file must be
+    /// rejected, not silently accepted — otherwise the change is left
+    /// uncommitted while the Run reports success. The hunk-coverage check
+    /// alone can't catch this (a 0-hunk file has no hunks to cover).
+    #[test]
+    fn rejects_zero_hunk_binary_file_omitted() {
+        // One real text file committed, the binary file dropped entirely.
+        let plan = BatchPlanOutput {
+            batches: vec![batch(&[change("a.rs", &[])], "add feature")],
+        };
+        let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1), ("blob.bin", 0)]));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unreferenced") && msg.contains("blob.bin"),
+            "expected an unreferenced-file error naming blob.bin, got: {msg}"
+        );
+    }
+
+    /// A zero-hunk file mixed into a batch with real text hunks is valid —
+    /// the binary ships with its related change in one commit.
+    #[test]
+    fn accepts_zero_hunk_file_grouped_with_text() {
+        let plan = BatchPlanOutput {
+            batches: vec![batch(
+                &[change("a.rs", &[1]), change("blob.bin", &[])],
+                "add feature with asset",
+            )],
+        };
+        assert!(
+            validate_batch_plan(&plan, &counts(&[("a.rs", 1), ("blob.bin", 0)])).is_ok(),
+            "a binary grouped with a text change must pass"
+        );
     }
 
     #[test]
