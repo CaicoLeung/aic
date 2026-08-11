@@ -241,9 +241,10 @@ async fn generate_and_commit(
     let diff = serde_json::json!({ "staged_files": files });
     let diff_str = diff.to_string();
 
-    // Generate initial draft, then run confirmation loop if enabled. The
-    // staged stats (what the commit would land) ride the preview footer; the
-    // landed stats (what it did land) ride the ✓ line.
+    // Generate initial draft, then run confirmation loop if enabled. Staged
+    // stats (what the commit would land) feed the preview footer — shown only
+    // when confirmation is on; landed stats (what it did land) always feed the
+    // ✓ line.
     let result =
         progress::with_spinner("Generating commit message", messenger(diff_str.clone())).await?;
     let stats = git.staged_stats(paths)?;
