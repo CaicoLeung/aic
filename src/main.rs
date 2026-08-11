@@ -4,6 +4,8 @@ pub mod completion;
 pub mod config;
 pub mod confirm;
 pub mod conflict;
+pub mod cursor;
+pub mod decoder;
 pub mod diff;
 pub mod display;
 pub mod generator;
@@ -57,7 +59,7 @@ pub(crate) type CommitMessenger =
 
 /// Run the batch-plan analysis behind a spinner that streams the model's
 /// reasoning live. The reasoning is shown as a rolling window sized to the
-/// space below the cursor ([`progress::reasoning_window_rows`]) that redraws
+/// space below the cursor ([`cursor::reasoning_window_rows`]) that redraws
 /// in place as the model thinks — newest rows at the bottom, oldest scrolled
 /// out of the window — and is erased when thinking ends, so the reasoning
 /// never lingers on screen or in the scrollback. When the cursor sits in the
@@ -101,11 +103,11 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
     // The DSR cursor-row query does up to ~200 ms of blocking tty I/O (poll
     // + raw-mode byte reads against a deadline). Run it on the blocking pool
     // so it stalls a worker, not the async reactor. A task panic degrades to
-    // the no-scroll [`progress::WindowSizing::fallback`] — decoration must
+    // the no-scroll [`cursor::WindowSizing::fallback`] — decoration must
     // never break the commit.
-    let sizing = tokio::task::spawn_blocking(progress::reasoning_window_rows)
+    let sizing = tokio::task::spawn_blocking(cursor::reasoning_window_rows)
         .await
-        .unwrap_or_else(|_| progress::WindowSizing::fallback());
+        .unwrap_or_else(|_| cursor::WindowSizing::fallback());
     let mut renderer =
         progress::ReasoningRenderer::new("Analyzing changes", sizing.max_rows, sizing.cursor_row);
     let start = Instant::now();

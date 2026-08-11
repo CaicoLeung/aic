@@ -58,7 +58,7 @@ pub(crate) fn resolve_cols(cols: usize) -> usize {
 /// counterpart of [`resolve_cols`]. `rows == 0` (non-TTY / piped, where
 /// `Term::stderr()` reports no size) falls back to [`FALLBACK_ROWS`]; unlike
 /// columns there is no hard cap — an oversized reading is harmless (the
-/// reasoning window caps itself at [`crate::progress::MAX_REASONING_ROWS`]).
+/// reasoning window caps itself at its own hard ceiling).
 /// Pure, so the fallback is unit-testable independently of the live terminal.
 fn resolve_rows(rows: usize) -> usize {
     if rows == 0 { FALLBACK_ROWS } else { rows }
@@ -123,7 +123,7 @@ pub(crate) fn terminal_width() -> usize {
 /// Read the real terminal's row count via [`resolve_rows`] (`0` →
 /// [`FALLBACK_ROWS`] on a non-TTY/pipe — parity with width's [`resolve_cols`]).
 /// No cap: unlike columns, an oversized reading is harmless (the reasoning
-/// window caps itself at [`crate::progress::MAX_REASONING_ROWS`], and the
+/// window caps itself at its own hard ceiling, and the
 /// renderer only uses the height to find the bottom margin). The single
 /// geometry entry point for in-place rendering's vertical budget, shared by
 /// the reasoning window sizing and the renderer's bottom-margin detection.

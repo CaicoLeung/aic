@@ -34,7 +34,7 @@ pub const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434";
 /// else — a wrapped rig completion failure (auth, rate limit, network) or an
 /// unrelated error — is `None`, so the caller propagates the original error
 /// unchanged. This is the only place the retry module touches a rig type.
-fn classify_retry(err: &anyhow::Error) -> Option<RetryReason> {
+pub(crate) fn classify_retry(err: &anyhow::Error) -> Option<RetryReason> {
     match err.downcast_ref::<StructuredOutputError>() {
         Some(StructuredOutputError::EmptyResponse) => Some(RetryReason::Empty),
         Some(StructuredOutputError::DeserializationError(_)) => Some(RetryReason::Truncated),
