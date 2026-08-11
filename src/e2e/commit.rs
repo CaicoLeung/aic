@@ -447,11 +447,7 @@ async fn commit_includes_binary_file_in_batch_plan() {
         Confirm::Disabled,
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "binary batch should succeed: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "binary batch should succeed: {:?}", result);
     assert_eq!(
         commit_count(dir.path()),
         before + 1,
@@ -460,6 +456,115 @@ async fn commit_includes_binary_file_in_batch_plan() {
     assert!(
         worktree_is_empty(dir.path()),
         "binary file must be committed, not left in the unstaged area"
+    );
+}
+
+/// Layer-3 coverage: the batch-plan path must send the model an explicit
+/// binary marker (not an empty diff string) for a zero-hunk file, so the model
+/// includes the file with an empty `hunks` array. `commit_includes_binary_file_
+/// in_batch_plan` stubs the planner with `planner_fixed`, which discards its
+/// input — so the marker string (the actual fix for the model-facing layer) was
+/// computed then thrown away, never asserted. This captures what was sent.
+#[tokio::test]
+async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+    git_in(dir.path(), &["add", "blob.bin"]);
+    git_in(dir.path(), &["commit", "-m", "add binary"]);
+    std::fs::write(dir.path().join("blob.bin"), [9u8, 9, 9, 9]).unwrap();
+
+    let plan = generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![generator::BatchChange {
+                file: "blob.bin".to_string(),
+                hunks: vec![],
+            }],
+            reason: Some("update binary".into()),
+        }],
+    };
+    let (planner, sent) = planner_capture(plan);
+    let git = Git::at(dir.path()).unwrap();
+    let result = run_commit_workflow_impl(
+        &git,
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner,
+        messenger_fixed("chore: update blob"),
+        Confirm::Disabled,
+    )
+    .await;
+    assert!(result.is_ok(), "batch should succeed: {:?}", result);
+
+    let sent = sent.lock();
+    assert_eq!(sent.len(), 1, "planner must be called exactly once");
+    let payload = &sent[0];
+    assert!(
+        payload.contains(crate::prompt::BINARY_MARKER),
+        "a zero-hunk file must reach the model as the binary marker, not an empty diff"
+    );
+    assert!(
+        payload.contains("blob.bin"),
+        "the binary file's path must appear in the model payload"
+    );
+}
+
+/// Coverage for the mode-only case the fix's root-cause scopes ("binary /
+/// mode-only / pure-rename") but which only a rewritten binary blob exercised.
+/// A pure executable-bit flip yields a non-empty, zero-hunk workdir diff — the
+/// same `hunk_count == 0 && !diff.trim().is_empty()` shape — and must be
+/// committed whole via `git add`, not silently dropped.
+#[cfg(unix)]
+#[tokio::test]
+async fn commit_includes_mode_only_change_in_batch_plan() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    let script = dir.path().join("script.sh");
+    std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+    git_in(dir.path(), &["add", "script.sh"]);
+    git_in(dir.path(), &["commit", "-m", "add script"]);
+    // Flip only the executable bit — content is byte-identical, so the workdir
+    // diff is mode-only (`old mode 100644` / `new mode 100755`), zero hunks.
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let plan = generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![generator::BatchChange {
+                file: "script.sh".to_string(),
+                hunks: vec![],
+            }],
+            reason: Some("make script executable".into()),
+        }],
+    };
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+    let result = run_commit_workflow_impl(
+        &git,
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chmod: make script executable"),
+        Confirm::Disabled,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "mode-only batch should succeed: {:?}",
+        result
+    );
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "the mode-only change must land one commit"
+    );
+    assert!(
+        worktree_is_empty(dir.path()),
+        "mode-only change must be committed, not left unstaged"
     );
 }
 
