@@ -554,9 +554,7 @@ pub(crate) async fn run_commit_workflow_impl(
                 // "nothing changed" and drops the file. Send an explicit marker
                 // instead so it includes the file with an empty hunks array.
                 let scoped = if hunk_count == 0 && !diff.trim().is_empty() {
-                    "(binary or non-textual file — stage whole; include with an \
-                     empty hunks array)"
-                        .to_string()
+                    prompt::BINARY_MARKER.to_string()
                 } else {
                     diff::format_diff_scoped(&diff, &f.path)
                 };

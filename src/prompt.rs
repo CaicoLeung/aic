@@ -29,13 +29,20 @@ Examples:
 - {"message": "refactor(db): replace raw SQL with query builder", "body": "Improves readability and enables compile-time query validation"}
 "#;
 
+/// Marker substituted for a binary / non-textual file's diff in the batch-plan
+/// JSON sent to the model. Emitted by the batch-plan path (`main.rs`) and
+/// documented verbatim in [`SYSTEM_PROMPT_BATCH_PLAN`]; the `mod tests` drift
+/// check keeps both in sync.
+pub const BINARY_MARKER: &str =
+    "(binary or non-textual file — stage whole; include with an empty hunks array)";
+
 const SYSTEM_PROMPT_BATCH_PLAN: &str = r#"
 You are an expert at analyzing unstaged git changes and splitting them into logical atomic commits.
 
 You will receive a JSON object with an "unstaged_files" array. Each element has:
 - "path": file path relative to repo root
 - "status": one of "Added", "Modified", "Deleted", "Renamed", "Untracked"
-- "diff": the diff for that file. It is divided into numbered HUNKS. Each hunk header looks like "[<context>] hunk N, lines A-B" followed by its changed lines. **N is the 1-based hunk index you reference in your answer.** A binary or non-textual file (image, font, compiled asset) shows a marker like "(binary or non-textual file …)" instead of hunks — it is still a real change: include it in exactly one batch with an EMPTY "hunks" array.
+- "diff": the diff for that file. It is divided into numbered HUNKS. Each hunk header looks like "[<context>] hunk N, lines A-B" followed by its changed lines. **N is the 1-based hunk index you reference in your answer.** A binary or non-textual file (image, font, compiled asset) shows the marker "(binary or non-textual file — stage whole; include with an empty hunks array)" instead of hunks — it is still a real change: include it in exactly one batch with an EMPTY "hunks" array.
 
 A "Deleted" status means the file has been removed entirely — its diff shows only removed lines. Treat file removals as real commits (e.g. "remove unused module", "delete deprecated config"); never return an empty batch list because every change is a deletion.
 
@@ -141,5 +148,21 @@ impl Default for PromptConfig {
             batch_plan_prompt: SYSTEM_PROMPT_BATCH_PLAN.trim().to_string(),
             resolve_prompt: SYSTEM_PROMPT_RESOLVE_CONFLICT.trim().to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BINARY_MARKER;
+
+    /// The batch-plan prompt must document the exact marker the batch-plan path
+    /// emits — otherwise the two drift silently and the model sees a marker it
+    /// was never told to expect (or vice-versa).
+    #[test]
+    fn batch_plan_prompt_documents_binary_marker() {
+        assert!(
+            super::SYSTEM_PROMPT_BATCH_PLAN.contains(BINARY_MARKER),
+            "SYSTEM_PROMPT_BATCH_PLAN must contain BINARY_MARKER verbatim"
+        );
     }
 }
