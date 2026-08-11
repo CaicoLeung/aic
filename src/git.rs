@@ -2,6 +2,7 @@ use crate::conflict;
 use crate::diff::parse_file_patch;
 use anyhow::Context;
 use git2::{DiffFormat, DiffLineType, ObjectType, Repository, Status, Tree};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
@@ -19,6 +20,24 @@ pub enum StatusKind {
     Deleted,
     Renamed,
     Untracked,
+}
+
+/// Per-file stats for a commit entry's footer: added/deleted line counts,
+/// new/removed status, and binary-ness for one path in one diff. Produced by
+/// [`Git::staged_stats`] (what a pending commit would land) and
+/// [`Git::committed_stats`] (what a landed commit did land); rendered by
+/// `display::Display::emit_file_stats`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStats {
+    pub path: String,
+    pub added: usize,
+    pub deleted: usize,
+    /// File is new in this diff (git `A`) — renders `[new]`.
+    pub new: bool,
+    /// File is deleted in this diff (git `D`) — renders `[del]`.
+    pub removed: bool,
+    /// Binary delta: no line counts exist; renders `(binary)`.
+    pub binary: bool,
 }
 
 /// The canonical non-zero-exit diagnostic: the command line (once), the exit
@@ -284,6 +303,125 @@ impl Git {
             Some(p) => format_diff_for_path(&diff, p),
             None => format_diff(&diff),
         }
+    }
+
+    /// Per-file stats for `paths` in the staged diff (HEAD → index) — exactly
+    /// what the next commit would land. Mirrors [`Git::diff`]'s head-less
+    /// handling: with no HEAD, every staged path counts as a new file.
+    pub fn staged_stats(&self, paths: &[String]) -> anyhow::Result<Vec<FileStats>> {
+        let head_tree = match self.repo.head() {
+            Ok(r) => Some(r.peel_to_tree().context("failed to peel HEAD to tree")?),
+            Err(_) => None,
+        };
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true);
+        let index = self.index()?;
+        let diff = self
+            .repo
+            .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))
+            .context("failed to compute staged diff")?;
+        Self::stats_from_diff(&diff, paths)
+    }
+
+    /// Per-file stats for `paths` in the commit `HEAD` just became — the
+    /// landed counterpart of [`Git::staged_stats`]. Diffed against the parent
+    /// commit (the empty tree for a root commit). Call after [`Git::commit`]:
+    /// this reads the same HEAD whose short hash that call displays, so the
+    /// stats always match the shown commit even if a hook moved HEAD.
+    pub fn committed_stats(&self, paths: &[String]) -> anyhow::Result<Vec<FileStats>> {
+        let head = self
+            .repo
+            .head()
+            .context("failed to resolve HEAD after commit")?
+            .peel_to_commit()
+            .context("failed to peel HEAD to commit")?;
+        let parent_tree = if head.parent_count() == 0 {
+            None
+        } else {
+            Some(
+                head.parent(0)
+                    .context("failed to read parent commit")?
+                    .tree()
+                    .context("failed to read parent tree")?,
+            )
+        };
+        let tree = head.tree().context("failed to read HEAD tree")?;
+        let diff = self
+            .repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
+            .context("failed to compute commit diff")?;
+        Self::stats_from_diff(&diff, paths)
+    }
+
+    /// Count per-file added/deleted lines and new/removed/binary status from
+    /// a libgit2 diff, restricted to `paths` (results keep the caller's
+    /// order). One `foreach` walk attributes lines by delta path; deltas
+    /// outside `paths` are skipped without stopping the walk. Binary deltas
+    /// fire no line events, so they are flagged from the file callback and
+    /// keep zero counts.
+    fn stats_from_diff(diff: &git2::Diff, paths: &[String]) -> anyhow::Result<Vec<FileStats>> {
+        let mut stats: Vec<FileStats> = paths
+            .iter()
+            .map(|p| FileStats {
+                path: p.clone(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            })
+            .collect();
+        let mut seen = vec![false; paths.len()];
+        let mut new_flags = vec![false; paths.len()];
+        let mut removed_flags = vec![false; paths.len()];
+        let mut binary_flags = vec![false; paths.len()];
+        let mut index: HashMap<&str, usize> = HashMap::with_capacity(paths.len());
+        for (i, p) in paths.iter().enumerate() {
+            index.insert(p.as_str(), i);
+        }
+
+        // The file and line callbacks run interleaved in one `foreach` walk,
+        // so each captures disjoint data (flags vs counts) — two closures
+        // borrowing the same Vec would not compile.
+        let mut file_cb = |delta: git2::DiffDelta<'_>, _: f32| -> bool {
+            let Some(i) = delta_path(&delta).and_then(|p| index.get(p).copied()) else {
+                return true;
+            };
+            seen[i] = true;
+            new_flags[i] = delta.status() == git2::Delta::Added;
+            removed_flags[i] = delta.status() == git2::Delta::Deleted;
+            binary_flags[i] = delta.flags().contains(git2::DiffFlags::BINARY);
+            true
+        };
+        let mut line_cb = |delta: git2::DiffDelta<'_>,
+                           _: Option<git2::DiffHunk<'_>>,
+                           line: git2::DiffLine<'_>|
+         -> bool {
+            let Some(i) = delta_path(&delta).and_then(|p| index.get(p).copied()) else {
+                return true;
+            };
+            match line.origin_value() {
+                DiffLineType::Addition => stats[i].added += 1,
+                DiffLineType::Deletion => stats[i].deleted += 1,
+                _ => {}
+            }
+            true
+        };
+        diff.foreach(&mut file_cb, None, None, Some(&mut line_cb))
+            .context("failed to walk diff")?;
+
+        let mut out = Vec::with_capacity(paths.len());
+        for (i, s) in stats.into_iter().enumerate() {
+            if seen[i] {
+                out.push(FileStats {
+                    new: new_flags[i],
+                    removed: removed_flags[i],
+                    binary: binary_flags[i],
+                    ..s
+                });
+            }
+        }
+        Ok(out)
     }
 
     pub fn add(&self, paths: &[&str]) -> anyhow::Result<()> {
@@ -557,6 +695,18 @@ fn index_status_kind(flags: Status) -> StatusKind {
     } else {
         StatusKind::Renamed
     }
+}
+
+/// The path identifying a diff delta: the new-side path, falling back to the
+/// old side (deletions keep both, but the fallback costs nothing). Non-UTF-8
+/// paths yield `None` — the caller skips them, matching `status()`'s
+/// UTF-8-only handling.
+fn delta_path<'a>(delta: &git2::DiffDelta<'a>) -> Option<&'a str> {
+    delta
+        .new_file()
+        .path()
+        .or_else(|| delta.old_file().path())
+        .and_then(|p| p.to_str())
 }
 
 fn format_line(line: &git2::DiffLine, output: &mut String) {
@@ -1291,5 +1441,40 @@ pub(crate) mod tests {
         assert!(patch.hunk_count() > 0, "must have at least one hunk");
         git.run_git(&["apply", "--cached", "-"], Some(&result), &[])
             .expect("rebuilt new-file patch must apply to the index");
+    }
+
+    /// The footer's data contract: `staged_stats` describes exactly what the
+    /// next commit would land (new file, counts per file), and
+    /// `committed_stats` after the commit describes the same diff — the
+    /// preview footer and the ✓-line footer must agree.
+    #[test]
+    fn staged_and_committed_stats_match_the_landed_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+        let git = Git::at(dir.path()).unwrap();
+
+        // New file with 3 lines, and a modified file: the seeded
+        // "original\n" → "new\nextra\n" (one line replaced, one added).
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.path().join("tracked.txt"), "new\nextra\n").unwrap();
+        git.add(&["a.txt", "tracked.txt"]).unwrap();
+
+        let paths = vec!["a.txt".to_string(), "tracked.txt".to_string()];
+        let staged = git.staged_stats(&paths).unwrap();
+        assert_eq!(staged.len(), 2, "one delta per path: {staged:?}");
+        assert_eq!(staged[0].path, "a.txt");
+        assert_eq!(staged[0].added, 3);
+        assert_eq!(staged[0].deleted, 0);
+        assert!(staged[0].new, "a.txt is new");
+        assert!(!staged[0].removed);
+        assert_eq!(staged[1].path, "tracked.txt");
+        assert_eq!(staged[1].added, 2);
+        assert_eq!(staged[1].deleted, 1);
+        assert!(!staged[1].new);
+        assert!(!staged[1].removed);
+
+        git.commit("chore: stats test".into(), None).unwrap();
+        let landed = git.committed_stats(&paths).unwrap();
+        assert_eq!(landed, staged, "preview and landed footers must agree");
     }
 }
