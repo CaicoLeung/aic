@@ -107,12 +107,15 @@ impl Staging {
                 continue;
             }
             let patch = parse_file_patch(&current);
-            // Non-empty diff, no textual hunks → a binary/mode-only/pure-rename
-            // delta: atomic, not hunk-replayable. Stage it whole via `git add`;
-            // the hunk path would no-op on zero hunks and silently drop the
-            // change (left unstaged while the Run reports success). The empty-
-            // diff guard above already handled "already landed".
-            if patch.hunk_count() == 0 {
+            // `hunk_count() == 0` is overloaded: an empty diff (already landed,
+            // warned above) and a non-empty binary/mode/rename delta both parse
+            // to zero hunks. Only the raw diff's emptiness separates them, so the
+            // whole-file branch self-guards on `!current.trim().is_empty()` —
+            // mirroring the marker condition in `main.rs`. Reordering or removing
+            // the warn-guard above can neither get an already-landed file
+            // re-staged nor let a real binary change fall through and be silently
+            // dropped (the class of bug this Run was returning Ok on).
+            if patch.hunk_count() == 0 && !current.trim().is_empty() {
                 git.add(&[file.as_str()])
                     .with_context(|| format!("staging whole file {file}"))?;
                 staged_paths.push(file.clone());
