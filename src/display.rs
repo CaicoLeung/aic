@@ -290,11 +290,13 @@ impl Display {
     /// File-stats footer for a commit entry, shared by [`Display::commit_preview`]
     /// and [`Display::commit_line`] so what the user confirms is what the ✓
     /// line shows — rendered as an aligned grid (`git diff --stat` style):
-    /// counts right-aligned in one column, filenames left-aligned in the
-    /// next, tags in a third. Green `+N`, red `−M`, muted filenames, a
+    /// `+N` and `−M` each right-align in their own column, with the `Σ` glyph
+    /// in a column of its own on the total row, so the totals land exactly
+    /// under the per-file counts; filenames left-align in the next column,
+    /// tags in the last. Green `+N`, red `−M`, muted filenames, a
     /// green-bold `[new]` / red-bold `[del]` tag, and a `Σ +X −Y (N files)`
-    /// total row when more than one file. Binary files render `(binary)` in
-    /// the counts column and skip the tag.
+    /// total row when more than one file. Binary files render `(binary)`
+    /// spanning the counts region and skip the tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
     /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
@@ -319,19 +321,38 @@ impl Display {
         let mut rows = 0;
         let shown = stats.len().min(Self::FILE_STATS_CAP);
         let shown_stats = &stats[..shown];
-        let token_len = |s: &FileStats| {
+        let plus_len = |s: &FileStats| {
             if s.binary {
-                "(binary)".chars().count()
+                0
             } else {
-                format!("+{} −{}", s.added, s.deleted).chars().count()
+                format!("+{}", s.added).chars().count()
+            }
+        };
+        let minus_len = |s: &FileStats| {
+            if s.binary {
+                0
+            } else {
+                format!("−{}", s.deleted).chars().count()
             }
         };
 
-        // Grid geometry. Counts column: widest counts token among the shown
-        // files. Tag column exists only when a shown file carries one
+        // Grid geometry. Counts region: the Σ glyph has its own column —
+        // 2 wide (`Σ `, blank on file rows) so it never touches the numbers,
+        // and only when a Σ row will render (i.e. more than one file) — then
+        // `+N` and `−M` each right-align in their own column with a 1-char
+        // gap, so the total row's numbers land exactly under the per-file
+        // counts. Tag column exists only when a shown file carries one
         // (` [new]` / ` [del]` are both 6 chars). Name column: widest shown
         // name, capped so the row fits the resolved text width.
-        let counts_width = shown_stats.iter().map(token_len).max().unwrap_or(0);
+        let sigma_col = if stats.len() > 1 { 2 } else { 0 };
+        let plus_width = shown_stats.iter().map(plus_len).max().unwrap_or(0);
+        let minus_width = shown_stats.iter().map(minus_len).max().unwrap_or(0);
+        let sep = if plus_width > 0 && minus_width > 0 {
+            1
+        } else {
+            0
+        };
+        let counts_region = sigma_col + plus_width + sep + minus_width;
         let tag_col = if shown_stats
             .iter()
             .any(|s| !s.binary && (s.new || s.removed))
@@ -342,7 +363,7 @@ impl Display {
         };
         let name_cap = self
             .text_width()
-            .saturating_sub(2 + counts_width + 2 + tag_col);
+            .saturating_sub(2 + counts_region + 2 + tag_col);
         let align = name_cap > 0;
         let name_width = if align {
             shown_stats
@@ -354,22 +375,30 @@ impl Display {
         } else {
             0
         };
+        let sigma_blank = " ".repeat(sigma_col);
+        let sep_str = if sep > 0 { " " } else { "" };
 
         for s in shown_stats {
-            // Counts column, right-aligned.
-            let pad = counts_width - token_len(s);
+            // Counts region: Σ column (blank on file rows), then `+N` and
+            // `−M` right-aligned to their own columns.
             let counts = if s.binary {
+                let pad = counts_region.saturating_sub("(binary)".chars().count());
                 format!(
                     "{}{}",
                     " ".repeat(pad),
                     self.styled("(binary)", gray.clone())
                 )
             } else {
+                let plus = format!("+{}", s.added);
+                let minus = format!("−{}", s.deleted);
                 format!(
-                    "{}{}{}",
-                    " ".repeat(pad),
-                    self.styled(&format!("+{}", s.added), green.clone()),
-                    self.styled(&format!(" −{}", s.deleted), red.clone()),
+                    "{}{}{}{}{}{}",
+                    sigma_blank,
+                    " ".repeat(plus_width - plus.chars().count()),
+                    self.styled(&plus, green.clone()),
+                    sep_str,
+                    " ".repeat(minus_width - minus.chars().count()),
+                    self.styled(&minus, red.clone()),
                 )
             };
             // Name column: truncated with `…` when wider than the cap,
@@ -412,14 +441,20 @@ impl Display {
         if stats.len() > 1 {
             let total_added: usize = stats.iter().map(|s| s.added).sum();
             let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
-            let sum_len = format!("Σ +{total_added} −{total_deleted}").chars().count();
-            let pad = counts_width.saturating_sub(sum_len);
+            let plus = format!("+{total_added}");
+            let minus = format!("−{total_deleted}");
+            // `Σ` sits in its own column (padded to the column width, like
+            // the file rows' blank); the totals right-align into the same
+            // `+N` / `−M` columns as the file rows above.
             self.emit(&format!(
-                "  {}{}{}{}  {}",
-                " ".repeat(pad),
+                "  {}{}{}{}{}{}{}  {}",
                 self.styled("Σ", gray.clone()),
-                self.styled(&format!(" +{total_added}"), green.clone()),
-                self.styled(&format!(" −{total_deleted}"), red.clone()),
+                " ".repeat(sigma_col - 1),
+                " ".repeat(plus_width.saturating_sub(plus.chars().count())),
+                self.styled(&plus, green.clone()),
+                sep_str,
+                " ".repeat(minus_width.saturating_sub(minus.chars().count())),
+                self.styled(&minus, red.clone()),
                 self.styled(&format!("({} files)", stats.len()), gray.clone()),
             ));
             rows += 1;
@@ -836,11 +871,12 @@ mod tests {
             got[2],
             "  Allow users to sign in via Google and GitHub OAuth2 providers"
         );
-        assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
-        // Counts are right-aligned in their column (" +4 −1" carries the pad);
-        // the Σ row's counts sit in the same column with a 2-space gap to the
-        // file count.
-        assert_eq!(got[4], "     +4 −1  src/main.rs");
+        // File rows carry a blank Σ column (`Σ ` wide); +N and −M each
+        // right-align in their own column (" +4" carries the pad). The Σ
+        // row's +16/−4 end exactly where +12/−3 and +4/−1 end, and the Σ
+        // glyph sits in the same column as the file rows' blank.
+        assert_eq!(got[3], "      +12 −3  src/auth.rs [new]");
+        assert_eq!(got[4], "       +4 −1  src/main.rs");
         assert_eq!(got[5], "    Σ +16 −4  (2 files)");
         assert_eq!(got[6], "");
         assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
@@ -973,8 +1009,8 @@ mod tests {
         ]);
         let got = lines.lock().clone();
         assert_eq!(got[0], "    (binary)  img.png");
-        // "(binary)" widens the counts column to 8 — "+0 −12" right-aligns
-        // with 2 pad spaces.
+        // "(binary)" spans the counts region (Σ column + +N/−M columns, 8
+        // wide here); "+0 −12" carries the blank Σ column + its own pads.
         assert_eq!(got[1], "      +0 −12  src/old.rs [del]");
         assert_eq!(got[2], "    Σ +0 −12  (2 files)");
         assert_eq!(rows, 3, "2 files + total");
@@ -1011,10 +1047,12 @@ mod tests {
             },
         ]);
         let got = lines.lock().clone();
-        // text_width is 76 (80 - 2 - 2); name column = 76 - 2 (nest) - 5
-        // (counts) - 2 (gap) - 6 (tag column) = 61 → 60 chars + "…".
-        assert_eq!(got[0], format!("    +1 −0  {}", "x".repeat(60) + "…"));
-        assert_eq!(got[1], format!("    +1 −0  a.rs{} [new]", " ".repeat(57)));
+        // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
+        // gap (1) + `−0` (2) = 7; name column = 76 - 2 (nest) - 7 - 2 (gap)
+        // - 6 (tag column) = 59 → 58 chars + "…". File rows carry a blank
+        // Σ column.
+        assert_eq!(got[0], format!("      +1 −0  {}", "x".repeat(58) + "…"));
+        assert_eq!(got[1], format!("      +1 −0  a.rs{} [new]", " ".repeat(55)));
         assert_eq!(rows, 3, "2 files + total");
     }
 
