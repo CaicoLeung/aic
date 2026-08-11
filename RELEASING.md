@@ -16,21 +16,63 @@ leaves your machine. See `docs/adr/0002-signed-self-update.md`.
 
 ## Cutting a release
 
+`main` is branch-protected: a `pull_request` rule (code-owner review, linear
+history) plus required status checks (`plan` from the Release workflow, `deny`
+from CI) gate every merge. The release scripts both require a clean `main`
+synced with `origin/main`, so the bump commit rides a PR before the tag goes
+out. The owner merges their own release PRs with an administrator merge — an
+owner cannot approve their own PR, so the code-owner-review requirement can
+never be satisfied on a self-authored release PR any other way (see
+`.github/CODEOWNERS`).
+
+### 1. Prepare the bump (on `main`)
+
 From a clean `main`, synced with `origin/main`:
 
 ```bash
-scripts/prepare-release.sh 0.1.6            # bump Cargo.toml + Cargo.lock,
-                                            # regenerate CHANGELOG.md via
-                                            # git-cliff, commit as
-                                            # chore(release): v0.1.6
-git show HEAD                                               # review the diff
-scripts/release.sh 0.1.6 --dry-run          # assert release-readiness
-scripts/release.sh 0.1.6                    # assert, tag v0.1.6, push main + tag
+scripts/prepare-release.sh 0.1.6   # bump Cargo.toml + Cargo.lock, regenerate
+                                   # CHANGELOG.md via git-cliff, commit as
+                                   # chore(release): v0.1.6 (local, on main)
+git show HEAD                      # review the generated diff
 ```
 
-`prepare-release.sh` deliberately **does not tag** — the tag push is
-irreversible (it triggers the release workflow, and branch protection blocks
-force-push), so review the generated CHANGELOG and version bump first.
+`prepare-release.sh` deliberately **does not tag** — it only commits the bump.
+Move that commit onto a release branch and restore `main`:
+
+```bash
+git branch chore/release-v0.1.6    # capture the bump commit
+git reset --hard origin/main       # main back to a clean, synced state
+git push -u origin chore/release-v0.1.6
+gh pr create --base main --head chore/release-v0.1.6 \
+  --title "chore(release): v0.1.6" --body "Release prep for v0.1.6."
+```
+
+### 2. Merge the PR
+
+Wait for the required checks to pass, then squash-merge with an administrator
+merge:
+
+```bash
+gh pr checks --watch               # wait for plan + deny (and lint/test)
+gh pr merge --squash --admin --subject "chore(release): v0.1.6" --body ""
+git pull --ff-only                 # fast-forward local main to the merged commit
+```
+
+Let `plan`/`deny` pass first even though `--admin` overrides branch
+protection — you want the bump commit proven green before you build a release
+on top of it. Squash keeps history linear (required by the `main` ruleset).
+
+### 3. Tag and push
+
+```bash
+scripts/release.sh 0.1.6 --dry-run # assert: Cargo.toml = 0.1.6, main synced, tag new
+scripts/release.sh 0.1.6           # create annotated tag v0.1.6, push tag
+```
+
+The tag push is irreversible — it triggers the release workflow, and branch
+protection blocks force-push — so review before tagging. `release.sh` also
+pushes `main`, a no-op now that the bump landed via PR; only the tag fires the
+workflow.
 
 Once the tag is pushed, CI does the rest:
 
@@ -68,18 +110,13 @@ git revert <commit-sha>
 git push
 ```
 
-After this, `brew install aic` and the shell/PowerShell installers resolve to
-the prior good release (the GitHub "latest" pointer falls back to it once the
-broken release is deleted).
-
 ### 2. Roll forward (existing self-update users)
 
 The only path off a broken version for `aic update` users is a higher good one:
 
 ```bash
-# Fix the regression, then prepare and ship the next version as usual:
-scripts/prepare-release.sh 0.1.7
-scripts/release.sh 0.1.7
+# Fix the regression, then cut the next release following
+# "Cutting a release" above (prepare → PR → merge → tag).
 ```
 
 `aic update` on the broken `0.1.6` will now move to `0.1.7`.
