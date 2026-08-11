@@ -404,6 +404,65 @@ async fn commit_batches_two_files_into_one_commit() {
     );
 }
 
+/// Regression: a binary file in the unstaged area must be committed by the
+/// batch-plan Run, not silently dropped. Binary deltas carry no `@@` hunks, so
+/// `parse_file_patch` reports zero hunks and the whole-file entry (`hunks: []`)
+/// is the only way to carry one. Staging must treat a zero-hunk, non-empty
+/// workdir diff as an atomic whole-file stage (`git add`), not as "nothing to
+/// do" — otherwise the binary change is left unstaged forever and the Run
+/// reports success. Reported: "binary files remain in the unstaged area, they
+/// will not be included in the batch plan."
+#[tokio::test]
+async fn commit_includes_binary_file_in_batch_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // A tracked binary file, committed at a base value, then rewritten in the
+    // workdir and left unstaged — the entry condition for the batch-plan path.
+    std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+    git_in(dir.path(), &["add", "blob.bin"]);
+    git_in(dir.path(), &["commit", "-m", "add binary"]);
+    std::fs::write(dir.path().join("blob.bin"), [9u8, 9, 9, 9]).unwrap();
+
+    // Stub plan carrying the whole binary file (no hunks to index). This is the
+    // plan a correct model would emit — the bug is downstream of the planner.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![generator::BatchChange {
+                file: "blob.bin".to_string(),
+                hunks: vec![],
+            }],
+            reason: Some("update binary".into()),
+        }],
+    };
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+    let result = run_commit_workflow_impl(
+        &git,
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        sink(),
+        planner_fixed(plan),
+        messenger_fixed("chore: update blob"),
+        Confirm::Disabled,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "binary batch should succeed: {:?}",
+        result
+    );
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "the binary change must land one commit"
+    );
+    assert!(
+        worktree_is_empty(dir.path()),
+        "binary file must be committed, not left in the unstaged area"
+    );
+}
+
 /// The other Run commit shape (issue #26): when files are already staged, the
 /// default Run re-stages them, drafts one message via the `CommitMessenger`,
 /// and commits — never reaching the `BatchPlanner`. This is the simpler of the
