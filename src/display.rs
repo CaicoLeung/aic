@@ -1182,6 +1182,51 @@ mod tests {
         );
     }
 
+    /// The preview path's Σ row is covered above; the landed ✓ line must show
+    /// the same total row for a multi-file commit — `commit_line` and
+    /// `commit_preview` share `emit_file_stats`, but this pins the contract on
+    /// the landed entry so a regression that drops the Σ row only post-commit
+    /// (e.g. a guard misplaced between the two callers) fails here.
+    #[test]
+    fn commit_line_renders_sigma_row_for_multiple_files() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            None,
+            "[1/2]",
+            &[
+                FileStats {
+                    path: "src/a.rs".into(),
+                    added: 3,
+                    deleted: 1,
+                    new: false,
+                    removed: false,
+                    binary: false,
+                },
+                FileStats {
+                    path: "src/b.rs".into(),
+                    added: 5,
+                    deleted: 0,
+                    new: true,
+                    removed: false,
+                    binary: false,
+                },
+            ],
+        );
+        let got = lines.lock().clone();
+        assert!(
+            got.iter().any(|l| {
+                l.contains("Σ") && l.contains("+8") && l.contains("−1") && l.contains("(2 files)")
+            }),
+            "multi-file landed commit must show the Σ total row, got: {got:?}"
+        );
+    }
+
     #[test]
     fn plain_when_colors_disabled() {
         let lines = Arc::new(Mutex::new(Vec::new()));
