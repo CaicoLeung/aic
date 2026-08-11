@@ -127,6 +127,11 @@ pub enum BlockHeuristic {
     SameContext,
     /// Blocks from different files sharing a directory scope.
     SameScope,
+    /// A whole file with no textual hunks (binary / mode-only / pure-rename).
+    /// Not a join decision — the file is itself one atomic change, staged via
+    /// `git add` rather than hunk replay. Distinct from [`BlockHeuristic::Single`]
+    /// (which carries exactly one hunk).
+    WholeFile,
 }
 
 impl BlockHeuristic {
@@ -137,6 +142,7 @@ impl BlockHeuristic {
             BlockHeuristic::Adjacency => "adjacent hunks (within file)",
             BlockHeuristic::SameContext => "same function/section context",
             BlockHeuristic::SameScope => "same directory scope (cross-file)",
+            BlockHeuristic::WholeFile => "whole file (binary or non-textual)",
         }
     }
 }
@@ -211,10 +217,25 @@ pub fn group(files: &[GroupFile], cfg: &GroupingConfig) -> Vec<Block> {
 /// Stage 1 — within-file adjacency (and same-context). Produces one block per
 /// maximal run of joinable consecutive hunks, per file. Exposed so callers can
 /// apply only the safe within-file heuristic.
+///
+/// Precondition: every `GroupFile` represents a *real* change — a non-empty
+/// workdir diff. A zero-hunk file here therefore means a binary/mode/rename
+/// delta (atomic), not an empty diff; the emptiness disambiguation lives in
+/// the live path (`staging::Staging`), which re-reads the raw diff per batch.
 pub fn group_adjacent(files: &[GroupFile], cfg: &GroupingConfig) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     for file in files {
         if file.hunks.is_empty() {
+            // Zero textual hunks on a real change (binary/mode/rename) — the
+            // file is one atomic unit. Carry it whole so the partition still
+            // covers every file; staging stages it via `git add`.
+            blocks.push(Block {
+                changes: vec![BatchChange {
+                    file: file.path.clone(),
+                    hunks: vec![],
+                }],
+                heuristic: BlockHeuristic::WholeFile,
+            });
             continue;
         }
         let mut run: Vec<usize> = vec![file.hunks[0].index];
@@ -617,6 +638,39 @@ mod tests {
         for b in &plan.batches {
             assert!(b.reason.is_some(), "every batch must carry a reason");
         }
+    }
+
+    /// Regression: a binary/mode/rename file (zero hunks) must still produce a
+    /// whole-file block, not be silently dropped — otherwise the engine's
+    /// "every file lands in exactly one batch" contract breaks and the change
+    /// is left uncommitted.
+    #[test]
+    fn binary_file_produces_whole_file_block() {
+        let files = [file("a.rs", &[hunk(1, "", 1, 2)]), file("blob.bin", &[])];
+        let blocks = group(&files, &default_cfg());
+        let plan = blocks_to_plan(&blocks);
+        // Both files appear: validate_batch_plan now rejects an omitted file.
+        let counts = vec![("a.rs".to_string(), 1), ("blob.bin".to_string(), 0)];
+        validate_batch_plan(&plan, &counts).expect("a binary file must land in the partition");
+        let binary = plan
+            .batches
+            .iter()
+            .flat_map(|b| b.changes.iter())
+            .find(|c| c.file == "blob.bin")
+            .expect("binary file must appear in a batch");
+        assert!(
+            binary.hunks.is_empty(),
+            "binary file stages whole (empty hunks)"
+        );
+        let binary_block = blocks
+            .iter()
+            .find(|b| b.changes.iter().any(|c| c.file == "blob.bin"))
+            .expect("binary file must form its own block");
+        assert_eq!(
+            binary_block.heuristic,
+            BlockHeuristic::WholeFile,
+            "a zero-hunk file is WholeFile, not Single (which means one hunk)"
+        );
     }
 
     /// Hunk indices are sorted within a change and blocks never repeat a hunk.

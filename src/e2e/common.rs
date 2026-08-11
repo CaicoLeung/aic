@@ -177,6 +177,24 @@ pub fn planner_fixed(plan: generator::BatchPlanOutput) -> BatchPlanner {
     )
 }
 
+/// Planner that records the diff JSON it was called with, then returns a fixed
+/// plan. Use when a test must assert what the batch-plan path *sent* to the
+/// model (e.g. the binary-file marker) — [`planner_fixed`] discards its input.
+pub fn planner_capture(
+    plan: generator::BatchPlanOutput,
+) -> (BatchPlanner, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    let p: BatchPlanner = Box::new(
+        move |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+            seen2.lock().push(diff);
+            let plan = plan.clone();
+            Box::pin(async move { Ok(plan) })
+        },
+    );
+    (p, seen)
+}
+
 /// A one-batch plan carrying hunk 1 of a single file — the whole change, in
 /// one commit. The hook e2e tests (issue #20) only need one commit, so the
 /// plan is trivially small; the split tests build their multi-batch plans
