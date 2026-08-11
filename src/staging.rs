@@ -107,6 +107,17 @@ impl Staging {
                 continue;
             }
             let patch = parse_file_patch(&current);
+            // Non-empty diff, no textual hunks → a binary/mode-only/pure-rename
+            // delta: atomic, not hunk-replayable. Stage it whole via `git add`;
+            // the hunk path would no-op on zero hunks and silently drop the
+            // change (left unstaged while the Run reports success). The empty-
+            // diff guard above already handled "already landed".
+            if patch.hunk_count() == 0 {
+                git.add(&[file.as_str()])
+                    .with_context(|| format!("staging whole file {file}"))?;
+                staged_paths.push(file.clone());
+                continue;
+            }
             let committed = self.committed_hunks.entry(file.clone()).or_default();
             let mapping = map_planned_hunks(planned, committed, patch.hunk_count())?;
             if mapping.current.is_empty() {
