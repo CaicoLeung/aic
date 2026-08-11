@@ -45,7 +45,7 @@ A Commit-confirmation menu action that lets the user modify the full Drafted Mes
 _Avoid_: message tweak, inline edit (overloaded), editor step
 
 **Commit entry**:
-The rendered card for one Batch — either the pending Commit preview (the `?`-marked draft) or the landed ✓ line. Both share the subject styling and the File stats footer, so what the user confirms is byte-for-byte what the completed line shows.
+The rendered card for one Batch — either the pending Commit preview (the `?`-marked draft) or the landed ✓ line. Both share the subject styling and the File stats footer; the footer shows the diff as it stands when rendered (staged for the preview, just-committed for the ✓ line), so a pre-commit hook that restages whole files can change the ✓ line's numbers.
 _Avoid_: commit card, entry, item
 
 **File stats footer**:
