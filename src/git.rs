@@ -356,9 +356,11 @@ impl Git {
     /// Count per-file added/deleted lines and new/removed/binary status from
     /// a libgit2 diff, restricted to `paths` (results keep the caller's
     /// order). One `foreach` walk attributes lines by delta path; deltas
-    /// outside `paths` are skipped without stopping the walk. Binary deltas
-    /// fire no line events, so they are flagged from the file callback and
-    /// keep zero counts.
+    /// outside `paths` are skipped without stopping the walk. A path in
+    /// `paths` that has no delta (e.g. a pre-commit hook that cancelled its
+    /// changes) is kept at zero counts rather than dropped, so the footer
+    /// always lists every planned file. Binary deltas fire no line events, so
+    /// they are flagged from the file callback and keep zero counts.
     fn stats_from_diff(diff: &git2::Diff, paths: &[String]) -> anyhow::Result<Vec<FileStats>> {
         let mut stats: Vec<FileStats> = paths
             .iter()
@@ -371,7 +373,6 @@ impl Git {
                 binary: false,
             })
             .collect();
-        let mut seen = vec![false; paths.len()];
         let mut new_flags = vec![false; paths.len()];
         let mut removed_flags = vec![false; paths.len()];
         let mut binary_flags = vec![false; paths.len()];
@@ -387,7 +388,6 @@ impl Git {
             let Some(i) = delta_path(&delta).and_then(|p| index.get(p).copied()) else {
                 return true;
             };
-            seen[i] = true;
             new_flags[i] = delta.status() == git2::Delta::Added;
             removed_flags[i] = delta.status() == git2::Delta::Deleted;
             binary_flags[i] = delta.flags().contains(git2::DiffFlags::BINARY);
@@ -412,14 +412,12 @@ impl Git {
 
         let mut out = Vec::with_capacity(paths.len());
         for (i, s) in stats.into_iter().enumerate() {
-            if seen[i] {
-                out.push(FileStats {
-                    new: new_flags[i],
-                    removed: removed_flags[i],
-                    binary: binary_flags[i],
-                    ..s
-                });
-            }
+            out.push(FileStats {
+                new: new_flags[i],
+                removed: removed_flags[i],
+                binary: binary_flags[i],
+                ..s
+            });
         }
         Ok(out)
     }
@@ -1522,5 +1520,27 @@ pub(crate) mod tests {
         assert_eq!(stats[0].added, 2);
         assert!(stats[0].new, "no HEAD → every staged path counts as new");
         assert!(!stats[0].removed);
+    }
+
+    /// A planned path absent from the diff (e.g. a pre-commit hook that
+    /// cancelled its changes) is kept at zero counts rather than dropped, so
+    /// the footer always accounts for every planned file.
+    #[test]
+    fn committed_stats_keeps_unmatched_path_at_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+        let git = Git::at(dir.path()).unwrap();
+        // tracked.txt is the only file in HEAD; a path with no delta is kept.
+        let stats = git
+            .committed_stats(&["nonexistent.txt".to_string()])
+            .unwrap();
+        assert_eq!(stats.len(), 1, "unmatched path is kept, not dropped: {stats:?}");
+        assert_eq!(stats[0].path, "nonexistent.txt");
+        assert_eq!(stats[0].added, 0);
+        assert_eq!(stats[0].deleted, 0);
+        assert!(
+            !stats[0].new && !stats[0].removed && !stats[0].binary,
+            "no delta → all flags false"
+        );
     }
 }
