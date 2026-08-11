@@ -1534,7 +1534,11 @@ pub(crate) mod tests {
         let stats = git
             .committed_stats(&["nonexistent.txt".to_string()])
             .unwrap();
-        assert_eq!(stats.len(), 1, "unmatched path is kept, not dropped: {stats:?}");
+        assert_eq!(
+            stats.len(),
+            1,
+            "unmatched path is kept, not dropped: {stats:?}"
+        );
         assert_eq!(stats[0].path, "nonexistent.txt");
         assert_eq!(stats[0].added, 0);
         assert_eq!(stats[0].deleted, 0);
