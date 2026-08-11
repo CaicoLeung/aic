@@ -44,6 +44,14 @@ _Avoid_: retry, redo, re-roll
 A Commit-confirmation menu action that lets the user modify the full Drafted Message (subject + body) before committing. Opens `$VISUAL`/`$EDITOR` on a temp file (via the `edit` crate, which also falls back to nano/vim/vi/emacs when neither is set) — git-style. Returns to the menu after editing so the result can be re-verified.
 _Avoid_: message tweak, inline edit (overloaded), editor step
 
+**Commit entry**:
+The rendered card for one Batch — either the pending Commit preview (the `?`-marked draft) or the landed ✓ line. Both share the subject styling and the File stats footer, so what the user confirms is byte-for-byte what the completed line shows.
+_Avoid_: commit card, entry, item
+
+**File stats footer**:
+The per-file block under a Commit entry's Drafted Message — in the Commit preview and on the landed ✓ line — listing each file with its `+N`/`−M` line counts, a `[new]`/`[del]` tag for added/deleted files, and a `Σ` total line when more than one file. Counts describe the diff the commit will land (preview) or just landed (✓ line); binary files show `(binary)`.
+_Avoid_: diff stats, file summary, stats block
+
 **Provider**:
 A named LLM service the API-provider Backend routes a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from config, then default. Meaningful only on the API-provider Backend; the CLI-agent Backend ignores it.
 _Avoid_: backend, engine
