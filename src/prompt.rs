@@ -35,7 +35,7 @@ You are an expert at analyzing unstaged git changes and splitting them into logi
 You will receive a JSON object with an "unstaged_files" array. Each element has:
 - "path": file path relative to repo root
 - "status": one of "Added", "Modified", "Deleted", "Renamed", "Untracked"
-- "diff": the diff for that file. It is divided into numbered HUNKS. Each hunk header looks like "[<context>] hunk N, lines A-B" followed by its changed lines. **N is the 1-based hunk index you reference in your answer.**
+- "diff": the diff for that file. It is divided into numbered HUNKS. Each hunk header looks like "[<context>] hunk N, lines A-B" followed by its changed lines. **N is the 1-based hunk index you reference in your answer.** A binary or non-textual file (image, font, compiled asset) shows a marker like "(binary or non-textual file …)" instead of hunks — it is still a real change: include it in exactly one batch with an EMPTY "hunks" array.
 
 A "Deleted" status means the file has been removed entirely — its diff shows only removed lines. Treat file removals as real commits (e.g. "remove unused module", "delete deprecated config"); never return an empty batch list because every change is a deletion.
 

@@ -549,7 +549,17 @@ pub(crate) async fn run_commit_workflow_impl(
                 let diff = git.diff_workdir(Some(f.path.as_str()))?;
                 let hunk_count = diff::parse_file_patch(&diff).hunk_count();
                 file_hunk_counts.push((f.path.clone(), hunk_count));
-                let scoped = diff::format_diff_scoped(&diff, &f.path);
+                // A changed file with no textual hunks (binary/mode/rename)
+                // would yield an empty scoped diff — the model reads that as
+                // "nothing changed" and drops the file. Send an explicit marker
+                // instead so it includes the file with an empty hunks array.
+                let scoped = if hunk_count == 0 && !diff.trim().is_empty() {
+                    "(binary or non-textual file — stage whole; include with an \
+                     empty hunks array)"
+                        .to_string()
+                } else {
+                    diff::format_diff_scoped(&diff, &f.path)
+                };
                 Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
