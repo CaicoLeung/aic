@@ -296,7 +296,8 @@ impl Display {
     /// tags in the last. Green `+N`, red `−M`, muted filenames, a
     /// green-bold `[new]` / red-bold `[del]` tag, and a `Σ +X −Y (N files)`
     /// total row when more than one file. Binary files render `(binary)`
-    /// spanning the counts region and skip the tag.
+    /// spanning the counts region; a binary file that is new or removed keeps
+    /// its `[new]`/`[del]` tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
     /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
@@ -344,19 +345,33 @@ impl Display {
         // counts. Tag column exists only when a shown file carries one
         // (` [new]` / ` [del]` are both 6 chars). Name column: widest shown
         // name, capped so the row fits the resolved text width.
+        let total_added: usize = stats.iter().map(|s| s.added).sum();
+        let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
         let sigma_col = if stats.len() > 1 { 2 } else { 0 };
-        let plus_width = shown_stats.iter().map(plus_len).max().unwrap_or(0);
-        let minus_width = shown_stats.iter().map(minus_len).max().unwrap_or(0);
+        // Size to the Σ total too, not just the per-file max: the total can
+        // carry more digits than any single file (ten `+1` → `+10`), and an
+        // all-binary diff totals `+0`/`−0` where every per-file width is 0 —
+        // sizing to the total keeps the Σ row's numbers landing exactly under
+        // the per-file counts in both cases.
+        let plus_width = shown_stats
+            .iter()
+            .map(plus_len)
+            .max()
+            .unwrap_or(0)
+            .max(format!("+{total_added}").chars().count());
+        let minus_width = shown_stats
+            .iter()
+            .map(minus_len)
+            .max()
+            .unwrap_or(0)
+            .max(format!("−{total_deleted}").chars().count());
         let sep = if plus_width > 0 && minus_width > 0 {
             1
         } else {
             0
         };
         let counts_region = sigma_col + plus_width + sep + minus_width;
-        let tag_col = if shown_stats
-            .iter()
-            .any(|s| !s.binary && (s.new || s.removed))
-        {
+        let tag_col = if shown_stats.iter().any(|s| s.new || s.removed) {
             6
         } else {
             0
@@ -409,9 +424,7 @@ impl Display {
                 name = format!("{}…", name.chars().take(keep).collect::<String>());
             }
             let name_pad = name_width.saturating_sub(name.chars().count());
-            let tag = if s.binary {
-                String::new()
-            } else if s.new {
+            let tag = if s.new {
                 self.styled(" [new]", new_tag.clone())
             } else if s.removed {
                 self.styled(" [del]", del_tag.clone())
@@ -980,8 +993,8 @@ mod tests {
     }
 
     /// The footer's edge rendering: binary files show `(binary)` instead of
-    /// counts (and skip the tag), deleted files carry `[del]`, and the Σ total
-    /// sums across all entries.
+    /// counts and keep their `[new]`/`[del]` tag; deleted files carry `[del]`,
+    /// and the Σ total sums across all entries.
     #[test]
     fn file_stats_footer_marks_binary_and_deleted_files() {
         let lines = Arc::new(Mutex::new(Vec::new()));
@@ -1008,11 +1021,87 @@ mod tests {
             },
         ]);
         let got = lines.lock().clone();
-        assert_eq!(got[0], "    (binary)  img.png");
-        // "(binary)" spans the counts region (Σ column + +N/−M columns, 8
-        // wide here); "+0 −12" carries the blank Σ column + its own pads.
+        // A new binary file keeps its `[new]` tag (the binary label replaces
+        // the counts, not the tag). "(binary)" spans the counts region; the
+        // name pads to align with src/old.rs (10 chars).
+        assert_eq!(got[0], "    (binary)  img.png    [new]");
         assert_eq!(got[1], "      +0 −12  src/old.rs [del]");
         assert_eq!(got[2], "    Σ +0 −12  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// The Σ total can carry more digits than any single file (two `+5` files
+    /// total `+10`); the column must size to the total so `+10` lands exactly
+    /// under each `+5` rather than overflowing into the gap. Regression for
+    /// the per-file-max-only column width.
+    #[test]
+    fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "a.rs".into(),
+                added: 5,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+            FileStats {
+                path: "b.rs".into(),
+                added: 5,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
+        // sits under the total's `0` of `+10`; both end at the same column.
+        assert_eq!(got[0], "       +5 −0  a.rs");
+        assert_eq!(got[1], "       +5 −0  b.rs");
+        assert_eq!(got[2], "    Σ +10 −0  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// An all-binary diff has no per-file counts (every width is 0), yet the
+    /// Σ row still renders a stable, gapped `+0 −0` — not a jammed `+0−0`.
+    /// Regression for the all-binary column collapse.
+    #[test]
+    fn file_stats_footer_stable_columns_when_all_files_binary() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "img.png".into(),
+                added: 0,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "data.bin".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // New binary keeps `[new]`; non-new binary carries no tag. The Σ row
+        // sizes to `+0`/`−0` (width 2 each) so it stays gapped and aligned.
+        assert_eq!(got[0], "    (binary)  img.png  [new]");
+        assert_eq!(got[1], "    (binary)  data.bin");
+        assert_eq!(got[2], "    Σ +0 −0  (2 files)");
         assert_eq!(rows, 3, "2 files + total");
     }
 
