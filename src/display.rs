@@ -1,6 +1,7 @@
 use console::{Style, Term};
 
 use crate::conflict::{ConflictedFile, RepoState};
+use crate::git::FileStats;
 use crate::layout::{FALLBACK_COLS, MARGIN, resolve_cols, wrap_line};
 use crate::types::{CommitType, commit_id_color, neutral_gray};
 
@@ -180,7 +181,18 @@ impl Display {
     /// truncation/re-flow). The body is greedy word-wrapped to
     /// [`Display::text_width`] with continuation lines aligned under the first
     /// body char; no hanging indent. Blank body lines stay blank.
-    pub fn commit_line(&self, hash: &str, message: &str, body: Option<&str>, prefix: &str) {
+    ///
+    /// `stats` render as the file-stats footer ([`Display::emit_file_stats`]) —
+    /// the landed twin of the preview's footer, so the confirmed draft and the
+    /// completed line show the same file information.
+    pub fn commit_line(
+        &self,
+        hash: &str,
+        message: &str,
+        body: Option<&str>,
+        prefix: &str,
+        stats: &[FileStats],
+    ) {
         // Muted gray for prefix/body/scope — read from the single-source
         // palette so it can't drift from the WCAG-guarded value.
         let gray = neutral_gray();
@@ -208,6 +220,7 @@ impl Display {
         if let Some(b) = body {
             self.emit_body(b);
         }
+        self.emit_file_stats(stats);
     }
 
     /// Style a conventional-commit subject line the same way in every
@@ -269,19 +282,229 @@ impl Display {
         rows
     }
 
+    /// Files beyond this many are elided from the footer with a
+    /// `… N more (N files)` line — the cap the old comma-joined preview used,
+    /// kept so a huge batch can't blow the screen.
+    const FILE_STATS_CAP: usize = 8;
+
+    /// File-stats footer for a commit entry, shared by [`Display::commit_preview`]
+    /// and [`Display::commit_line`] so what the user confirms is what the ✓
+    /// line shows — rendered as an aligned grid (`git diff --stat` style):
+    /// `+N` and `−M` each right-align in their own column, with the `Σ` glyph
+    /// in a column of its own on the total row, so the totals land exactly
+    /// under the per-file counts; filenames left-align in the next column,
+    /// tags in the last. Green `+N`, red `−M`, muted filenames, a
+    /// green-bold `[new]` / red-bold `[del]` tag, and a `Σ +X −Y (N files)`
+    /// total row when more than one file. Binary files render `(binary)`
+    /// right-aligned in the counts region, which widens to fit the label when
+    /// any shown file is binary; a binary file that is new or removed keeps
+    /// its `[new]`/`[del]` tag.
+    ///
+    /// Glyph colors follow [`Display::review_section`]'s diff-line convention
+    /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
+    /// Widths use the codebase's char-count model (same as [`wrap_line`]), so
+    /// the grid holds exactly for ASCII paths and approximately for CJK ones.
+    /// Column widths come from the shown files only. A filename wider than
+    /// the grid is truncated with `…` — the one case the footer truncates,
+    /// since a broken column defeats the grid; on a pathologically narrow
+    /// terminal (`name_cap == 0`) the grid degrades to unpadded overflow,
+    /// matching [`wrap_line`]'s `width == 0` convention. The
+    /// [`FILE_STATS_CAP`] bounds height. Returns the rows emitted, for the
+    /// preview's erase accounting.
+    fn emit_file_stats(&self, stats: &[FileStats]) -> usize {
+        if stats.is_empty() {
+            return 0;
+        }
+        let gray = neutral_gray();
+        let green = Style::new().green();
+        let red = Style::new().red();
+        let new_tag = Style::new().green().bold();
+        let del_tag = Style::new().red().bold();
+        let mut rows = 0;
+        let shown = stats.len().min(Self::FILE_STATS_CAP);
+        let shown_stats = &stats[..shown];
+        let plus_len = |s: &FileStats| {
+            if s.binary {
+                0
+            } else {
+                format!("+{}", s.added).chars().count()
+            }
+        };
+        let minus_len = |s: &FileStats| {
+            if s.binary {
+                0
+            } else {
+                format!("−{}", s.deleted).chars().count()
+            }
+        };
+
+        // Grid geometry. Counts region: the Σ glyph has its own column —
+        // 2 wide (`Σ `, blank on file rows) so it never touches the numbers,
+        // and only when a Σ row will render (i.e. more than one file) — then
+        // `+N` and `−M` each right-align in their own column with a 1-char
+        // gap, so the total row's numbers land exactly under the per-file
+        // counts. Tag column exists only when a shown file carries one
+        // (` [new]` / ` [del]` are both 6 chars). Name column: widest shown
+        // name, capped so the row fits the resolved text width.
+        let total_added: usize = stats.iter().map(|s| s.added).sum();
+        let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
+        let sigma_col = if stats.len() > 1 { 2 } else { 0 };
+        // Size to the Σ total too, not just the per-file max: the total can
+        // carry more digits than any single file (ten `+1` → `+10`), and an
+        // all-binary diff totals `+0`/`−0` where every per-file width is 0 —
+        // sizing to the total keeps the Σ row's numbers landing exactly under
+        // the per-file counts in both cases.
+        let plus_width = shown_stats
+            .iter()
+            .map(plus_len)
+            .max()
+            .unwrap_or(0)
+            .max(format!("+{total_added}").chars().count());
+        let minus_width = shown_stats
+            .iter()
+            .map(minus_len)
+            .max()
+            .unwrap_or(0)
+            .max(format!("−{total_deleted}").chars().count());
+        let sep = if plus_width > 0 && minus_width > 0 {
+            1
+        } else {
+            0
+        };
+        // The counts region must also fit the `(binary)` label when any shown
+        // file is binary — otherwise `(binary)` (8 chars) overflows a narrower
+        // region and the binary rows drift out of line with the Σ total row.
+        // The extra width becomes leading pad (`lead`) on the text rows and
+        // the Σ row, so all three row kinds — text file, binary file, Σ total
+        // — occupy the same `counts_region` and the filename column lands at
+        // one column across every row.
+        let binary_label = "(binary)".chars().count();
+        let base_region = sigma_col + plus_width + sep + minus_width;
+        let counts_region = if shown_stats.iter().any(|s| s.binary) {
+            base_region.max(binary_label)
+        } else {
+            base_region
+        };
+        let lead = " ".repeat(counts_region - base_region);
+        let tag_col = if shown_stats.iter().any(|s| s.new || s.removed) {
+            6
+        } else {
+            0
+        };
+        let name_cap = self
+            .text_width()
+            .saturating_sub(2 + counts_region + 2 + tag_col);
+        let align = name_cap > 0;
+        let name_width = if align {
+            shown_stats
+                .iter()
+                .map(|s| s.path.chars().count())
+                .max()
+                .unwrap_or(0)
+                .min(name_cap)
+        } else {
+            0
+        };
+        let sigma_blank = " ".repeat(sigma_col);
+        let sep_str = if sep > 0 { " " } else { "" };
+        // Shared `+N`/`−M` column formatter — file rows and the Σ total row
+        // pad identically, so the alignment math has one home and the two
+        // rows cannot drift apart.
+        let fmt_columns = |plus: &str, minus: &str| {
+            format!(
+                "{}{}{}{}{}",
+                " ".repeat(plus_width.saturating_sub(plus.chars().count())),
+                self.styled(plus, green.clone()),
+                sep_str,
+                " ".repeat(minus_width.saturating_sub(minus.chars().count())),
+                self.styled(minus, red.clone()),
+            )
+        };
+
+        for s in shown_stats {
+            // Counts region: Σ column (blank on file rows), then `+N` and
+            // `−M` right-aligned to their own columns.
+            let counts = if s.binary {
+                let pad = counts_region - binary_label;
+                format!(
+                    "{}{}",
+                    " ".repeat(pad),
+                    self.styled("(binary)", gray.clone())
+                )
+            } else {
+                let plus = format!("+{}", s.added);
+                let minus = format!("−{}", s.deleted);
+                format!("{lead}{sigma_blank}{}", fmt_columns(&plus, &minus))
+            };
+            // Name column: truncated with `…` when wider than the cap,
+            // padded to the grid width otherwise.
+            let mut name = s.path.clone();
+            if align && name.chars().count() > name_width {
+                let keep = name_width.saturating_sub(1);
+                name = format!("{}…", name.chars().take(keep).collect::<String>());
+            }
+            let name_pad = name_width.saturating_sub(name.chars().count());
+            let tag = if s.new {
+                self.styled(" [new]", new_tag.clone())
+            } else if s.removed {
+                self.styled(" [del]", del_tag.clone())
+            } else {
+                String::new()
+            };
+            // trim_end drops the trailing name padding on rows without a tag —
+            // plain spaces, so it is safe with ANSI styling enabled too.
+            self.emit(
+                format!(
+                    "  {counts}  {}{}{}",
+                    self.styled(&name, gray.clone()),
+                    " ".repeat(name_pad),
+                    tag
+                )
+                .trim_end(),
+            );
+            rows += 1;
+        }
+        if stats.len() > Self::FILE_STATS_CAP {
+            self.emit(&self.styled(
+                &format!("  … {} more ({} files)", stats.len() - shown, stats.len()),
+                gray.clone(),
+            ));
+            rows += 1;
+        }
+        if stats.len() > 1 {
+            let plus = format!("+{total_added}");
+            let minus = format!("−{total_deleted}");
+            // `Σ` sits in its own column (padded to the column width, like
+            // the file rows' blank); the totals right-align into the same
+            // `+N` / `−M` columns as the file rows above.
+            let sigma_text = format!(
+                "{}{}",
+                self.styled("Σ", gray.clone()),
+                " ".repeat(sigma_col.saturating_sub(1)),
+            );
+            self.emit(&format!(
+                "  {lead}{}{}  {}",
+                sigma_text,
+                fmt_columns(&plus, &minus),
+                self.styled(&format!("({} files)", stats.len()), gray.clone()),
+            ));
+            rows += 1;
+        }
+        rows
+    }
+
     /// Pre-commit confirmation preview (issue #78): the exact message that
     /// would be committed, framed as *pending* so it can't be mistaken for the
     /// ✓ lines of already-landed batches — a yellow `?` marker on the header
     /// and subject (the subject keeps its conventional-commit coloring, so the
-    /// draft previews the exact styling the ✓ line will use), gray body, dim
-    /// file list.
+    /// draft previews the exact styling the ✓ line will use), gray body, and
+    /// the file-stats footer ([`Display::emit_file_stats`]).
     ///
     /// Returns how many rows the preview occupies, so the caller can erase it
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
     /// a confirmed draft never lingers on screen.
-    pub fn commit_preview(&self, message: &str, body: Option<&str>, paths: &[String]) -> usize {
+    pub fn commit_preview(&self, message: &str, body: Option<&str>, stats: &[FileStats]) -> usize {
         let pending = Style::new().yellow().bold();
-        let dim = Style::new().dim();
         self.emit(&format!(
             "{} {}",
             self.styled("?", pending.clone()),
@@ -296,24 +519,9 @@ impl Display {
         if let Some(b) = body {
             rows += self.emit_body(b);
         }
-        let files = if paths.len() == 1 {
-            paths[0].clone()
-        } else if paths.len() <= 8 {
-            format!("{} ({} files)", paths.join(", "), paths.len())
-        } else {
-            // Keep the preview line bounded: a huge batch must not print an
-            // unbounded file list.
-            let shown = &paths[..8];
-            format!(
-                "{}, … +{} more ({} files)",
-                shown.join(", "),
-                paths.len() - shown.len(),
-                paths.len()
-            )
-        };
-        self.emit(&self.styled(&format!("files: {files}"), dim));
+        rows += self.emit_file_stats(stats);
         self.emit_blank();
-        rows + 2
+        rows + 1
     }
 
     // ------------------------------------------------------------------
@@ -662,22 +870,47 @@ mod tests {
         let rows = d.commit_preview(
             "feat(auth): add OAuth2 login support",
             Some("Allow users to sign in via Google and GitHub OAuth2 providers"),
-            &["src/auth.rs".to_string(), "src/main.rs".to_string()],
+            &[
+                FileStats {
+                    path: "src/auth.rs".into(),
+                    added: 12,
+                    deleted: 3,
+                    new: true,
+                    removed: false,
+                    binary: false,
+                },
+                FileStats {
+                    path: "src/main.rs".into(),
+                    added: 4,
+                    deleted: 1,
+                    new: false,
+                    removed: false,
+                    binary: false,
+                },
+            ],
         );
         let got = lines.lock().clone();
-        // Pending header + subject carry the `?` marker; body and file list
-        // sit at the shared margin; a trailing blank separates the preview
-        // from the confirmation menu. `rows` is the whole block, so the caller
-        // can erase it after the draft is confirmed.
+        // Pending header + subject carry the `?` marker; body sits at the
+        // shared margin; the file-stats footer is nested under it — counts
+        // first, then filename, `[new]`/`[del]` tag, and a Σ total; a trailing
+        // blank separates the preview from the confirmation menu. `rows` is
+        // the whole block, so the caller can erase it after the draft is
+        // confirmed.
         assert_eq!(got[0], "  ? proposed commit:");
         assert_eq!(got[1], "  ? feat(auth): add OAuth2 login support");
         assert_eq!(
             got[2],
             "  Allow users to sign in via Google and GitHub OAuth2 providers"
         );
-        assert_eq!(got[3], "  files: src/auth.rs, src/main.rs (2 files)");
-        assert_eq!(got[4], "");
-        assert_eq!(rows, 5, "header + subject + body + files + blank");
+        // File rows carry a blank Σ column (`Σ ` wide); +N and −M each
+        // right-align in their own column (" +4" carries the pad). The Σ
+        // row's +16/−4 end exactly where +12/−3 and +4/−1 end, and the Σ
+        // glyph sits in the same column as the file rows' blank.
+        assert_eq!(got[3], "      +12 −3  src/auth.rs [new]");
+        assert_eq!(got[4], "       +4 −1  src/main.rs");
+        assert_eq!(got[5], "    Σ +16 −4  (2 files)");
+        assert_eq!(got[6], "");
+        assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
     }
 
     #[test]
@@ -687,14 +920,25 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        let rows = d.commit_preview("chore: bump dep", None, &["Cargo.toml".to_string()]);
+        let rows = d.commit_preview(
+            "chore: bump dep",
+            None,
+            &[FileStats {
+                path: "Cargo.toml".into(),
+                added: 5,
+                deleted: 2,
+                new: false,
+                removed: false,
+                binary: false,
+            }],
+        );
         let got = lines.lock().clone();
         assert_eq!(got[0], "  ? proposed commit:");
         assert_eq!(got[1], "  ? chore: bump dep");
-        // Single file: no "(1 files)" suffix; no body line emitted.
-        assert_eq!(got[2], "  files: Cargo.toml");
+        // Single file: no Σ total line; no body line emitted.
+        assert_eq!(got[2], "    +5 −2  Cargo.toml");
         assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
-        assert_eq!(rows, 4, "header + subject + files + blank");
+        assert_eq!(rows, 4, "header + subject + file + blank");
     }
 
     /// `clear_last` drops the most recent rows from the buffer (the in-memory
@@ -732,17 +976,313 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        let paths: Vec<String> = (1..=10).map(|i| format!("src/f{i}.rs")).collect();
-        let rows = d.commit_preview("feat: big", None, &paths);
+        let stats: Vec<FileStats> = (1..=10)
+            .map(|i| FileStats {
+                path: format!("src/f{i}.rs"),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            })
+            .collect();
+        let rows = d.commit_preview("feat: big", None, &stats);
         let got = lines.lock().clone();
         assert!(
-            got.iter().any(|l| l.contains(
-                "files: src/f1.rs, src/f2.rs, src/f3.rs, src/f4.rs, src/f5.rs, \
-                 src/f6.rs, src/f7.rs, src/f8.rs, … +2 more (10 files)"
-            )),
+            got.iter().any(|l| l.contains("… 2 more (10 files)")),
             "expected a truncated file list, got: {got:?}"
         );
-        assert_eq!(rows, 4, "header + subject + files + blank");
+        assert!(
+            got.iter().any(|l| l.contains("Σ +10 −0  (10 files)")),
+            "expected a total over all files, got: {got:?}"
+        );
+        assert!(
+            got.iter().any(|l| l.contains("src/f8.rs")),
+            "the 8th file must be shown, got: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|l| l.contains("src/f9.rs")),
+            "the 9th file must be elided, got: {got:?}"
+        );
+        assert_eq!(
+            rows, 13,
+            "header + subject + 8 files + elision + total + blank"
+        );
+    }
+
+    /// The footer's edge rendering: binary files show `(binary)` instead of
+    /// counts and keep their `[new]`/`[del]` tag; deleted files carry `[del]`,
+    /// and the Σ total sums across all entries.
+    #[test]
+    fn file_stats_footer_marks_binary_and_deleted_files() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "img.png".into(),
+                added: 0,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "src/old.rs".into(),
+                added: 0,
+                deleted: 12,
+                new: false,
+                removed: true,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // A new binary file keeps its `[new]` tag (the binary label replaces
+        // the counts, not the tag). "(binary)" spans the counts region; the
+        // name pads to align with src/old.rs (10 chars).
+        assert_eq!(got[0], "    (binary)  img.png    [new]");
+        assert_eq!(got[1], "      +0 −12  src/old.rs [del]");
+        assert_eq!(got[2], "    Σ +0 −12  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// The Σ total can carry more digits than any single file (two `+5` files
+    /// total `+10`); the column must size to the total so `+10` lands exactly
+    /// under each `+5` rather than overflowing into the gap. Regression for
+    /// the per-file-max-only column width.
+    #[test]
+    fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "a.rs".into(),
+                added: 5,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+            FileStats {
+                path: "b.rs".into(),
+                added: 5,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
+        // sits under the total's `0` of `+10`; both end at the same column.
+        assert_eq!(got[0], "       +5 −0  a.rs");
+        assert_eq!(got[1], "       +5 −0  b.rs");
+        assert_eq!(got[2], "    Σ +10 −0  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// An all-binary diff has no per-file counts (every width is 0), yet the
+    /// Σ row still renders a stable, gapped `+0 −0` — not a jammed `+0−0`.
+    /// Regression for the all-binary column collapse.
+    #[test]
+    fn file_stats_footer_stable_columns_when_all_files_binary() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "img.png".into(),
+                added: 0,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "data.bin".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // New binary keeps `[new]`; non-new binary carries no tag. The counts
+        // region widens to fit `(binary)` (8 > the `+0`/`−0` base region of 7),
+        // so the Σ row gains a leading pad and its `(2 files)` label lands in
+        // the same column as the filenames above.
+        assert_eq!(got[0], "    (binary)  img.png  [new]");
+        assert_eq!(got[1], "    (binary)  data.bin");
+        assert_eq!(got[2], "     Σ +0 −0  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// A binary file alongside a text file whose counts region is narrower
+    /// than `(binary)`: the region widens to 8 and every row — text, binary,
+    /// Σ — carries the same leading pad, so `(binary)`'s right edge, the text
+    /// `−M`, and the filename column all line up. Regression for the
+    /// binary-overflow column drift between file rows and the Σ row.
+    #[test]
+    fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "x.bin".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "a.rs".into(),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // base region (Σ 2 + `+1` 2 + gap 1 + `−0` 2 = 7) widens to 8 for
+        // `(binary)`; the text row and Σ row each carry one leading pad, so
+        // all three rows' counts end at the same column and the filenames
+        // start at the same column.
+        assert_eq!(got[0], "    (binary)  x.bin");
+        assert_eq!(got[1], "       +1 −0  a.rs");
+        assert_eq!(got[2], "     Σ +1 −0  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// A filename wider than the grid's name column is truncated with `…`
+    /// (char-count model) so the columns — and the tag column — stay intact:
+    /// the short file's name pads to the same width and its `[new]` tag lands
+    /// at the same column as a tag on the truncated row would.
+    #[test]
+    fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let long = "x".repeat(70);
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: long.clone(),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+            FileStats {
+                path: "a.rs".into(),
+                added: 1,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
+        // gap (1) + `−0` (2) = 7; name column = 76 - 2 (nest) - 7 - 2 (gap)
+        // - 6 (tag column) = 59 → 58 chars + "…". File rows carry a blank
+        // Σ column.
+        assert_eq!(got[0], format!("      +1 −0  {}", "x".repeat(58) + "…"));
+        assert_eq!(got[1], format!("      +1 −0  a.rs{} [new]", " ".repeat(55)));
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// The landed line shows the same footer as the preview — the file stats
+    /// survive the commit.
+    #[test]
+    fn commit_line_renders_file_stats_footer() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            None,
+            "[1/3]",
+            &[FileStats {
+                path: "src/auth.rs".into(),
+                added: 7,
+                deleted: 2,
+                new: true,
+                removed: false,
+                binary: false,
+            }],
+        );
+        let got = lines.lock().clone();
+        assert!(
+            got.iter().any(|l| l.contains("+7 −2  src/auth.rs [new]")),
+            "committed line must show the footer, got: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|l| l.contains("Σ")),
+            "single file must not get a total line, got: {got:?}"
+        );
+    }
+
+    /// The preview path's Σ row is covered above; the landed ✓ line must show
+    /// the same total row for a multi-file commit — `commit_line` and
+    /// `commit_preview` share `emit_file_stats`, but this pins the contract on
+    /// the landed entry so a regression that drops the Σ row only post-commit
+    /// (e.g. a guard misplaced between the two callers) fails here.
+    #[test]
+    fn commit_line_renders_sigma_row_for_multiple_files() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            None,
+            "[1/2]",
+            &[
+                FileStats {
+                    path: "src/a.rs".into(),
+                    added: 3,
+                    deleted: 1,
+                    new: false,
+                    removed: false,
+                    binary: false,
+                },
+                FileStats {
+                    path: "src/b.rs".into(),
+                    added: 5,
+                    deleted: 0,
+                    new: true,
+                    removed: false,
+                    binary: false,
+                },
+            ],
+        );
+        let got = lines.lock().clone();
+        assert!(
+            got.iter().any(|l| {
+                l.contains("Σ") && l.contains("+8") && l.contains("−1") && l.contains("(2 files)")
+            }),
+            "multi-file landed commit must show the Σ total row, got: {got:?}"
+        );
     }
 
     #[test]
@@ -752,7 +1292,13 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            Some("body line"),
+            "[1/3]",
+            &[],
+        );
         let got = lines.lock().clone();
         // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
         // Type prefix "feat" is present, followed by ": add thing". Subject now
@@ -771,7 +1317,13 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            Some("body line"),
+            "[1/3]",
+            &[],
+        );
         let joined = lines.lock().join("\n");
         // hash #d97706 (bold), feat type green #15803d (bold), description bold
         // default fg, body + prefix muted gray #6b7280.
@@ -808,7 +1360,7 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
         let joined = lines.lock().join("\n");
         // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
         // readability — see types::NAMED_PALETTE).
@@ -835,7 +1387,7 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
         let got = lines.lock().clone();
         // Exact visible text — catches the dropped-paren regression directly.
         // Subject carries a 2-col left margin.
@@ -863,7 +1415,7 @@ mod tests {
                 colors: true,
                 lines: lines.clone(),
             });
-            d.commit_line("hash000", &format!("{type_str}: msg"), None, "");
+            d.commit_line("hash000", &format!("{type_str}: msg"), None, "", &[]);
             let joined = lines.lock().join("\n");
             assert!(
                 joined.contains(rgb),
@@ -885,7 +1437,7 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("ghi9012", "blob: thing in progress", None, "");
+        d.commit_line("ghi9012", "blob: thing in progress", None, "", &[]);
         let joined = lines.lock().join("\n");
         assert!(
             !joined.contains("107;114;128"),
@@ -917,7 +1469,7 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("jkl3456", "no colon message", None, "");
+        d.commit_line("jkl3456", "no colon message", None, "", &[]);
         let joined = lines.lock().join("\n");
         // No-colon messages have no type token to color → muted gray #6b7280
         // (darkened from the old #9ca3af for white-bg readability).

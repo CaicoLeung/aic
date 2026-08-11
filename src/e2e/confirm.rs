@@ -111,14 +111,15 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
         !lines.iter().any(|l| l.contains("proposed commit:")),
         "a confirmed draft must not linger, got: {lines:?}"
     );
-    assert!(
-        !lines.iter().any(|l| l.contains("files: tracked.txt")),
-        "a confirmed draft's file list must not linger, got: {lines:?}"
-    );
-    // The post-commit line is what remains.
+    // The post-commit line is what remains — with the file-stats footer
+    // (the preview's footer, re-rendered on the landed line).
     assert!(
         lines.iter().any(|l| l.contains("\u{2713}")),
         "post-commit line missing, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("+1 −1  tracked.txt")),
+        "committed line must show the file stats footer, got: {lines:?}"
     );
 }
 
@@ -434,6 +435,66 @@ async fn commit_confirm_commits_every_batch() {
         "batch 2 must commit beta's change"
     );
     assert!(worktree_is_empty(dir.path()), "working tree must be clean");
+}
+
+/// A multi-file batch (two files in one commit) must render the Σ total row
+/// on its landed ✓ line. This drives the full chain — stage → commit →
+/// `committed_stats` → `commit_line` → `emit_file_stats` — with a capturing
+/// sink, so a regression that drops the Σ row only end-to-end (e.g.
+/// `committed_stats` losing a file to the `seen` filter, or a guard wired to
+/// only the preview caller) fails here, where the per-call unit test cannot.
+#[tokio::test]
+async fn multi_file_batch_landed_line_shows_sigma_total() {
+    let dir = tempfile::tempdir().unwrap();
+    two_file_unstaged_repo(dir.path());
+
+    // One batch carrying both files — a genuine multi-file commit.
+    let plan = generator::BatchPlanOutput {
+        batches: vec![generator::BatchPlanBatch {
+            changes: vec![
+                generator::BatchChange {
+                    file: "alpha.txt".to_string(),
+                    hunks: vec![1],
+                },
+                generator::BatchChange {
+                    file: "beta.txt".to_string(),
+                    hunks: vec![1],
+                },
+            ],
+            reason: Some("both files together".into()),
+        }],
+    };
+    let git = Git::at(dir.path()).unwrap();
+    let buf = BufferWrite::default();
+    let display = Display::with(buf.clone());
+
+    let result = run_commit_workflow_impl(
+        &git,
+        resolver_returning(""),
+        prompt_queue(vec![]),
+        display,
+        planner_fixed(plan),
+        messenger_fixed("chore: both"),
+        Confirm::Disabled,
+    )
+    .await;
+    assert!(result.is_ok(), "multi-file batch should land: {:?}", result);
+
+    let lines = buf.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("alpha.txt")),
+        "landed footer must list alpha.txt, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("beta.txt")),
+        "landed footer must list beta.txt, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| {
+            l.contains("Σ") && l.contains("+2") && l.contains("−2") && l.contains("(2 files)")
+        }),
+        "multi-file landed commit must show the Σ total row, got: {lines:?}"
+    );
 }
 
 /// Batch mode + Abort on the FIRST batch: nothing commits at all, the abort

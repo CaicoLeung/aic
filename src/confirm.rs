@@ -14,6 +14,7 @@
 
 use crate::CommitMessenger;
 use crate::display::Display;
+use crate::git::FileStats;
 use crate::progress;
 use anyhow::Context;
 
@@ -165,7 +166,7 @@ pub(crate) fn inquire_opt<T>(
 /// before being replaced so superseded drafts never accumulate on screen.
 pub(crate) async fn confirm_draft(
     draft: (String, Option<String>),
-    paths: &[String],
+    stats: &[FileStats],
     display: &Display,
     confirm: &Confirm,
     messenger: &CommitMessenger,
@@ -180,7 +181,7 @@ pub(crate) async fn confirm_draft(
     };
 
     loop {
-        let rows = display.commit_preview(&message, body.as_deref(), paths);
+        let rows = display.commit_preview(&message, body.as_deref(), stats);
         match menu(&message)? {
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
