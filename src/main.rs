@@ -5,6 +5,7 @@ pub mod config;
 pub mod confirm;
 pub mod conflict;
 pub mod cursor;
+pub mod decoder;
 pub mod diff;
 pub mod display;
 pub mod generator;
