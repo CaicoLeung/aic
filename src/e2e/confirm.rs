@@ -111,14 +111,15 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
         !lines.iter().any(|l| l.contains("proposed commit:")),
         "a confirmed draft must not linger, got: {lines:?}"
     );
-    assert!(
-        !lines.iter().any(|l| l.contains("files: tracked.txt")),
-        "a confirmed draft's file list must not linger, got: {lines:?}"
-    );
-    // The post-commit line is what remains.
+    // The post-commit line is what remains — with the file-stats footer
+    // (the preview's footer, re-rendered on the landed line).
     assert!(
         lines.iter().any(|l| l.contains("\u{2713}")),
         "post-commit line missing, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("+1 −1  tracked.txt")),
+        "committed line must show the file stats footer, got: {lines:?}"
     );
 }
 

@@ -1,6 +1,7 @@
 use console::{Style, Term};
 
 use crate::conflict::{ConflictedFile, RepoState};
+use crate::git::FileStats;
 use crate::layout::{FALLBACK_COLS, MARGIN, resolve_cols, wrap_line};
 use crate::types::{CommitType, commit_id_color, neutral_gray};
 
@@ -180,7 +181,18 @@ impl Display {
     /// truncation/re-flow). The body is greedy word-wrapped to
     /// [`Display::text_width`] with continuation lines aligned under the first
     /// body char; no hanging indent. Blank body lines stay blank.
-    pub fn commit_line(&self, hash: &str, message: &str, body: Option<&str>, prefix: &str) {
+    ///
+    /// `stats` render as the file-stats footer ([`Display::emit_file_stats`]) —
+    /// the landed twin of the preview's footer, so the confirmed draft and the
+    /// completed line show the same file information.
+    pub fn commit_line(
+        &self,
+        hash: &str,
+        message: &str,
+        body: Option<&str>,
+        prefix: &str,
+        stats: &[FileStats],
+    ) {
         // Muted gray for prefix/body/scope — read from the single-source
         // palette so it can't drift from the WCAG-guarded value.
         let gray = neutral_gray();
@@ -208,6 +220,7 @@ impl Display {
         if let Some(b) = body {
             self.emit_body(b);
         }
+        self.emit_file_stats(stats);
     }
 
     /// Style a conventional-commit subject line the same way in every
@@ -269,19 +282,95 @@ impl Display {
         rows
     }
 
+    /// Files beyond this many are elided from the footer with a
+    /// `… +N more (N files)` line — the cap the old comma-joined preview used,
+    /// kept so a huge batch can't blow the screen.
+    const FILE_STATS_CAP: usize = 8;
+
+    /// File-stats footer for a commit entry, shared by [`Display::commit_preview`]
+    /// and [`Display::commit_line`] so what the user confirms is what the ✓
+    /// line shows: one line per file — green `+N`, red `−M`, muted filename,
+    /// a green-bold `[new]` / red-bold `[del]` tag — then a `Σ +X −Y (N files)`
+    /// total line when more than one file. Binary files render `(binary)`
+    /// instead of counts and skip the tag.
+    ///
+    /// Glyph colors follow [`Display::review_section`]'s diff-line convention
+    /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
+    /// Lines are never wrapped or truncated (overflow preferable to
+    /// truncation, same as the subject line); the [`FILE_STATS_CAP`] bounds
+    /// height instead. Returns the rows emitted, for the preview's erase
+    /// accounting.
+    fn emit_file_stats(&self, stats: &[FileStats]) -> usize {
+        if stats.is_empty() {
+            return 0;
+        }
+        let gray = neutral_gray();
+        let green = Style::new().green();
+        let red = Style::new().red();
+        let new_tag = Style::new().green().bold();
+        let del_tag = Style::new().red().bold();
+        let mut rows = 0;
+        let shown = stats.len().min(Self::FILE_STATS_CAP);
+        for s in &stats[..shown] {
+            let (counts, tag) = if s.binary {
+                (self.styled("(binary)", gray.clone()), String::new())
+            } else {
+                (
+                    format!(
+                        "{}{}",
+                        self.styled(&format!("+{}", s.added), green.clone()),
+                        self.styled(&format!(" −{}", s.deleted), red.clone()),
+                    ),
+                    if s.new {
+                        self.styled(" [new]", new_tag.clone())
+                    } else if s.removed {
+                        self.styled(" [del]", del_tag.clone())
+                    } else {
+                        String::new()
+                    },
+                )
+            };
+            self.emit(&format!(
+                "  {counts}  {}{}",
+                self.styled(&s.path, gray.clone()),
+                tag
+            ));
+            rows += 1;
+        }
+        if stats.len() > Self::FILE_STATS_CAP {
+            self.emit(&self.styled(
+                &format!("  … +{} more ({} files)", stats.len() - shown, stats.len()),
+                gray.clone(),
+            ));
+            rows += 1;
+        }
+        if stats.len() > 1 {
+            let total_added: usize = stats.iter().map(|s| s.added).sum();
+            let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
+            self.emit(&format!(
+                "  {}{}{} {}",
+                self.styled("Σ", gray.clone()),
+                self.styled(&format!(" +{total_added}"), green.clone()),
+                self.styled(&format!(" −{total_deleted}"), red.clone()),
+                self.styled(&format!("({} files)", stats.len()), gray.clone()),
+            ));
+            rows += 1;
+        }
+        rows
+    }
+
     /// Pre-commit confirmation preview (issue #78): the exact message that
     /// would be committed, framed as *pending* so it can't be mistaken for the
     /// ✓ lines of already-landed batches — a yellow `?` marker on the header
     /// and subject (the subject keeps its conventional-commit coloring, so the
-    /// draft previews the exact styling the ✓ line will use), gray body, dim
-    /// file list.
+    /// draft previews the exact styling the ✓ line will use), gray body, and
+    /// the file-stats footer ([`Display::emit_file_stats`]).
     ///
     /// Returns how many rows the preview occupies, so the caller can erase it
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
     /// a confirmed draft never lingers on screen.
-    pub fn commit_preview(&self, message: &str, body: Option<&str>, paths: &[String]) -> usize {
+    pub fn commit_preview(&self, message: &str, body: Option<&str>, stats: &[FileStats]) -> usize {
         let pending = Style::new().yellow().bold();
-        let dim = Style::new().dim();
         self.emit(&format!(
             "{} {}",
             self.styled("?", pending.clone()),
@@ -296,24 +385,9 @@ impl Display {
         if let Some(b) = body {
             rows += self.emit_body(b);
         }
-        let files = if paths.len() == 1 {
-            paths[0].clone()
-        } else if paths.len() <= 8 {
-            format!("{} ({} files)", paths.join(", "), paths.len())
-        } else {
-            // Keep the preview line bounded: a huge batch must not print an
-            // unbounded file list.
-            let shown = &paths[..8];
-            format!(
-                "{}, … +{} more ({} files)",
-                shown.join(", "),
-                paths.len() - shown.len(),
-                paths.len()
-            )
-        };
-        self.emit(&self.styled(&format!("files: {files}"), dim));
+        rows += self.emit_file_stats(stats);
         self.emit_blank();
-        rows + 2
+        rows + 1
     }
 
     // ------------------------------------------------------------------
@@ -662,22 +736,43 @@ mod tests {
         let rows = d.commit_preview(
             "feat(auth): add OAuth2 login support",
             Some("Allow users to sign in via Google and GitHub OAuth2 providers"),
-            &["src/auth.rs".to_string(), "src/main.rs".to_string()],
+            &[
+                FileStats {
+                    path: "src/auth.rs".into(),
+                    added: 12,
+                    deleted: 3,
+                    new: true,
+                    removed: false,
+                    binary: false,
+                },
+                FileStats {
+                    path: "src/main.rs".into(),
+                    added: 4,
+                    deleted: 1,
+                    new: false,
+                    removed: false,
+                    binary: false,
+                },
+            ],
         );
         let got = lines.lock().clone();
-        // Pending header + subject carry the `?` marker; body and file list
-        // sit at the shared margin; a trailing blank separates the preview
-        // from the confirmation menu. `rows` is the whole block, so the caller
-        // can erase it after the draft is confirmed.
+        // Pending header + subject carry the `?` marker; body sits at the
+        // shared margin; the file-stats footer is nested under it — counts
+        // first, then filename, `[new]`/`[del]` tag, and a Σ total; a trailing
+        // blank separates the preview from the confirmation menu. `rows` is
+        // the whole block, so the caller can erase it after the draft is
+        // confirmed.
         assert_eq!(got[0], "  ? proposed commit:");
         assert_eq!(got[1], "  ? feat(auth): add OAuth2 login support");
         assert_eq!(
             got[2],
             "  Allow users to sign in via Google and GitHub OAuth2 providers"
         );
-        assert_eq!(got[3], "  files: src/auth.rs, src/main.rs (2 files)");
-        assert_eq!(got[4], "");
-        assert_eq!(rows, 5, "header + subject + body + files + blank");
+        assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
+        assert_eq!(got[4], "    +4 −1  src/main.rs");
+        assert_eq!(got[5], "    Σ +16 −4 (2 files)");
+        assert_eq!(got[6], "");
+        assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
     }
 
     #[test]
@@ -687,14 +782,25 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        let rows = d.commit_preview("chore: bump dep", None, &["Cargo.toml".to_string()]);
+        let rows = d.commit_preview(
+            "chore: bump dep",
+            None,
+            &[FileStats {
+                path: "Cargo.toml".into(),
+                added: 5,
+                deleted: 2,
+                new: false,
+                removed: false,
+                binary: false,
+            }],
+        );
         let got = lines.lock().clone();
         assert_eq!(got[0], "  ? proposed commit:");
         assert_eq!(got[1], "  ? chore: bump dep");
-        // Single file: no "(1 files)" suffix; no body line emitted.
-        assert_eq!(got[2], "  files: Cargo.toml");
+        // Single file: no Σ total line; no body line emitted.
+        assert_eq!(got[2], "    +5 −2  Cargo.toml");
         assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
-        assert_eq!(rows, 4, "header + subject + files + blank");
+        assert_eq!(rows, 4, "header + subject + file + blank");
     }
 
     /// `clear_last` drops the most recent rows from the buffer (the in-memory
@@ -732,17 +838,107 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        let paths: Vec<String> = (1..=10).map(|i| format!("src/f{i}.rs")).collect();
-        let rows = d.commit_preview("feat: big", None, &paths);
+        let stats: Vec<FileStats> = (1..=10)
+            .map(|i| FileStats {
+                path: format!("src/f{i}.rs"),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            })
+            .collect();
+        let rows = d.commit_preview("feat: big", None, &stats);
         let got = lines.lock().clone();
         assert!(
-            got.iter().any(|l| l.contains(
-                "files: src/f1.rs, src/f2.rs, src/f3.rs, src/f4.rs, src/f5.rs, \
-                 src/f6.rs, src/f7.rs, src/f8.rs, … +2 more (10 files)"
-            )),
+            got.iter().any(|l| l.contains("… +2 more (10 files)")),
             "expected a truncated file list, got: {got:?}"
         );
-        assert_eq!(rows, 4, "header + subject + files + blank");
+        assert!(
+            got.iter().any(|l| l.contains("Σ +10 −0 (10 files)")),
+            "expected a total over all files, got: {got:?}"
+        );
+        assert!(
+            got.iter().any(|l| l.contains("src/f8.rs")),
+            "the 8th file must be shown, got: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|l| l.contains("src/f9.rs")),
+            "the 9th file must be elided, got: {got:?}"
+        );
+        assert_eq!(
+            rows, 13,
+            "header + subject + 8 files + elision + total + blank"
+        );
+    }
+
+    /// The footer's edge rendering: binary files show `(binary)` instead of
+    /// counts (and skip the tag), deleted files carry `[del]`, and the Σ total
+    /// sums across all entries.
+    #[test]
+    fn file_stats_footer_marks_binary_and_deleted_files() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "img.png".into(),
+                added: 0,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "src/old.rs".into(),
+                added: 0,
+                deleted: 12,
+                new: false,
+                removed: true,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        assert_eq!(got[0], "    (binary)  img.png");
+        assert_eq!(got[1], "    +0 −12  src/old.rs [del]");
+        assert_eq!(got[2], "    Σ +0 −12 (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// The landed line shows the same footer as the preview — the file stats
+    /// survive the commit.
+    #[test]
+    fn commit_line_renders_file_stats_footer() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            None,
+            "[1/3]",
+            &[FileStats {
+                path: "src/auth.rs".into(),
+                added: 7,
+                deleted: 2,
+                new: true,
+                removed: false,
+                binary: false,
+            }],
+        );
+        let got = lines.lock().clone();
+        assert!(
+            got.iter().any(|l| l.contains("+7 −2  src/auth.rs [new]")),
+            "committed line must show the footer, got: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|l| l.contains("Σ")),
+            "single file must not get a total line, got: {got:?}"
+        );
     }
 
     #[test]
@@ -752,7 +948,13 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            Some("body line"),
+            "[1/3]",
+            &[],
+        );
         let got = lines.lock().clone();
         // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
         // Type prefix "feat" is present, followed by ": add thing". Subject now
@@ -771,7 +973,13 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("abc1234", "feat: add thing", Some("body line"), "[1/3]");
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            Some("body line"),
+            "[1/3]",
+            &[],
+        );
         let joined = lines.lock().join("\n");
         // hash #d97706 (bold), feat type green #15803d (bold), description bold
         // default fg, body + prefix muted gray #6b7280.
@@ -808,7 +1016,7 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
         let joined = lines.lock().join("\n");
         // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
         // readability — see types::NAMED_PALETTE).
@@ -835,7 +1043,7 @@ mod tests {
             colors: false,
             lines: lines.clone(),
         });
-        d.commit_line("def5678", "fix(auth): correct token check", None, "");
+        d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
         let got = lines.lock().clone();
         // Exact visible text — catches the dropped-paren regression directly.
         // Subject carries a 2-col left margin.
@@ -863,7 +1071,7 @@ mod tests {
                 colors: true,
                 lines: lines.clone(),
             });
-            d.commit_line("hash000", &format!("{type_str}: msg"), None, "");
+            d.commit_line("hash000", &format!("{type_str}: msg"), None, "", &[]);
             let joined = lines.lock().join("\n");
             assert!(
                 joined.contains(rgb),
@@ -885,7 +1093,7 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("ghi9012", "blob: thing in progress", None, "");
+        d.commit_line("ghi9012", "blob: thing in progress", None, "", &[]);
         let joined = lines.lock().join("\n");
         assert!(
             !joined.contains("107;114;128"),
@@ -917,7 +1125,7 @@ mod tests {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("jkl3456", "no colon message", None, "");
+        d.commit_line("jkl3456", "no colon message", None, "", &[]);
         let joined = lines.lock().join("\n");
         // No-colon messages have no type token to color → muted gray #6b7280
         // (darkened from the old #9ca3af for white-bg readability).
