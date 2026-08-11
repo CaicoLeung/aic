@@ -1477,4 +1477,50 @@ pub(crate) mod tests {
         let landed = git.committed_stats(&paths).unwrap();
         assert_eq!(landed, staged, "preview and landed footers must agree");
     }
+
+    /// `committed_stats` on a root commit (no parent) diffs against the empty
+    /// tree — the `parent_count() == 0` branch. After `init_test_repo`, HEAD
+    /// is exactly such a root commit, seeded with `tracked.txt`.
+    #[test]
+    fn committed_stats_handles_root_commit_with_no_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        init_test_repo(dir.path());
+        let git = Git::at(dir.path()).unwrap();
+
+        let stats = git.committed_stats(&["tracked.txt".to_string()]).unwrap();
+        assert_eq!(
+            stats.len(),
+            1,
+            "one delta against the empty tree: {stats:?}"
+        );
+        assert_eq!(stats[0].path, "tracked.txt");
+        assert_eq!(stats[0].added, 1, "seeded `original\\n` is one added line");
+        assert_eq!(stats[0].deleted, 0);
+        assert!(stats[0].new, "root commit introduces tracked.txt");
+    }
+
+    /// `staged_stats` with no HEAD (a fresh repo, no commits yet) treats every
+    /// staged path as a new file — the `repo.head()` error branch. Mirrors
+    /// `Git::diff`'s head-less handling.
+    #[test]
+    fn staged_stats_treats_every_path_as_new_without_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("core.autocrlf", "false")
+            .unwrap();
+        std::fs::write(dir.path().join("first.txt"), "alpha\nbeta\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("first.txt")).unwrap();
+        index.write().unwrap();
+
+        let git = Git::at(dir.path()).unwrap();
+        let stats = git.staged_stats(&["first.txt".to_string()]).unwrap();
+        assert_eq!(stats.len(), 1, "one staged path: {stats:?}");
+        assert_eq!(stats[0].path, "first.txt");
+        assert_eq!(stats[0].added, 2);
+        assert!(stats[0].new, "no HEAD → every staged path counts as new");
+        assert!(!stats[0].removed);
+    }
 }
