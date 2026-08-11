@@ -41,7 +41,7 @@ const MAX_REASONING_ROWS: usize = 40;
 /// at the bottom margin instead of scrolling. A region taller than the rows
 /// left below the cursor therefore **collapses** — several frame rows
 /// overwrite the same bottom physical row, so the reasoning is invisible, and
-/// the erase at [`ReasoningRenderer::finish`] cannot reclaim what was never
+/// the erase at [`ReasoningRenderer::finish`](crate::progress::ReasoningRenderer::finish) cannot reclaim what was never
 /// cleanly painted. Sizing to the *full* terminal height (`h - 3`) assumed the
 /// cursor starts in the top three rows; in reality it sits at the shell prompt
 /// — mid-screen or lower — so a full-height window collapsed in the common
@@ -61,7 +61,7 @@ const MAX_REASONING_ROWS: usize = 40;
 ///   cursor-down clamp would otherwise swallow). The cap is the pre-dynamic
 ///   fixed budget, clamped so the frame still fits on screen — no reasoning
 ///   row ever lands in the scrollback (the block is painted in place and
-///   erased by [`ReasoningRenderer::finish`]). The scrolls DO shift the
+///   erased by [`ReasoningRenderer::finish`](crate::progress::ReasoningRenderer::finish)). The scrolls DO shift the
 ///   screen up one row per descent past the margin, so the user's prior
 ///   terminal output above the prompt advances into the scrollback by that
 ///   many rows — an unavoidable cost of painting a window at the bottom of a
@@ -116,7 +116,7 @@ pub(crate) fn reasoning_window_rows() -> WindowSizing {
 /// renderer scrolls instead and the pre-dynamic budget applies (clamped so
 /// the frame never exceeds the screen). With the cursor unknown, fall back to
 /// the fixed cap that predates the dynamic window — the user-visible baseline
-/// before the sizing regression (12 rows was the original [`ThinkingView`]
+/// before the sizing regression (12 rows was the original [`ThinkingView`](crate::progress::ThinkingView)
 /// budget).
 fn reasoning_rows_for(height: usize, cursor_row: Option<usize>) -> usize {
     match cursor_row.filter(|r| *r <= height) {

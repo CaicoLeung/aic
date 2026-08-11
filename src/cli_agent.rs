@@ -35,6 +35,7 @@
 //!   [`TokioRunner`] satisfies; tests inject a [`FakeRunner`] with canned
 //!   stdout/stderr/exit, so the arg-substitution / fence-strip / parse / retry
 //!   glue is unit-tested without spawning real CLIs.
+//!
 //! The per-envelope line decoders (claude/pi/opencode/codex stream-json folds)
 //! live in [`crate::decoder`]; this module drives them via `run_streamed`.
 
@@ -46,9 +47,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::decoder::{ClaudeDecoder, CodexDecoder, Decoder, OpenCodeDecoder, PiDecoder};
 use crate::llm::{LlmError, classify_retry, parse_json_response, strip_code_fence};
 use crate::retry::{RetryPolicy, should_retry};
-use crate::decoder::{ClaudeDecoder, CodexDecoder, Decoder, OpenCodeDecoder, PiDecoder};
 
 /// The literal token in an args template that is replaced with the full
 /// (system + user) prompt at run time.
@@ -139,20 +140,20 @@ pub enum Encoding {
     #[default]
     Plain,
     /// Claude Code `--output-format stream-json --include-partial-messages`:
-    /// stdout is NDJSON. Decoded per-line by [`decode_claude_stream_line`].
+    /// stdout is NDJSON. Decoded per-line by [`ClaudeDecoder`].
     ClaudeStreamJson,
     /// pi's `--mode json`: stdout is NDJSON of `message_update` events whose
     /// `assistantMessageEvent` carries `thinking_delta`/`text_delta` chunks —
     /// a complete reasoning + answer stream (290 thinking + 142 text deltas
     /// observed on a 120-word generation). Decoded per-line by
-    /// [`decode_pi_stream_line`].
+    /// [`PiDecoder`].
     PiStreamJson,
     /// opencode's `run --format json`: stdout is NDJSON of events
     /// (`step_start`/`reasoning`/`text`/`step_finish`). The `text` event's
     /// `part.text` carries the **full** answer, arriving whole at completion
     /// (not token-streamed), so this is clean answer extraction rather than a
     /// live reasoning feed — the loading frame covers the wait. Decoded by
-    /// [`decode_opencode_stream_line`].
+    /// [`OpenCodeDecoder`].
     OpenCodeJson,
     /// codex's `exec --json`: stdout is NDJSON of thread/turn/item events.
     /// The answer is the `agent_message` (or its documented-but-drifted
@@ -161,7 +162,7 @@ pub enum Encoding {
     /// (`reasoning` item at `item.completed`) is best-effort: account/org
     /// dependent and often absent (Issue #10746), so its presence is a bonus
     /// and its absence is normal. Decoded per-line by
-    /// [`decode_codex_stream_line`].
+    /// [`CodexDecoder`].
     CodexJson,
 }
 
@@ -242,7 +243,7 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // [`BATCH_TIMEOUT_SECS`] budget at the foot of this function — 240s
         // killed healthy long-reasoning runs. `turn.started` and tool-use
         // `item.started` events are forwarded as live progress by
-        // [`decode_codex_stream_line`] so the reasoning window is not empty.
+        // [`CodexDecoder`] so the reasoning window is not empty.
         "codex" => (
             "codex",
             vec![
@@ -1240,5 +1241,4 @@ mod tests {
             "expected idle Timeout(1), got {err:#}"
         );
     }
-
 }

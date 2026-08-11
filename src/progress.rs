@@ -95,7 +95,7 @@ where
 }
 
 /// A rolling window over the model's streamed reasoning, sized to the caller's
-/// `cap` — the rendered-row budget from [`reasoning_window_rows`], reused as
+/// `cap` — the rendered-row budget from [`crate::cursor::reasoning_window_rows`], reused as
 /// the line-storage bound. Each line renders to at least one row, so at most
 /// `cap` lines are ever visible at once; that makes `cap` an exact upper
 /// bound on retained lines, not an approximation. The post-wrap rendered-row
@@ -107,7 +107,7 @@ where
 /// the terminal clean for the rest of the run. The cap keeps the block bounded
 /// while it streams, so no unbounded region ever accumulates.
 ///
-/// `cap` is sized by the caller from [`reasoning_window_rows`], so a larger
+/// `cap` is sized by the caller from [`crate::cursor::reasoning_window_rows`], so a larger
 /// terminal retains more reasoning instead of aging it out at a fixed rate.
 /// Completed lines (terminated by `\n`) roll into the window; the in-progress
 /// partial line (no trailing `\n` yet) is shown as the window's last line while
@@ -298,7 +298,7 @@ fn style_kind(piece: &str, kind: LineKind) -> String {
 /// exactly what this returns.
 ///
 /// `feed_width` is the per-piece wrap budget. `max_rows` is the rendered-row
-/// cap (from [`reasoning_window_rows`]); the newest `max_rows` rows below the
+/// cap (from [`crate::cursor::reasoning_window_rows`]); the newest `max_rows` rows below the
 /// spinner are kept and the oldest drop out — a long line that wraps to
 /// several rows still cannot grow the region, so the top row may start
 /// mid-line, like a terminal tail window. An empty `window` yields just the
@@ -440,7 +440,7 @@ pub(crate) struct ReasoningRenderer {
     label: &'static str,
     feed_width: usize,
     /// Rendered-row cap for the reasoning window, resolved once by the caller
-    /// from the real terminal height ([`reasoning_window_rows`]) so the view
+    /// from the real terminal height ([`crate::cursor::reasoning_window_rows`]) so the view
     /// and the renderer share one notion of the window size; a resize
     /// mid-stream only changes wrap widths, never the row budget.
     max_rows: usize,
@@ -667,7 +667,7 @@ impl ReasoningRenderer {
     /// Bind a renderer to stderr with `label` on the spinner row. `max_rows`
     /// is the reasoning window's rendered-row cap and `cursor_row` the
     /// DSR-reported cursor row (`None` if the query failed — scrolling is
-    /// then disabled), both from [`reasoning_window_rows`]. `feed_width` is
+    /// then disabled), both from [`crate::cursor::reasoning_window_rows`]. `feed_width` is
     /// resolved once from the shared terminal geometry ([`terminal_width`]),
     /// floored at the progress surface's [`MIN_PROGRESS_WIDTH`] so the
     /// spinner and its label keep room. A resize mid-stream only changes
@@ -1693,4 +1693,3 @@ mod tests {
         assert_eq!(rows.len(), 4, "spinner + 3 rows survive the cap");
     }
 }
-
