@@ -289,17 +289,24 @@ impl Display {
 
     /// File-stats footer for a commit entry, shared by [`Display::commit_preview`]
     /// and [`Display::commit_line`] so what the user confirms is what the ✓
-    /// line shows: one line per file — green `+N`, red `−M`, muted filename,
-    /// a green-bold `[new]` / red-bold `[del]` tag — then a `Σ +X −Y (N files)`
-    /// total line when more than one file. Binary files render `(binary)`
-    /// instead of counts and skip the tag.
+    /// line shows — rendered as an aligned grid (`git diff --stat` style):
+    /// counts right-aligned in one column, filenames left-aligned in the
+    /// next, tags in a third. Green `+N`, red `−M`, muted filenames, a
+    /// green-bold `[new]` / red-bold `[del]` tag, and a `Σ +X −Y (N files)`
+    /// total row when more than one file. Binary files render `(binary)` in
+    /// the counts column and skip the tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
     /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
-    /// Lines are never wrapped or truncated (overflow preferable to
-    /// truncation, same as the subject line); the [`FILE_STATS_CAP`] bounds
-    /// height instead. Returns the rows emitted, for the preview's erase
-    /// accounting.
+    /// Widths use the codebase's char-count model (same as [`wrap_line`]), so
+    /// the grid holds exactly for ASCII paths and approximately for CJK ones.
+    /// Column widths come from the shown files only. A filename wider than
+    /// the grid is truncated with `…` — the one case the footer truncates,
+    /// since a broken column defeats the grid; on a pathologically narrow
+    /// terminal (`name_cap == 0`) the grid degrades to unpadded overflow,
+    /// matching [`wrap_line`]'s `width == 0` convention. The
+    /// [`FILE_STATS_CAP`] bounds height. Returns the rows emitted, for the
+    /// preview's erase accounting.
     fn emit_file_stats(&self, stats: &[FileStats]) -> usize {
         if stats.is_empty() {
             return 0;
@@ -311,30 +318,88 @@ impl Display {
         let del_tag = Style::new().red().bold();
         let mut rows = 0;
         let shown = stats.len().min(Self::FILE_STATS_CAP);
-        for s in &stats[..shown] {
-            let (counts, tag) = if s.binary {
-                (self.styled("(binary)", gray.clone()), String::new())
+        let shown_stats = &stats[..shown];
+        let token_len = |s: &FileStats| {
+            if s.binary {
+                "(binary)".chars().count()
             } else {
-                (
-                    format!(
-                        "{}{}",
-                        self.styled(&format!("+{}", s.added), green.clone()),
-                        self.styled(&format!(" −{}", s.deleted), red.clone()),
-                    ),
-                    if s.new {
-                        self.styled(" [new]", new_tag.clone())
-                    } else if s.removed {
-                        self.styled(" [del]", del_tag.clone())
-                    } else {
-                        String::new()
-                    },
+                format!("+{} −{}", s.added, s.deleted).chars().count()
+            }
+        };
+
+        // Grid geometry. Counts column: widest counts token among the shown
+        // files. Tag column exists only when a shown file carries one
+        // (` [new]` / ` [del]` are both 6 chars). Name column: widest shown
+        // name, capped so the row fits the resolved text width.
+        let counts_width = shown_stats.iter().map(token_len).max().unwrap_or(0);
+        let tag_col = if shown_stats
+            .iter()
+            .any(|s| !s.binary && (s.new || s.removed))
+        {
+            6
+        } else {
+            0
+        };
+        let name_cap = self
+            .text_width()
+            .saturating_sub(2 + counts_width + 2 + tag_col);
+        let align = name_cap > 0;
+        let name_width = if align {
+            shown_stats
+                .iter()
+                .map(|s| s.path.chars().count())
+                .max()
+                .unwrap_or(0)
+                .min(name_cap)
+        } else {
+            0
+        };
+
+        for s in shown_stats {
+            // Counts column, right-aligned.
+            let pad = counts_width - token_len(s);
+            let counts = if s.binary {
+                format!(
+                    "{}{}",
+                    " ".repeat(pad),
+                    self.styled("(binary)", gray.clone())
+                )
+            } else {
+                format!(
+                    "{}{}{}",
+                    " ".repeat(pad),
+                    self.styled(&format!("+{}", s.added), green.clone()),
+                    self.styled(&format!(" −{}", s.deleted), red.clone()),
                 )
             };
-            self.emit(&format!(
-                "  {counts}  {}{}",
-                self.styled(&s.path, gray.clone()),
-                tag
-            ));
+            // Name column: truncated with `…` when wider than the cap,
+            // padded to the grid width otherwise.
+            let mut name = s.path.clone();
+            if align && name.chars().count() > name_width {
+                let keep = name_width.saturating_sub(1);
+                name = format!("{}…", name.chars().take(keep).collect::<String>());
+            }
+            let name_pad = name_width.saturating_sub(name.chars().count());
+            let tag = if s.binary {
+                String::new()
+            } else if s.new {
+                self.styled(" [new]", new_tag.clone())
+            } else if s.removed {
+                self.styled(" [del]", del_tag.clone())
+            } else {
+                String::new()
+            };
+            // trim_end drops the trailing name padding on rows without a tag —
+            // plain spaces, so it is safe with ANSI styling enabled too.
+            self.emit(
+                format!(
+                    "  {counts}  {}{}{}",
+                    self.styled(&name, gray.clone()),
+                    " ".repeat(name_pad),
+                    tag
+                )
+                .trim_end(),
+            );
             rows += 1;
         }
         if stats.len() > Self::FILE_STATS_CAP {
@@ -347,8 +412,11 @@ impl Display {
         if stats.len() > 1 {
             let total_added: usize = stats.iter().map(|s| s.added).sum();
             let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
+            let sum_len = format!("Σ +{total_added} −{total_deleted}").chars().count();
+            let pad = counts_width.saturating_sub(sum_len);
             self.emit(&format!(
-                "  {}{}{} {}",
+                "  {}{}{}{}  {}",
+                " ".repeat(pad),
                 self.styled("Σ", gray.clone()),
                 self.styled(&format!(" +{total_added}"), green.clone()),
                 self.styled(&format!(" −{total_deleted}"), red.clone()),
@@ -769,8 +837,11 @@ mod tests {
             "  Allow users to sign in via Google and GitHub OAuth2 providers"
         );
         assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
-        assert_eq!(got[4], "    +4 −1  src/main.rs");
-        assert_eq!(got[5], "    Σ +16 −4 (2 files)");
+        // Counts are right-aligned in their column (" +4 −1" carries the pad);
+        // the Σ row's counts sit in the same column with a 2-space gap to the
+        // file count.
+        assert_eq!(got[4], "     +4 −1  src/main.rs");
+        assert_eq!(got[5], "    Σ +16 −4  (2 files)");
         assert_eq!(got[6], "");
         assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
     }
@@ -855,7 +926,7 @@ mod tests {
             "expected a truncated file list, got: {got:?}"
         );
         assert!(
-            got.iter().any(|l| l.contains("Σ +10 −0 (10 files)")),
+            got.iter().any(|l| l.contains("Σ +10 −0  (10 files)")),
             "expected a total over all files, got: {got:?}"
         );
         assert!(
@@ -902,8 +973,48 @@ mod tests {
         ]);
         let got = lines.lock().clone();
         assert_eq!(got[0], "    (binary)  img.png");
-        assert_eq!(got[1], "    +0 −12  src/old.rs [del]");
-        assert_eq!(got[2], "    Σ +0 −12 (2 files)");
+        // "(binary)" widens the counts column to 8 — "+0 −12" right-aligns
+        // with 2 pad spaces.
+        assert_eq!(got[1], "      +0 −12  src/old.rs [del]");
+        assert_eq!(got[2], "    Σ +0 −12  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// A filename wider than the grid's name column is truncated with `…`
+    /// (char-count model) so the columns — and the tag column — stay intact:
+    /// the short file's name pads to the same width and its `[new]` tag lands
+    /// at the same column as a tag on the truncated row would.
+    #[test]
+    fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let long = "x".repeat(70);
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: long.clone(),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+            FileStats {
+                path: "a.rs".into(),
+                added: 1,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // text_width is 76 (80 - 2 - 2); name column = 76 - 2 (nest) - 5
+        // (counts) - 2 (gap) - 6 (tag column) = 61 → 60 chars + "…".
+        assert_eq!(got[0], format!("    +1 −0  {}", "x".repeat(60) + "…"));
+        assert_eq!(got[1], format!("    +1 −0  a.rs{} [new]", " ".repeat(57)));
         assert_eq!(rows, 3, "2 files + total");
     }
 
