@@ -296,7 +296,8 @@ impl Display {
     /// tags in the last. Green `+N`, red `−M`, muted filenames, a
     /// green-bold `[new]` / red-bold `[del]` tag, and a `Σ +X −Y (N files)`
     /// total row when more than one file. Binary files render `(binary)`
-    /// spanning the counts region; a binary file that is new or removed keeps
+    /// right-aligned in the counts region, which widens to fit the label when
+    /// any shown file is binary; a binary file that is new or removed keeps
     /// its `[new]`/`[del]` tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
@@ -370,7 +371,21 @@ impl Display {
         } else {
             0
         };
-        let counts_region = sigma_col + plus_width + sep + minus_width;
+        // The counts region must also fit the `(binary)` label when any shown
+        // file is binary — otherwise `(binary)` (8 chars) overflows a narrower
+        // region and the binary rows drift out of line with the Σ total row.
+        // The extra width becomes leading pad (`lead`) on the text rows and
+        // the Σ row, so all three row kinds — text file, binary file, Σ total
+        // — occupy the same `counts_region` and the filename column lands at
+        // one column across every row.
+        let binary_label = "(binary)".chars().count();
+        let base_region = sigma_col + plus_width + sep + minus_width;
+        let counts_region = if shown_stats.iter().any(|s| s.binary) {
+            base_region.max(binary_label)
+        } else {
+            base_region
+        };
+        let lead = " ".repeat(counts_region - base_region);
         let tag_col = if shown_stats.iter().any(|s| s.new || s.removed) {
             6
         } else {
@@ -410,7 +425,7 @@ impl Display {
             // Counts region: Σ column (blank on file rows), then `+N` and
             // `−M` right-aligned to their own columns.
             let counts = if s.binary {
-                let pad = counts_region.saturating_sub("(binary)".chars().count());
+                let pad = counts_region - binary_label;
                 format!(
                     "{}{}",
                     " ".repeat(pad),
@@ -419,7 +434,7 @@ impl Display {
             } else {
                 let plus = format!("+{}", s.added);
                 let minus = format!("−{}", s.deleted);
-                format!("{}{}", sigma_blank, fmt_columns(&plus, &minus))
+                format!("{lead}{sigma_blank}{}", fmt_columns(&plus, &minus))
             };
             // Name column: truncated with `…` when wider than the cap,
             // padded to the grid width otherwise.
@@ -468,7 +483,7 @@ impl Display {
                 " ".repeat(sigma_col.saturating_sub(1)),
             );
             self.emit(&format!(
-                "  {}{}  {}",
+                "  {lead}{}{}  {}",
                 sigma_text,
                 fmt_columns(&plus, &minus),
                 self.styled(&format!("({} files)", stats.len()), gray.clone()),
@@ -1100,11 +1115,54 @@ mod tests {
             },
         ]);
         let got = lines.lock().clone();
-        // New binary keeps `[new]`; non-new binary carries no tag. The Σ row
-        // sizes to `+0`/`−0` (width 2 each) so it stays gapped and aligned.
+        // New binary keeps `[new]`; non-new binary carries no tag. The counts
+        // region widens to fit `(binary)` (8 > the `+0`/`−0` base region of 7),
+        // so the Σ row gains a leading pad and its `(2 files)` label lands in
+        // the same column as the filenames above.
         assert_eq!(got[0], "    (binary)  img.png  [new]");
         assert_eq!(got[1], "    (binary)  data.bin");
-        assert_eq!(got[2], "    Σ +0 −0  (2 files)");
+        assert_eq!(got[2], "     Σ +0 −0  (2 files)");
+        assert_eq!(rows, 3, "2 files + total");
+    }
+
+    /// A binary file alongside a text file whose counts region is narrower
+    /// than `(binary)`: the region widens to 8 and every row — text, binary,
+    /// Σ — carries the same leading pad, so `(binary)`'s right edge, the text
+    /// `−M`, and the filename column all line up. Regression for the
+    /// binary-overflow column drift between file rows and the Σ row.
+    #[test]
+    fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        let rows = d.emit_file_stats(&[
+            FileStats {
+                path: "x.bin".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "a.rs".into(),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+        ]);
+        let got = lines.lock().clone();
+        // base region (Σ 2 + `+1` 2 + gap 1 + `−0` 2 = 7) widens to 8 for
+        // `(binary)`; the text row and Σ row each carry one leading pad, so
+        // all three rows' counts end at the same column and the filenames
+        // start at the same column.
+        assert_eq!(got[0], "    (binary)  x.bin");
+        assert_eq!(got[1], "       +1 −0  a.rs");
+        assert_eq!(got[2], "     Σ +1 −0  (2 files)");
         assert_eq!(rows, 3, "2 files + total");
     }
 
