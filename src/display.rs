@@ -392,6 +392,19 @@ impl Display {
         };
         let sigma_blank = " ".repeat(sigma_col);
         let sep_str = if sep > 0 { " " } else { "" };
+        // Shared `+N`/`−M` column formatter — file rows and the Σ total row
+        // pad identically, so the alignment math has one home and the two
+        // rows cannot drift apart.
+        let fmt_columns = |plus: &str, minus: &str| {
+            format!(
+                "{}{}{}{}{}",
+                " ".repeat(plus_width.saturating_sub(plus.chars().count())),
+                self.styled(plus, green.clone()),
+                sep_str,
+                " ".repeat(minus_width.saturating_sub(minus.chars().count())),
+                self.styled(minus, red.clone()),
+            )
+        };
 
         for s in shown_stats {
             // Counts region: Σ column (blank on file rows), then `+N` and
@@ -406,15 +419,7 @@ impl Display {
             } else {
                 let plus = format!("+{}", s.added);
                 let minus = format!("−{}", s.deleted);
-                format!(
-                    "{}{}{}{}{}{}",
-                    sigma_blank,
-                    " ".repeat(plus_width - plus.chars().count()),
-                    self.styled(&plus, green.clone()),
-                    sep_str,
-                    " ".repeat(minus_width - minus.chars().count()),
-                    self.styled(&minus, red.clone()),
-                )
+                format!("{}{}", sigma_blank, fmt_columns(&plus, &minus))
             };
             // Name column: truncated with `…` when wider than the cap,
             // padded to the grid width otherwise.
@@ -452,22 +457,20 @@ impl Display {
             rows += 1;
         }
         if stats.len() > 1 {
-            let total_added: usize = stats.iter().map(|s| s.added).sum();
-            let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
             // `Σ` sits in its own column (padded to the column width, like
             // the file rows' blank); the totals right-align into the same
             // `+N` / `−M` columns as the file rows above.
-            self.emit(&format!(
-                "  {}{}{}{}{}{}{}  {}",
+            let sigma_text = format!(
+                "{}{}",
                 self.styled("Σ", gray.clone()),
-                " ".repeat(sigma_col - 1),
-                " ".repeat(plus_width.saturating_sub(plus.chars().count())),
-                self.styled(&plus, green.clone()),
-                sep_str,
-                " ".repeat(minus_width.saturating_sub(minus.chars().count())),
-                self.styled(&minus, red.clone()),
+                " ".repeat(sigma_col.saturating_sub(1)),
+            );
+            self.emit(&format!(
+                "  {}{}  {}",
+                sigma_text,
+                fmt_columns(&plus, &minus),
                 self.styled(&format!("({} files)", stats.len()), gray.clone()),
             ));
             rows += 1;
