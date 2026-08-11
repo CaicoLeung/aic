@@ -283,7 +283,7 @@ impl Display {
     }
 
     /// Files beyond this many are elided from the footer with a
-    /// `… +N more (N files)` line — the cap the old comma-joined preview used,
+    /// `… N more (N files)` line — the cap the old comma-joined preview used,
     /// kept so a huge batch can't blow the screen.
     const FILE_STATS_CAP: usize = 8;
 
@@ -466,7 +466,7 @@ impl Display {
         }
         if stats.len() > Self::FILE_STATS_CAP {
             self.emit(&self.styled(
-                &format!("  … +{} more ({} files)", stats.len() - shown, stats.len()),
+                &format!("  … {} more ({} files)", stats.len() - shown, stats.len()),
                 gray.clone(),
             ));
             rows += 1;
@@ -989,7 +989,7 @@ mod tests {
         let rows = d.commit_preview("feat: big", None, &stats);
         let got = lines.lock().clone();
         assert!(
-            got.iter().any(|l| l.contains("… +2 more (10 files)")),
+            got.iter().any(|l| l.contains("… 2 more (10 files)")),
             "expected a truncated file list, got: {got:?}"
         );
         assert!(
