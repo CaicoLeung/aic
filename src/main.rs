@@ -467,12 +467,12 @@ pub(crate) async fn run_commit_workflow_impl(
     Ok(())
 }
 
-/// Drive a streaming LLM call behind the live reasoning feed: probe the
+/// Run an LLM call behind the live reasoning feed: probe the
 /// terminal geometry, build the real [`progress::ReasoningRenderer`] sink, and
 /// hand the reasoning tap to `make_call` so the caller's streaming generator
 /// forwards its thinking deltas into the feed. The shared production wiring
 /// for both the planner and the message paths — each streams through here.
-async fn drive_streaming<F, T>(
+async fn run_with_reasoning_feed<F, T>(
     label: &'static str,
     cold_start: Option<String>,
     make_call: F,
@@ -512,7 +512,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     let planner: BatchPlanner = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
             let cold_start = planner_cold.clone();
-            Box::pin(drive_streaming(
+            Box::pin(run_with_reasoning_feed(
                 "Analyzing changes",
                 cold_start,
                 move |tap| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
@@ -526,7 +526,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     let messenger: CommitMessenger = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
             let cold_start = cold_start.clone();
-            Box::pin(drive_streaming(
+            Box::pin(run_with_reasoning_feed(
                 "Generating commit message",
                 cold_start,
                 move |tap| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {

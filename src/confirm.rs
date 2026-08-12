@@ -185,6 +185,8 @@ pub(crate) async fn confirm_draft(
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
+                // The production messenger streams its own reasoning feed, so
+                // it is awaited bare — an outer spinner would double up.
                 let result = messenger(diff.clone()).await?;
                 message = result.message;
                 body = result.body;
