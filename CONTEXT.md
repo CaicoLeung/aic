@@ -113,3 +113,9 @@ _Avoid_: complete, finish, commit (overloaded — see Run, Drafted Message)
 **Conflict module**:
 The module (`src/conflict.rs`, reached as `Git::conflict() -> Conflict<'_>`) that owns conflict detection, classification, worktree I/O for conflicted files, and Finalize. Owns the `RepoState`, `ConflictKind`, `ConflictedFile` types and `has_conflict_markers`. The commit guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git` and call across this seam; `Git` keeps the repo handle, `run_git`, and the libgit2/CLI commit path.
 _Avoid_: resolve module, merge module, conflict service
+
+### Progress
+
+**Reasoning feed**:
+The Run's streaming-reasoning display driver (`src/reasoning_feed.rs`): owns the *when-to-paint* policy between a streaming LLM call and a rendering sink. A rolling reasoning window redraws in place as the model thinks and is erased when thinking ends, so nothing lingers in the scrollback; when a backend emits no reasoning deltas at all (a CLI agent in print mode, or an API cold start) a loading frame keeps the screen alive and, past the loading grace, shows an explanatory notice. The driver runs against a `ReasoningSink` trait (concretely `progress::ReasoningRenderer` in production, a recording fake in tests), keeping the byte-level frame/row assembly in `progress` separate from the frame-policy decisions here. Both the BatchPlan analysis and the Drafted Message generation stream through one `drive_streaming` helper at the production wiring layer.
+_Avoid_: reasoning service, thinking component, streaming view
