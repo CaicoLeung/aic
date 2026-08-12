@@ -250,4 +250,77 @@ mod tests {
             "no paint for silent backend: {e:?}"
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_paints_loading_frame_while_backend_is_silent() {
+        let sink = FakeSink::default();
+        let record = sink.0.clone();
+        let mut sink = sink;
+
+        // A silent backend: no reasoning delta ever arrives, so every steady
+        // tick takes the `!got_output` arm and paints a loading frame. The tap
+        // is held (not dropped) so the reasoning channel stays open — dropping
+        // it would close `rx` and the loop would busy-spin on the always-ready
+        // recv arm instead of ever ticking. Two ticks is enough to exercise the
+        // dispatch; the past-grace notice is `std::time::Instant`-based (not
+        // the paused tokio clock), so its classification stays in the
+        // `loading_notice` unit tests rather than being slept into here.
+        let res: anyhow::Result<i32> = run(&mut sink, 10, None, |tap| {
+            Box::pin(async move {
+                let _tap = tap;
+                tokio::time::sleep(SPINNER_TICK * 3).await;
+                Ok(3)
+            })
+        })
+        .await;
+
+        assert_eq!(res.unwrap(), 3);
+        let e = events(&FakeSink(record));
+        assert!(
+            e.iter().any(|s| s.starts_with("loading")),
+            "expected loading frames for a silent backend: {e:?}"
+        );
+        // No delta ever arrived, so the content-paint arm must not have fired.
+        assert!(
+            !e.iter().any(|s| s.starts_with("paint:")),
+            "no content paint for a silent backend: {e:?}"
+        );
+        assert_eq!(e.last().unwrap(), "finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_refreshes_after_first_delta_then_finishes() {
+        let sink = FakeSink::default();
+        let record = sink.0.clone();
+        let mut sink = sink;
+
+        // One delta latches `got_output`, then the model stays silent past a
+        // tick so the steady-tick arm repaints via `refresh` (not loading).
+        let res: anyhow::Result<i32> = run(&mut sink, 10, None, |mut tap| {
+            Box::pin(async move {
+                tap("thinking about the diff\n");
+                tokio::time::sleep(SPINNER_TICK * 3).await;
+                Ok(5)
+            })
+        })
+        .await;
+
+        assert_eq!(res.unwrap(), 5);
+        let e = events(&FakeSink(record));
+        assert!(
+            e.iter().any(|s| s.starts_with("paint:")),
+            "expected a content paint for the delta: {e:?}"
+        );
+        assert!(
+            e.iter().any(|s| s.starts_with("refresh")),
+            "expected a refresh repaint past the first delta: {e:?}"
+        );
+        // The latch invariant: once a delta has been seen, no later tick may
+        // repaint a loading frame over the feed.
+        assert!(
+            !e.iter().any(|s| s.starts_with("loading")),
+            "loading frame painted after a delta (latch broken): {e:?}"
+        );
+        assert_eq!(e.last().unwrap(), "finish");
+    }
 }
