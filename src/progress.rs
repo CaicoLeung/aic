@@ -748,10 +748,10 @@ impl ReasoningRenderer {
 
     /// Paint one loading frame for the silent/cold-start backend state: the
     /// spinner row annotated with `elapsed` seconds, plus — once `notice` is
-    /// past [`LOADING_GRACE`]/classified — an explanatory row. Used by
-    /// [`analyze_changes`](crate::analyze_changes) between stream start and
-    /// the first reasoning delta so a non-streaming or cold-starting backend
-    /// is not a silent dead zone: the user always sees motion (the spinning
+    /// past [`LOADING_GRACE`]/classified — an explanatory row. Used by the
+    /// [`reasoning_feed`](crate::reasoning_feed) driver between stream start
+    /// and the first reasoning delta so a non-streaming or cold-starting
+    /// backend is not a silent dead zone: the user always sees motion (the spinning
     /// glyph) and a rising elapsed count. The first delta swaps this frame for
     /// the normal reasoning window via [`paint`](Self::paint); both go through
     /// [`draw_rows`], so the in-place repaint handles the height transition
