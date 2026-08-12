@@ -81,8 +81,10 @@ async fn generate_and_commit(
     // stats (what the commit would land) feed the preview footer — shown only
     // when confirmation is on; landed stats (what it did land) always feed the
     // ✓ line.
-    let result =
-        progress::with_spinner("Generating commit message", messenger(diff_str.clone())).await?;
+    // The production messenger carries its own progress surface (the live
+    // reasoning feed), so it is awaited bare — an outer spinner would double
+    // up. A canned test messenger returns whole, with no reasoning to show.
+    let result = messenger(diff_str.clone()).await?;
     let stats = git.staged_stats(paths)?;
     let (message, body, preview_rows) = confirm_draft(
         (result.message, result.body),
