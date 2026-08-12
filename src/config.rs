@@ -685,23 +685,24 @@ pub(crate) fn resolve_base_url(
     }
 }
 
-pub fn run_list() -> Result<()> {
-    let config = Config::load()?;
+/// Pure: the lines `aic list` prints for a loaded config, by resolved backend.
+/// Tested without IO so the CLI-backend branch — which re-resolves the
+/// args/timeout with source tracking — is covered, not just the API path that
+/// goes through [`ResolvedConfig`] (cf. [`apply_use`] for the same split).
+fn list_lines(config: Option<&Config>) -> Result<Vec<String>> {
     let kind = config
-        .as_ref()
         .map(|c| c.resolve_backend())
         .transpose()?
         .unwrap_or(BackendKind::Api);
-
-    println!("Backend:  {}", kind.display_name());
+    let mut lines = vec![format!("Backend:  {}", kind.display_name())];
     match kind {
         BackendKind::Cli => {
             // resolve_backend guarantees a command is set for the CLI backend.
-            let c = config.as_ref().expect("cli backend implies config present");
+            let c = config.expect("cli backend implies config present");
             let command = c
                 .active_cli_command()
                 .expect("cli backend implies command set");
-            println!("Command:  {command} (source: {})", Source::Config);
+            lines.push(format!("Command:  {command} (source: {})", Source::Config));
             let (args, args_src) = match &c.cli.args {
                 Some(a) => (a.join(" "), Source::Config),
                 None => (
@@ -709,46 +710,54 @@ pub fn run_list() -> Result<()> {
                     Source::Default,
                 ),
             };
-            println!("Args:     {args} (source: {args_src})");
+            lines.push(format!("Args:     {args} (source: {args_src})"));
             let (timeout, to_src) = match c.cli.timeout_secs {
                 Some(t) => (t, Source::Config),
                 None => (crate::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
             };
-            println!("Timeout:  {timeout}s (source: {to_src})");
+            lines.push(format!("Timeout:  {timeout}s (source: {to_src})"));
         }
         BackendKind::Api => {
-            let resolved = ResolvedConfig::resolve(config.as_ref());
-            println!(
+            let resolved = ResolvedConfig::resolve(config);
+            lines.push(format!(
                 "Provider: {} (source: {})",
                 resolved.backend, resolved.backend_source
-            );
-            println!(
+            ));
+            lines.push(format!(
                 "Model:    {} (source: {})",
                 resolved.model, resolved.model_source
-            );
-            println!(
+            ));
+            lines.push(format!(
                 "API key:  {} (source: {})",
                 resolved.mask_api_key(),
                 resolved.api_key_source
-            );
-            println!(
+            ));
+            lines.push(format!(
                 "Base URL: {} (source: {})",
                 resolved.base_url.as_deref().unwrap_or("(none)"),
                 resolved.base_url_source
-            );
+            ));
             let saved: Vec<&str> = config
-                .as_ref()
                 .map(|c| c.providers.iter().map(|p| p.backend.as_str()).collect())
                 .unwrap_or_default();
             if !saved.is_empty() {
-                println!(
+                lines.push(format!(
                     "Saved:   {} (switch with `aic use <name>`)",
                     saved.join(", ")
-                );
+                ));
             }
         }
     }
+    Ok(lines)
+}
 
+/// `aic list` — print the resolved configuration. A thin load → format → print
+/// shell over [`list_lines`]; all presentation lives there.
+pub fn run_list() -> Result<()> {
+    let config = Config::load()?;
+    for line in list_lines(config.as_ref())? {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -1188,6 +1197,73 @@ model = "gpt-5"
             .find(|p| p.backend == "openai")
             .unwrap();
         assert_eq!(openai.api_key.as_deref(), Some("sk-remembered"));
+    }
+
+    #[test]
+    fn list_lines_api_branch_shows_resolved_provider() {
+        let c = cfg("openai", Some("sk-live-key"), Some("gpt-4o"), None);
+        let lines = super::list_lines(Some(&c)).unwrap();
+        assert_eq!(lines[0], "Backend:  API provider");
+        assert!(
+            lines.iter().any(|l| l.contains("Provider: openai")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Model:    gpt-4o")),
+            "got {lines:?}"
+        );
+        // mask_api_key: first 3 … last 3 of an 11-char key.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("API key:") && l.contains("sk-...key")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn list_lines_cli_branch_resolves_defaults_with_source() {
+        // Command set, args/timeout absent → both resolve to defaults (source:
+        // default), the previously-untested branch.
+        let c = Config {
+            backend_kind: Some(BackendKind::Cli),
+            cli: CliConfig {
+                command: Some("claude".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let lines = super::list_lines(Some(&c)).unwrap();
+        assert_eq!(lines[0], "Backend:  CLI agent");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "Command:  claude (source: config)"),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Args:") && l.contains("source: default")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Timeout:") && l.contains("source: default")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn list_lines_no_config_defaults_to_api_backend() {
+        // No config file at all ⇒ Api backend, every resolved value default-sourced.
+        let lines = super::list_lines(None).unwrap();
+        assert_eq!(lines[0], "Backend:  API provider");
+        assert!(
+            lines.iter().all(|l| !l.contains("source: config")),
+            "nothing config-sourced: {lines:?}"
+        );
     }
 
     #[test]

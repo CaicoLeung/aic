@@ -748,10 +748,10 @@ impl ReasoningRenderer {
 
     /// Paint one loading frame for the silent/cold-start backend state: the
     /// spinner row annotated with `elapsed` seconds, plus — once `notice` is
-    /// past [`LOADING_GRACE`]/classified — an explanatory row. Used by
-    /// [`analyze_changes`](crate::analyze_changes) between stream start and
-    /// the first reasoning delta so a non-streaming or cold-starting backend
-    /// is not a silent dead zone: the user always sees motion (the spinning
+    /// past [`LOADING_GRACE`]/classified — an explanatory row. Used by the
+    /// [`reasoning_feed`](crate::reasoning_feed) driver between stream start
+    /// and the first reasoning delta so a non-streaming or cold-starting
+    /// backend is not a silent dead zone: the user always sees motion (the spinning
     /// glyph) and a rising elapsed count. The first delta swaps this frame for
     /// the normal reasoning window via [`paint`](Self::paint); both go through
     /// [`draw_rows`], so the in-place repaint handles the height transition
@@ -860,6 +860,26 @@ impl ReasoningRenderer {
         self.prev_height = 0;
         self.active = false;
         self.cursor_hidden = false;
+    }
+}
+
+/// Production [`reasoning_feed::ReasoningSink`]. Each method forwards to the
+/// inherent method of the same name in `impl ReasoningRenderer` above — Rust's
+/// method resolution prefers inherent over trait, so a `self.paint` body here
+/// is *not* a recursive call. The trait seam exists so the driver loop can run
+/// against a recording fake in tests; this is the only production sink.
+impl crate::reasoning_feed::ReasoningSink for ReasoningRenderer {
+    fn paint(&mut self, window: &[String], in_code_start: bool) {
+        self.paint(window, in_code_start)
+    }
+    fn paint_loading(&mut self, elapsed: Duration, notice: LoadingNotice) {
+        self.paint_loading(elapsed, notice)
+    }
+    fn refresh(&mut self, window: &[String], in_code_start: bool, elapsed: Duration) {
+        self.refresh(window, in_code_start, elapsed)
+    }
+    fn finish(&mut self) {
+        self.finish()
     }
 }
 

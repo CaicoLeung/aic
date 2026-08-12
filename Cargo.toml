@@ -47,6 +47,7 @@ libc = "0.2"
 inquire = "0.9"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 parking_lot = "0.12"
 temp-env = "0.3"
 tempfile = "3"
