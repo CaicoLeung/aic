@@ -15,7 +15,6 @@
 use crate::CommitMessenger;
 use crate::display::Display;
 use crate::git::FileStats;
-use crate::progress;
 use anyhow::Context;
 
 // ----------------------------------------------------------------------
@@ -186,8 +185,7 @@ pub(crate) async fn confirm_draft(
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
-                let result =
-                    progress::with_spinner("Regenerating message", messenger(diff.clone())).await?;
+                let result = messenger(diff.clone()).await?;
                 message = result.message;
                 body = result.body;
             }
