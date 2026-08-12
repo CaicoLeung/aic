@@ -130,11 +130,18 @@ pub fn validate_batch_plan(
 }
 
 impl Generator {
-    pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
+    /// Generate a Conventional-Commits message for one batch's staged diff,
+    /// streaming the model's reasoning to `on_reasoning` as it thinks. The
+    /// LLMAgent seam owns streaming + tolerant parsing + retry, so this is a
+    /// single typed call.
+    pub async fn generate_commit_message_streaming(
+        diff: &str,
+        on_reasoning: impl FnMut(&str) + Send,
+    ) -> anyhow::Result<CommitOutput> {
         let p = PromptConfig::default().git_message;
         LlmConfig::load()?
             .agent(&p)
-            .schema::<CommitOutput>(diff)
+            .stream_typed_with_reasoning::<CommitOutput>(diff, on_reasoning)
             .await
     }
 
