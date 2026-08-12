@@ -15,6 +15,7 @@ pub mod input;
 pub mod layout;
 pub mod llm;
 pub mod progress;
+pub mod reasoning_feed;
 pub mod prompt;
 pub mod retry;
 pub mod setup;

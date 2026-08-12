@@ -863,6 +863,24 @@ impl ReasoningRenderer {
     }
 }
 
+/// Production [`reasoning_feed::ReasoningSink`] — delegates to the inherent
+/// rendering methods above. The trait seam lets the driver loop run against a
+/// fake sink in tests; this impl is the only one wired in production.
+impl crate::reasoning_feed::ReasoningSink for ReasoningRenderer {
+    fn paint(&mut self, window: &[String], in_code_start: bool) {
+        self.paint(window, in_code_start)
+    }
+    fn paint_loading(&mut self, elapsed: Duration, notice: LoadingNotice) {
+        self.paint_loading(elapsed, notice)
+    }
+    fn refresh(&mut self, window: &[String], in_code_start: bool, elapsed: Duration) {
+        self.refresh(window, in_code_start, elapsed)
+    }
+    fn finish(&mut self) {
+        self.finish()
+    }
+}
+
 impl Drop for ReasoningRenderer {
     fn drop(&mut self) {
         // Backstop: if the stream aborted before finish(), erase the frame fast
