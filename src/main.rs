@@ -58,171 +58,6 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
-/// Run the batch-plan analysis behind a spinner that streams the model's
-/// reasoning live. The reasoning is shown as a rolling window sized to the
-/// space below the cursor ([`cursor::reasoning_window_rows`]) that redraws
-/// in place as the model thinks — newest rows at the bottom, oldest scrolled
-/// out of the window — and is erased when thinking ends, so the reasoning
-/// never lingers on screen or in the scrollback. When the cursor sits in the
-/// bottom rows (the usual shell-prompt position) the renderer grows the frame
-/// past the bottom margin by scrolling the screen, so the reasoning is
-/// visible even there instead of collapsing. Markdown is rendered inline
-/// (bold headings, coloured code blocks — fence state tracked across the
-/// whole stream, so code keeps its colour even after its opener scrolls out
-/// of the window), and at the end of analysis the final frame **dissolves**
-/// one row at a time so each line stays readable as it exits, rather than
-/// blinking out wholesale.
-///
-/// Rendering is hand-rolled via [`progress::ReasoningRenderer`] rather than an
-/// indicatif multi-line spinner: indicatif repaints by blanking every row then
-/// redrawing them, and its steady tick forced that ~20×/s, so a multi-row
-/// window flickered. This renderer rewrites **only the row that changed** on
-/// each token — the in-progress line grows fluidly while the rows above stay
-/// untouched — and falls back to a full anti-flicker repaint only when the
-/// window rolls. Idle ticks are suppressed while streaming is active so the
-/// feed never flashes; the spinner animates only once the model goes silent.
-/// See [`progress::ReasoningRenderer`] for the redraw contract.
-///
-/// **Silent-backend fallback.** A backend that emits no reasoning deltas at
-/// all (a CLI agent in single-shot print mode, or an API cold start) would
-/// leave the renderer's first frame unpainted — a dead silent screen for the
-/// whole run. To avoid that, a loading frame
-/// ([`progress::ReasoningRenderer::paint_loading`]) is painted on a
-/// [`progress::SPINNER_TICK`] cadence between stream start and the first
-/// delta: a spinner + elapsed-seconds counter immediately, and after
-/// [`progress::LOADING_GRACE`] an explanatory notice that this CLI agent does
-/// not stream its thinking process. The first delta cancels loading and hands
-/// off to the normal reasoning window; both frames go through the same
-/// [`progress::ReasoningRenderer`] so the in-place repaint handles the height
-/// transition with no flicker. Reasoning deltas flow through an unbounded
-/// channel so the streaming future (which owns the [`progress::ThinkingView`]
-/// inside its callback closure) and the repaint loop never borrow-conflict —
-/// the future writes windows, the loop paints them.
-async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutput> {
-    use std::time::Instant;
-
-    // The DSR cursor-row query does up to ~200 ms of blocking tty I/O (poll
-    // + raw-mode byte reads against a deadline). Run it on the blocking pool
-    // so it stalls a worker, not the async reactor. A task panic degrades to
-    // the no-scroll [`cursor::WindowSizing::fallback`] — decoration must
-    // never break the commit.
-    let sizing = tokio::task::spawn_blocking(cursor::reasoning_window_rows)
-        .await
-        .unwrap_or_else(|_| cursor::WindowSizing::fallback());
-    let mut renderer =
-        progress::ReasoningRenderer::new("Analyzing changes", sizing.max_rows, sizing.cursor_row);
-    let start = Instant::now();
-    // Windows travel with the markdown fence state entering them (tracked by
-    // `ThinkingView` over the whole stream), so the repaint loop classifies
-    // the visible window exactly as a full-stream scan would.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<String>, bool)>();
-
-    // A streaming-capable backend (claude `stream-json`, pi `--mode json`)
-    // that has not yet produced reasoning is in a cold start — SessionStart
-    // hooks, MCP handshakes, and a network TTFT often total 6–10 s before
-    // the first `thinking_delta`. That is NOT "does not support streaming",
-    // so past [`progress::LOADING_GRACE`] its loading frame shows a
-    // cold-start notice rather than the non-streaming claim. Plain backends
-    // (and opencode/codex, whose reasoning arrives whole at completion) are
-    // the case the non-streaming notice was written for.
-    //
-    // The decision — "is this a streaming-capable cold start, and what name
-    // labels the notice" — is decided behind the Backend seam by
-    // [`LlmConfig::cold_start_program`], so this frame never branches on
-    // backend kind or encoding. `None` ⇒ not streaming-capable → the silent
-    // notice. Defaults to `None` on any config-read glitch (safer: never
-    // falsely claims a streaming capability).
-    let cold_start: Option<String> = crate::llm::LlmConfig::load()
-        .ok()
-        .and_then(|c| c.cold_start_program());
-
-    // The streaming future owns the `ThinkingView` inside its `on_reasoning`
-    // closure; windows are forwarded to the channel rather than rendered
-    // inline, so the repaint loop below holds the renderer with no overlapping
-    // borrow of the view. `tokio::pin!` lets us poll it across `select!`
-    // arms without re-creating it each iteration.
-    let fut = async {
-        let mut view = progress::ThinkingView::new(sizing.max_rows);
-        generator::Generator::split_patch_streaming(diff, |delta| {
-            let (window, in_code_start) = view.push(delta);
-            // Channel send only fails if the receiver was dropped — which
-            // happens after `fut` completes, when pending windows no longer
-            // matter — so the error is silently swallowed.
-            let _ = tx.send((window, in_code_start));
-        })
-        .await
-    };
-    tokio::pin!(fut);
-
-    let mut got_output = false;
-    let mut last_window: Vec<String> = Vec::new();
-    let mut last_in_code_start = false;
-    let mut ticker = tokio::time::interval(progress::SPINNER_TICK);
-    // The interval's first tick fires immediately; we want the first painted
-    // frame to reflect a real (even if 0 s) elapsed, so the immediate tick is
-    // welcome — it gives sub-second feedback before any LLM round-trip.
-
-    let result = loop {
-        tokio::select! {
-            biased;
-            // Completion wins over everything: a fast backend never paints a
-            // loading frame at all.
-            res = &mut fut => {
-                break res;
-            }
-            // A reasoning delta or startup milestone hands the rolling window
-            // to the renderer and latches `got_output` so no later tick can
-            // repaint a loading frame over the feed. The same window and its
-            // fence state are retained for the steady-tick repaint below.
-            window = rx.recv() => {
-                if let Some((window, in_code_start)) = window {
-                    got_output = true;
-                    last_window = window.clone();
-                    last_in_code_start = in_code_start;
-                    renderer.paint(&window, in_code_start);
-                }
-            }
-            // Steady tick — two roles by mode:
-            //  * Before the first line (genuinely silent backend, e.g. codex
-            //    plain): the loading frame keeps the screen alive — spinner +
-            //    elapsed, plus the silent/cold-start notice once past
-            //    [`LOADING_GRACE`].
-            //  * After the first line (startup milestones or reasoning are
-            //    flowing): repaint the retained window with a fresh elapsed so
-            //    the spinner keeps animating and the clock keeps rising while
-            //    the model is silent between deltas — e.g. claude's post-init
-            //    TTFT gap. The loading grace never trips in this mode, because
-            //    startup milestones arrive within ~1 s and each resets
-            //    `got_output`; the grace therefore measures only true
-            //    no-output-at-all backends, not cold starts.
-            _ = ticker.tick() => {
-                let elapsed = start.elapsed();
-                if !got_output {
-                    let notice = if elapsed >= progress::LOADING_GRACE {
-                        match &cold_start {
-                            Some(program) => {
-                                progress::LoadingNotice::ColdStart(program.clone())
-                            }
-                            None => progress::LoadingNotice::Silent,
-                        }
-                    } else {
-                        progress::LoadingNotice::None
-                    };
-                    renderer.paint_loading(elapsed, notice);
-                } else {
-                    renderer.refresh(&last_window, last_in_code_start, elapsed);
-                }
-            }
-        }
-    };
-
-    // Thinking is over: `finish` erases the reasoning/loading block (in-place
-    // all along, so nothing ever hit the scrollback) and parks the cursor
-    // below it. The renderer's Drop is a backstop if the stream aborted first.
-    renderer.finish();
-    result
-}
-
 async fn generate_and_commit(
     git: &Git,
     paths: &[String],
@@ -630,6 +465,32 @@ pub(crate) async fn run_commit_workflow_impl(
     Ok(())
 }
 
+/// Drive a streaming LLM call behind the live reasoning feed: probe the
+/// terminal geometry, build the real [`progress::ReasoningRenderer`] sink, and
+/// hand the reasoning tap to `make_call` so the caller's streaming generator
+/// forwards its thinking deltas into the feed. The shared production wiring
+/// for both the planner and the message paths — each streams through here.
+async fn drive_streaming<F, T>(
+    label: &'static str,
+    cold_start: Option<String>,
+    make_call: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce(reasoning_feed::ReasoningTap) -> BoxFuture<anyhow::Result<T>>,
+    T: Send,
+{
+    // The DSR cursor-row query does up to ~200 ms of blocking tty I/O (poll
+    // + raw-mode byte reads against a deadline). Run it on the blocking pool
+    // so it stalls a worker, not the async reactor. A task panic degrades to
+    // the no-scroll [`cursor::WindowSizing::fallback`] — decoration must
+    // never break the commit.
+    let sizing = tokio::task::spawn_blocking(cursor::reasoning_window_rows)
+        .await
+        .unwrap_or_else(|_| cursor::WindowSizing::fallback());
+    let mut sink = progress::ReasoningRenderer::new(label, sizing.max_rows, sizing.cursor_row);
+    reasoning_feed::run(&mut sink, sizing.max_rows, cold_start.as_deref(), make_call).await
+}
+
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
 /// into [`run_commit_workflow_impl`].
@@ -638,14 +499,40 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
     let prompt: Prompt = Box::new(prompt_yes_no);
+    // Read once, shared by the planner and message adapters: a
+    // streaming-capable backend that has not yet produced reasoning is in a
+    // cold start, and past the loading grace its loading frame says so. `None`
+    // on any config-read glitch — never falsely claim a streaming capability.
+    let cold_start = crate::llm::LlmConfig::load()
+        .ok()
+        .and_then(|c| c.cold_start_program());
+    let planner_cold = cold_start.clone();
     let planner: BatchPlanner = Box::new(
-        |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
-            Box::pin(async move { analyze_changes(&diff).await })
+        move |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+            let cold_start = planner_cold.clone();
+            Box::pin(drive_streaming(
+                "Analyzing changes",
+                cold_start,
+                move |tap| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
+                    Box::pin(async move {
+                        generator::Generator::split_patch_streaming(&diff, tap).await
+                    })
+                },
+            ))
         },
     );
     let messenger: CommitMessenger = Box::new(
-        |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-            Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
+        move |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
+            let cold_start = cold_start.clone();
+            Box::pin(drive_streaming(
+                "Generating commit message",
+                cold_start,
+                move |tap| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
+                    Box::pin(async move {
+                        generator::Generator::generate_commit_message_streaming(&diff, tap).await
+                    })
+                },
+            ))
         },
     );
     let git = Git::at(Path::new("."))?;
