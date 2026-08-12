@@ -134,6 +134,11 @@ impl Generator {
     /// streaming the model's reasoning to `on_reasoning` as it thinks. The
     /// LLMAgent seam owns streaming + tolerant parsing + retry, so this is a
     /// single typed call.
+    ///
+    /// Single-commit generation now streams its reasoning live — it previously
+    /// returned whole with no feed — so the message path shows the same live
+    /// thinking window as the batch planner, both driven through one
+    /// `reasoning_feed` driver.
     pub async fn generate_commit_message_streaming(
         diff: &str,
         on_reasoning: impl FnMut(&str) + Send,

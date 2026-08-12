@@ -863,9 +863,11 @@ impl ReasoningRenderer {
     }
 }
 
-/// Production [`reasoning_feed::ReasoningSink`] — delegates to the inherent
-/// rendering methods above. The trait seam lets the driver loop run against a
-/// fake sink in tests; this impl is the only one wired in production.
+/// Production [`reasoning_feed::ReasoningSink`]. Each method forwards to the
+/// inherent method of the same name in `impl ReasoningRenderer` above — Rust's
+/// method resolution prefers inherent over trait, so a `self.paint` body here
+/// is *not* a recursive call. The trait seam exists so the driver loop can run
+/// against a recording fake in tests; this is the only production sink.
 impl crate::reasoning_feed::ReasoningSink for ReasoningRenderer {
     fn paint(&mut self, window: &[String], in_code_start: bool) {
         self.paint(window, in_code_start)
