@@ -1200,6 +1200,73 @@ model = "gpt-5"
     }
 
     #[test]
+    fn list_lines_api_branch_shows_resolved_provider() {
+        let c = cfg("openai", Some("sk-live-key"), Some("gpt-4o"), None);
+        let lines = super::list_lines(Some(&c)).unwrap();
+        assert_eq!(lines[0], "Backend:  API provider");
+        assert!(
+            lines.iter().any(|l| l.contains("Provider: openai")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Model:    gpt-4o")),
+            "got {lines:?}"
+        );
+        // mask_api_key: first 3 … last 3 of an 11-char key.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("API key:") && l.contains("sk-...key")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn list_lines_cli_branch_resolves_defaults_with_source() {
+        // Command set, args/timeout absent → both resolve to defaults (source:
+        // default), the previously-untested branch.
+        let c = Config {
+            backend_kind: Some(BackendKind::Cli),
+            cli: CliConfig {
+                command: Some("claude".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let lines = super::list_lines(Some(&c)).unwrap();
+        assert_eq!(lines[0], "Backend:  CLI agent");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "Command:  claude (source: config)"),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Args:") && l.contains("source: default")),
+            "got {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Timeout:") && l.contains("source: default")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn list_lines_no_config_defaults_to_api_backend() {
+        // No config file at all ⇒ Api backend, every resolved value default-sourced.
+        let lines = super::list_lines(None).unwrap();
+        assert_eq!(lines[0], "Backend:  API provider");
+        assert!(
+            lines.iter().all(|l| !l.contains("source: config")),
+            "nothing config-sourced: {lines:?}"
+        );
+    }
+
+    #[test]
     fn resolve_backend_uses_discriminator_and_allows_dormant_fields() {
         // ADR 0011: `backend_kind` is authoritative — it alone picks the active
         // Backend. The inactive Backend's fields may sit dormant in the file

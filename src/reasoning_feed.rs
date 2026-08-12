@@ -27,10 +27,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::progress::{
-    LOADING_GRACE, SPINNER_TICK, LoadingNotice, ThinkingView,
-};
 use crate::BoxFuture;
+use crate::progress::{LOADING_GRACE, LoadingNotice, SPINNER_TICK, ThinkingView};
 
 /// What the driver paints to: one frame per content delta or loading tick, and
 /// a final dissolve on success. The production impl is
@@ -167,7 +165,9 @@ mod tests {
             self.0.lock().push(format!("paint:{}", window.len()));
         }
         fn paint_loading(&mut self, elapsed: Duration, notice: LoadingNotice) {
-            self.0.lock().push(format!("loading:{elapsed:?}/{notice:?}"));
+            self.0
+                .lock()
+                .push(format!("loading:{elapsed:?}/{notice:?}"));
         }
         fn refresh(&mut self, _: &[String], _: bool, elapsed: Duration) {
             self.0.lock().push(format!("refresh:{elapsed:?}"));
@@ -239,14 +239,15 @@ mod tests {
         let mut sink = sink;
 
         // No reasoning delta at all — a non-streaming backend that returns whole.
-        let res: anyhow::Result<i32> = run(&mut sink, 10, None, |_tap| {
-            Box::pin(async move { Ok(3) })
-        })
-        .await;
+        let res: anyhow::Result<i32> =
+            run(&mut sink, 10, None, |_tap| Box::pin(async move { Ok(3) })).await;
 
         assert_eq!(res.unwrap(), 3);
         let e = events(&FakeSink(record));
         assert_eq!(e.last().unwrap(), "finish");
-        assert!(!e.iter().any(|s| s.starts_with("paint")), "no paint for silent backend: {e:?}");
+        assert!(
+            !e.iter().any(|s| s.starts_with("paint")),
+            "no paint for silent backend: {e:?}"
+        );
     }
 }
