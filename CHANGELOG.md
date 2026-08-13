@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-08-13
+
+> 🎉 **0.5.2** — 1 change · 1 contributor
+
+### Documentation
+
+- Document the PR-protected main release flow
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.5.1] - 2026-08-11
 
 > 🎉 **0.5.1** — 2 changes · 1 contributor
