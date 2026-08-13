@@ -523,16 +523,13 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     );
     let messenger: CommitMessenger = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-            let cold_start = cold_start.clone();
-            Box::pin(run_with_reasoning_feed(
-                "Generating commit message",
-                cold_start,
-                move |tap| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-                    Box::pin(async move {
-                        generator::Generator::generate_commit_message_streaming(&diff, tap).await
-                    })
-                },
-            ))
+            Box::pin(async move {
+                progress::with_spinner(
+                    "Generating commit message",
+                    generator::Generator::generate_commit_message_streaming(&diff, |_: &str| {}),
+                )
+                .await
+            })
         },
     );
     let git = Git::at(Path::new("."))?;
