@@ -61,6 +61,7 @@ RUST
 
 # Leave changes unstaged — aic will detect and split them
 export PATH="$BIN_DIR:$PATH"
-export PS1='❯ '
+export STARSHIP_CONFIG="$SCRIPT_DIR/starship.toml"
+eval "$(starship init bash)"
 echo "$DEMO_DIR" > /tmp/aic-demo-path
 set +e +u +o pipefail

@@ -101,6 +101,7 @@ git commit -q -m "feat: add confirm flag and reverse parse order"
 git merge -q feature-a 2>/dev/null || true
 
 export PATH="$BIN_DIR:$PATH"
-export PS1='❯ '
+export STARSHIP_CONFIG="$SCRIPT_DIR/starship.toml"
+eval "$(starship init bash)"
 echo "$DEMO_DIR" > /tmp/aic-resolve-demo-path
 set +e +u +o pipefail
