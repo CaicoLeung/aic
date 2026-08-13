@@ -167,14 +167,19 @@ pub enum Encoding {
 }
 
 impl Encoding {
-    /// Whether this envelope emits a **live, token-streamed** reasoning feed
-    /// (`thinking_delta` chunk by chunk) that a loading frame can wait on.
-    /// True only for claude `stream-json` and pi `--mode json` — the two
-    /// envelopes whose pre-first-delta wait is a *cold start* (hooks/MCP/TTFT,
-    /// often 6–10 s) rather than a "does not support streaming" gap. opencode
-    /// and codex arrive **whole at completion** (no live stream to cold-start
-    /// into), so they are `false`: past the loading grace their silence is
-    /// treated like a plain backend's, not a delayed reasoning feed.
+    /// Whether a loading frame should treat this envelope's pre-first-output
+    /// wait as a *cold start* (progress expected: hooks/MCP/TTFT) rather than a
+    /// "does not support streaming" gap. `true` for claude `stream-json` and
+    /// pi `--mode json`; opencode/codex arrive whole at completion → `false`.
+    ///
+    /// **Caveat — "live" is not equal across the two `true` arms.** pi
+    /// token-streams `thinking_delta` live across the thinking phase; Claude
+    /// Code 2.1.x holds the thinking phase silent, then flushes reasoning as one
+    /// end-of-phase burst of ≈248-char chunks (only its `text_delta` streams
+    /// live). claude stays `true` because its early `system` milestones keep the
+    /// loading frame fed, **not** because reasoning is token-streamed — so its
+    /// reasoning window jumps in bursts rather than typing out. (Measured via a
+    /// byte-level stdout arrival harness; see `docs/research-cli-agent-streaming.md`.)
     pub fn streams_reasoning_live(self) -> bool {
         matches!(self, Self::ClaudeStreamJson | Self::PiStreamJson)
     }
@@ -190,8 +195,9 @@ impl Encoding {
 /// (ADR 0011; [`crate::config::CliConfig`]) so config-load never re-derives
 /// it. claude's `--output-format
 /// stream-json --include-partial-messages` carries [`Encoding::ClaudeStreamJson`]
-/// so claude's `thinking_delta` reasoning streams live (plain `-p` returns
-/// only the final answer, leaving the reasoning window empty); its NDJSON
+/// so claude's `thinking_delta` reasoning surfaces in the feed (plain `-p`
+/// returns only the final answer, leaving the window empty). Claude Code
+/// batches reasoning as an end-of-phase burst, not a live token stream; its NDJSON
 /// envelope is decoded centrally in [`CliAgent::run_once`], so the typed
 /// paths still receive the plain JSON text they parse. codex's `--json`
 /// yields [`Encoding::CodexJson`] (answer via `agent_message` at
@@ -202,10 +208,13 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
     // promise is enforced by the invocation itself, not by trusting each
     // CLI's default.
     let (command, args, encoding) = match name {
-        // Stream-JSON + partial messages: the only invocation that surfaces
-        // claude's reasoning (`thinking_delta`) as a live stream. Plain `-p`
-        // print mode returns only the final answer with no thinking feed, so
-        // the batch-plan reasoning window would stay empty under it.
+        // Stream-JSON + partial messages: surfaces claude's reasoning
+        // (`thinking_delta`) in the feed (plain `-p` returns only the final
+        // answer, leaving the reasoning window empty). Caveat: Claude Code
+        // 2.1.x batches reasoning as an end-of-phase burst of ~248-char chunks,
+        // NOT a live token stream (only `text_delta` streams live) — so the
+        // reasoning window jumps in bursts rather than typing out. Still
+        // strictly better than plain `-p`, which emits no thinking at all.
         // `--include-partial-messages` emits `content_block_delta`/
         // `thinking_delta`/`text_delta` chunks decoded centrally by
         // [`Encoding::ClaudeStreamJson`]. Print mode still cannot prompt, so
