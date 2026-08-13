@@ -11,7 +11,7 @@ AI commit messages that are **actually atomic** — and work with your existing 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
-![aic splits one file into three atomic commits](docs/demo.gif)
+![aic splits one file into three atomic commits](https://vhs.charm.sh/vhs-78XLWnaEdLvjDqeCkETQVh.gif)
 
 ---
 
@@ -131,7 +131,7 @@ Full reference: [provider table](#supported-providers) · [CLI-agent presets](#c
 
 ## Resolving merge conflicts
 
-![aic resolve proposes resolutions and finalizes the merge](docs/resolve-demo.gif)
+![aic resolve proposes resolutions and finalizes the merge](https://vhs.charm.sh/vhs-3ZyDoDLS0ZghlrrVsJa70w.gif)
 
 Run `aic resolve` in a repo mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. When nothing's left unmerged, it runs the merge's `--continue` for you. Plain `aic` in a conflicted repo notices and offers to hand off.
 

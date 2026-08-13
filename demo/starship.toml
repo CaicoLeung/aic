@@ -1,0 +1,29 @@
+# Minimal elegant prompt for the VHS demo GIFs.
+# Catppuccin Mocha accents on a starship layout. Two-line: context, then ❯.
+# https://catppuccin.com/palette
+
+format = "$directory$git_branch$git_status$character"
+add_newline = false
+
+[directory]
+format = "[$path]($style) "
+style = "bold #89b4fa"   # Blue
+truncation_length = 1
+truncate_to_repo = true
+repo_root_style = "bold #89b4fa"
+
+[git_branch]
+format = "on [$symbol$branch]($style) "
+symbol = " "             # Nerd Font branch glyph
+style = "bold #a6e3a1"   # Green
+
+[git_status]
+format = '([$all_status$ahead_behind]($style) )'
+style = "#f9e2af"        # Yellow
+modified = "!"
+untracked = "?"
+conflicted = "="
+
+[character]
+success_symbol = "[❯](bold #cba6f7) "   # Mauve
+error_symbol = "[❯](bold #f38ba8) "     # Red
