@@ -55,6 +55,9 @@ pub(crate) type BatchPlanner =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>>>;
 /// Erased commit-message writer: takes one batch's staged diff JSON and returns
 /// its Conventional-Commits message + body. Boxed for the same reason.
+///
+/// Invariant: the production implementation carries its own loading spinner, so
+/// callers await it bare — wrapping it in an outer spinner would double up.
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
@@ -81,8 +84,6 @@ async fn generate_and_commit(
     // stats (what the commit would land) feed the preview footer — shown only
     // when confirmation is on; landed stats (what it did land) always feed the
     // ✓ line.
-    // The production messenger carries its own spinner, so it is awaited
-    // bare — an outer spinner would double up.
     let result = messenger(diff_str.clone()).await?;
     let stats = git.staged_stats(paths)?;
     let (message, body, preview_rows) = confirm_draft(
@@ -526,7 +527,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
             Box::pin(async move {
                 progress::with_spinner(
                     "Generating commit message",
-                    generator::Generator::generate_commit_message_streaming(&diff, |_: &str| {}),
+                    generator::Generator::generate_commit_message(&diff),
                 )
                 .await
             })
