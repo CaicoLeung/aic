@@ -3,7 +3,7 @@ use console::{Style, Term};
 use crate::conflict::{ConflictedFile, RepoState};
 use crate::git::FileStats;
 use crate::layout::{FALLBACK_COLS, MARGIN, resolve_cols, wrap_line};
-use crate::types::{CommitType, commit_id_color, neutral_gray};
+use crate::types::{CommitType, commit_id_color, neutral_gray, sigma_color};
 
 /// Line-based write seam behind [`Display`].
 ///
@@ -294,7 +294,7 @@ impl Display {
     /// in a column of its own on the total row, so the totals land exactly
     /// under the per-file counts; filenames left-align in the next column,
     /// tags in the last. Green `+N`, red `−M`, muted filenames, a
-    /// green-bold `[new]` / red-bold `[del]` tag, and a `Σ +X −Y (N files)`
+    /// green-bold `[new]` / red-bold `[del]` tag, and a bold-cyan `Σ +X −Y
     /// total row when more than one file. Binary files render `(binary)`
     /// right-aligned in the counts region, which widens to fit the label when
     /// any shown file is binary; a binary file that is new or removed keeps
@@ -393,7 +393,7 @@ impl Display {
         };
         let name_cap = self
             .text_width()
-            .saturating_sub(2 + counts_region + 2 + tag_col);
+            .saturating_sub(counts_region + 2 + tag_col);
         let align = name_cap > 0;
         let name_width = if align {
             shown_stats
@@ -455,7 +455,7 @@ impl Display {
             // plain spaces, so it is safe with ANSI styling enabled too.
             self.emit(
                 format!(
-                    "  {counts}  {}{}{}",
+                    "{counts}  {}{}{}",
                     self.styled(&name, gray.clone()),
                     " ".repeat(name_pad),
                     tag
@@ -466,7 +466,7 @@ impl Display {
         }
         if stats.len() > Self::FILE_STATS_CAP {
             self.emit(&self.styled(
-                &format!("  … {} more ({} files)", stats.len() - shown, stats.len()),
+                &format!("… {} more ({} files)", stats.len() - shown, stats.len()),
                 gray.clone(),
             ));
             rows += 1;
@@ -475,15 +475,16 @@ impl Display {
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
             // `Σ` sits in its own column (padded to the column width, like
-            // the file rows' blank); the totals right-align into the same
-            // `+N` / `−M` columns as the file rows above.
+            // the file rows' blank) in cyan-600 — harmonizing with the green
+            // `+N` additions while staying distinct from the red `−M`; the
+            // totals right-align into the same `+N` / `−M` columns above.
             let sigma_text = format!(
                 "{}{}",
-                self.styled("Σ", gray.clone()),
+                self.styled("Σ", sigma_color().bold()),
                 " ".repeat(sigma_col.saturating_sub(1)),
             );
             self.emit(&format!(
-                "  {lead}{}{}  {}",
+                "{lead}{}{}  {}",
                 sigma_text,
                 fmt_columns(&plus, &minus),
                 self.styled(&format!("({} files)", stats.len()), gray.clone()),
@@ -891,7 +892,7 @@ mod tests {
         );
         let got = lines.lock().clone();
         // Pending header + subject carry the `?` marker; body sits at the
-        // shared margin; the file-stats footer is nested under it — counts
+        // shared margin; the file-stats footer is aligned with it — counts
         // first, then filename, `[new]`/`[del]` tag, and a Σ total; a trailing
         // blank separates the preview from the confirmation menu. `rows` is
         // the whole block, so the caller can erase it after the draft is
@@ -906,9 +907,9 @@ mod tests {
         // right-align in their own column (" +4" carries the pad). The Σ
         // row's +16/−4 end exactly where +12/−3 and +4/−1 end, and the Σ
         // glyph sits in the same column as the file rows' blank.
-        assert_eq!(got[3], "      +12 −3  src/auth.rs [new]");
-        assert_eq!(got[4], "       +4 −1  src/main.rs");
-        assert_eq!(got[5], "    Σ +16 −4  (2 files)");
+        assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
+        assert_eq!(got[4], "     +4 −1  src/main.rs");
+        assert_eq!(got[5], "  Σ +16 −4  (2 files)");
         assert_eq!(got[6], "");
         assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
     }
@@ -936,7 +937,7 @@ mod tests {
         assert_eq!(got[0], "  ? proposed commit:");
         assert_eq!(got[1], "  ? chore: bump dep");
         // Single file: no Σ total line; no body line emitted.
-        assert_eq!(got[2], "    +5 −2  Cargo.toml");
+        assert_eq!(got[2], "  +5 −2  Cargo.toml");
         assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
         assert_eq!(rows, 4, "header + subject + file + blank");
     }
@@ -1042,9 +1043,9 @@ mod tests {
         // A new binary file keeps its `[new]` tag (the binary label replaces
         // the counts, not the tag). "(binary)" spans the counts region; the
         // name pads to align with src/old.rs (10 chars).
-        assert_eq!(got[0], "    (binary)  img.png    [new]");
-        assert_eq!(got[1], "      +0 −12  src/old.rs [del]");
-        assert_eq!(got[2], "    Σ +0 −12  (2 files)");
+        assert_eq!(got[0], "  (binary)  img.png    [new]");
+        assert_eq!(got[1], "    +0 −12  src/old.rs [del]");
+        assert_eq!(got[2], "  Σ +0 −12  (2 files)");
         assert_eq!(rows, 3, "2 files + total");
     }
 
@@ -1080,9 +1081,9 @@ mod tests {
         let got = lines.lock().clone();
         // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
         // sits under the total's `0` of `+10`; both end at the same column.
-        assert_eq!(got[0], "       +5 −0  a.rs");
-        assert_eq!(got[1], "       +5 −0  b.rs");
-        assert_eq!(got[2], "    Σ +10 −0  (2 files)");
+        assert_eq!(got[0], "     +5 −0  a.rs");
+        assert_eq!(got[1], "     +5 −0  b.rs");
+        assert_eq!(got[2], "  Σ +10 −0  (2 files)");
         assert_eq!(rows, 3, "2 files + total");
     }
 
@@ -1119,9 +1120,9 @@ mod tests {
         // region widens to fit `(binary)` (8 > the `+0`/`−0` base region of 7),
         // so the Σ row gains a leading pad and its `(2 files)` label lands in
         // the same column as the filenames above.
-        assert_eq!(got[0], "    (binary)  img.png  [new]");
-        assert_eq!(got[1], "    (binary)  data.bin");
-        assert_eq!(got[2], "     Σ +0 −0  (2 files)");
+        assert_eq!(got[0], "  (binary)  img.png  [new]");
+        assert_eq!(got[1], "  (binary)  data.bin");
+        assert_eq!(got[2], "   Σ +0 −0  (2 files)");
         assert_eq!(rows, 3, "2 files + total");
     }
 
@@ -1160,9 +1161,9 @@ mod tests {
         // `(binary)`; the text row and Σ row each carry one leading pad, so
         // all three rows' counts end at the same column and the filenames
         // start at the same column.
-        assert_eq!(got[0], "    (binary)  x.bin");
-        assert_eq!(got[1], "       +1 −0  a.rs");
-        assert_eq!(got[2], "     Σ +1 −0  (2 files)");
+        assert_eq!(got[0], "  (binary)  x.bin");
+        assert_eq!(got[1], "     +1 −0  a.rs");
+        assert_eq!(got[2], "   Σ +1 −0  (2 files)");
         assert_eq!(rows, 3, "2 files + total");
     }
 
@@ -1198,11 +1199,11 @@ mod tests {
         ]);
         let got = lines.lock().clone();
         // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
-        // gap (1) + `−0` (2) = 7; name column = 76 - 2 (nest) - 7 - 2 (gap)
-        // - 6 (tag column) = 59 → 58 chars + "…". File rows carry a blank
+        // gap (1) + `−0` (2) = 7; name column = 76 - 7 (counts) - 2 (gap)
+        // - 6 (tag column) = 61 → 60 chars + "…". File rows carry a blank
         // Σ column.
-        assert_eq!(got[0], format!("      +1 −0  {}", "x".repeat(58) + "…"));
-        assert_eq!(got[1], format!("      +1 −0  a.rs{} [new]", " ".repeat(55)));
+        assert_eq!(got[0], format!("    +1 −0  {}", "x".repeat(60) + "…"));
+        assert_eq!(got[1], format!("    +1 −0  a.rs{} [new]", " ".repeat(57)));
         assert_eq!(rows, 3, "2 files + total");
     }
 
