@@ -55,6 +55,13 @@ const NEUTRAL_GRAY: (u8, u8, u8) = (107, 114, 128);
 /// as WCAG AA Large (3:1) on both themes.
 const COMMIT_ID_COLOR: (u8, u8, u8) = (217, 119, 6);
 
+/// Σ total-row glyph color (`#0891b2`, cyan-600) for the summation marker in
+/// `display`'s file-stats footer. Adjacent to green on the wheel, so it
+/// harmonizes with the `+N` additions while staying distinct from the red
+/// `−M` and the amber commit-id; bolded at the call site (single glyph =
+/// large text) to read as the summary row. Cleared 3:1 on both themes.
+const SIGMA_COLOR: (u8, u8, u8) = (8, 145, 178);
+
 /// FNV-1a 32-bit over the lowercased token, mapped into [`FALLBACK_PALETTE`].
 /// Stable, dependency-free, decent distribution for short strings. Extracted
 /// from [`CommitType::color_for`] so determinism and distribution can be
@@ -93,6 +100,13 @@ pub fn neutral_gray() -> Style {
 /// qualifies as WCAG AA Large.
 pub fn commit_id_color() -> Style {
     rgb_style(COMMIT_ID_COLOR)
+}
+
+/// Cyan [`Style`] for the Σ total-row glyph. Reads the single-source
+/// [`SIGMA_COLOR`]; the caller bolds it so the glyph qualifies as WCAG AA
+/// Large.
+pub fn sigma_color() -> Style {
+    rgb_style(SIGMA_COLOR)
 }
 
 /// Conventional Commit type with associated display color.
@@ -525,9 +539,23 @@ mod tests {
         );
         checked += 1;
 
+        // Σ total-row cyan — guarded so the summation glyph's contrast can't
+        // silently regress.
+        let on_white = contrast(SIGMA_COLOR, WHITE);
+        let on_dark = contrast(SIGMA_COLOR, DARK);
+        assert!(
+            on_white >= AA_LARGE,
+            "sigma cyan fails 3:1 on white: {on_white:.2}"
+        );
+        assert!(
+            on_dark >= AA_LARGE,
+            "sigma cyan fails 3:1 on dark: {on_dark:.2}"
+        );
+        checked += 1;
+
         // Guard against the palette arrays silently shrinking to [] and the
         // loop body never running (a passing-vacuously regression).
-        assert_eq!(checked, NAMED_PALETTE.len() + FALLBACK_PALETTE.len() + 2);
+        assert_eq!(checked, NAMED_PALETTE.len() + FALLBACK_PALETTE.len() + 3);
     }
 
     /// `fallback_palette_index` is deterministic: the same token resolves to

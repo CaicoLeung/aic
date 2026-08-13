@@ -240,6 +240,26 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
   answer will produce an empty reasoning feed (the spinner still shows, but no
   thinking text flows). A CLI that buffers all output internally until exit
   cannot be made to stream by aic — aic can only relay what the CLI flushes.
+- **Claude Code batches reasoning; pi streams it (measured 2026-08).** A
+  byte-level arrival harness (one `os.read(1)` per byte, timestamped at each
+  `\n` = the instant aic's `next_line` returns) against the same
+  thinking-heavy prompt through each preset's exact argv:
+  - **pi** `--mode json` — streams ≈200 token-sized `thinking_delta` lines
+    live, spread across ~1.9 s of the thinking phase (smooth).
+  - **claude** `--output-format stream-json --include-partial-messages`
+    (Claude Code 2.1.228) — **silent on stdout *and* stderr for the entire
+    thinking phase** (~39 s in one run), then flushes ≈28 `thinking_delta`
+    lines (≈248 chars each — partial-message chunks, not model tokens) in a
+    single ~25 ms burst right before the `text_delta` phase (which *does*
+    stream live, ≈400 deltas). The reasoning window therefore jumps in one
+    chunky dump instead of typing out.
+  `--include-partial-messages` is already the live-streaming flag and there is
+  no other claude flag that fixes this — the batching is Claude Code's own
+  output behavior, upstream of aic. So the pi-smooth / claude-chunky
+  difference is inherent to the CLIs, not an aic bug; aic can only relay what
+  each CLI flushes. `Encoding::streams_reasoning_live()` keeps claude `true`
+  only because its early `system` milestones feed the loading frame, not
+  because reasoning is token-streamed.
 - **Idle timeout, not wall-clock.** `DEFAULT_TIMEOUT_SECS = 240`
   (`src/cli_agent.rs:36`) is per-line idle, so an actively-printing CLI runs
   unbounded; only a fully silent one for the full budget surfaces

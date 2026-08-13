@@ -130,23 +130,19 @@ pub fn validate_batch_plan(
 }
 
 impl Generator {
-    /// Generate a Conventional-Commits message for one batch's staged diff,
-    /// streaming the model's reasoning to `on_reasoning` as it thinks. The
-    /// LLMAgent seam owns streaming + tolerant parsing + retry, so this is a
-    /// single typed call.
-    ///
-    /// Single-commit generation now streams its reasoning live — it previously
-    /// returned whole with no feed — so the message path shows the same live
-    /// thinking window as the batch planner, both driven through one
-    /// `reasoning_feed` driver.
-    pub async fn generate_commit_message_streaming(
-        diff: &str,
-        on_reasoning: impl FnMut(&str) + Send,
-    ) -> anyhow::Result<CommitOutput> {
+    /// Generate a Conventional-Commits message for one batch's staged diff.
+    /// A single typed call: the LLMAgent seam owns typed completion +
+    /// tolerant parsing + retry. No reasoning is surfaced here — the message
+    /// path runs behind a bare loading spinner (see `main.rs`); only the
+    /// batch planner streams its thinking live. (Claude Code batches its
+    /// reasoning into an end-of-phase burst rather than a live token stream,
+    /// so streaming it bought no smooth UI — see
+    /// `docs/research-cli-agent-streaming.md`.)
+    pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
         let p = PromptConfig::default().git_message;
         LlmConfig::load()?
             .agent(&p)
-            .stream_typed_with_reasoning::<CommitOutput>(diff, on_reasoning)
+            .schema::<CommitOutput>(diff)
             .await
     }
 
