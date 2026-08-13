@@ -339,16 +339,18 @@ impl Display {
         };
 
         // Grid geometry. Counts region: the Σ glyph has its own column —
-        // 2 wide (`Σ `, blank on file rows) so it never touches the numbers,
-        // and only when a Σ row will render (i.e. more than one file) — then
-        // `+N` and `−M` each right-align in their own column with a 1-char
-        // gap, so the total row's numbers land exactly under the per-file
-        // counts. Tag column exists only when a shown file carries one
-        // (` [new]` / ` [del]` are both 6 chars). Name column: widest shown
-        // name, capped so the row fits the resolved text width.
+        // 2 wide (`Σ `, blank on file rows) so it never touches the numbers.
+        // Always reserved (even for a single-file commit) so counts align
+        // across every commit's footer — a multi-file commit's file rows
+        // have a blank where Σ would be, same as a single-file commit's one
+        // row. Then `+N` and `−M` each right-align in their own column with a
+        // 1-char gap, so the total row's numbers land exactly under the
+        // per-file counts. Tag column exists only when a shown file carries
+        // one (` [new]` / ` [del]` are both 6 chars). Name column: widest
+        // shown name, capped so the row fits the resolved text width.
         let total_added: usize = stats.iter().map(|s| s.added).sum();
         let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
-        let sigma_col = if stats.len() > 1 { 2 } else { 0 };
+        let sigma_col = 2;
         // Size to the Σ total too, not just the per-file max: the total can
         // carry more digits than any single file (ten `+1` → `+10`), and an
         // all-binary diff totals `+0`/`−0` where every per-file width is 0 —
@@ -937,7 +939,7 @@ mod tests {
         assert_eq!(got[0], "  ? proposed commit:");
         assert_eq!(got[1], "  ? chore: bump dep");
         // Single file: no Σ total line; no body line emitted.
-        assert_eq!(got[2], "  +5 −2  Cargo.toml");
+        assert_eq!(got[2], "    +5 −2  Cargo.toml");
         assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
         assert_eq!(rows, 4, "header + subject + file + blank");
     }
