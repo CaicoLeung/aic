@@ -34,6 +34,9 @@ Hide
 Type "source demo/setup.sh"
 Enter
 Sleep 2s
+Type "clear"
+Enter
+Sleep 500ms
 Show
 
 # Show the actual changes so viewer sees what aic will split
@@ -41,6 +44,10 @@ Type@30ms "git diff"
 Sleep 200ms
 Enter
 Sleep 3s
+Type@30ms "clear"
+Sleep 200ms
+Enter
+Sleep 1s
 
 # Run aic — the money shot
 Type@50ms "aic"

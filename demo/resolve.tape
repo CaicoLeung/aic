@@ -34,10 +34,13 @@ Hide
 Type "source demo/resolve-setup.sh"
 Enter
 Sleep 2s
+Type "clear"
+Enter
+Sleep 500ms
 Show
 
 # Run aic resolve — straight in, no git status clutter
 Type@50ms "aic resolve"
 Sleep 150ms
 Enter
-Sleep 12s
+Sleep 16s
