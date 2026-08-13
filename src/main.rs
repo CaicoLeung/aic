@@ -81,9 +81,8 @@ async fn generate_and_commit(
     // stats (what the commit would land) feed the preview footer — shown only
     // when confirmation is on; landed stats (what it did land) always feed the
     // ✓ line.
-    // The production messenger carries its own progress surface (the live
-    // reasoning feed), so it is awaited bare — an outer spinner would double
-    // up. A canned test messenger returns whole, with no reasoning to show.
+    // The production messenger carries its own spinner, so it is awaited
+    // bare — an outer spinner would double up.
     let result = messenger(diff_str.clone()).await?;
     let stats = git.staged_stats(paths)?;
     let (message, body, preview_rows) = confirm_draft(
@@ -470,8 +469,8 @@ pub(crate) async fn run_commit_workflow_impl(
 /// Run an LLM call behind the live reasoning feed: probe the
 /// terminal geometry, build the real [`progress::ReasoningRenderer`] sink, and
 /// hand the reasoning tap to `make_call` so the caller's streaming generator
-/// forwards its thinking deltas into the feed. The shared production wiring
-/// for both the planner and the message paths — each streams through here.
+/// forwards its thinking deltas into the feed. The production wiring for the
+/// batch-planner path (the commit-message path uses a bare spinner).
 async fn run_with_reasoning_feed<F, T>(
     label: &'static str,
     cold_start: Option<String>,
@@ -501,14 +500,13 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
     let prompt: Prompt = Box::new(prompt_yes_no);
-    // Read once, shared by the planner and message adapters: a
-    // streaming-capable backend that has not yet produced reasoning is in a
-    // cold start, and past the loading grace its loading frame says so. `None`
-    // on any config-read glitch — never falsely claim a streaming capability.
-    let cold_start = crate::llm::LlmConfig::load()
+    // The planner's streaming-capable backend that has not yet produced
+    // reasoning is in a cold start, and past the loading grace its loading
+    // frame says so. `None` on any config-read glitch — never falsely claim a
+    // streaming capability.
+    let planner_cold = crate::llm::LlmConfig::load()
         .ok()
         .and_then(|c| c.cold_start_program());
-    let planner_cold = cold_start.clone();
     let planner: BatchPlanner = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
             let cold_start = planner_cold.clone();
