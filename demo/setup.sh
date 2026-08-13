@@ -16,6 +16,7 @@ chmod +x "$BIN_DIR/aic"
 
 # Mini git repo with one file that has 3 distinct changes
 git init -q "$DEMO_DIR"
+git -C "$DEMO_DIR" symbolic-ref HEAD refs/heads/main
 cd "$DEMO_DIR"
 git config user.email "dev@example.com"
 git config user.name "Demo Dev"
