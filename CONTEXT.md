@@ -52,6 +52,15 @@ _Avoid_: commit card, entry, item
 The per-file block under a Commit entry's Drafted Message — in the Commit preview and on the landed ✓ line — listing each file with its `+N`/`−M` line counts, a `[new]`/`[del]` tag for added/deleted files, and a `Σ` total line when more than one file. Counts describe the diff the commit will land (preview) or just landed (✓ line); binary files show `(binary)`.
 _Avoid_: diff stats, file summary, stats block
 
+
+**Run module**:
+The module (`src/run.rs`) that owns the default commit workflow: `default_run` checks the repo state and routes — mid-Conflict it offers resolve-then-continue via the front door, otherwise it runs `commit_run`, the single-commit / Batch-plan spine (plan → staged Diff JSON → Drafted Message → commit). Deps arrive as two purposeful bundles, `RunDeps` (display, planner, messenger, confirm) and — on the conflicted route — `ResolveDeps`; `main.rs` is only the composition root.
+_Avoid_: workflow module, engine, orchestrator
+
+**Diff JSON envelope**:
+The JSON payload shape the LLM planner and messenger consume: per-file `{path, diff}` records (`files_json`, `src/diff_json.rs`) and the Batch-plan analysis envelope (`plan_batch_diff_json`). Pure functions over model inputs — no `&Git`, no I/O — so `Git` stays a mere adapter feeding them and the envelope shape is unit-testable on its own.
+_Avoid_: diff payload, prompt body, JSON blob
+
 **Provider**:
 A named LLM service the API-provider Backend routes a Run through (OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama, xAI, Mistral, OpenRouter, Perplexity, Together, plus the generic OpenAI-compatible provider). Resolved per Run from config, then default. Meaningful only on the API-provider Backend; the CLI-agent Backend ignores it.
 _Avoid_: backend, engine
