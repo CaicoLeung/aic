@@ -32,6 +32,7 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::Parser;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -56,38 +57,44 @@ pub(crate) type BatchPlanner =
 /// Erased commit-message writer: takes one batch's staged diff JSON and returns
 /// its Conventional-Commits message + body. Boxed for the same reason.
 ///
-/// Invariant: the production implementation carries its own loading spinner, so
-/// callers await it bare — wrapping it in an outer spinner would double up.
+/// Invariant: the production implementation is a bare LLM call — no spinner.
+/// Each caller owns its spinner: the pre-draft phase uses one shared spinner
+/// across all concurrent drafts (N standalone spinners would collide on a
+/// single terminal line — only one clears, the rest leave residue), and the
+/// serial paths (staged single-commit, confirm re-generate) wrap each call.
+/// This mirrors the test messengers, which are likewise bare, so production
+/// and tests exercise the same call shape.
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
+
+/// Cap on concurrent commit-message drafts during a multi-batch Run (ADR 0014).
+/// Each batch's draft fans out after the plan; this bounds in-flight LLM requests
+/// so a large split does not trip provider rate limits (HTTP 429). Batches at or
+/// below this count draft fully in parallel.
+// ponytail: fixed cap, not configurable — promote to a config knob only if a
+// provider tier's rate limit bites before splits this large occur in practice.
+const MAX_CONCURRENT_DRAFTS: usize = 8;
 
 async fn generate_and_commit(
     git: &Git,
     paths: &[String],
     display: &Display,
     prefix: &str,
+    draft: generator::CommitOutput,
     messenger: &CommitMessenger,
     confirm: &Confirm,
 ) -> anyhow::Result<()> {
-    let files: Vec<serde_json::Value> = paths
-        .iter()
-        .map(|p| {
-            let diff = git.diff(Some(p.as_str()))?;
-            let scoped = diff::format_diff_scoped(&diff, p);
-            Ok(serde_json::json!({ "path": p, "diff": scoped }))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let diff = serde_json::json!({ "staged_files": files });
-    let diff_str = diff.to_string();
-
-    // Generate initial draft, then run confirmation loop if enabled. Staged
-    // stats (what the commit would land) feed the preview footer — shown only
-    // when confirmation is on; landed stats (what it did land) always feed the
-    // ✓ line.
-    let result = messenger(diff_str.clone()).await?;
+    // The first draft was produced up front by the caller (the unstaged
+    // multi-batch path drafts all batches concurrently — ADR 0014 — and the
+    // single-commit path drafts inline before calling this). What remains is
+    // the confirmation loop — whose Re-generate action redrafts against the
+    // staged diff — then the commit. Staged stats (what the commit would land)
+    // feed the preview footer — shown only when confirmation is on; landed
+    // stats (what it did land) always feed the ✓ line.
+    let diff_str = staged_diff_json(git, paths)?;
     let stats = git.staged_stats(paths)?;
     let (message, body, preview_rows) = confirm_draft(
-        (result.message, result.body),
+        (draft.message, draft.body),
         &stats,
         display,
         confirm,
@@ -102,6 +109,59 @@ async fn generate_and_commit(
     let landed = git.committed_stats(paths)?;
     display.commit_line(&hash, &message, body.as_deref(), prefix, &landed);
     Ok(())
+}
+
+/// The commit-message LLM's diff payload: `{"staged_files":[{"path","diff"}]}`,
+/// each `diff` the numbered scoped view (`format_diff_scoped`). One shape,
+/// shared by the staged first-draft path and the plan-time pre-draft slicer —
+/// both must hand the model identical JSON, so the envelope lives in one place.
+fn files_json(files: impl IntoIterator<Item = (String, String)>) -> String {
+    let files: Vec<serde_json::Value> = files
+        .into_iter()
+        .map(|(path, diff)| serde_json::json!({ "path": path, "diff": diff }))
+        .collect();
+    serde_json::json!({ "staged_files": files }).to_string()
+}
+
+/// The staged diff for one batch's files (read live from the index via
+/// `git.diff`) as the commit-message JSON. Feeds the first draft and the
+/// confirmation Re-generate action, which must redraft against what landed.
+fn staged_diff_json(git: &Git, paths: &[String]) -> anyhow::Result<String> {
+    let pairs = paths
+        .iter()
+        .map(|p| {
+            let diff = git.diff(Some(p.as_str()))?;
+            Ok((p.clone(), diff::format_diff_scoped(&diff, p)))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(files_json(pairs))
+}
+
+/// One batch's plan-time diff as the commit-message JSON. Each file's planned
+/// hunks are sliced out of the plan-time workdir diff — the numbering the model
+/// saw and the plan refers to — then scoped; an empty `hunks` slice means the
+/// whole file. Used to pre-draft a batch's message before its staging turn.
+fn plan_batch_diff_json(
+    batch: &generator::BatchPlanBatch,
+    raw_diffs: &HashMap<String, String>,
+) -> anyhow::Result<String> {
+    let pairs = batch
+        .changes
+        .iter()
+        .map(|c| {
+            let raw = raw_diffs
+                .get(&c.file)
+                .with_context(|| format!("no plan-time diff for batch file {}", c.file))?;
+            let scoped = if c.hunks.is_empty() {
+                diff::format_diff_scoped(raw, &c.file)
+            } else {
+                let sliced = diff::parse_file_patch(raw).slice(&c.hunks)?;
+                diff::format_diff_scoped(&sliced, &c.file)
+            };
+            Ok((c.file.clone(), scoped))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(files_json(pairs))
 }
 
 /// Read a y/n answer from stdin. The label is written to stderr (Display is
@@ -381,10 +441,12 @@ pub(crate) async fn run_commit_workflow_impl(
         // pre-commit hooks that re-stage whole files) and remaps the plan-time
         // indices onto the current diff via its internal `committed_hunks`.
         let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
+        let mut raw_diffs: HashMap<String, String> = HashMap::new();
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
             .map(|f| {
                 let diff = git.diff_workdir(Some(f.path.as_str()))?;
+                raw_diffs.insert(f.path.clone(), diff.clone());
                 let hunk_count = diff::parse_file_patch(&diff).hunk_count();
                 file_hunk_counts.push((f.path.clone(), hunk_count));
                 // A changed file with no textual hunks (binary/mode/rename)
@@ -406,13 +468,44 @@ pub(crate) async fn run_commit_workflow_impl(
             .context("batch plan validation failed")?;
 
         let count = result.batches.len();
+        // Pre-draft every batch's message concurrently (ADR 0014): the LLM
+        // round-trips dominate a multi-batch Run's wall-clock, and each batch's
+        // diff content is fully known at plan time, so fanning the drafts out
+        // collapses N sequential waits into one. Each draft is sliced from the
+        // plan-time workdir diff (the numbering the model saw) rather than the
+        // staged diff; the two diverge only under a pre-commit hook that
+        // rewrites bytes — irrelevant to a commit message — and the
+        // confirmation Re-generate action still redrafts against the staged
+        // diff. Each concurrent draft runs behind its own `[i/N]` bar on one
+        // shared MultiProgress (N standalone spinners collide on one line —
+        // only one clears); the messenger is a bare LLM call, so the bars are
+        // the only spinners in this phase. Order-preserving `buffered` keeps
+        // the messenger's call order (and the test messengers' per-call
+        // counters) deterministic.
+        let batch_diffs: Vec<String> = result
+            .batches
+            .iter()
+            .map(|b| plan_batch_diff_json(b, &raw_diffs))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let futs: Vec<BoxFuture<anyhow::Result<generator::CommitOutput>>> =
+            batch_diffs.into_iter().map(&messenger).collect();
+        let drafts: Vec<anyhow::Result<generator::CommitOutput>> = progress::with_indexed_spinners(
+            "Generating commit message",
+            MAX_CONCURRENT_DRAFTS,
+            futs,
+        )
+        .await?;
+
         let mut staging = staging::Staging::new();
-        for (i, batch) in result.batches.iter().enumerate() {
+        for (i, (batch, draft)) in result.batches.iter().zip(drafts).enumerate() {
             let prefix = format!("[{}/{count}]", i + 1);
-            // Stage this batch's hunks, then generate + commit. Either step
-            // failing after earlier batches already committed leaves the repo
-            // partially committed, so both share one abort message naming how
-            // far we got and that the rest is recoverable by re-running `aic`.
+            // Stage this batch's hunks, then commit its pre-drafted message.
+            // Either step failing after earlier batches already committed
+            // leaves the repo partially committed, so both share one abort
+            // message naming how far we got and that the rest is recoverable by
+            // re-running `aic`. The draft was produced up front; surfacing its
+            // error after staging (not before) keeps the "remaining changes
+            // are still staged" contract identical to drafting inline.
             let outcome = async {
                 let paths = staging.stage_batch(git, batch, &display)?;
                 if paths.is_empty() {
@@ -420,7 +513,9 @@ pub(crate) async fn run_commit_workflow_impl(
                     // batch or a pre-commit hook — nothing to commit.
                     return Ok(());
                 }
-                generate_and_commit(git, &paths, &display, &prefix, &messenger, &confirm).await
+                let draft = draft?;
+                generate_and_commit(git, &paths, &display, &prefix, draft, &messenger, &confirm)
+                    .await
             };
             if let Err(e) = outcome.await {
                 let batch_word = if i == 1 { "batch" } else { "batches" };
@@ -453,7 +548,11 @@ pub(crate) async fn run_commit_workflow_impl(
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         git.add(&refs)?;
-        match generate_and_commit(git, &paths, &display, "", &messenger, &confirm).await {
+        let diff_str = staged_diff_json(git, &paths)?;
+        let draft =
+            progress::with_spinner("Generating commit message", messenger(diff_str.clone()))
+                .await?;
+        match generate_and_commit(git, &paths, &display, "", draft, &messenger, &confirm).await {
             Ok(()) => {}
             // Declining the confirmation is a user choice, not an error: report
             // it as a clean abort naming the outcome — nothing committed.
@@ -471,7 +570,7 @@ pub(crate) async fn run_commit_workflow_impl(
 /// terminal geometry, build the real [`progress::ReasoningRenderer`] sink, and
 /// hand the reasoning tap to `make_call` so the caller's streaming generator
 /// forwards its thinking deltas into the feed. The production wiring for the
-/// batch-planner path (the commit-message path uses a bare spinner).
+/// batch-planner path (the commit-message path owns its spinner per call site).
 async fn run_with_reasoning_feed<F, T>(
     label: &'static str,
     cold_start: Option<String>,
@@ -524,13 +623,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     );
     let messenger: CommitMessenger = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-            Box::pin(async move {
-                progress::with_spinner(
-                    "Generating commit message",
-                    generator::Generator::generate_commit_message(&diff),
-                )
-                .await
-            })
+            Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
     let git = Git::at(Path::new("."))?;
@@ -619,5 +712,88 @@ async fn main() -> anyhow::Result<()> {
             completion::install_completion(shell)
         }
         None => run_commit_workflow().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A two-hunk single-file workdir diff whose hunks add distinct tokens
+    /// (`alpha` / `beta`) so slicing can be told apart from the whole file.
+    fn two_hunk_diff() -> &'static str {
+        "diff --git a/f.rs b/f.rs\n\
+index 1..2 100644\n\
+--- a/f.rs\n\
++++ b/f.rs\n\
+@@ -1,3 +1,3 @@\n\
+ ctx\n\
+-x\n\
++alpha\n\
+ ctx\n\
+@@ -10,3 +10,3 @@ fn b\n\
+ ctx\n\
+-y\n\
++beta\n\
+ ctx\n"
+    }
+
+    fn batch(file: &str, hunks: &[usize]) -> generator::BatchPlanBatch {
+        generator::BatchPlanBatch {
+            changes: vec![generator::BatchChange {
+                file: file.to_string(),
+                hunks: hunks.to_vec(),
+            }],
+            reason: None,
+        }
+    }
+
+    /// Pull the single file's scoped diff out of the `staged_files` JSON so a
+    /// test asserts on hunk content, not on the envelope shape.
+    fn only_diff(json: &str) -> String {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        v["staged_files"][0]["diff"].as_str().unwrap().to_string()
+    }
+
+    /// Non-empty `hunks` slice out only the planned hunks from the plan-time
+    /// diff — hunk 2's `beta` lands, hunk 1's `alpha` does not.
+    #[test]
+    fn plan_batch_diff_json_slices_selected_hunks() {
+        let raw_diffs = HashMap::from([("f.rs".to_string(), two_hunk_diff().to_string())]);
+        let json = plan_batch_diff_json(&batch("f.rs", &[2]), &raw_diffs).unwrap();
+        let diff = only_diff(&json);
+        assert!(diff.contains("beta"), "selected hunk 2 must be present");
+        assert!(!diff.contains("alpha"), "unselected hunk 1 must be absent");
+    }
+
+    /// Empty `hunks` means every hunk of the file — both `alpha` and `beta`.
+    #[test]
+    fn plan_batch_diff_json_empty_hunks_keeps_whole_file() {
+        let raw_diffs = HashMap::from([("f.rs".to_string(), two_hunk_diff().to_string())]);
+        let json = plan_batch_diff_json(&batch("f.rs", &[]), &raw_diffs).unwrap();
+        let diff = only_diff(&json);
+        assert!(diff.contains("alpha") && diff.contains("beta"));
+    }
+
+    /// A batch file with no captured plan-time diff is a programming error,
+    /// not a recoverable one — name the file in the error.
+    #[test]
+    fn plan_batch_diff_json_missing_file_errors() {
+        let raw_diffs = HashMap::<String, String>::new();
+        let err = plan_batch_diff_json(&batch("ghost.rs", &[]), &raw_diffs)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no plan-time diff"), "unexpected error: {err}");
+        assert!(err.contains("ghost.rs"));
+    }
+
+    /// The shared envelope both draft paths emit — locked so a change at one
+    /// call site can't drift the shape the model (and the other path) expects.
+    #[test]
+    fn files_json_envelope_shape_is_stable() {
+        let json = files_json([("a.rs".to_string(), "diff-a".to_string())]);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["staged_files"][0]["path"], "a.rs");
+        assert_eq!(v["staged_files"][0]["diff"], "diff-a");
     }
 }

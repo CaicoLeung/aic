@@ -99,6 +99,47 @@ where
     result
 }
 
+/// Run N concurrent futures, each behind its own bar on one shared
+/// [`indicatif::MultiProgress`], labeled `[i/N] {label}`. Unlike N standalone
+/// [`with_spinner`] calls — whose independent [`indicatif::ProgressBar`]s
+/// collide on a single terminal line (only one clears, the rest leave residue)
+/// — a `MultiProgress` gives each bar its own row and clears it on completion,
+/// so concurrent drafts render cleanly. Futures are polled `concurrency` at a
+/// time via order-preserving `buffered`, keeping call order (and the test
+/// messengers' per-call counters) deterministic. The outer `Result` is a setup
+/// failure (a malformed style); each inner `Result` is one future's outcome.
+pub(crate) async fn with_indexed_spinners<T>(
+    label: &str,
+    concurrency: usize,
+    futs: impl IntoIterator<Item = crate::BoxFuture<anyhow::Result<T>>>,
+) -> anyhow::Result<Vec<anyhow::Result<T>>>
+where
+    T: Send + 'static,
+{
+    use futures::stream::{self, StreamExt};
+    let futs: Vec<crate::BoxFuture<anyhow::Result<T>>> = futs.into_iter().collect();
+    let count = futs.len();
+    let mp = indicatif::MultiProgress::new();
+    let style = spinner_style()?;
+    let tracked: Vec<crate::BoxFuture<anyhow::Result<T>>> = futs
+        .into_iter()
+        .enumerate()
+        .map(|(i, fut)| -> crate::BoxFuture<anyhow::Result<T>> {
+            let bar = mp.add(indicatif::ProgressBar::new_spinner());
+            bar.set_style(style.clone());
+            bar.set_message(format!("[{}/{}] {label}", i + 1, count));
+            bar.enable_steady_tick(SPINNER_TICK);
+            Box::pin(async move {
+                let r = fut.await;
+                bar.disable_steady_tick();
+                bar.finish_and_clear();
+                r
+            })
+        })
+        .collect();
+    Ok(stream::iter(tracked).buffered(concurrency).collect().await)
+}
+
 /// A rolling window over the model's streamed reasoning, sized to the caller's
 /// `cap` — the rendered-row budget from [`crate::cursor::reasoning_window_rows`], reused as
 /// the line-storage bound. Each line renders to at least one row, so at most
