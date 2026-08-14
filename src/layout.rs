@@ -64,6 +64,50 @@ fn resolve_rows(rows: usize) -> usize {
     if rows == 0 { FALLBACK_ROWS } else { rows }
 }
 
+/// Greedy word-wrap *geometry*: pack `words` (each a `Vec` of display-width-1
+/// units) into rows of ≤`width`, hard-breaking a word longer than `width` at
+/// the boundary. Returns each row as the sequence of word-slices that compose
+/// it — callers collect (plain text) or style-emit (ANSI) without re-deriving
+/// the breaks. `width` must be ≥ 1; callers short-circuit `0`.
+///
+/// This is the single wrap-geometry source: [`wrap_line`] (plain `char`
+/// words, for the panel engine) and the Markdown renderer's tagged wrap
+/// (`progress::wrap_runs`, `(char, tag)` words) share these exact breaks, so a
+/// fix to the greedy/hard-break policy reaches both paths. It never sees a
+/// style byte — width is the element count — which is what keeps styling
+/// applied *after* wrap ANSI-blind (ADR 0013).
+pub(crate) fn wrap_words<T>(words: &[Vec<T>], width: usize) -> Vec<Vec<&[T]>> {
+    debug_assert!(width > 0, "callers short-circuit width == 0");
+    let mut rows: Vec<Vec<&[T]>> = Vec::new();
+    let mut cur: Vec<&[T]> = Vec::new();
+    let mut cur_len = 0usize;
+    for w in words {
+        let wlen = w.len();
+        // If the running line can't accept " <word>", flush it first.
+        if !cur.is_empty() && cur_len + 1 + wlen > width {
+            rows.push(std::mem::take(&mut cur));
+            cur_len = 0;
+        }
+        if cur.is_empty() {
+            // Word starts a new line — hard-break it if it alone exceeds width.
+            let mut idx = 0;
+            while wlen - idx > width {
+                rows.push(vec![&w[idx..idx + width]]);
+                idx += width;
+            }
+            if idx < wlen {
+                cur.push(&w[idx..]);
+                cur_len = wlen - idx;
+            }
+        } else {
+            cur.push(&w[..]);
+            cur_len += 1 + wlen;
+        }
+    }
+    rows.push(cur);
+    rows
+}
+
 /// Greedy word-wrap of a single line (no embedded newlines) to `width` display
 /// columns, counted in `char`s (not bytes) so CJK commit bodies wrap correctly.
 ///
@@ -76,37 +120,33 @@ fn resolve_rows(rows: usize) -> usize {
 /// unchanged. The panel engine's `text_width` yields `0` on a sub-margin
 /// terminal, so this guard is load-bearing there, not dead code.
 ///
+/// A thin collector over [`wrap_words`]: the break geometry lives once there,
+/// shared with the Markdown renderer, and this just rejoins each row's
+/// word-slices with single spaces into plain `String`s.
+///
 /// Returns at least one piece; an empty input yields `vec![""]` so blank
 /// source lines round-trip as a single empty piece.
 pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![line.to_string()];
     }
-    let mut out: Vec<String> = Vec::new();
-    let mut cur: Vec<char> = Vec::with_capacity(width);
-    for word in line.split_whitespace() {
-        let w: Vec<char> = word.chars().collect();
-        // If the running line can't accept " <word>", flush it first.
-        if !cur.is_empty() && cur.len() + 1 + w.len() > width {
-            out.push(cur.iter().collect());
-            cur.clear();
-        }
-        if cur.is_empty() {
-            // Word starts a new line — hard-break it if it alone exceeds width.
-            let mut idx = 0;
-            while w.len() - idx > width {
-                let chunk: String = w[idx..idx + width].iter().collect();
-                out.push(chunk);
-                idx += width;
+    let words: Vec<Vec<char>> = line
+        .split_whitespace()
+        .map(|w| w.chars().collect())
+        .collect();
+    wrap_words(&words, width)
+        .into_iter()
+        .map(|row| {
+            let mut s = String::new();
+            for (i, slice) in row.iter().enumerate() {
+                if i > 0 {
+                    s.push(' ');
+                }
+                s.extend(slice.iter());
             }
-            cur.extend(&w[idx..]);
-        } else {
-            cur.push(' ');
-            cur.extend(&w);
-        }
-    }
-    out.push(cur.iter().collect());
-    out
+            s
+        })
+        .collect()
 }
 
 /// Read the real terminal's column count and resolve it through
