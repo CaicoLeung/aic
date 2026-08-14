@@ -17,6 +17,11 @@ use console::{Color, Style, Term};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Duration;
+use std::sync::LazyLock;
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{self as hl, ThemeSet};
+use syntect::parsing::SyntaxSet;
 
 use crate::layout::{MARGIN, terminal_height, terminal_width, wrap_line};
 
@@ -377,13 +382,26 @@ fn span_style(sp: Span) -> Option<Style> {
     }
 }
 
-/// Style one same-span run via `console`, which strips the ANSI on a non-TTY so
-/// piped output stays clean. `Plain` is a verbatim passthrough. Per-run (not
-/// per-row) granularity is what lets [`wrap_styled`] re-open a span that a wrap
-/// break split across two rows.
-fn style_run(text: &str, sp: Span) -> String {
-    match span_style(sp) {
-        Some(style) => style.apply_to(text).to_string(),
+/// Resolve the effective [`Style`] for a span on a line whose [`Span::Plain`]
+/// runs carry `base` — the line-kind style (dim for a blockquote, bold for a
+/// heading, `None` for Normal/list). `Bold`/`Code` override the base with their
+/// own span style so emphasis stands out; `Plain` inherits the base, so a
+/// blockquote stays dim between its bold spans and a heading stays bold around
+/// a code span.
+fn resolve_style(sp: Span, base: Option<&Style>) -> Option<Style> {
+    match sp {
+        Span::Plain => base.cloned(),
+        Span::Bold | Span::Code => span_style(sp),
+    }
+}
+
+/// Apply a style via `console`, which strips the ANSI on a non-TTY so piped
+/// output stays clean; `None` is a verbatim passthrough. Per-run (not per-row)
+/// granularity is what lets [`wrap_styled`] re-open a span that a wrap break
+/// split across two rows.
+fn paint(text: &str, style: Option<Style>) -> String {
+    match style {
+        Some(s) => s.apply_to(text).to_string(),
         None => text.to_string(),
     }
 }
@@ -426,70 +444,86 @@ fn parse_inline(line: &str) -> Vec<(String, Span)> {
     segs
 }
 
-/// Greedy word-wrap of an inline-parsed line to `width` display columns
-/// (counted in `char`s, CJK-safe — mirroring [`crate::layout::wrap_line`]),
-/// re-opening a span's ANSI at the start of any row that begins mid-span and
-/// letting `console` close it at the row end. Width math stays on plain
-/// `char`s: ANSI is emitted only by [`style_run`] *after* breaks are chosen, so
-/// escape bytes never count toward width. A long token is hard-broken at the
-/// boundary, exactly like [`crate::layout::wrap_line`].
+/// Greedy word-wrap of a tagged line to `width` display columns (counted in
+/// `char`s, CJK-safe — mirroring [`crate::layout::wrap_line`]), re-opening each
+/// tag's ANSI at the start of any row that begins mid-tag and letting `console`
+/// close it at the row end. Width math stays on plain `char`s: ANSI is emitted
+/// only by [`render_runs`] *after* breaks are chosen, so escape bytes never
+/// count toward width. A long token is hard-broken at the boundary, exactly
+/// like [`crate::layout::wrap_line`].
 ///
-/// The re-open property falls out of rendering each row independently: a row
-/// starting mid-`**bold**` begins with [`Span::Bold`] chars, and [`render_row`]
-/// opens bold at the first span change from the initial [`Span::Plain`].
-fn wrap_styled(segments: &[(String, Span)], width: usize) -> Vec<String> {
+/// `style_of` turns a tag into its [`Style`] (or `None` for a plain run); `plain`
+/// is the tag for the single inter-word space a wrap break inserts. The
+/// re-open property falls out of rendering each row independently: a row
+/// starting mid-tag re-opens that tag's ANSI.
+fn wrap_runs<T: PartialEq + Clone>(
+    segments: &[(String, T)],
+    width: usize,
+    plain: T,
+    style_of: impl Fn(&T) -> Option<Style>,
+) -> Vec<String> {
     if width == 0 {
-        return vec![render_row(&flat_chars(segments))];
+        return vec![render_runs(&flat_runs(segments), &style_of)];
     }
-    let words = tokenize_words(segments);
+    let words = tokenize_runs(segments);
     if words.is_empty() {
         return vec![String::new()];
     }
     let mut out: Vec<String> = Vec::new();
-    let mut cur: Vec<(char, Span)> = Vec::with_capacity(width);
+    let mut cur: Vec<(char, T)> = Vec::with_capacity(width);
     for w in &words {
         if !cur.is_empty() && cur.len() + 1 + w.len() > width {
-            out.push(render_row(&cur));
+            out.push(render_runs(&cur, &style_of));
             cur.clear();
         }
         if cur.is_empty() {
             let mut idx = 0;
             while w.len() - idx > width {
-                out.push(render_row(&w[idx..idx + width]));
+                out.push(render_runs(&w[idx..idx + width], &style_of));
                 idx += width;
             }
             cur.extend_from_slice(&w[idx..]);
         } else {
-            cur.push((' ', Span::Plain));
+            cur.push((' ', plain.clone()));
             cur.extend_from_slice(w);
         }
     }
-    out.push(render_row(&cur));
+    out.push(render_runs(&cur, &style_of));
     out
 }
 
-/// Flatten segments into a `(char, Span)` stream — the unit [`wrap_styled`]
-/// packs and [`render_row`] paints.
-fn flat_chars(segments: &[(String, Span)]) -> Vec<(char, Span)> {
+/// The inline-prose wrapper around [`wrap_runs`]: tags are [`Span`]s, the
+/// inter-word space is [`Span::Plain`], and each span's style is resolved
+/// against `base` (the line-kind style that [`Span::Plain`] inherits) via
+/// [`resolve_style`].
+fn wrap_inline(segments: &[(String, Span)], width: usize, base: Option<Style>) -> Vec<String> {
+    wrap_runs(segments, width, Span::Plain, move |sp| {
+        resolve_style(*sp, base.as_ref())
+    })
+}
+
+/// Flatten `(text, tag)` segments into the `(char, tag)` stream the wrap packs
+/// and [`render_runs`] paints.
+fn flat_runs<T: Clone>(segments: &[(String, T)]) -> Vec<(char, T)> {
     segments
         .iter()
-        .flat_map(|(s, sp)| s.chars().map(|c| (c, *sp)))
+        .flat_map(|(s, t)| s.chars().map(|c| (c, t.clone())))
         .collect()
 }
 
-/// Split a `(char, Span)` stream into whitespace-delimited words (any run of
+/// Split a `(char, tag)` stream into whitespace-delimited words (any run of
 /// whitespace separates, mirroring [`crate::layout::wrap_line`]'s
-/// `split_whitespace`), each word carrying the span of its chars.
-fn tokenize_words(segments: &[(String, Span)]) -> Vec<Vec<(char, Span)>> {
+/// `split_whitespace`), each word carrying its chars' tags.
+fn tokenize_runs<T: Clone>(segments: &[(String, T)]) -> Vec<Vec<(char, T)>> {
     let mut out = Vec::new();
     let mut cur = Vec::new();
-    for (c, sp) in flat_chars(segments) {
+    for (c, t) in flat_runs(segments) {
         if c.is_whitespace() {
             if !cur.is_empty() {
                 out.push(std::mem::take(&mut cur));
             }
         } else {
-            cur.push((c, sp));
+            cur.push((c, t));
         }
     }
     if !cur.is_empty() {
@@ -498,35 +532,87 @@ fn tokenize_words(segments: &[(String, Span)]) -> Vec<Vec<(char, Span)>> {
     out
 }
 
-/// Render one wrapped row of `(char, Span)` pairs to an ANSI-styled string:
-/// consecutive same-span chars become one styled run via [`style_run`], so a
-/// row starting mid-span re-opens that span and the row ends clean.
-fn render_row(chars: &[(char, Span)]) -> String {
+/// Render one wrapped row of `(char, tag)` pairs to an ANSI-styled string:
+/// consecutive same-tag chars become one styled run via [`paint`] (the style
+/// from `style_of`), so a row starting mid-tag re-opens that tag's ANSI and the
+/// row ends clean.
+fn render_runs<T: PartialEq>(
+    chars: &[(char, T)],
+    style_of: &impl Fn(&T) -> Option<Style>,
+) -> String {
     let mut out = String::new();
     let mut run = String::new();
-    let mut cur = Span::Plain;
-    for &(c, sp) in chars {
-        if sp != cur {
-            if !run.is_empty() {
-                out.push_str(&style_run(&run, cur));
-                run.clear();
-            }
-            cur = sp;
+    let mut cur: Option<&T> = None;
+    for (c, t) in chars {
+        if cur.is_some_and(|prev| prev != t) && !run.is_empty() {
+            out.push_str(&paint(&run, style_of(cur.unwrap())));
+            run.clear();
         }
-        run.push(c);
+        cur = Some(t);
+        run.push(*c);
     }
-    if !run.is_empty() {
-        out.push_str(&style_run(&run, cur));
+    if let Some(t) = cur
+        && !run.is_empty()
+    {
+        out.push_str(&paint(&run, style_of(t)));
     }
     out
+}
+
+/// Bundled syntax + theme sets, initialised once on first code block (the
+/// ~MiB dump decode is a one-time cost paid when reasoning first streams
+/// fenced code, never at startup). `base16-eighties.dark` reads on a default
+/// terminal and tokens away from the prose colour.
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static HIGHLIGHT_THEME: LazyLock<hl::Theme> = LazyLock::new(|| {
+    ThemeSet::load_defaults()
+        .themes
+        .get("base16-eighties.dark")
+        .cloned()
+        .expect("base16-eighties.dark ships with default-themes")
+});
+
+/// The theme's default foreground — regions matching it are left unstyled so
+/// plain code text falls back to the terminal default rather than the theme's
+/// light grey (which would vanish on a light background). Tokens keep their
+/// colour.
+fn default_fg() -> Option<hl::Color> {
+    HIGHLIGHT_THEME.settings.foreground
+}
+
+/// Highlight one code line into `(text, Option<Style>)` runs for [`wrap_runs`]:
+/// syntect's per-token foreground colour becomes a `TrueColor` console style,
+/// with multi-line string/comment state carried across lines by the borrowed
+/// `HighlightLines`. Regions matching the theme default are `None` (plain).
+fn highlight_code_line(
+    h: &mut HighlightLines,
+    line: &str,
+    default_fg: Option<hl::Color>,
+) -> Vec<(String, Option<Style>)> {
+    h.highlight_line(line, &SYNTAXES)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(st, text)| {
+            let style = (Some(st.foreground) != default_fg)
+                .then(|| Style::new().fg(Color::TrueColor(st.foreground.r, st.foreground.g, st.foreground.b)));
+            (text.to_string(), style)
+        })
+        .collect()
+}
+
+/// The language token from a fence line like ``` ```rust ```, or `None` for a
+/// bare ``` ``` ``` / closer. syntect resolves it against its syntax set.
+fn fence_lang(fence: &str) -> Option<&str> {
+    let lang = fence.trim_start_matches(['`', '~']).trim();
+    (!lang.is_empty()).then_some(lang)
 }
 
 /// Build the visual rows for one reasoning frame: the spinner+label row on
 /// top, then each retained reasoning line greedy-wrapped under the shared
 /// `│ ` indent and styled by its markdown kind (bold headings, coloured code
-/// blocks) — and, for Normal prose, inline `**bold**`/`code` spans re-opened
-/// across wrap breaks. Pure (no I/O) so the layout is unit-testable; the
-/// renderer paints exactly what this returns.
+/// blocks) — and every prose kind (Normal/Heading/ListItem/Blockquote) gets
+/// inline `**bold**`/`code` spans re-opened across wrap breaks. Pure (no I/O)
+/// so the layout is unit-testable; the renderer paints exactly what this returns.
 ///
 /// `feed_width` is the per-piece wrap budget. `max_rows` is the rendered-row
 /// cap (from [`crate::cursor::reasoning_window_rows`]); the newest `max_rows` rows below the
@@ -1534,7 +1620,7 @@ mod tests {
     /// to several rows whose words rejoin losslessly.
     #[test]
     fn wrap_styled_preserves_words_losslessly() {
-        let rows = wrap_styled(&parse_inline("the quick brown fox"), 10);
+        let rows = wrap_inline(&parse_inline("the quick brown fox"), 10, None);
         assert_eq!(rows.join(" "), "the quick brown fox");
     }
 
@@ -1549,7 +1635,7 @@ mod tests {
     fn wrap_styled_reopens_span_across_wrap_break() {
         console::set_colors_enabled(true);
         // One bold word at width 4 → three wrapped rows, all beginning mid-bold.
-        let rows = wrap_styled(&parse_inline("**abcdefghij**"), 4);
+        let rows = wrap_inline(&parse_inline("**abcdefghij**"), 4, None);
         assert!(rows.len() >= 2);
         for r in &rows {
             assert!(r.contains("\x1b["), "row lost its bold re-open: {r:?}");
