@@ -19,6 +19,7 @@ pub mod grouping;
 pub mod input;
 pub mod layout;
 pub mod llm;
+pub mod markdown;
 pub mod progress;
 pub mod prompt;
 pub mod reasoning_feed;

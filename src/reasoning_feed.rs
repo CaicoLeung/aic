@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::progress::{LOADING_GRACE, LoadingNotice, SPINNER_TICK, ThinkingView};
+use crate::markdown::LoadingNotice;
+use crate::progress::{LOADING_GRACE, SPINNER_TICK, ThinkingView};
 use crate::types::BoxFuture;
 
 /// What the driver paints to: one frame per content delta or loading tick, and

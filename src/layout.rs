@@ -72,7 +72,7 @@ fn resolve_rows(rows: usize) -> usize {
 ///
 /// This is the single wrap-geometry source: [`wrap_line`] (plain `char`
 /// words, for the panel engine) and the Markdown renderer's tagged wrap
-/// (`progress::wrap_runs`, `(char, tag)` words) share these exact breaks, so a
+/// (`markdown::wrap_runs`, `(char, tag)` words) share these exact breaks, so a
 /// fix to the greedy/hard-break policy reaches both paths. It never sees a
 /// style byte — width is the element count — which is what keeps styling
 /// applied *after* wrap ANSI-blind (ADR 0013).
