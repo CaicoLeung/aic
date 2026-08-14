@@ -32,7 +32,6 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::Parser;
-use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::IsTerminal;
@@ -58,8 +57,13 @@ pub(crate) type BatchPlanner =
 /// Erased commit-message writer: takes one batch's staged diff JSON and returns
 /// its Conventional-Commits message + body. Boxed for the same reason.
 ///
-/// Invariant: the production implementation carries its own loading spinner, so
-/// callers await it bare — wrapping it in an outer spinner would double up.
+/// Invariant: the production implementation is a bare LLM call — no spinner.
+/// Each caller owns its spinner: the pre-draft phase uses one shared spinner
+/// across all concurrent drafts (N standalone spinners would collide on a
+/// single terminal line — only one clears, the rest leave residue), and the
+/// serial paths (staged single-commit, confirm re-generate) wrap each call.
+/// This mirrors the test messengers, which are likewise bare, so production
+/// and tests exercise the same call shape.
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
@@ -462,21 +466,25 @@ pub(crate) async fn run_commit_workflow_impl(
         // staged diff; the two diverge only under a pre-commit hook that
         // rewrites bytes — irrelevant to a commit message — and the
         // confirmation Re-generate action still redrafts against the staged
-        // diff. Order-preserving `buffered` keeps the messenger's call order
-        // (and the test messengers' per-call counters) deterministic.
+        // diff. Each concurrent draft runs behind its own `[i/N]` bar on one
+        // shared MultiProgress (N standalone spinners collide on one line —
+        // only one clears); the messenger is a bare LLM call, so the bars are
+        // the only spinners in this phase. Order-preserving `buffered` keeps
+        // the messenger's call order (and the test messengers' per-call
+        // counters) deterministic.
         let batch_diffs: Vec<String> = result
             .batches
             .iter()
             .map(|b| plan_batch_diff_json(b, &raw_diffs))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let drafts: Vec<anyhow::Result<generator::CommitOutput>> = {
-            let futs: Vec<BoxFuture<anyhow::Result<generator::CommitOutput>>> =
-                batch_diffs.into_iter().map(&messenger).collect();
-            stream::iter(futs)
-                .buffered(MAX_CONCURRENT_DRAFTS)
-                .collect::<Vec<_>>()
-                .await
-        };
+        let futs: Vec<BoxFuture<anyhow::Result<generator::CommitOutput>>> =
+            batch_diffs.into_iter().map(&messenger).collect();
+        let drafts: Vec<anyhow::Result<generator::CommitOutput>> = progress::with_indexed_spinners(
+            "Generating commit message",
+            MAX_CONCURRENT_DRAFTS,
+            futs,
+        )
+        .await?;
 
         let mut staging = staging::Staging::new();
         for (i, (batch, draft)) in result.batches.iter().zip(drafts).enumerate() {
@@ -531,7 +539,9 @@ pub(crate) async fn run_commit_workflow_impl(
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         git.add(&refs)?;
         let diff_str = staged_diff_json(git, &paths)?;
-        let draft = messenger(diff_str.clone()).await?;
+        let draft =
+            progress::with_spinner("Generating commit message", messenger(diff_str.clone()))
+                .await?;
         match generate_and_commit(git, &paths, &display, "", draft, &messenger, &confirm).await {
             Ok(()) => {}
             // Declining the confirmation is a user choice, not an error: report
@@ -550,7 +560,7 @@ pub(crate) async fn run_commit_workflow_impl(
 /// terminal geometry, build the real [`progress::ReasoningRenderer`] sink, and
 /// hand the reasoning tap to `make_call` so the caller's streaming generator
 /// forwards its thinking deltas into the feed. The production wiring for the
-/// batch-planner path (the commit-message path uses a bare spinner).
+/// batch-planner path (the commit-message path owns its spinner per call site).
 async fn run_with_reasoning_feed<F, T>(
     label: &'static str,
     cold_start: Option<String>,
@@ -603,13 +613,7 @@ async fn run_commit_workflow() -> anyhow::Result<()> {
     );
     let messenger: CommitMessenger = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-            Box::pin(async move {
-                progress::with_spinner(
-                    "Generating commit message",
-                    generator::Generator::generate_commit_message(&diff),
-                )
-                .await
-            })
+            Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
         },
     );
     let git = Git::at(Path::new("."))?;
