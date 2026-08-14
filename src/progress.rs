@@ -111,20 +111,20 @@ where
 pub(crate) async fn with_indexed_spinners<T>(
     label: &str,
     concurrency: usize,
-    futs: impl IntoIterator<Item = crate::BoxFuture<anyhow::Result<T>>>,
+    futs: impl IntoIterator<Item = crate::types::BoxFuture<anyhow::Result<T>>>,
 ) -> anyhow::Result<Vec<anyhow::Result<T>>>
 where
     T: Send + 'static,
 {
     use futures::stream::{self, StreamExt};
-    let futs: Vec<crate::BoxFuture<anyhow::Result<T>>> = futs.into_iter().collect();
+    let futs: Vec<crate::types::BoxFuture<anyhow::Result<T>>> = futs.into_iter().collect();
     let count = futs.len();
     let mp = indicatif::MultiProgress::new();
     let style = spinner_style()?;
-    let tracked: Vec<crate::BoxFuture<anyhow::Result<T>>> = futs
+    let tracked: Vec<crate::types::BoxFuture<anyhow::Result<T>>> = futs
         .into_iter()
         .enumerate()
-        .map(|(i, fut)| -> crate::BoxFuture<anyhow::Result<T>> {
+        .map(|(i, fut)| -> crate::types::BoxFuture<anyhow::Result<T>> {
             let bar = mp.add(indicatif::ProgressBar::new_spinner());
             bar.set_style(style.clone());
             bar.set_message(format!("[{}/{}] {label}", i + 1, count));

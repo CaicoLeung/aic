@@ -12,10 +12,10 @@
 //! standalone service, so it reaches across to the display + LLM seams the
 //! Run already holds. See CONTEXT.md "Commit confirmation".
 
-use crate::CommitMessenger;
 use crate::display::Display;
 use crate::git::FileStats;
 use crate::progress;
+use crate::types::CommitMessenger;
 use anyhow::Context;
 
 // ----------------------------------------------------------------------
