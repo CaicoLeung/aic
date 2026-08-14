@@ -16,8 +16,8 @@
 use console::{Color, Style, Term};
 use std::collections::VecDeque;
 use std::future::Future;
-use std::time::Duration;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{self as hl, ThemeSet};
@@ -593,8 +593,13 @@ fn highlight_code_line(
         .unwrap_or_default()
         .into_iter()
         .map(|(st, text)| {
-            let style = (Some(st.foreground) != default_fg)
-                .then(|| Style::new().fg(Color::TrueColor(st.foreground.r, st.foreground.g, st.foreground.b)));
+            let style = (Some(st.foreground) != default_fg).then(|| {
+                Style::new().fg(Color::TrueColor(
+                    st.foreground.r,
+                    st.foreground.g,
+                    st.foreground.b,
+                ))
+            });
             (text.to_string(), style)
         })
         .collect()
@@ -677,7 +682,12 @@ fn reasoning_rows(
         } else if kind == LineKind::Code {
             if let Some(h) = highlighter.as_mut() {
                 let runs = highlight_code_line(h, &display, theme_default);
-                for piece in wrap_runs(&runs, feed_width.saturating_sub(2), None, |s: &Option<Style>| (*s).clone()) {
+                for piece in wrap_runs(
+                    &runs,
+                    feed_width.saturating_sub(2),
+                    None,
+                    |s: &Option<Style>| (*s).clone(),
+                ) {
                     rows.push(format!("{MARGIN}│   {piece}"));
                 }
             } else {
@@ -1621,8 +1631,14 @@ mod tests {
     /// literal-until-closed to reuse the library verbatim.
     #[test]
     fn parse_inline_unclosed_opener_is_optimistic() {
-        assert_eq!(parse_inline("**bold"), vec![("bold".to_string(), Span::Bold)]);
-        assert_eq!(parse_inline("`code"), vec![("code".to_string(), Span::Code)]);
+        assert_eq!(
+            parse_inline("**bold"),
+            vec![("bold".to_string(), Span::Bold)]
+        );
+        assert_eq!(
+            parse_inline("`code"),
+            vec![("code".to_string(), Span::Code)]
+        );
     }
 
     /// Code spans are atomic: `` `a **b** c` `` is one Code segment whose
@@ -1671,7 +1687,10 @@ mod tests {
         // Re-open: a row beginning mid-bold still opens bold. render_row resets
         // its span at every row, so a span split by a wrap break is re-opened,
         // not carried — this is exactly why each wrapped bold row is coloured.
-        assert!(render_runs(&[('a', Span::Bold)], &|sp| resolve_style(*sp, None)).starts_with("\x1b[1m"));
+        assert!(
+            render_runs(&[('a', Span::Bold)], &|sp| resolve_style(*sp, None))
+                .starts_with("\x1b[1m")
+        );
     }
 
     /// List items, blockquotes, and headings carry inline `**bold**` and must
@@ -1702,7 +1721,10 @@ mod tests {
     fn resolve_style_plain_inherits_base_bold_overrides() {
         let dim = Style::new().dim();
         assert_eq!(resolve_style(Span::Plain, Some(&dim)), Some(dim.clone()));
-        assert_eq!(resolve_style(Span::Bold, Some(&dim)), Some(Style::new().bold()));
+        assert_eq!(
+            resolve_style(Span::Bold, Some(&dim)),
+            Some(Style::new().bold())
+        );
         assert_eq!(resolve_style(Span::Plain, None), None);
     }
 
@@ -2269,7 +2291,11 @@ mod tests {
         let rows = reasoning_rows(
             "⠹",
             "thinking",
-            &["```rust".to_string(), "let x: i32 = 1;".to_string(), "```".to_string()],
+            &[
+                "```rust".to_string(),
+                "let x: i32 = 1;".to_string(),
+                "```".to_string(),
+            ],
             40,
             None,
             10,
@@ -2293,7 +2319,11 @@ mod tests {
         let bare = reasoning_rows(
             "⠹",
             "thinking",
-            &["```".to_string(), "let x = 1;".to_string(), "```".to_string()],
+            &[
+                "```".to_string(),
+                "let x = 1;".to_string(),
+                "```".to_string(),
+            ],
             40,
             None,
             10,
@@ -2303,8 +2333,14 @@ mod tests {
             .iter()
             .find(|r| console::strip_ansi_codes(r).contains("let x"))
             .unwrap();
-        assert!(bare_code.contains("\x1b[36m"), "bare fence should be cyan: {bare_code:?}");
-        assert!(!bare_code.contains("\x1b[38;2;"), "bare fence must not highlight: {bare_code:?}");
+        assert!(
+            bare_code.contains("\x1b[36m"),
+            "bare fence should be cyan: {bare_code:?}"
+        );
+        assert!(
+            !bare_code.contains("\x1b[38;2;"),
+            "bare fence must not highlight: {bare_code:?}"
+        );
 
         // Opener scrolled out: window begins inside a block, so no highlighter
         // exists and the tail is uniform cyan — the documented lazy limit.
