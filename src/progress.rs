@@ -1683,6 +1683,49 @@ mod tests {
         );
     }
 
+    /// The load-bearing ANSI-blind property (ADR 0013): a bold line wrapped
+    /// narrow keeps every row's *visible* width within the budget — the wrap
+    /// counted plain chars (via `layout::wrap_words`) and applied styling
+    /// after, so escape bytes never inflated a row. This is the direct check
+    /// the other wrap tests assert only indirectly.
+    #[test]
+    fn wrap_runs_visible_width_stays_within_budget() {
+        console::set_colors_enabled(true);
+        for budget in [4, 8, 12] {
+            let rows = wrap_inline(
+                &parse_inline("**bold one two three four five six seven**"),
+                budget,
+                None,
+            );
+            assert!(!rows.is_empty());
+            for r in &rows {
+                let vis = console::strip_ansi_codes(r).chars().count();
+                assert!(
+                    vis <= budget,
+                    "budget {budget}: visible width {vis} > budget: {r:?}"
+                );
+            }
+        }
+    }
+
+    /// [`render_runs`] coalesces consecutive same-tag chars into one styled run
+    /// and re-opens the ANSI at a tag change — the isolated behaviour the wrap
+    /// re-open relies on. Two bold runs split by a plain space open bold twice.
+    #[test]
+    fn render_runs_coalesces_runs_and_reopens_mid_tag() {
+        console::set_colors_enabled(true);
+        let s = render_runs(
+            &[
+                ('a', Span::Bold),
+                ('b', Span::Bold),
+                (' ', Span::Plain),
+                ('c', Span::Bold),
+            ],
+            &|sp| resolve_style(*sp, None),
+        );
+        assert_eq!(s.matches("\x1b[1m").count(), 2, "two bold re-opens: {s:?}");
+        assert!(s.contains("ab") && s.contains('c'));
+    }
     /// List items, blockquotes, and headings carry inline `**bold**` and must
     /// parse it (strip the asterisks) like Normal prose — the bug that left
     /// `**` visible in every non-Normal prose kind.
