@@ -260,6 +260,24 @@ async fn analyze_changes(diff: &str) -> anyhow::Result<generator::BatchPlanOutpu
   each CLI flushes. `Encoding::streams_reasoning_live()` keeps claude `true`
   only because its early `system` milestones feed the loading frame, not
   because reasoning is token-streamed.
+- **Re-measured 2026-08-14 (pi 0.84.2, codex-cli 0.147): pi now also batches
+  short thinking phases.** A pty harness driving aic 0.5.3 with a fake pi
+  emitting deltas at a fixed 100 ms cadence confirmed aic repaints the
+  reasoning window per delta (20/20 markers at native cadence) — aic's
+  relay/render path is not the regressor. What changed is upstream:
+  - **pi** still streams long thinking phases live (618 `thinking_delta`s over
+    13.3 s on a thinking-heavy prompt), but (1) ~6–8 s of complete stdout
+    silence precedes the first delta on every run (server-side thinking
+    latency), and (2) **short** thinking phases no longer stream — the whole
+    thinking lands as one ~10 ms delta burst (also pre-filled in
+    `message_start`) right before the text phase, so the window jumps in one
+    chunky dump exactly like claude's.
+  - **codex** `exec --json` remains silent for the entire reasoning phase by
+    design (`thread.started` + `turn.started`, then nothing until
+    `item.completed`); the planner window shows only the loading frame.
+  The pi-smooth / claude-chunky split above was pi-version-dependent and no
+  longer holds for short thinking runs; aic can only relay what each CLI
+  flushes.
 - **Idle timeout, not wall-clock.** `DEFAULT_TIMEOUT_SECS = 240`
   (`src/cli_agent.rs:36`) is per-line idle, so an actively-printing CLI runs
   unbounded; only a fully silent one for the full budget surfaces
