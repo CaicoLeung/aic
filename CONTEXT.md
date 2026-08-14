@@ -121,7 +121,11 @@ _Avoid_: complete, finish, commit (overloaded — see Run, Drafted Message)
 
 **Conflict module**:
 The module (`src/conflict.rs`, reached as `Git::conflict() -> Conflict<'_>`) that owns conflict detection, classification, worktree I/O for conflicted files, and Finalize. Owns the `RepoState`, `ConflictKind`, `ConflictedFile` types and `has_conflict_markers`. The commit guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git` and call across this seam; `Git` keeps the repo handle, `run_git`, and the libgit2/CLI commit path.
-_Avoid_: resolve module, merge module, conflict service
+_Avoid_: merge module, conflict service
+
+**Resolve module**:
+The module (`src/resolve.rs`) that owns the `aic resolve` workflow: `resolve_run` walks the Conflict's files, shows each proposed Resolution's unified diff, applies approvals, and Finalizes — parameterized by one `ResolveDeps` bundle (resolve, prompt, display). `default_run` in the Run module hands its whole `ResolveDeps` over when the user accepts `resolve now?`; the dependency runs one way (run → resolve).
+_Avoid_: resolution module, conflict workflow (the detection/Finalize half lives in the Conflict module)
 
 ### Progress
 
