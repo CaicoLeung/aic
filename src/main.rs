@@ -7,6 +7,7 @@ pub mod conflict;
 pub mod cursor;
 pub mod decoder;
 pub mod diff;
+pub mod diff_json;
 pub mod display;
 pub mod generator;
 pub mod git;
