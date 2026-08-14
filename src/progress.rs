@@ -23,7 +23,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{self as hl, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-use crate::layout::{MARGIN, terminal_height, terminal_width, wrap_line};
+use crate::layout::{MARGIN, terminal_height, terminal_width, wrap_line, wrap_words};
 
 /// Minimum usable width for in-place progress rendering: the spinner glyph +
 /// its label need at least this much room, so a pathologically narrow terminal
@@ -445,12 +445,13 @@ fn parse_inline(line: &str) -> Vec<(String, Span)> {
 }
 
 /// Greedy word-wrap of a tagged line to `width` display columns (counted in
-/// `char`s, CJK-safe — mirroring [`crate::layout::wrap_line`]), re-opening each
-/// tag's ANSI at the start of any row that begins mid-tag and letting `console`
-/// close it at the row end. Width math stays on plain `char`s: ANSI is emitted
-/// only by [`render_runs`] *after* breaks are chosen, so escape bytes never
-/// count toward width. A long token is hard-broken at the boundary, exactly
-/// like [`crate::layout::wrap_line`].
+/// `char`s, CJK-safe), re-opening each tag's ANSI at the start of any row that
+/// begins mid-tag and letting `console` close it at the row end. Width math
+/// stays on plain `char`s: the break geometry is delegated to
+/// [`crate::layout::wrap_words`] (shared with [`crate::layout::wrap_line`], so
+/// a fix to the greedy/hard-break policy reaches both — ADR 0013), and ANSI is
+/// emitted only by [`render_runs`] *after* the breaks are chosen, so escape
+/// bytes never count toward width.
 ///
 /// `style_of` turns a tag into its [`Style`] (or `None` for a plain run); `plain`
 /// is the tag for the single inter-word space a wrap break inserts. The
@@ -466,30 +467,19 @@ fn wrap_runs<T: PartialEq + Clone>(
         return vec![render_runs(&flat_runs(segments), &style_of)];
     }
     let words = tokenize_runs(segments);
-    if words.is_empty() {
-        return vec![String::new()];
-    }
-    let mut out: Vec<String> = Vec::new();
-    let mut cur: Vec<(char, T)> = Vec::with_capacity(width);
-    for w in &words {
-        if !cur.is_empty() && cur.len() + 1 + w.len() > width {
-            out.push(render_runs(&cur, &style_of));
-            cur.clear();
-        }
-        if cur.is_empty() {
-            let mut idx = 0;
-            while w.len() - idx > width {
-                out.push(render_runs(&w[idx..idx + width], &style_of));
-                idx += width;
+    wrap_words(&words, width)
+        .into_iter()
+        .map(|row| {
+            let mut chars: Vec<(char, T)> = Vec::new();
+            for (i, slice) in row.iter().enumerate() {
+                if i > 0 {
+                    chars.push((' ', plain.clone()));
+                }
+                chars.extend(slice.iter().cloned());
             }
-            cur.extend_from_slice(&w[idx..]);
-        } else {
-            cur.push((' ', plain.clone()));
-            cur.extend_from_slice(w);
-        }
-    }
-    out.push(render_runs(&cur, &style_of));
-    out
+            render_runs(&chars, &style_of)
+        })
+        .collect()
 }
 
 /// The inline-prose wrapper around [`wrap_runs`]: tags are [`Span`]s, the
