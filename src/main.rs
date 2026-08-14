@@ -32,6 +32,8 @@ use crate::display::Display;
 use crate::git::Git;
 use anyhow::Context;
 use clap::Parser;
+use futures::stream::{self, StreamExt};
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -61,33 +63,34 @@ pub(crate) type BatchPlanner =
 pub(crate) type CommitMessenger =
     Box<dyn Fn(String) -> BoxFuture<anyhow::Result<generator::CommitOutput>>>;
 
+/// Cap on concurrent commit-message drafts during a multi-batch Run (ADR 0014).
+/// Each batch's draft fans out after the plan; this bounds in-flight LLM requests
+/// so a large split does not trip provider rate limits (HTTP 429). Batches at or
+/// below this count draft fully in parallel.
+// ponytail: fixed cap, not configurable — promote to a config knob only if a
+// provider tier's rate limit bites before splits this large occur in practice.
+const MAX_CONCURRENT_DRAFTS: usize = 8;
+
 async fn generate_and_commit(
     git: &Git,
     paths: &[String],
     display: &Display,
     prefix: &str,
+    draft: generator::CommitOutput,
     messenger: &CommitMessenger,
     confirm: &Confirm,
 ) -> anyhow::Result<()> {
-    let files: Vec<serde_json::Value> = paths
-        .iter()
-        .map(|p| {
-            let diff = git.diff(Some(p.as_str()))?;
-            let scoped = diff::format_diff_scoped(&diff, p);
-            Ok(serde_json::json!({ "path": p, "diff": scoped }))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let diff = serde_json::json!({ "staged_files": files });
-    let diff_str = diff.to_string();
-
-    // Generate initial draft, then run confirmation loop if enabled. Staged
-    // stats (what the commit would land) feed the preview footer — shown only
-    // when confirmation is on; landed stats (what it did land) always feed the
-    // ✓ line.
-    let result = messenger(diff_str.clone()).await?;
+    // The first draft was produced up front by the caller (the unstaged
+    // multi-batch path drafts all batches concurrently — ADR 0014 — and the
+    // single-commit path drafts inline before calling this). What remains is
+    // the confirmation loop — whose Re-generate action redrafts against the
+    // staged diff — then the commit. Staged stats (what the commit would land)
+    // feed the preview footer — shown only when confirmation is on; landed
+    // stats (what it did land) always feed the ✓ line.
+    let diff_str = staged_diff_json(git, paths)?;
     let stats = git.staged_stats(paths)?;
     let (message, body, preview_rows) = confirm_draft(
-        (result.message, result.body),
+        (draft.message, draft.body),
         &stats,
         display,
         confirm,
@@ -102,6 +105,49 @@ async fn generate_and_commit(
     let landed = git.committed_stats(paths)?;
     display.commit_line(&hash, &message, body.as_deref(), prefix, &landed);
     Ok(())
+}
+
+/// The JSON diff payload the commit-message LLM reads for one batch's staged
+/// files: `{"staged_files":[{"path","diff"}]}`, each `diff` the numbered scoped
+/// view (`format_diff_scoped`). Shared by the first draft and the confirmation
+/// Re-generate action, which must see the same shape.
+fn staged_diff_json(git: &Git, paths: &[String]) -> anyhow::Result<String> {
+    let files: Vec<serde_json::Value> = paths
+        .iter()
+        .map(|p| {
+            let diff = git.diff(Some(p.as_str()))?;
+            let scoped = diff::format_diff_scoped(&diff, p);
+            Ok(serde_json::json!({ "path": p, "diff": scoped }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(serde_json::json!({ "staged_files": files }).to_string())
+}
+
+/// One batch's plan-time diff as the commit-message JSON. Each file's planned
+/// hunks are sliced out of the plan-time workdir diff — the numbering the model
+/// saw and the plan refers to — then scoped; an empty `hunks` slice means the
+/// whole file. Used to pre-draft a batch's message before its staging turn.
+fn plan_batch_diff_json(
+    batch: &generator::BatchPlanBatch,
+    raw_diffs: &HashMap<String, String>,
+) -> anyhow::Result<String> {
+    let files: Vec<serde_json::Value> = batch
+        .changes
+        .iter()
+        .map(|c| {
+            let raw = raw_diffs
+                .get(&c.file)
+                .with_context(|| format!("no plan-time diff for batch file {}", c.file))?;
+            let scoped = if c.hunks.is_empty() {
+                diff::format_diff_scoped(raw, &c.file)
+            } else {
+                let sliced = diff::parse_file_patch(raw).slice(&c.hunks)?;
+                diff::format_diff_scoped(&sliced, &c.file)
+            };
+            Ok(serde_json::json!({ "path": c.file, "diff": scoped }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(serde_json::json!({ "staged_files": files }).to_string())
 }
 
 /// Read a y/n answer from stdin. The label is written to stderr (Display is
@@ -381,10 +427,12 @@ pub(crate) async fn run_commit_workflow_impl(
         // pre-commit hooks that re-stage whole files) and remaps the plan-time
         // indices onto the current diff via its internal `committed_hunks`.
         let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
+        let mut raw_diffs: HashMap<String, String> = HashMap::new();
         let files: Vec<serde_json::Value> = unstaged_files
             .iter()
             .map(|f| {
                 let diff = git.diff_workdir(Some(f.path.as_str()))?;
+                raw_diffs.insert(f.path.clone(), diff.clone());
                 let hunk_count = diff::parse_file_patch(&diff).hunk_count();
                 file_hunk_counts.push((f.path.clone(), hunk_count));
                 // A changed file with no textual hunks (binary/mode/rename)
@@ -406,13 +454,40 @@ pub(crate) async fn run_commit_workflow_impl(
             .context("batch plan validation failed")?;
 
         let count = result.batches.len();
+        // Pre-draft every batch's message concurrently (ADR 0014): the LLM
+        // round-trips dominate a multi-batch Run's wall-clock, and each batch's
+        // diff content is fully known at plan time, so fanning the drafts out
+        // collapses N sequential waits into one. Each draft is sliced from the
+        // plan-time workdir diff (the numbering the model saw) rather than the
+        // staged diff; the two diverge only under a pre-commit hook that
+        // rewrites bytes — irrelevant to a commit message — and the
+        // confirmation Re-generate action still redrafts against the staged
+        // diff. Order-preserving `buffered` keeps the messenger's call order
+        // (and the test messengers' per-call counters) deterministic.
+        let batch_diffs: Vec<String> = result
+            .batches
+            .iter()
+            .map(|b| plan_batch_diff_json(b, &raw_diffs))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let drafts: Vec<anyhow::Result<generator::CommitOutput>> = {
+            let futs: Vec<BoxFuture<anyhow::Result<generator::CommitOutput>>> =
+                batch_diffs.into_iter().map(&messenger).collect();
+            stream::iter(futs)
+                .buffered(MAX_CONCURRENT_DRAFTS)
+                .collect::<Vec<_>>()
+                .await
+        };
+
         let mut staging = staging::Staging::new();
-        for (i, batch) in result.batches.iter().enumerate() {
+        for (i, (batch, draft)) in result.batches.iter().zip(drafts).enumerate() {
             let prefix = format!("[{}/{count}]", i + 1);
-            // Stage this batch's hunks, then generate + commit. Either step
-            // failing after earlier batches already committed leaves the repo
-            // partially committed, so both share one abort message naming how
-            // far we got and that the rest is recoverable by re-running `aic`.
+            // Stage this batch's hunks, then commit its pre-drafted message.
+            // Either step failing after earlier batches already committed
+            // leaves the repo partially committed, so both share one abort
+            // message naming how far we got and that the rest is recoverable by
+            // re-running `aic`. The draft was produced up front; surfacing its
+            // error after staging (not before) keeps the "remaining changes
+            // are still staged" contract identical to drafting inline.
             let outcome = async {
                 let paths = staging.stage_batch(git, batch, &display)?;
                 if paths.is_empty() {
@@ -420,7 +495,9 @@ pub(crate) async fn run_commit_workflow_impl(
                     // batch or a pre-commit hook — nothing to commit.
                     return Ok(());
                 }
-                generate_and_commit(git, &paths, &display, &prefix, &messenger, &confirm).await
+                let draft = draft?;
+                generate_and_commit(git, &paths, &display, &prefix, draft, &messenger, &confirm)
+                    .await
             };
             if let Err(e) = outcome.await {
                 let batch_word = if i == 1 { "batch" } else { "batches" };
@@ -453,7 +530,9 @@ pub(crate) async fn run_commit_workflow_impl(
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         git.add(&refs)?;
-        match generate_and_commit(git, &paths, &display, "", &messenger, &confirm).await {
+        let diff_str = staged_diff_json(git, &paths)?;
+        let draft = messenger(diff_str.clone()).await?;
+        match generate_and_commit(git, &paths, &display, "", draft, &messenger, &confirm).await {
             Ok(()) => {}
             // Declining the confirmation is a user choice, not an error: report
             // it as a clean abort naming the outcome — nothing committed.
