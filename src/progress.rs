@@ -239,6 +239,16 @@ enum LineKind {
     /// A ``` / ~~~ fence line itself — rendered dim so it reads as a delimiter
     /// rather than content.
     CodeFence,
+    /// A list item (`- ` / `* ` / `+ ` / `1. `) — [`list_item_body`] has
+    /// already replaced the unordered marker with a `•` bullet (and kept the
+    /// ordered marker), so the kind needs no style of its own: the bullet is
+    /// the visual signal. A wrapped item uses the shared indent (no hanging
+    /// indent) — the window is transient and erased, so list alignment is not
+    /// worth per-line wrap machinery.
+    ListItem,
+    /// A `>` blockquote — rendered dim, with the `>` markers (and nesting)
+    /// stripped by [`strip_blockquote`].
+    Blockquote,
 }
 
 /// Whether `s` is an ATX heading opener: one to six `#`, then end-of-line or
@@ -264,9 +274,55 @@ fn classify_line(line: &str, in_code: bool) -> (LineKind, String, bool) {
     } else if is_atx_heading(trimmed) {
         let body = trimmed.trim_start_matches('#').trim_start();
         (LineKind::Heading, body.to_string(), in_code)
+    } else if let Some(body) = list_item_body(trimmed) {
+        (LineKind::ListItem, body, in_code)
+    } else if is_blockquote(trimmed) {
+        (LineKind::Blockquote, strip_blockquote(trimmed), in_code)
     } else {
         (LineKind::Normal, line.to_string(), in_code)
     }
+}
+
+/// A list-item marker at the start of a line: `-`, `*`, or `+` followed by a
+/// space (bullet), or one-to-nine ASCII digits followed by `.` or `)` and a
+/// space (ordered). The required trailing space keeps `*bold*` (no space) and
+/// a bare `-` out of the list kind. Returns the rendered display string — a
+/// `•` bullet for unordered items, the original `N.`/`N)` marker kept for
+/// ordered ones (the number is semantic) — so the marker renders as a list
+/// without the renderer needing a per-kind prefix. `None` for non-list lines.
+fn list_item_body(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    // Unordered: marker + space.
+    if b.len() >= 2 && matches!(b[0], b'-' | b'*' | b'+') && b[1] == b' ' {
+        return Some(format!("• {}", &s[2..]));
+    }
+    // Ordered: digits + '.'|')' + space.
+    let n = b.iter().take_while(|&&c| c.is_ascii_digit()).count();
+    if (1..=9).contains(&n)
+        && matches!(b.get(n), Some(&b'.') | Some(&b')'))
+        && b.get(n + 1) == Some(&b' ')
+    {
+        let marker = &s[..n + 1]; // "1." or "12)"
+        let body = &s[n + 2..];
+        return Some(format!("{marker} {body}"));
+    }
+    None
+}
+
+/// A blockquote line: the first char is `>` (CommonMark allows `>` with or
+/// without a following space, and `>>` nesting). Generous on purpose — a
+/// leading `>` in reasoning prose is a quote, not a comparison (which would
+/// not sit at the start of a trimmed line).
+fn is_blockquote(s: &str) -> bool {
+    s.starts_with('>')
+}
+
+/// Strip a blockquote's leading `>` markers and the spaces between them, so
+/// `> text`, `>>nested`, and `> > spaced` all render their content under the
+/// shared indent. Nested quotes collapse to one level — the transient window
+/// does not model quote depth.
+fn strip_blockquote(s: &str) -> String {
+    s.trim_start_matches(['>', ' ']).to_string()
 }
 
 /// The [`Style`] for a [`LineKind`], or `None` for the plain passthrough
@@ -278,6 +334,8 @@ fn kind_style(kind: LineKind) -> Option<Style> {
         LineKind::Heading => Some(Style::new().bold()),
         LineKind::Code => Some(Style::new().fg(Color::Cyan)),
         LineKind::CodeFence => Some(Style::new().dim()),
+        LineKind::ListItem => None,
+        LineKind::Blockquote => Some(Style::new().dim()),
     }
 }
 
@@ -1325,6 +1383,38 @@ mod tests {
         assert_eq!(classify_line("def f():", in_code).0, LineKind::Code);
     }
 
+    /// A list-item marker classifies as ListItem: unordered markers (`-`,
+    /// `*`, `+`) render with a `•` bullet, ordered markers (`1.`, `12)`)
+    /// keep their number. The required trailing space keeps `*bold*` and a
+    /// bare `-` in Normal.
+    #[test]
+    fn classify_list_item_replaces_marker() {
+        let (kind, text, _) = classify_line("- first", false);
+        assert_eq!(kind, LineKind::ListItem);
+        assert_eq!(text, "• first");
+        assert_eq!(classify_line("* second", false).1, "• second");
+        assert_eq!(classify_line("+ third", false).1, "• third");
+        // ordered keeps its marker (the number is semantic)
+        let (k, t, _) = classify_line("1. step", false);
+        assert_eq!(k, LineKind::ListItem);
+        assert_eq!(t, "1. step");
+        assert_eq!(classify_line("12) big", false).1, "12) big");
+        // no trailing space, or a bare marker → not a list
+        assert_eq!(classify_line("*bold*", false).0, LineKind::Normal);
+        assert_eq!(classify_line("-", false).0, LineKind::Normal);
+    }
+
+    /// A `>` blockquote classifies as Blockquote with the markers (and
+    /// nesting) stripped. A leading `>` with no following space still quotes.
+    #[test]
+    fn classify_blockquote_strips_markers() {
+        let (kind, text, _) = classify_line("> quoted text", false);
+        assert_eq!(kind, LineKind::Blockquote);
+        assert_eq!(text, "quoted text");
+        assert_eq!(classify_line(">>nested", false).1, "nested");
+        assert_eq!(classify_line("> > deep", false).1, "deep");
+    }
+
     /// [`reasoning_rows`] classifies markdown lines and still honours the
     /// rendered-row cap + spinner row. Asserts only length and the spinner
     /// (ANSI is environment-dependent on the test process); kind correctness
@@ -1357,17 +1447,20 @@ mod tests {
         );
     }
 
-    /// [`kind_style`] routes each [`LineKind`] to its style: the three content
-    /// kinds each select a style, `Normal` selects none (the plain passthrough).
-    /// Catches a routing regression — e.g. `Code` returning `None` — that would
-    /// silently strip styling from a whole line kind, which the TTY-gated
-    /// emission test above cannot see (ANSI is stripped in a non-TTY test run).
+    /// [`kind_style`] routes each [`LineKind`] to its style: every content kind
+    /// except `Normal` and `ListItem` (whose `•` bullet is its own signal)
+    /// selects a style. Catches a routing regression — e.g. `Code` returning
+    /// `None` — that would silently strip styling from a whole line kind, which
+    /// the TTY-gated emission test above cannot see (ANSI is stripped in a
+    /// non-TTY test run).
     #[test]
     fn kind_style_routes_each_line_kind() {
         assert!(kind_style(LineKind::Normal).is_none());
         assert!(kind_style(LineKind::Heading).is_some());
         assert!(kind_style(LineKind::Code).is_some());
         assert!(kind_style(LineKind::CodeFence).is_some());
+        assert!(kind_style(LineKind::ListItem).is_none());
+        assert!(kind_style(LineKind::Blockquote).is_some());
     }
 
     /// [`style_kind`] leaves plain reasoning lines untouched: `Normal`
