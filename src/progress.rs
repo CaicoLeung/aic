@@ -221,9 +221,10 @@ const REASONING_GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 /// blocks). The state is carried across the whole stream by
 /// [`ThinkingView`], so a code block whose opener has already scrolled out of
 /// the window still colours its content correctly, and a closer after a long
-/// block still closes it. Inline `**bold**` / `` `code` `` are deliberately
-/// not parsed: they can split across wrap boundaries, and the explicit ask was
-/// line-level "bold titles" and "code blocks", both of which are wrap-safe.
+/// block still closes it. Inline `**bold**` / `` `code` `` *are* parsed for
+/// [`LineKind::Normal`] prose (see [`parse_inline`] + [`wrap_styled`]), which
+/// re-opens a span that a wrap break split across two rows; other kinds stay
+/// on the wrap-safe single-style-per-line path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LineKind {
     /// Plain reasoning prose — no styling.
@@ -291,11 +292,183 @@ fn style_kind(piece: &str, kind: LineKind) -> String {
     }
 }
 
+/// Inline markdown span within a single reasoning line. Parsed line-locally
+/// (never crosses `\n` — callers feed one line at a time) and only for
+/// [`LineKind::Normal`] prose: headings are already bold, and fenced code is
+/// raw. Styled: `**bold**`/`***bold italic***` (bold), `` `code` `` (cyan);
+/// italic, underline, strike and footnote superscripts are parsed but shown
+/// plain, and link/image URLs are dropped — the transient window shows text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Span {
+    /// Unstyled run — Normal prose has no line-kind style to inherit.
+    Plain,
+    /// `**bold**`.
+    Bold,
+    /// `` `code` `` — the same cyan as a fenced block, so inline and block
+    /// code read the same.
+    Code,
+}
+
+/// The [`Style`] for an inline [`Span`], or `None` for [`Span::Plain`]. Mirrors
+/// [`kind_style`]'s split so the routing is unit-testable apart from emission.
+fn span_style(sp: Span) -> Option<Style> {
+    match sp {
+        Span::Plain => None,
+        Span::Bold => Some(Style::new().bold()),
+        Span::Code => Some(Style::new().fg(Color::Cyan)),
+    }
+}
+
+/// Style one same-span run via `console`, which strips the ANSI on a non-TTY so
+/// piped output stays clean. `Plain` is a verbatim passthrough. Per-run (not
+/// per-row) granularity is what lets [`wrap_styled`] re-open a span that a wrap
+/// break split across two rows.
+fn style_run(text: &str, sp: Span) -> String {
+    match span_style(sp) {
+        Some(style) => style.apply_to(text).to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// Parse inline markdown in a single reasoning line via `streamdown_parser`
+/// and map it to aic's [`Span`] stream for [`wrap_styled`]. A fresh
+/// `InlineParser` is built per call; streamdown resets its formatting state at
+/// the end of each `parse()`, so emphasis is line-local (it never crosses
+/// `\n`), and an unclosed opener is rendered **optimistically** — a
+/// half-streamed `**bold` shows bold before the closer arrives (the partial
+/// line is re-parsed next delta, so it self-corrects). aic keeps the
+/// wrap-reopen work in [`wrap_styled`]: streamdown parses, aic wraps.
+///
+/// Mapping: `Bold`/`BoldItalic` → [`Span::Bold`], `Code` → [`Span::Code`];
+/// italic, underline, strikeout and footnote superscripts collapse to plain
+/// (terminal italic is unreliable and aic committed to bold + code), and
+/// link/image URLs are dropped — the transient window shows the text, not the
+/// target. Returns ordered `(text, Span)` segments; never empty.
+fn parse_inline(line: &str) -> Vec<(String, Span)> {
+    use streamdown_parser::InlineElement;
+    let mut parser = streamdown_parser::InlineParser::new();
+    let mut segs: Vec<(String, Span)> = parser
+        .parse(line)
+        .into_iter()
+        .map(|el| match el {
+            InlineElement::Bold(s) | InlineElement::BoldItalic(s) => (s, Span::Bold),
+            InlineElement::Code(s) => (s, Span::Code),
+            InlineElement::Text(s)
+            | InlineElement::Italic(s)
+            | InlineElement::Underline(s)
+            | InlineElement::Strikeout(s)
+            | InlineElement::Footnote(s) => (s, Span::Plain),
+            InlineElement::Link { text, .. } => (text, Span::Plain),
+            InlineElement::Image { alt, .. } => (alt, Span::Plain),
+        })
+        .collect();
+    if segs.is_empty() {
+        segs.push((String::new(), Span::Plain));
+    }
+    segs
+}
+
+/// Greedy word-wrap of an inline-parsed line to `width` display columns
+/// (counted in `char`s, CJK-safe — mirroring [`crate::layout::wrap_line`]),
+/// re-opening a span's ANSI at the start of any row that begins mid-span and
+/// letting `console` close it at the row end. Width math stays on plain
+/// `char`s: ANSI is emitted only by [`style_run`] *after* breaks are chosen, so
+/// escape bytes never count toward width. A long token is hard-broken at the
+/// boundary, exactly like [`crate::layout::wrap_line`].
+///
+/// The re-open property falls out of rendering each row independently: a row
+/// starting mid-`**bold**` begins with [`Span::Bold`] chars, and [`render_row`]
+/// opens bold at the first span change from the initial [`Span::Plain`].
+fn wrap_styled(segments: &[(String, Span)], width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![render_row(&flat_chars(segments))];
+    }
+    let words = tokenize_words(segments);
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur: Vec<(char, Span)> = Vec::with_capacity(width);
+    for w in &words {
+        if !cur.is_empty() && cur.len() + 1 + w.len() > width {
+            out.push(render_row(&cur));
+            cur.clear();
+        }
+        if cur.is_empty() {
+            let mut idx = 0;
+            while w.len() - idx > width {
+                out.push(render_row(&w[idx..idx + width]));
+                idx += width;
+            }
+            cur.extend_from_slice(&w[idx..]);
+        } else {
+            cur.push((' ', Span::Plain));
+            cur.extend_from_slice(w);
+        }
+    }
+    out.push(render_row(&cur));
+    out
+}
+
+/// Flatten segments into a `(char, Span)` stream — the unit [`wrap_styled`]
+/// packs and [`render_row`] paints.
+fn flat_chars(segments: &[(String, Span)]) -> Vec<(char, Span)> {
+    segments
+        .iter()
+        .flat_map(|(s, sp)| s.chars().map(|c| (c, *sp)))
+        .collect()
+}
+
+/// Split a `(char, Span)` stream into whitespace-delimited words (any run of
+/// whitespace separates, mirroring [`crate::layout::wrap_line`]'s
+/// `split_whitespace`), each word carrying the span of its chars.
+fn tokenize_words(segments: &[(String, Span)]) -> Vec<Vec<(char, Span)>> {
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    for (c, sp) in flat_chars(segments) {
+        if c.is_whitespace() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push((c, sp));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Render one wrapped row of `(char, Span)` pairs to an ANSI-styled string:
+/// consecutive same-span chars become one styled run via [`style_run`], so a
+/// row starting mid-span re-opens that span and the row ends clean.
+fn render_row(chars: &[(char, Span)]) -> String {
+    let mut out = String::new();
+    let mut run = String::new();
+    let mut cur = Span::Plain;
+    for &(c, sp) in chars {
+        if sp != cur {
+            if !run.is_empty() {
+                out.push_str(&style_run(&run, cur));
+                run.clear();
+            }
+            cur = sp;
+        }
+        run.push(c);
+    }
+    if !run.is_empty() {
+        out.push_str(&style_run(&run, cur));
+    }
+    out
+}
+
 /// Build the visual rows for one reasoning frame: the spinner+label row on
 /// top, then each retained reasoning line greedy-wrapped under the shared
 /// `│ ` indent and styled by its markdown kind (bold headings, coloured code
-/// blocks). Pure (no I/O) so the layout is unit-testable; the renderer paints
-/// exactly what this returns.
+/// blocks) — and, for Normal prose, inline `**bold**`/`code` spans re-opened
+/// across wrap breaks. Pure (no I/O) so the layout is unit-testable; the
+/// renderer paints exactly what this returns.
 ///
 /// `feed_width` is the per-piece wrap budget. `max_rows` is the rendered-row
 /// cap (from [`crate::cursor::reasoning_window_rows`]); the newest `max_rows` rows below the
@@ -333,8 +506,18 @@ fn reasoning_rows(
     for line in window {
         let (kind, display, next) = classify_line(line, in_code);
         in_code = next;
-        for piece in wrap_line(&display, feed_width) {
-            rows.push(format!("{MARGIN}│ {}", style_kind(&piece, kind)));
+        // Normal prose gets inline `**bold**`/`code` parsing + styled wrap
+        // (a span split by a wrap break is re-opened on the next row); every
+        // other kind keeps the single-style-per-line path, which is wrap-safe.
+        if kind == LineKind::Normal {
+            let segments = parse_inline(&display);
+            for piece in wrap_styled(&segments, feed_width) {
+                rows.push(format!("{MARGIN}│ {piece}"));
+            }
+        } else {
+            for piece in wrap_line(&display, feed_width) {
+                rows.push(format!("{MARGIN}│ {}", style_kind(&piece, kind)));
+            }
         }
     }
     // The load-bearing rendered-row cap: the line window alone can't bound the
@@ -1196,6 +1379,92 @@ mod tests {
             style_kind("plain reasoning", LineKind::Normal),
             "plain reasoning"
         );
+    }
+
+    /// [`parse_inline`] leaves unmarked prose as one [`Span::Plain`] segment.
+    #[test]
+    fn parse_inline_plain_is_one_segment() {
+        assert_eq!(
+            parse_inline("just text"),
+            vec![("just text".to_string(), Span::Plain)]
+        );
+    }
+
+    /// `**bold**` and `` `code` `` become their own segments; surrounding text
+    /// stays Plain. The markers are consumed, not kept in the text.
+    #[test]
+    fn parse_inline_bold_and_code_segments() {
+        assert_eq!(
+            parse_inline("a **b** `c` d"),
+            vec![
+                ("a ".to_string(), Span::Plain),
+                ("b".to_string(), Span::Bold),
+                (" ".to_string(), Span::Plain),
+                ("c".to_string(), Span::Code),
+                (" d".to_string(), Span::Plain),
+            ]
+        );
+    }
+
+    /// Optimistic (accepted trade-off): an opener with no matching closer on
+    /// the line is rendered styled anyway, so a half-streamed `**bold` shows
+    /// bold and `` `code `` shows code before the closer arrives — the partial
+    /// line is re-parsed next delta and self-corrects. This is streamdown-parser's
+    /// natural behaviour (stateful toggle + end-of-line flush), chosen over
+    /// literal-until-closed to reuse the library verbatim.
+    #[test]
+    fn parse_inline_unclosed_opener_is_optimistic() {
+        assert_eq!(parse_inline("**bold"), vec![("bold".to_string(), Span::Bold)]);
+        assert_eq!(parse_inline("`code"), vec![("code".to_string(), Span::Code)]);
+    }
+
+    /// Code spans are atomic: `` `a **b** c` `` is one Code segment whose
+    /// backticked content is not re-scanned for `**`.
+    #[test]
+    fn parse_inline_code_span_is_atomic() {
+        assert_eq!(
+            parse_inline("`a **b** c`"),
+            vec![("a **b** c".to_string(), Span::Code)]
+        );
+    }
+
+    /// [`span_style`] routes each [`Span`]: Bold and Code select a style, Plain
+    /// selects none (mirrors [`kind_style`]'s routing test).
+    #[test]
+    fn span_style_routes_each_span() {
+        assert!(span_style(Span::Plain).is_none());
+        assert!(span_style(Span::Bold).is_some());
+        assert!(span_style(Span::Code).is_some());
+    }
+
+    /// [`wrap_styled`] keeps [`wrap_line`]'s greedy contract: a long line wraps
+    /// to several rows whose words rejoin losslessly.
+    #[test]
+    fn wrap_styled_preserves_words_losslessly() {
+        let rows = wrap_styled(&parse_inline("the quick brown fox"), 10);
+        assert_eq!(rows.join(" "), "the quick brown fox");
+    }
+
+    /// The re-open invariant (Q3=A): a bold span wider than the wrap budget
+    /// splits across rows, and each row re-opens bold — a row beginning
+    /// mid-span styles identically to one bold from its own start, so a wrapped
+    /// `**bold**` run stays coloured on every row. Colors are forced because
+    /// `console` otherwise strips ANSI off a TTY-less test process; this is
+    /// safe because Plain/Normal prose never styles, so the other tests' exact
+    /// byte assertions are unaffected.
+    #[test]
+    fn wrap_styled_reopens_span_across_wrap_break() {
+        console::set_colors_enabled(true);
+        // One bold word at width 4 → three wrapped rows, all beginning mid-bold.
+        let rows = wrap_styled(&parse_inline("**abcdefghij**"), 4);
+        assert!(rows.len() >= 2);
+        for r in &rows {
+            assert!(r.contains("\x1b["), "row lost its bold re-open: {r:?}");
+        }
+        // Re-open: a row beginning mid-bold still opens bold. render_row resets
+        // its span at every row, so a span split by a wrap break is re-opened,
+        // not carried — this is exactly why each wrapped bold row is coloured.
+        assert!(render_row(&[('a', Span::Bold)]).starts_with("\x1b[1m"));
     }
 
     /// [`loading_rows`] before the grace deadline: just the spinner row with
