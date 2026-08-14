@@ -142,5 +142,19 @@ This is sound:
 - **Negative:** Requires bounded concurrency (a semaphore) and a per-Batch
   plan-time-diff slicer built on the existing `parse_file_patch` numbering. New
   machinery, but small and on primitives that already exist.
+- **Implementation note (spinner ownership):** Concurrent drafts cannot each
+  own a standalone `indicatif` spinner — N concurrent `ProgressBar`s collide on
+  one terminal line (only one clears, the rest leave residue). The
+  `CommitMessenger` is therefore a bare LLM call; the pre-draft phase owns one
+  shared `indicatif::MultiProgress` that renders every concurrent draft behind
+  its own `[i/N]` bar on a separate row, each `finish_and_clear`'d on
+  completion — so N parallel drafts stack vertically and clear cleanly instead
+  of clobbering each other. The serial paths (staged single-commit, confirm
+  Re-generate) wrap each call behind a single spinner individually. This
+  mirrors the bare test messengers, so production and tests exercise the same
+  call shape.
 
-Implementation is the follow-up companion change; this ADR records the direction.
+Implementation landed in `src/main.rs` and `src/progress.rs` (and
+`src/confirm.rs` for the Re-generate spinner): the plan-time-diff slicer
+(`plan_batch_diff_json`), bounded concurrency via `StreamExt::buffered` inside
+`progress::with_indexed_spinners`, and the per-batch `[i/N]` MultiProgress bars.
