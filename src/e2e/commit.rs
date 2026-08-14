@@ -9,18 +9,18 @@ async fn commit_clean_repo_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
-    let (resolver, seen) = resolver_recording();
-    let prompt = prompt_queue(vec![]); // empty — must not be asked
+    let (_resolver, seen) = resolver_recording();
+    let _prompt = prompt_queue(vec![]); // empty — must not be asked
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver,
-        prompt,
-        sink(),
-        unreachable_planner(),
-        unreachable_messenger(),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
@@ -42,14 +42,19 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_commit_workflow_impl(
+    let err = default_run(
         &git,
-        resolver,
-        prompt_queue(vec![false]),
-        sink(),
-        unreachable_planner(),
-        unreachable_messenger(),
-        Confirm::Disabled,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![false]),
+            display: sink(),
+        },
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
     )
     .await
     .expect_err("must abort when user declines resolve");
@@ -74,14 +79,19 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
     // [0] = "resolve now?" yes, [1] = "apply tracked.txt?" yes
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = default_run(
         &git,
-        resolver,
-        prompt_queue(vec![true, true]),
-        sink(),
-        unreachable_planner(),
-        unreachable_messenger(),
-        Confirm::Disabled,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true, true]),
+            display: sink(),
+        },
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -121,14 +131,19 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
-    let result = run_commit_workflow_impl(
+    let result = default_run(
         &git,
-        resolver,
-        prompt_queue(vec![true, false]),
-        display,
-        unreachable_planner(),
-        unreachable_messenger(),
-        Confirm::Disabled,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true, false]),
+            display,
+        },
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -202,14 +217,14 @@ async fn commit_splits_one_file_across_two_batches() {
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: stub"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: stub"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -276,14 +291,14 @@ async fn commit_splits_two_files_across_two_batches() {
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: stub"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: stub"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -361,14 +376,14 @@ async fn commit_batches_two_files_into_one_commit() {
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: both files"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: both files"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -437,14 +452,14 @@ async fn commit_includes_binary_file_in_batch_plan() {
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: update blob"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: update blob"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(result.is_ok(), "binary batch should succeed: {:?}", result);
@@ -486,14 +501,14 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
     };
     let (planner, sent) = planner_capture(plan);
     let git = Git::at(dir.path()).unwrap();
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner,
-        messenger_fixed("chore: update blob"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner,
+            messenger: messenger_fixed("chore: update blob"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(result.is_ok(), "batch should succeed: {:?}", result);
@@ -542,14 +557,14 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chmod: make script executable"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chmod: make script executable"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -590,14 +605,14 @@ async fn commit_staged_files_in_one_commit() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        unreachable_resolver(), // non-conflicted path must NOT resolve
-        prompt_queue(vec![]),
-        sink(),
-        unreachable_planner(), // staged path must NOT plan
-        messenger_fixed("feat: staged change"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(), // staged path must NOT plan,
+            messenger: messenger_fixed("feat: staged change"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -673,14 +688,14 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
     };
     let (messenger, calls) = messenger_then_error(1); // batch 1 ok, batch 2 fails
     let git = Git::at(dir.path()).unwrap();
-    let err = run_commit_workflow_impl(
+    let err = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger,
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger,
+            confirm: Confirm::Disabled,
+        },
     )
     .await
     .expect_err("must abort when a later batch fails");
@@ -724,18 +739,18 @@ async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_commit_workflow_impl(
+    let err = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        // Planner hands back a plan with zero batches — the regressions this
-        // test guards are (a) the workflow accepting it as a clean no-op and
-        // (b) the workflow entering the loop and committing nothing but still
-        // returning Ok. Both would surface as a missing error here.
-        planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
-        unreachable_messenger(),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            // Planner hands back a plan with zero batches — the regressions this
+            // test guards are (a) the workflow accepting it as a clean no-op and
+            // (b) the workflow entering the loop and committing nothing but still
+            // returning Ok. Both would surface as a missing error here.
+            planner: planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
     )
     .await
     .expect_err("an empty batch plan must be rejected, not silently no-op'd");
@@ -836,14 +851,14 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("feat: hook swallows the rest"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("feat: hook swallows the rest"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -910,14 +925,14 @@ async fn commit_splits_one_file_across_three_batches() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: stub"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: stub"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -998,14 +1013,14 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("feat: same-file disjoint hunks"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("feat: same-file disjoint hunks"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(

@@ -13,7 +13,15 @@ async fn resolve_clean_repo_is_a_noop() {
     let prompt = prompt_queue(vec![]); // empty — must not be asked
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt, sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt,
+            display: sink(),
+        },
+    )
+    .await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
     assert!(
         seen.lock().is_empty(),
@@ -33,9 +41,16 @@ async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![]), sink())
-        .await
-        .expect_err("refused state must error, not succeed");
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![]),
+            display: sink(),
+        },
+    )
+    .await
+    .expect_err("refused state must error, not succeed");
     let msg = format!("{err:#}");
     // Pin the literal "<label> state" phrase, not just the bare label — a bare
     // `contains("am")` would false-pass on common words like "stream".
@@ -74,7 +89,15 @@ async fn resolve_full_flow_finalizes_merge() {
     let resolver = resolver_returning("merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![true]), sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true]),
+            display: sink(),
+        },
+    )
+    .await;
     assert!(result.is_ok(), "happy path should succeed: {:?}", result);
 
     assert!(is_clean(dir.path()), "merge must be finalized");
@@ -97,7 +120,15 @@ async fn resolve_partial_approval_keeps_approved_staged() {
     let prompt: Prompt = Box::new(|label: &str| Ok(label.contains("tracked.txt")));
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt, sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt,
+            display: sink(),
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "partial approval handoff should not error: {:?}",
@@ -130,7 +161,15 @@ async fn resolve_skips_binary_and_stages_text() {
     let resolver = resolver_returning("merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![true]), sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true]),
+            display: sink(),
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "binary skip should hand off, not error: {:?}",
@@ -166,7 +205,15 @@ async fn resolve_retries_after_markers_then_succeeds() {
         resolver_then("<<<<<<< HEAD\nbad\n=======\nworse\n>>>>>>> x\n", "merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![true]), sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true]),
+            display: sink(),
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "retry-then-clean should succeed: {:?}",
@@ -189,9 +236,16 @@ async fn resolve_gives_up_when_markers_persist() {
     let (resolver, calls) = resolver_always_markers();
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![]), sink())
-        .await
-        .expect_err("must bail when no file could be resolved");
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![]),
+            display: sink(),
+        },
+    )
+    .await
+    .expect_err("must bail when no file could be resolved");
     assert!(
         format!("{err:#}").contains("no files could be resolved"),
         "expected give-up message, got: {err:#}"
@@ -222,9 +276,16 @@ async fn resolve_reports_llm_error_when_retry_fails() {
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
-    let err = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![]), display)
-        .await
-        .expect_err("must bail when the only file's resolution fails");
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![]),
+            display,
+        },
+    )
+    .await
+    .expect_err("must bail when the only file's resolution fails");
     assert!(
         format!("{err:#}").contains("no files could be resolved"),
         "expected bail, got: {err:#}"
@@ -269,7 +330,15 @@ async fn resolve_offers_finalize_when_all_manual() {
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![true]), sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true]),
+            display: sink(),
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "manual-finalize should succeed: {:?}",
@@ -320,7 +389,15 @@ async fn resolve_declines_finalize_when_all_manual() {
     let before = commit_count(dir.path());
 
     // Answer "finalize now?" with no — the only prompt on this path.
-    let result = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![false]), sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![false]),
+            display: sink(),
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "declining finalize should not error: {:?}",
@@ -381,7 +458,15 @@ async fn resolve_finalizes_clean(dir: &Path, expected: conflict::RepoState) {
 
     let resolver = resolver_returning("merged\n");
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![true]), sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true]),
+            display: sink(),
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "{expected:?} resolve should succeed: {:?}",
@@ -465,9 +550,16 @@ async fn resolve_skips_delete_modify_conflict() {
     assert_eq!(files[0].path, "tracked.txt");
     assert_eq!(files[0].kind, conflict::ConflictKind::DeleteModify);
 
-    let err = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![]), sink())
-        .await
-        .expect_err("delete/modify has no resolvable file");
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![]),
+            display: sink(),
+        },
+    )
+    .await
+    .expect_err("delete/modify has no resolvable file");
     assert!(
         format!("{err:#}").contains("no files could be resolved"),
         "expected bail, got: {err:#}"
@@ -491,7 +583,15 @@ async fn resolve_skips_oversized_and_stages_text() {
     let resolver = resolver_returning("merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![true]), sink()).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![true]),
+            display: sink(),
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "oversized skip should hand off, not error: {:?}",
@@ -530,9 +630,16 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
     let (resolver, calls) = resolver_error();
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_resolve_workflow_impl(&git, resolver, prompt_queue(vec![]), sink())
-        .await
-        .expect_err("must bail when the LLM call fails");
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt: prompt_queue(vec![]),
+            display: sink(),
+        },
+    )
+    .await
+    .expect_err("must bail when the LLM call fails");
     assert!(
         format!("{err:#}").contains("no files could be resolved"),
         "expected bail, got: {err:#}"
@@ -571,7 +678,15 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
-    let result = run_resolve_workflow_impl(&git, resolver, prompt, display).await;
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            prompt,
+            display,
+        },
+    )
+    .await;
     assert!(
         result.is_ok(),
         "mixed-blocker handoff should not error: {:?}",
