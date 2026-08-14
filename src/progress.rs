@@ -647,20 +647,48 @@ fn reasoning_rows(
     // Running fence state, carried from the stream (see the doc) and advanced
     // line-by-line across the window.
     let mut in_code = in_code_start;
+    // A per-block highlighter, started on a ```lang opener and dropped on the
+    // closer. When the window begins mid-block the opener has scrolled out, so
+    // no highlighter exists and the tail renders in the uniform code colour —
+    // the known limit of highlighting only blocks whose opener is in view.
+    let mut highlighter: Option<HighlightLines> = None;
+    let theme_default = default_fg();
     for line in window {
+        let was_in_code = in_code;
         let (kind, display, next) = classify_line(line, in_code);
         in_code = next;
-        // Normal prose gets inline `**bold**`/`code` parsing + styled wrap
-        // (a span split by a wrap break is re-opened on the next row); every
-        // other kind keeps the single-style-per-line path, which is wrap-safe.
-        if kind == LineKind::Normal {
-            let segments = parse_inline(&display);
-            for piece in wrap_styled(&segments, feed_width) {
-                rows.push(format!("{MARGIN}│ {piece}"));
-            }
-        } else {
+        // Prose kinds get inline `**bold**`/`code` parsing (Bold/Code override
+        // the line-kind base style Plain inherits); code is raw so its text is
+        // never reinterpreted as inline markdown. A fence sits flush; the code
+        // body is indented two columns (the wrap budget shrinks by the same
+        // two so the total line width is unchanged).
+        if kind == LineKind::CodeFence {
+            highlighter = if was_in_code {
+                None // closer
+            } else {
+                // opener: highlight for the fence's language, if syntect knows it
+                fence_lang(&display)
+                    .and_then(|lang| SYNTAXES.find_syntax_by_token(lang))
+                    .map(|syntax| HighlightLines::new(syntax, &HIGHLIGHT_THEME))
+            };
             for piece in wrap_line(&display, feed_width) {
                 rows.push(format!("{MARGIN}│ {}", style_kind(&piece, kind)));
+            }
+        } else if kind == LineKind::Code {
+            if let Some(h) = highlighter.as_mut() {
+                let runs = highlight_code_line(h, &display, theme_default);
+                for piece in wrap_runs(&runs, feed_width.saturating_sub(2), None, |s: &Option<Style>| (*s).clone()) {
+                    rows.push(format!("{MARGIN}│   {piece}"));
+                }
+            } else {
+                for piece in wrap_line(&display, feed_width.saturating_sub(2)) {
+                    rows.push(format!("{MARGIN}│   {}", style_kind(&piece, kind)));
+                }
+            }
+        } else {
+            let segments = parse_inline(&display);
+            for piece in wrap_inline(&segments, feed_width, kind_style(kind)) {
+                rows.push(format!("{MARGIN}│ {piece}"));
             }
         }
     }
@@ -1643,7 +1671,39 @@ mod tests {
         // Re-open: a row beginning mid-bold still opens bold. render_row resets
         // its span at every row, so a span split by a wrap break is re-opened,
         // not carried — this is exactly why each wrapped bold row is coloured.
-        assert!(render_row(&[('a', Span::Bold)]).starts_with("\x1b[1m"));
+        assert!(render_runs(&[('a', Span::Bold)], &|sp| resolve_style(*sp, None)).starts_with("\x1b[1m"));
+    }
+
+    /// List items, blockquotes, and headings carry inline `**bold**` and must
+    /// parse it (strip the asterisks) like Normal prose — the bug that left
+    /// `**` visible in every non-Normal prose kind.
+    #[test]
+    fn reasoning_rows_strips_bold_in_prose_kinds() {
+        let window = vec![
+            "# **Heading**".to_string(),
+            "- **bold** item".to_string(),
+            "> **bold** quote".to_string(),
+            "plain **bold** text".to_string(),
+        ];
+        let rows = reasoning_rows("⠹", "thinking", &window, 80, None, 20, false);
+        let joined = rows.join("\n");
+        assert!(
+            !joined.contains("**"),
+            "literal markdown asterisks survived in a prose kind: {joined:?}"
+        );
+        // the word itself survives — only its asterisks were stripped
+        assert!(joined.contains("bold"), "bold text was dropped: {joined:?}");
+    }
+
+    /// `resolve_style` is the layering rule: Plain inherits the line-kind base,
+    /// Bold/Code override it. A blockquote is dim, so a plain run on it stays
+    /// dim while a bold run drops the dim for full bold.
+    #[test]
+    fn resolve_style_plain_inherits_base_bold_overrides() {
+        let dim = Style::new().dim();
+        assert_eq!(resolve_style(Span::Plain, Some(&dim)), Some(dim.clone()));
+        assert_eq!(resolve_style(Span::Bold, Some(&dim)), Some(Style::new().bold()));
+        assert_eq!(resolve_style(Span::Plain, None), None);
     }
 
     /// [`loading_rows`] before the grace deadline: just the spinner row with
@@ -2149,15 +2209,121 @@ mod tests {
         ];
         let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 12, true);
         assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
-        let body: Vec<&str> = rows[1..]
+        let body: Vec<String> = rows[1..]
             .iter()
-            .map(|r| r.strip_prefix(&prefix).unwrap())
+            .map(|r| console::strip_ansi_codes(r.strip_prefix(&prefix).unwrap()).to_string())
             .collect();
-        assert_eq!(body, vec!["let x = 1;", "```", "done"]);
+        assert_eq!(body, vec!["  let x = 1;", "```", "done"]);
         // And a window that starts mid-block with `false` (no opener at all,
         // e.g. the stream genuinely began outside a block) classifies the
         // first fence as an opener.
         let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 12, false);
         assert_eq!(rows.len(), 4, "spinner + 3 rows survive the cap");
+    }
+
+    /// A code block body is indented two columns, the fence stays flush, and the
+    /// total row width never exceeds the prose budget (the body wraps to
+    /// `feed_width - 2` so the indent is "free").
+    #[test]
+    fn reasoning_rows_indents_code_body_keeps_fence_flush() {
+        let prefix = format!("{MARGIN}│ ");
+        let window = vec![
+            "```rust".to_string(),
+            "let x = 1;".to_string(),
+            "```".to_string(),
+        ];
+        let rows = reasoning_rows("⠹", "thinking", &window, 20, None, 10, false);
+        // strip ANSI so the assertions are about geometry (indent + overflow),
+        // not whichever global colour state another parallel test raced in.
+        let body: Vec<String> = rows[1..]
+            .iter()
+            .map(|r| console::strip_ansi_codes(r.strip_prefix(&prefix).unwrap()).to_string())
+            .collect();
+        // fence flush, code body indented two
+        assert_eq!(body[0], "```rust");
+        assert_eq!(body[1], "  let x = 1;");
+        assert_eq!(body[2], "```");
+        for r in &rows {
+            assert!(
+                console::strip_ansi_codes(r).chars().count() <= 24,
+                "indented code row overflowed: {:?}",
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn fence_lang_extracts_token_and_handles_closers() {
+        assert_eq!(fence_lang("```rust"), Some("rust"));
+        assert_eq!(fence_lang("~~~python"), Some("python"));
+        assert_eq!(fence_lang("```"), None);
+        assert_eq!(fence_lang("```  js  "), Some("js"));
+    }
+
+    #[test]
+    fn reasoning_rows_highlights_tagged_code_with_syntect() {
+        console::set_colors_enabled(true);
+        // A ```rust block whose opener is in view is highlighted per token:
+        // syntect emits TrueColor (38;2;r;g;b) regions, distinct from the
+        // uniform cyan (36) fallback used when no language is known.
+        let rows = reasoning_rows(
+            "⠹",
+            "thinking",
+            &["```rust".to_string(), "let x: i32 = 1;".to_string(), "```".to_string()],
+            40,
+            None,
+            10,
+            false,
+        );
+        let code_row = rows
+            .iter()
+            .find(|r| console::strip_ansi_codes(r).contains("let x"))
+            .expect("code body row present");
+        assert!(
+            code_row.contains("\x1b[38;2;"),
+            "tagged code block was not syntect-highlighted: {code_row:?}"
+        );
+    }
+
+    #[test]
+    fn reasoning_rows_falls_back_to_cyan_without_language() {
+        console::set_colors_enabled(true);
+        // Bare ``` fence (no language) → uniform cyan, no TrueColor regions,
+        // and so does a block whose opener scrolled out (mid-block window).
+        let bare = reasoning_rows(
+            "⠹",
+            "thinking",
+            &["```".to_string(), "let x = 1;".to_string(), "```".to_string()],
+            40,
+            None,
+            10,
+            false,
+        );
+        let bare_code = bare
+            .iter()
+            .find(|r| console::strip_ansi_codes(r).contains("let x"))
+            .unwrap();
+        assert!(bare_code.contains("\x1b[36m"), "bare fence should be cyan: {bare_code:?}");
+        assert!(!bare_code.contains("\x1b[38;2;"), "bare fence must not highlight: {bare_code:?}");
+
+        // Opener scrolled out: window begins inside a block, so no highlighter
+        // exists and the tail is uniform cyan — the documented lazy limit.
+        let orphan = reasoning_rows(
+            "⠹",
+            "thinking",
+            &["let y = 2;".to_string()],
+            40,
+            None,
+            10,
+            true,
+        );
+        let orphan_code = orphan
+            .iter()
+            .find(|r| console::strip_ansi_codes(r).contains("let y"))
+            .unwrap();
+        assert!(
+            orphan_code.contains("\x1b[36m") && !orphan_code.contains("\x1b[38;2;"),
+            "scrolled-out opener should fall back to cyan: {orphan_code:?}"
+        );
     }
 }
