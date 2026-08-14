@@ -134,3 +134,16 @@ pub(crate) fn prompt_text(
         Err(e) => Err(e).context("could not read terminal input"),
     }
 }
+/// Read a y/n answer from raw stdin (no inquire — this must work when stdin is
+/// a pipe in tests, and the label is written to stderr because `Display` is
+/// stderr-only so piped stdout stays clean). An empty answer (just Enter)
+/// defaults to `true` (yes); `n` / `no` / any other input returns `false`.
+pub(crate) fn prompt_yes_no(label: &str) -> Result<bool> {
+    use std::io::Write as _;
+    eprint!("{label} [y/n] ");
+    io::stderr().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim().to_lowercase();
+    Ok(matches!(trimmed.as_str(), "" | "y" | "yes"))
+}
