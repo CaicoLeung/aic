@@ -67,6 +67,70 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
     assert!(!is_clean(dir.path()));
 }
 
+/// Default `aic` run on a rebase state: `aic resolve` refuses rebase/am (ADR
+/// 0005), so the run never offers it — it aborts immediately, naming the
+/// manual continuation instead of redirecting to a command that would refuse.
+#[tokio::test]
+async fn commit_run_rebase_state_aborts_with_manual_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    rebase_conflict(dir.path());
+
+    let (resolver, seen) = resolver_recording();
+    let git = Git::at(dir.path()).unwrap();
+
+    let err = default_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver,
+            // Empty queue: the resolve offer must never fire — if it does,
+            // the exhausted queue panics and fails this test loudly.
+            prompt: prompt_queue(vec![]),
+            display: sink(),
+        },
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
+    )
+    .await
+    .expect_err("rebase state must abort without offering resolve");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("mid-rebase") && msg.contains("git rebase --continue"),
+        "expected manual-continuation abort, got: {msg}"
+    );
+    assert!(
+        !msg.contains("aic resolve"),
+        "must not point at a command that refuses rebase: {msg}"
+    );
+    assert!(seen.lock().is_empty(), "resolver must not run on rebase");
+    assert!(!is_clean(dir.path()), "repo must be left untouched");
+}
+
+/// The commit guard — the deeper net under the front door — gives the same
+/// honest advice for rebase states: the manual continuation, not `aic resolve`.
+#[test]
+fn commit_guard_names_manual_continuation_for_rebase() {
+    let dir = tempfile::tempdir().unwrap();
+    rebase_conflict(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let err = git
+        .assert_commit_safe()
+        .expect_err("guard must refuse to commit mid-rebase");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("mid-rebase") && msg.contains("git rebase --continue"),
+        "expected manual-continuation hint, got: {msg}"
+    );
+    assert!(
+        !msg.contains("aic resolve"),
+        "must not point at a command that refuses rebase: {msg}"
+    );
+}
+
 /// Default `aic` run: user accepts `resolve now?`, resolver returns clean
 /// content, user approves — the conflicted repo is resolved and finalized
 /// through the commit-workflow entry point.

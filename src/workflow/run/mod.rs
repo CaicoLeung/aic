@@ -282,11 +282,13 @@ fn staged_diff_json(git: &Git, paths: &[String]) -> anyhow::Result<String> {
 }
 
 /// The default command's front door: gate on a conflicted repo, then dispatch.
-/// On conflict it offers `aic resolve` (`resolve.prompt`), handing the whole
-/// [`ResolveDeps`] to [`resolve_run`] on acceptance; the gate notice renders
-/// on the commit display. On decline it aborts — the commit guard in
+/// On a resolvable conflict it offers `aic resolve` (`resolve.prompt`), handing
+/// the whole [`ResolveDeps`] to [`resolve_run`] on acceptance; the gate notice
+/// renders on the commit display. On decline it aborts — the commit guard in
 /// `Git::commit` is the deeper net; this prompt is the friendly front door
-/// (ADR 0005).
+/// (ADR 0005). rebase/am states are never offered (resolve refuses them,
+/// ADR 0005) — the abort names the manual continuation instead, so the advice
+/// never points at a command that would refuse.
 pub(crate) async fn default_run(
     git: &Git,
     resolve: ResolveDeps,
@@ -294,6 +296,13 @@ pub(crate) async fn default_run(
 ) -> anyhow::Result<()> {
     let state = git.conflict().state()?;
     if state.is_conflicted() {
+        if let Some(args) = state.manual_finalize_command() {
+            anyhow::bail!(
+                "aborted — repo is mid-{}. finish it with `git {}`, then re-run `aic`",
+                state.label(),
+                args.join(" ")
+            );
+        }
         crate::git::conflict::resolve_prompt(&commit.display, state);
         if (resolve.prompt)("resolve now?")? {
             return resolve_run(git, resolve).await;
