@@ -1,9 +1,16 @@
+//! The static commit panel: the [`Display`] core, its [`DisplayWrite`] sink
+//! seam, and the commit-line engine (`commit_line`, `commit_preview`,
+//! body/file-stats renderers). The resolve-flow UI is NOT here — it lives in
+//! [`crate::conflict`] next to its domain, rendering through this module's
+//! `styled`/`emit` primitives so both surfaces share one seam and one margin.
+
 use console::{Style, Term};
 
-use crate::conflict::{ConflictedFile, RepoState};
+use crate::commit_type::CommitType;
 use crate::git::FileStats;
 use crate::layout::{FALLBACK_COLS, MARGIN, resolve_cols, wrap_line};
-use crate::types::{CommitType, commit_id_color, neutral_gray, sigma_color};
+use crate::palette;
+use crate::palette::{commit_id_color, neutral_gray, sigma_color};
 
 /// Line-based write seam behind [`Display`].
 ///

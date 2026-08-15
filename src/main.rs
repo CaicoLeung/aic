@@ -4,6 +4,7 @@
 
 pub mod cli;
 pub mod cli_agent;
+pub mod commit_type;
 pub mod completion;
 pub mod config;
 pub mod confirm;
@@ -20,6 +21,7 @@ pub mod input;
 pub mod layout;
 pub mod llm;
 pub mod markdown;
+pub mod palette;
 pub mod parse;
 pub mod progress;
 pub mod prompt;

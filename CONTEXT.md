@@ -129,6 +129,14 @@ _Avoid_: resolution module, conflict workflow (the detection/Finalize half lives
 
 ### Progress
 
+**Palette**:
+The module (`src/palette.rs`) where every color decision lives: the WCAG-guarded named/fallback palettes keyed by Commit Type (`CommitType::color_for` is defined here, next to the data), the single-source neutral-gray/commit-id/sigma accessors, and the terminal-16 role functions (`success`, `pending`, `caution`, `added`, `removed`, `hint`, …) that replaced ~30 ad-hoc `Style::new()` chains across the commit panel and resolve UI. Renderers call roles, never hand-roll styles.
+_Avoid_: color utils, theme
+
+**Commit Type**:
+The vocabulary module (`src/commit_type.rs`): the `CommitType` enum (the Conventional Commits types plus community additions), its string parsing, and `ParsedMessage` — the single decomposition of a subject line. Purely lexical; colors resolve through the Palette.
+_Avoid_: conventional type, types module (that's the seam aliases in `src/types.rs`)
+
 **Reasoning feed**:
 The Run's streaming-reasoning display driver (`src/reasoning_feed.rs`): owns the *when-to-paint* policy between a streaming LLM call and a rendering sink. A rolling reasoning window redraws in place as the model thinks and is erased when thinking ends, so nothing lingers in the scrollback; when a backend emits no reasoning deltas at all (a CLI agent in print mode, or an API cold start) a loading frame keeps the screen alive and, past the loading grace, shows an explanatory notice. The driver runs against a `ReasoningSink` trait (concretely `progress::ReasoningRenderer` in production, a recording fake in tests), keeping the byte-level frame/row assembly in `progress` separate from the frame-policy decisions here. Both the BatchPlan analysis and the Drafted Message generation stream through one `drive_streaming` helper at the production wiring layer.
 _Avoid_: reasoning service, thinking component, streaming view
