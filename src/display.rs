@@ -205,7 +205,7 @@ impl Display {
         let gray = neutral_gray();
 
         // Main line: [prefix] ✓ <hash> <message>
-        let check = self.styled("\u{2713}", Style::new().green().bold());
+        let check = self.styled("\u{2713}", palette::success());
         // Commit ID: amber #d97706, bold so the short token qualifies as WCAG
         // AA Large (3:1) on both themes — the old #f3b340 read at ~1.9:1 on
         // white. Bold is also the right visual weight for a ref.
@@ -255,7 +255,7 @@ impl Display {
                     Some(s) => self.styled(&format!("({s})"), gray.clone()),
                     None => String::new(),
                 };
-                let bold_desc = self.styled(desc, Style::new().bold());
+                let bold_desc = self.styled(desc, palette::emphasis());
                 format!("{}{}: {}", colored_type, scope, bold_desc)
             }
             // No colon — no type token to color; render the whole message in
@@ -323,10 +323,10 @@ impl Display {
             return 0;
         }
         let gray = neutral_gray();
-        let green = Style::new().green();
-        let red = Style::new().red();
-        let new_tag = Style::new().green().bold();
-        let del_tag = Style::new().red().bold();
+        let green = palette::added();
+        let red = palette::removed();
+        let new_tag = palette::added_strong();
+        let del_tag = palette::removed_strong();
         let mut rows = 0;
         let shown = stats.len().min(Self::FILE_STATS_CAP);
         let shown_stats = &stats[..shown];
@@ -514,7 +514,7 @@ impl Display {
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
     /// a confirmed draft never lingers on screen.
     pub fn commit_preview(&self, message: &str, body: Option<&str>, stats: &[FileStats]) -> usize {
-        let pending = Style::new().yellow().bold();
+        let pending = palette::pending();
         self.emit(&format!(
             "{} {}",
             self.styled("?", pending.clone()),
