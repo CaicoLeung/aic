@@ -299,7 +299,7 @@ pub(crate) async fn default_run(
             return resolve_run(git, resolve).await;
         }
         anyhow::bail!(
-            "aborted: repo is mid-{}; resolve conflicts first",
+            "aborted — repo is mid-{}. run `aic resolve` when ready, then re-run `aic`",
             state.label()
         );
     }
