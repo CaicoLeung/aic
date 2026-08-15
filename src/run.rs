@@ -328,7 +328,7 @@ where
     let sizing = tokio::task::spawn_blocking(cursor::reasoning_window_rows)
         .await
         .unwrap_or_else(|_| cursor::WindowSizing::fallback());
-    let mut sink = progress::ReasoningRenderer::new(label, sizing.max_rows, sizing.cursor_row);
+    let mut sink = progress::reasoning_sink(label, sizing.max_rows, sizing.cursor_row);
     reasoning_feed::run(&mut sink, sizing.max_rows, cold_start.as_deref(), make_call).await
 }
 

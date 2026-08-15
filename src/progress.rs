@@ -506,6 +506,19 @@ fn incremental_bottom(new: &[String], prev: &[String]) -> bool {
         && prev[new.len() - 1] != new[new.len() - 1]
         && prev[..new.len() - 1] == new[..new.len() - 1]
 }
+/// The single door for callers outside this module: construct the production
+/// renderer and hand it back as an opaque [`reasoning_feed::ReasoningSink`].
+/// The concrete `ReasoningRenderer` and its inherent methods stay private —
+/// the trait impl below is the only public protocol, so the two doors can
+/// never drift apart.
+pub(crate) fn reasoning_sink(
+    label: &'static str,
+    max_rows: usize,
+    cursor_row: Option<usize>,
+) -> impl crate::reasoning_feed::ReasoningSink {
+    ReasoningRenderer::new(label, max_rows, cursor_row)
+}
+
 impl ReasoningRenderer {
     /// Bind a renderer to stderr with `label` on the spinner row. `max_rows`
     /// is the reasoning window's rendered-row cap and `cursor_row` the
@@ -515,7 +528,7 @@ impl ReasoningRenderer {
     /// floored at the progress surface's [`MIN_PROGRESS_WIDTH`] so the
     /// spinner and its label keep room. A resize mid-stream only changes
     /// wrap widths, never correctness.
-    pub(crate) fn new(label: &'static str, max_rows: usize, cursor_row: Option<usize>) -> Self {
+    fn new(label: &'static str, max_rows: usize, cursor_row: Option<usize>) -> Self {
         Self {
             term: Term::stderr(),
             label,
@@ -540,7 +553,7 @@ impl ReasoningRenderer {
     /// whole block every token) is the difference between fluid character
     /// growth and the flashing "block-by-block" feed. The spinner animates
     /// instead on stall ticks via [`Self::refresh`]. A no-op off a terminal.
-    pub(crate) fn paint(&mut self, window: &[String], in_code_start: bool) {
+    fn paint(&mut self, window: &[String], in_code_start: bool) {
         if !self.term.is_term() {
             return;
         }
@@ -565,7 +578,7 @@ impl ReasoningRenderer {
     /// the spinner advances and the elapsed count rises so the wait stays
     /// visible across a long TTFT gap without the feed ever freezing. A no-op
     /// off a terminal.
-    pub(crate) fn refresh(&mut self, window: &[String], in_code_start: bool, elapsed: Duration) {
+    fn refresh(&mut self, window: &[String], in_code_start: bool, elapsed: Duration) {
         if !self.term.is_term() {
             return;
         }
@@ -599,7 +612,7 @@ impl ReasoningRenderer {
     /// the normal reasoning window via [`paint`](Self::paint); both go through
     /// [`draw_rows`], so the in-place repaint handles the height transition
     /// with no special-casing. A no-op off a terminal.
-    pub(crate) fn paint_loading(&mut self, elapsed: Duration, notice: LoadingNotice) {
+    fn paint_loading(&mut self, elapsed: Duration, notice: LoadingNotice) {
         if !self.term.is_term() {
             return;
         }
@@ -662,7 +675,7 @@ impl ReasoningRenderer {
     /// is already complete), replacing the old fixed read-tail hold-then-erase:
     /// the dissolve itself is the readability window. An *aborted* stream takes
     /// the fast path in [`Drop`] instead, never blocking on decoration.
-    pub(crate) fn finish(&mut self) {
+    fn finish(&mut self) {
         if !self.active {
             return;
         }
