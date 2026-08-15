@@ -52,10 +52,11 @@ async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
     .await
     .expect_err("refused state must error, not succeed");
     let msg = format!("{err:#}");
-    // Pin the literal "<label> state" phrase, not just the bare label — a bare
-    // `contains("am")` would false-pass on common words like "stream".
+    // Pin the literal "<label> state yet" phrase — a bare `contains("am")`
+    // would false-pass on common words like "stream", and stopping at
+    // "<label> state" would miss the yet-wording regressing back to "in v1".
     assert!(
-        msg.contains(&format!("{label} state")) && msg.contains("yet"),
+        msg.contains(&format!("{label} state yet")),
         "expected {label} refusal, got: {msg}"
     );
     assert!(
