@@ -373,15 +373,14 @@ pub(crate) fn conflicted_summary(display: &Display, files: &[ConflictedFile]) {
     display.emit_blank();
 }
 
-/// Render the combined review diff (original worktree -> LLM resolution).
-/// Coloring by leading sign so a glance distinguishes additions, context,
-/// and the per-file path header:
-///   `+` addition → green, `-` deletion → red, ` ` context → dim,
-///   anything else → a bare file path acting as a section header → bold
-///   cyan. A path can't be mistaken for a diff line because unified-diff
-///   bodies only ever start with `+`/`-`/` `.
-pub(crate) fn review_section(display: &Display, diff: &str) {
-    display.emit(&display.styled("proposed resolutions:", palette::muted()));
+/// Render one file's review diff (original worktree -> LLM resolution) with
+/// its path as the header — called immediately before that file's `apply`
+/// prompt, so heading, diff, and question never drift apart.
+/// Coloring by leading sign so a glance distinguishes additions and context:
+///   `+` addition → green, `-` deletion → red, ` ` context → dim.
+pub(crate) fn review_section(display: &Display, path: &str, diff: &str) {
+    display.emit(&display.styled("proposed resolution:", palette::muted()));
+    display.emit(&display.styled(path, palette::header()));
     for line in diff.lines() {
         // Color is computed on the original diff line (leading +,-, or
         // space), then the shared margin is prepended by `emit` — so the

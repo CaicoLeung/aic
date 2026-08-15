@@ -153,23 +153,15 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         anyhow::bail!("no files could be resolved; resolve the conflicts manually");
     }
 
-    // Combined review diff, then per-file sticky approval. Each file's path
-    // is emitted bare on its own line so `review_section` can render it as a
-    // header — unified-diff bodies only ever start with `+`/`-`/` `, so a
-    // bare path is unambiguously a boundary (a `--- path ---` prefix would
-    // tint it red as a deletion line).
-    let mut combined = String::new();
-    for (path, original, resolved) in &plans {
-        combined.push_str(path);
-        combined.push('\n');
-        combined.push_str(&unified_diff(original, resolved));
-        combined.push('\n');
-    }
-    crate::git::conflict::review_section(&display, &combined);
-
+    // Per-file review + sticky approval, interleaved: each file's diff is
+    // rendered immediately before its `apply` prompt, so the diff on screen
+    // is always the one being asked about. Review still precedes the disk
+    // write — the diff is in-memory (`unified_diff`), and `write_worktree`
+    // only happens after approval (ADR 0005).
     let mut approved = 0usize;
     let mut rejected = 0usize;
-    for (path, _original, resolved) in &plans {
+    for (path, original, resolved) in &plans {
+        crate::git::conflict::review_section(&display, path, &unified_diff(original, resolved));
         if prompt(&format!("apply {path}?"))? {
             conflict.write_worktree(path, resolved)?;
             git.add(&[path.as_str()])?;
