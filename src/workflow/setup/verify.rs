@@ -131,7 +131,7 @@ fn show_verify_result(
     base_url: Option<&str>,
     result: Result<String>,
 ) -> Result<()> {
-    let term = Term::stdout();
+    let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
     term.write_line(&format!("Verify — {} ({model})", p.display()))?;
@@ -214,7 +214,7 @@ pub(super) fn step_verify_cli(draft: &Draft) -> Result<Nav> {
 /// [`LlmError`](crate::llm::cli_agent::LlmError) on failure (its `Display` already
 /// carries a human hint).
 fn show_cli_verify_result(result: Result<String>) -> Result<()> {
-    let term = Term::stdout();
+    let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
     term.write_line("Verify — CLI agent")?;

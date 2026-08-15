@@ -59,11 +59,13 @@ pub fn run_setup() -> Result<()> {
 /// Clear the terminal and render the setup header, so each menu or prompt
 /// occupies a clean screen instead of leaving previous selections in the
 /// scrollback.
-fn show_screen() -> Result<()> {
-    let term = Term::stdout();
+fn show_screen(section: &str) -> Result<()> {
+    // stderr: all interactive chrome shares inquire's stream, so a piped
+    // stdout carries only real results (the save path's "Saved to" line).
+    let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    term.write_line("aic setup — configure your AI provider")?;
+    term.write_line(&format!("aic setup — {section}"))?;
     term.write_line("  ↑/↓ move · Enter confirm · Esc back/cancel · Ctrl-C cancel")?;
     term.write_line("")?;
     Ok(())
@@ -258,7 +260,7 @@ enum ModeChoice {
 /// two-backend model without forcing re-configuring users through it. Esc
 /// skips to the menu; Ctrl-C cancels setup.
 fn step_mode_choice() -> Result<ModeChoice> {
-    show_screen()?;
+    show_screen("choose a backend")?;
     let items = vec![
         "API provider — use an API key (OpenAI, Anthropic, Gemini, …)".to_string(),
         "CLI agent — reuse Claude Code / Codex / pi (no API key needed)".to_string(),
@@ -279,7 +281,7 @@ fn step_mode_choice() -> Result<ModeChoice> {
 /// seeds as API (the historical default). Returns `true` on Ctrl-C (cancel
 /// setup).
 fn step_backend_choice(draft: &mut Draft) -> Result<bool> {
-    show_screen()?;
+    show_screen("choose a backend")?;
     let items = vec![
         "API provider — use an API key".to_string(),
         "CLI agent — reuse a coding-agent CLI (no API key)".to_string(),
@@ -393,7 +395,7 @@ fn confirm_initial(draft: &Draft, existing: &Option<Config>) -> bool {
 /// value, else `false` (the default — behavior unchanged until the user opts
 /// in).
 fn step_confirm_commit(existing: &Option<Config>, draft: &mut Draft) -> Result<Nav> {
-    show_screen()?;
+    show_screen("commit confirmation")?;
     let initial = confirm_initial(draft, existing);
     // A yes/no option list driven by arrow keys + Enter — never typed input,
     // so the user keeps their hands off the keyboard.

@@ -190,7 +190,7 @@ pub(super) fn run_provider_flow(
         }
         // Screen 2: configure the provider's fields independently.
         loop {
-            show_screen()?;
+            show_screen("AI provider")?;
             let (entries, labels) = provider_submenu_items(draft);
             match opt_nav("Configure AI provider", &labels, 0)? {
                 OptNav::Value(i) => {
@@ -217,7 +217,7 @@ pub(super) fn run_provider_flow(
     }
 }
 fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Result<Nav> {
-    show_screen()?;
+    show_screen("AI provider")?;
     let providers = Provider::all();
     let items: Vec<String> = providers
         .iter()
@@ -264,7 +264,7 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             // Blank is accepted only when there is a current key to keep;
             // otherwise the validator enforces a non-empty entry.
             let allow_empty = !key.is_empty();
-            show_screen()?;
+            show_screen("AI provider")?;
             match prompt_text(&prompt, None, allow_empty, "API key cannot be empty")? {
                 TextAct::Value(v) => {
                     let v = if v.is_empty() { key } else { v };
@@ -299,7 +299,7 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             // no key, row 0 is the "No API key" option instead.
             let keep_idx = if has_key { Some(0) } else { None };
             loop {
-                show_screen()?;
+                show_screen("AI provider")?;
                 match opt_nav("API key", &items, 0)? {
                     OptNav::Value(i) if keep_idx == Some(i) => {
                         // Keep current key — draft.api_key already holds it.
@@ -310,7 +310,7 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
                         return Ok(Nav::Next);
                     }
                     OptNav::Value(i) if i == enter_idx => {
-                        show_screen()?;
+                        show_screen("AI provider")?;
                         match prompt_text("API key (blank = keyless server)", None, true, "")? {
                             TextAct::Value(v) => {
                                 draft.api_key = if v.is_empty() { None } else { Some(v) };
@@ -349,7 +349,7 @@ fn step_base_url(
     );
     match provider.base_url_requirement() {
         BaseUrlRequirement::Required => {
-            show_screen()?;
+            show_screen("AI provider")?;
             match prompt_text(
                 "Base URL (e.g. http://localhost:1234/v1)",
                 initial.as_deref(),
@@ -389,7 +389,7 @@ fn step_base_url(
             // none, row 0 is the "Use default" option instead.
             let keep_idx = if has_url { Some(0) } else { None };
             loop {
-                show_screen()?;
+                show_screen("AI provider")?;
                 match opt_nav("Base URL", &items, 0)? {
                     OptNav::Value(i) if keep_idx == Some(i) => {
                         // Keep current URL — draft.base_url already holds it.
@@ -400,7 +400,7 @@ fn step_base_url(
                         return Ok(Nav::Next);
                     }
                     OptNav::Value(i) if i == custom_idx => {
-                        show_screen()?;
+                        show_screen("AI provider")?;
                         match prompt_text(
                             &format!("Custom base URL (e.g. {default})"),
                             None,
@@ -436,7 +436,7 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
 
     // No curated list (OpenRouter, OpenAI-compatible) -> required free text.
     if models.is_empty() {
-        show_screen()?;
+        show_screen("AI provider")?;
         return match prompt_text(
             "Model (required)",
             initial.as_deref(),
@@ -467,10 +467,10 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         });
 
     loop {
-        show_screen()?;
+        show_screen("AI provider")?;
         match opt_nav("Model", &items, highlight)? {
             OptNav::Value(i) if i == custom_idx => {
-                show_screen()?;
+                show_screen("AI provider")?;
                 match prompt_text("Custom model", None, false, "model cannot be empty")? {
                     TextAct::Value(v) => {
                         draft.model = Some(v);
