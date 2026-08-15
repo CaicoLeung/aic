@@ -292,7 +292,8 @@ impl Display {
     }
 
     /// Files beyond this many are elided from the footer with a
-    /// `… N more (N files)` line — the cap the old comma-joined preview used,
+    /// `… N more` line — the file count lives in the Σ row, so it is not
+    /// repeated here; the cap is the one the old comma-joined preview used,
     /// kept so a huge batch can't blow the screen.
     const FILE_STATS_CAP: usize = 8;
 
