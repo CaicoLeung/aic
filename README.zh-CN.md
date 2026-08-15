@@ -88,7 +88,7 @@ aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下�
 - **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
 - **实时推理** —— 观看模型思考拆分方案的全过程
 - **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
-- **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 之间切换
+- **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode）之间切换
 
 ## 安装
 
@@ -107,7 +107,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
-| `aic use <provider>` | 切换到已通过 `aic setup` 配置过的 provider。 |
+| `aic use <name>` | 切换到已通过 `aic setup` 配置过的 provider，或切换到 CLI agent（claude、codex、pi、opencode）。 |
 | `aic list` | 展示已 resolve 的 config 及每个值的来源。 |
 | `aic update` | 更新到最新版本。 |
 | `aic completion` | 安装 shell 补全。 |
