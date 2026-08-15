@@ -257,6 +257,12 @@ impl Provider {
         self.meta().display
     }
 
+    /// This provider's aliases — the extra names [`Self::from_name`] accepts,
+    /// straight from the registry (single source of truth).
+    pub fn aliases(&self) -> &'static [&'static str] {
+        self.meta().aliases
+    }
+
     pub fn requires_key(&self) -> bool {
         self.meta().requires_key
     }
