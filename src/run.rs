@@ -28,6 +28,7 @@ use crate::diff_json;
 use crate::display::Display;
 use crate::generator;
 use crate::git::Git;
+use crate::grouping;
 use crate::input;
 use crate::progress;
 use crate::reasoning_feed;
@@ -108,8 +109,28 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         let diff = serde_json::json!({ "unstaged_files": files });
         let result = planner(diff.to_string()).await?;
 
-        generator::validate_batch_plan(&result, &file_hunk_counts)
-            .context("batch plan validation failed")?;
+        // An invalid plan is an LLM malfunction, not a user problem: warn and
+        // regroup deterministically instead of failing the Run. The engine's
+        // output is a valid partition by construction (every hunk of real
+        // work lands in exactly one batch), so issue #34's silent no-op
+        // cannot recur — real work always yields ≥1 batch. The re-validation
+        // is defensive only.
+        let result = match generator::validate_batch_plan(&result, &file_hunk_counts) {
+            Ok(()) => result,
+            Err(plan_err) => {
+                display.warn(&format!(
+                    "LLM batch plan invalid ({plan_err}); regrouping deterministically"
+                ));
+                let diffs: Vec<(String, String)> = unstaged_files
+                    .iter()
+                    .map(|f| Ok((f.path.clone(), raw_diffs[&f.path].clone())))
+                    .collect::<anyhow::Result<_>>()?;
+                let plan = grouping::plan_from_diffs(&diffs);
+                generator::validate_batch_plan(&plan, &file_hunk_counts)
+                    .context("deterministic fallback plan failed validation")?;
+                plan
+            }
+        };
 
         let count = result.batches.len();
         // Pre-draft every batch's message concurrently (ADR 0014): the LLM
