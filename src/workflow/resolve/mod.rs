@@ -48,9 +48,9 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         return Ok(());
     }
     if !state.resolvable() {
-        // rebase / am — detected but refused in v1.
+        // rebase / am — detected but refused (not supported yet).
         crate::git::conflict::refused(&display, state);
-        anyhow::bail!("aic cannot resolve a {} state in v1", state.label());
+        anyhow::bail!("aic cannot resolve a {} state yet", state.label());
     }
 
     let files = conflict.conflicted_files()?;

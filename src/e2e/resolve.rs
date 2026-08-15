@@ -55,7 +55,7 @@ async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
     // Pin the literal "<label> state" phrase, not just the bare label — a bare
     // `contains("am")` would false-pass on common words like "stream".
     assert!(
-        msg.contains(&format!("{label} state")) && msg.contains("v1"),
+        msg.contains(&format!("{label} state")) && msg.contains("yet"),
         "expected {label} refusal, got: {msg}"
     );
     assert!(
