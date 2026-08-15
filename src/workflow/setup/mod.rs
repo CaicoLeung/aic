@@ -88,6 +88,7 @@ const ICON_VERIFY: &str = "\u{f1616}"; // nf-md-connection
 const ICON_DONE: &str = "\u{f004d}"; // nf-md-arrow_left
 const ICON_CLI: &str = "\u{f018d}"; // nf-md-console
 const ICON_BACKEND: &str = "\u{f0a1a}"; // nf-md-toggle_switch_outline
+const ICON_SELECT: &str = "\u{f0142}"; // nf-md-chevron_right — "pick this" row marker
 
 // Status markers for verify outcomes and the save line — same Nerd Font
 // family, same trade.
@@ -286,8 +287,8 @@ enum ModeChoice {
 fn step_mode_choice() -> Result<ModeChoice> {
     show_screen("choose a backend")?;
     let items = vec![
-        "API provider — use an API key (OpenAI, Anthropic, Gemini, …)".to_string(),
-        "CLI agent — reuse Claude Code / Codex / pi (no API key needed)".to_string(),
+        format!("{ICON_PROVIDER} API provider — use an API key (OpenAI, Anthropic, Gemini, …)"),
+        format!("{ICON_CLI} CLI agent — reuse Claude Code / Codex / pi (no API key needed)"),
     ];
     Ok(match opt_nav("How should aic get its model?", &items, 0)? {
         OptNav::Value(0) => ModeChoice::Api,
@@ -307,8 +308,8 @@ fn step_mode_choice() -> Result<ModeChoice> {
 fn step_backend_choice(draft: &mut Draft) -> Result<bool> {
     show_screen("choose a backend")?;
     let items = vec![
-        "API provider — use an API key".to_string(),
-        "CLI agent — reuse a coding-agent CLI (no API key)".to_string(),
+        format!("{ICON_PROVIDER} API provider — use an API key"),
+        format!("{ICON_CLI} CLI agent — reuse a coding-agent CLI (no API key)"),
     ];
     let default = match draft.active_backend() {
         BackendKind::Api => 0,
@@ -352,16 +353,12 @@ fn confirm_label(draft: &Draft) -> String {
     }
 }
 
-/// `CLI agent` menu row: the configured command, or `(not configured)` when no
-/// CLI-agent backend is set. The active backend is named separately by the
-/// [`backend_banner`] on the main menu.
+/// `CLI agent` menu row: the configured command's name — args stay in the
+/// picker and the config, not on this row. `(not configured)` when no
+/// CLI-agent backend is set.
 fn cli_label(draft: &Draft) -> String {
     match draft.active_cli_command() {
-        Some(cmd) => {
-            let mut parts = vec![cmd.to_string()];
-            parts.extend(draft.cli.args.clone().unwrap_or_default());
-            parts.join(" ")
-        }
+        Some(cmd) => cmd.to_string(),
         None => "(not configured)".to_string(),
     }
 }
@@ -431,7 +428,7 @@ fn step_confirm_commit(existing: &Option<Config>, draft: &mut Draft) -> Result<N
     let initial = confirm_initial(draft, existing);
     // A yes/no option list driven by arrow keys + Enter — never typed input,
     // so the user keeps their hands off the keyboard.
-    let items = vec!["yes".to_string(), "no".to_string()];
+    let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
     let default_idx = if initial { 0 } else { 1 };
     match opt_nav(
         "Require confirmation before each commit?",
