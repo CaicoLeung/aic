@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.4] - 2026-08-15
+
+> 🎉 **0.5.4** — 5 changes · 1 contributor
+
+### Features
+
+- CLI-agent presets in `aic use` + provider vocabulary completion (#140)
+
+### Bug Fixes
+
+- Harden run/resolve/setup UX from the interaction audit (#141)
+- Tighten commit-output file-stats footer (#142)
+
+### Documentation
+
+- Re-measure pi/codex planner streaming — aic not the regressor (#137)
+- Add AGENTS.md with repository guidelines for AI assistants
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.5.3] - 2026-08-14
 
 > 🎉 **0.5.3** — 3 changes · 1 contributor
