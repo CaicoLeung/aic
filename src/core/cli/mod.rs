@@ -1,16 +1,25 @@
 use clap::{Parser, Subcommand};
 
-use crate::llm::Provider;
+use crate::llm::{Provider, cli_agent::PRESETS};
 
-/// The `aic use <provider>` vocabulary — every registry canonical name with
-/// its aliases right behind it — as clap possible values, so shell completion
-/// offers the same words `Provider::from_name` accepts. Built from the
-/// registry (single source of truth); aliases are flat entries because
-/// possible-value matching is how clap validates the input.
-fn provider_values() -> clap::builder::PossibleValuesParser {
-    let values: Vec<clap::builder::PossibleValue> = Provider::all()
-        .iter()
-        .flat_map(|p| std::iter::once(p.name()).chain(p.aliases().iter().copied()))
+/// The `aic use <name>` vocabulary: CLI-agent presets first (they win at
+/// match time — `aic use claude` is the claude code CLI agent, not the
+/// Anthropic API provider), then every registry provider name and alias that
+/// doesn't collide with a preset. Flat clap possible values so shell
+/// completion offers exactly what `aic use` accepts.
+fn use_values() -> clap::builder::PossibleValuesParser {
+    let mut words: Vec<&str> = PRESETS.to_vec();
+    words.extend(
+        Provider::all()
+            .iter()
+            .flat_map(|p| std::iter::once(p.name()).chain(p.aliases().iter().copied())),
+    );
+    // Order-preserving dedupe: a provider alias shadowed by a preset (claude)
+    // disappears from the vocabulary instead of appearing twice.
+    let mut seen = std::collections::HashSet::new();
+    let values: Vec<clap::builder::PossibleValue> = words
+        .into_iter()
+        .filter(|w| seen.insert(*w))
         .map(clap::builder::PossibleValue::new)
         .collect();
     clap::builder::PossibleValuesParser::new(values)
@@ -37,10 +46,12 @@ pub enum Commands {
     Update,
     /// Resolve git merge conflicts in the working tree via the LLM
     Resolve,
-    /// Switch the active API provider to one already configured via `aic setup`
+    /// Switch the active backend: an API provider already configured via
+    /// `aic setup`, or a CLI agent (claude, codex, pi, opencode)
     Use {
-        /// Provider name or alias (e.g. openai, anthropic, gemini, deepseek)
-        #[arg(value_parser = provider_values(), ignore_case = true)]
+        /// API provider name/alias (e.g. openai, anthropic, gemini), or a
+        /// CLI agent (claude, codex, pi, opencode)
+        #[arg(value_parser = use_values(), ignore_case = true)]
         provider: String,
     },
     /// Install shell completion script

@@ -353,14 +353,16 @@ mod tests {
         assert!(body.contains("aic"));
     }
 
-    /// `aic use <TAB>` must offer the provider registry's vocabulary — every
-    /// canonical name and alias — instead of the `_default` action, which
-    /// completes nothing (the reported "completion not working for aic use").
-    /// Asserts on the actual value list in the provider spec line, not on
-    /// loose `contains` (the arg's help text already names four providers).
+    /// `aic use <TAB>` must offer the full `use` vocabulary — CLI-agent
+    /// presets plus every provider canonical name and alias not shadowed by
+    /// a preset — instead of the `_default` action, which completes nothing
+    /// (the reported "completion not working for aic use"). Asserts on the
+    /// actual value list in the provider spec line, not on loose `contains`
+    /// (the arg's help text already names several providers).
     #[test]
-    fn zsh_completion_offers_provider_vocabulary_for_use() {
+    fn zsh_completion_offers_use_vocabulary() {
         use crate::llm::Provider;
+        use crate::llm::cli_agent::PRESETS;
 
         let mut buf = Vec::new();
         write_completion(Shell::Zsh, &mut buf);
@@ -378,14 +380,31 @@ mod tests {
             .split_whitespace()
             .collect();
 
-        for provider in Provider::all() {
-            for word in std::iter::once(provider.name()).chain(provider.aliases().iter().copied()) {
-                assert!(
-                    offered.contains(&word),
-                    "`aic use` completion does not offer {word:?} (offered: {offered:?})"
-                );
-            }
+        // Same expectation `use_values()` builds: presets first, then
+        // provider names/aliases, a preset-shadowed alias appearing once.
+        let mut expected: Vec<&str> = PRESETS.to_vec();
+        expected.extend(
+            Provider::all()
+                .iter()
+                .flat_map(|p| std::iter::once(p.name()).chain(p.aliases().iter().copied())),
+        );
+        let mut seen = std::collections::HashSet::new();
+        for word in expected
+            .into_iter()
+            .filter(|w| seen.insert(*w))
+            .collect::<Vec<_>>()
+        {
+            assert!(
+                offered.contains(&word),
+                "`aic use` completion does not offer {word:?} (offered: {offered:?})"
+            );
         }
+        // The shadowed alias appears exactly once (the CLI agent claude).
+        assert_eq!(
+            offered.iter().filter(|&&w| w == "claude").count(),
+            1,
+            "claude should appear once (the CLI agent), offered: {offered:?}"
+        );
     }
 
     /// `detect_shell` maps `$SHELL` (basename) to a supported shell; unknown

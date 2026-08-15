@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::llm::cli_agent::cli_preset;
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, LLM, Provider};
 
 /// The CLI-agent Backend's four config fields — a unit (command + argv
@@ -798,16 +799,33 @@ pub fn run_list() -> Result<()> {
     Ok(())
 }
 
-/// Pure core of `aic use <name>`: validate the name, bank the currently
-/// active provider's live top-level state into the memory bank, then activate
-/// the target profile (restore its key/model/base_url and force the API
-/// backend). Split from [`run_use`] (which owns the load/save/print IO) so the
-/// switch contract — source banked, target restored, backend forced to API —
-/// is unit-testable without the real config file.
+/// Pure core of `aic use <name>`: a CLI-agent preset name (claude, codex,
+/// pi, opencode — case-insensitive) switches the CLI-agent Backend to that
+/// preset; anything else is a provider switch — validate the name, bank the
+/// currently active provider's live top-level state into the memory bank,
+/// then activate the target profile (restore its key/model/base_url and
+/// force the API backend). Split from [`run_use`] (which owns the
+/// load/save/print IO) so the switch contracts are unit-testable without
+/// the real config file.
 ///
-/// Errors: unknown provider name; a known name with no banked profile (run
-/// `aic setup` to add one).
+/// Errors (provider arm): unknown provider name; a known name with no banked
+/// profile (run `aic setup` to add one).
 fn apply_use(mut config: Config, name: &str) -> Result<Config> {
+    // CLI-agent presets win over provider names: `aic use claude` switches
+    // to the claude code CLI agent, not the Anthropic API provider. Presets
+    // are stateless (auth is the CLI's own), so switching just overwrites
+    // the CLI fields and flips the discriminator; the API fields stay
+    // dormant-but-intact for a later switch back (ADR 0011).
+    if let Some(spec) = cli_preset(&name.to_ascii_lowercase()) {
+        config.cli = CliConfig {
+            command: Some(spec.command),
+            args: Some(spec.args),
+            timeout_secs: Some(spec.timeout_secs),
+            encoding: Some(spec.encoding),
+        };
+        config.backend_kind = Some(BackendKind::Cli);
+        return Ok(config);
+    }
     if !Provider::is_known_name(name) {
         anyhow::bail!(
             "unknown provider '{name}'; pick one of: {}",
@@ -858,18 +876,25 @@ fn apply_use(mut config: Config, name: &str) -> Result<Config> {
     Ok(config)
 }
 
-/// `aic use <provider>` — switch the active API provider by restoring a
-/// remembered profile, without re-entering the key/model. The provider must
-/// already have been configured via `aic setup` (so it has an entry in the
-/// `providers` bank). Switches the active backend to API (a CLI-agent user
-/// who runs `aic use` is asking for the API path); any stored CLI fields
-/// stay dormant for a switch back via `aic setup`, per ADR 0011.
+/// `aic use <name>` — switch the active Backend: a CLI-agent preset name
+/// (claude, codex, pi, opencode) activates that CLI agent (no setup needed —
+/// the agent reuses its own auth); a provider name restores a remembered
+/// profile without re-entering the key/model (the provider must already
+/// have been configured via `aic setup`). The inactive Backend's fields stay
+/// dormant for a switch back, per ADR 0011.
 pub fn run_use(name: &str) -> Result<()> {
     let mut config = Config::load()
         .ok()
         .flatten()
         .context("no config found — run `aic setup` to configure a provider first")?;
     config = apply_use(config, name)?;
+
+    if config.backend_kind == Some(BackendKind::Cli) {
+        let command = config.cli.active_command().unwrap_or(name);
+        config.save()?;
+        println!("Switched to CLI agent {command}.");
+        return Ok(());
+    }
 
     // The activated profile's key (now in the top-level row after apply_use).
     let normalized = config.backend.as_deref().unwrap_or(name);

@@ -364,6 +364,37 @@ fn apply_use_merge_keeps_banked_value_when_source_field_blank() {
     assert_eq!(openai.api_key.as_deref(), Some("sk-remembered"));
 }
 
+/// `aic use claude` switches to the CLI-agent backend (claude code), not the
+/// Anthropic API provider — preset names win over provider aliases. The API
+/// row stays dormant-but-intact for a later switch back (ADR 0011).
+#[test]
+fn apply_use_preset_name_switches_to_cli_agent() {
+    let c = cfg("openai", Some("sk"), Some("gpt-5"), None);
+    let out = super::apply_use(c, "claude").unwrap();
+    assert_eq!(out.backend_kind, Some(BackendKind::Cli));
+    assert_eq!(out.cli.active_command(), Some("claude"));
+    let args = out.cli.args.unwrap();
+    assert!(args.contains(&"--include-partial-messages".to_string()));
+    assert_eq!(
+        out.cli.encoding,
+        Some(crate::llm::cli_agent::Encoding::ClaudeStreamJson)
+    );
+    // The API row is untouched, just dormant.
+    assert_eq!(out.backend.as_deref(), Some("openai"));
+    assert_eq!(out.api_key.as_deref(), Some("sk"));
+    assert_eq!(out.model.as_deref(), Some("gpt-5"));
+}
+
+/// Preset matching mirrors the clap arg's `ignore_case`: `aic use Codex` is
+/// the CLI agent, not an unknown-provider error.
+#[test]
+fn apply_use_preset_match_is_case_insensitive() {
+    let c = cfg("openai", None, None, None);
+    let out = super::apply_use(c, "Codex").unwrap();
+    assert_eq!(out.backend_kind, Some(BackendKind::Cli));
+    assert_eq!(out.cli.active_command(), Some("codex"));
+}
+
 #[test]
 fn list_lines_api_branch_shows_resolved_provider() {
     let c = cfg("openai", Some("sk-live-key"), Some("gpt-4o"), None);
