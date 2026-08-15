@@ -54,7 +54,7 @@ _Avoid_: diff stats, file summary, stats block
 
 
 **Run module**:
-The module (`src/run.rs`) that owns the default commit workflow: `default_run` checks the repo state and routes — mid-Conflict it offers resolve-then-continue via the front door, otherwise it runs `commit_run`, the single-commit / Batch-plan spine (plan → staged Diff JSON → Drafted Message → commit). Deps arrive as two purposeful bundles, `RunDeps` (display, planner, messenger, confirm) and — on the conflicted route — `ResolveDeps`; `main.rs` is only the composition root.
+The module (`src/run.rs`) that owns the default commit workflow: `default_run` checks the repo state and routes — mid-Conflict it offers resolve-then-continue via the front door, otherwise it runs `commit_run`, the single-commit / Batch-plan spine (plan → staged Diff JSON → Drafted Message → commit). Deps arrive as two purposeful bundles, `RunDeps` (display, planner, messenger, confirm) and — on the conflicted route — `ResolveDeps`; `src/lib.rs` is the module root and `main.rs` only the thin dispatch (ADR 0015).
 _Avoid_: workflow module, engine, orchestrator
 
 **Diff JSON envelope**:

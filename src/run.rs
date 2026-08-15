@@ -335,7 +335,7 @@ where
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
 /// into [`default_run`].
-pub(crate) async fn default_workflow() -> anyhow::Result<()> {
+pub async fn default_workflow() -> anyhow::Result<()> {
     let resolve = ResolveDeps {
         resolve: Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
             Box::pin(async move { generator::Generator::resolve_conflict(&content).await })

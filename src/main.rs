@@ -1,43 +1,10 @@
-//! Composition root: module declarations, one-time config migrations, and
-//! CLI dispatch. The workflows live in their modules — the default commit Run
-//! in [`run`], the resolve workflow in [`resolve`].
+//! Composition root: one-time config migrations and CLI dispatch. The module
+//! tree lives in the library root (`src/lib.rs`); the workflows live in their
+//! modules — the default commit Run in `aic::run`, the resolve workflow in
+//! `aic::resolve`.
 
-pub mod cli;
-pub mod cli_agent;
-pub mod commit_type;
-pub mod completion;
-pub mod config;
-pub mod confirm;
-pub mod conflict;
-pub mod cursor;
-pub mod decoder;
-pub mod diff;
-pub mod diff_json;
-pub mod display;
-pub mod generator;
-pub mod git;
-pub mod grouping;
-pub mod input;
-pub mod layout;
-pub mod llm;
-pub mod markdown;
-pub mod palette;
-pub mod parse;
-pub mod progress;
-pub mod prompt;
-pub mod reasoning_feed;
-pub mod resolve;
-pub mod retry;
-pub mod run;
-pub mod setup;
-pub mod staging;
-pub mod types;
-pub mod update;
-
-#[cfg(test)]
-mod e2e;
-
-use crate::cli::Commands;
+use aic::cli::Commands;
+use aic::{cli, completion, config, resolve, run, setup, update};
 use clap::Parser;
 use std::io::IsTerminal;
 
@@ -63,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     // only configs byte-identical to a known legacy preset snapshot are
     // rewritten; a custom command is never touched. Notices print to stderr so
     // the file rewrite is transparent; a migration failure is logged but
-    // never blocks the run (the user can still `aic setup` to refresh).
+    // never blocks the run (the user can still run `aic setup` to refresh).
     match config::Config::migrate_if_stale() {
         Ok(notices) => notices.iter().for_each(|n| eprintln!("aic: {n}")),
         Err(e) => eprintln!("aic: config migration skipped: {e:#}"),

@@ -208,7 +208,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
 
 /// Production entry point for `aic resolve` — wires the real LLM resolver and
 /// stdin y/n prompt into [`resolve_run`].
-pub(crate) async fn resolve_workflow() -> anyhow::Result<()> {
+pub async fn resolve_workflow() -> anyhow::Result<()> {
     let resolve: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
