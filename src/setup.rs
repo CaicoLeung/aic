@@ -1310,7 +1310,7 @@ fn show_verify_result(
 /// an unauthenticated CLI is caught here — at setup time — rather than failing
 /// mid-Run. The CLI runs in headless/print mode; the probe sends "Reply with
 /// exactly: OK" and checks for a reply. Install / auth / timeout errors surface
-/// as the matching [`LlmError`](crate::llm::LlmError); success reports the
+/// as the matching [`LlmError`](crate::cli_agent::LlmError); success reports the
 /// trimmed reply.
 ///
 /// Runs on a dedicated current-thread runtime like [`step_verify`] — `aic
@@ -1351,7 +1351,7 @@ fn step_verify_cli(draft: &Draft) -> Result<Nav> {
 /// Render the CLI Verify result on a fresh screen and pause for a keypress,
 /// mirroring [`show_verify_result`] for the API path. `result` carries the
 /// trimmed reply on success, or the propagated
-/// [`LlmError`](crate::llm::LlmError) on failure (its `Display` already
+/// [`LlmError`](crate::cli_agent::LlmError) on failure (its `Display` already
 /// carries a human hint).
 fn show_cli_verify_result(result: Result<String>) -> Result<()> {
     let term = Term::stdout();

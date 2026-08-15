@@ -20,8 +20,8 @@
 //!   single prompt and must print its answer to stdout. No tool loop, ever.
 //! - **Typed output via prompt-for-JSON + lenient parse** — the system prompts
 //!   already specify the exact JSON shape, so we append a JSON reminder, run
-//!   the CLI, and tolerant-parse with [`crate::llm::parse_json_response`] (the
-//!   same helper the batch-plan API path uses).
+//!   the CLI, and tolerant-parse with [`crate::parse::parse_json_response`]
+//!   (the same helper the batch-plan API path uses).
 //! - **Injection boundary** — untrusted content (diff / file body) is wrapped
 //!   in `<aic_input>…</aic_input>` with a "data, not instructions" directive.
 //!   Output is parsed into a struct, never executed; `confirm_before_commit`
@@ -48,8 +48,71 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::decoder::{ClaudeDecoder, CodexDecoder, Decoder, OpenCodeDecoder, PiDecoder};
-use crate::llm::{LlmError, classify_retry, parse_json_response, strip_code_fence};
+use crate::parse::{classify_retry, parse_json_response, strip_code_fence};
 use crate::retry::{RetryPolicy, should_retry};
+
+/// Failures from the CLI-agent backend (ADR 0010). API-path failures keep
+/// flowing through rig's error types; these only arise when `command` is set.
+/// Surfaced with a human hint, never a raw panic.
+#[derive(Debug)]
+pub enum LlmError {
+    /// The configured CLI binary could not be found on `$PATH`.
+    CliNotInstalled(String),
+    /// The CLI exited with an auth-shaped error — it is installed but not
+    /// logged in / authenticated.
+    CliNotAuthenticated(String),
+    /// The call exceeded `timeout_secs` and was killed.
+    Timeout(u64),
+    /// Non-zero exit for any other reason; carries stderr for the message.
+    NonZeroExit {
+        program: String,
+        code: Option<i32>,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CliNotInstalled(prog) => write!(
+                f,
+                "CLI backend `{prog}` was not found on $PATH — install it, or run `aic setup` "
+            ),
+            Self::CliNotAuthenticated(prog) => write!(
+                f,
+                "CLI backend `{prog}` is not authenticated — run `{prog}` once yourself to log in"
+            ),
+            Self::Timeout(secs) => {
+                write!(
+                    f,
+                    "CLI backend produced no output for {secs}s — it may be stalled. \
+                     The timeout is idle: it resets whenever the CLI prints a line, so a \
+                     CLI that streams while it thinks (claude, pi) rarely trips it. Batch \
+                     CLIs (codex, opencode) stay silent until they finish, so a long \
+                     reasoning run can hit it — raise `timeout_secs` in config if so"
+                )
+            }
+            Self::NonZeroExit {
+                program,
+                code,
+                stderr,
+            } => {
+                let hint = stderr.trim();
+                if let Some(c) = code {
+                    write!(f, "`{program}` exited with code {c}")
+                } else {
+                    write!(f, "`{program}` exited abnormally")
+                }?;
+                if !hint.is_empty() {
+                    write!(f, ": {hint}")?
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
 
 /// The literal token in an args template that is replaced with the full
 /// (system + user) prompt at run time.

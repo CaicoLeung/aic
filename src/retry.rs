@@ -3,8 +3,8 @@
 //!
 //! [`RetryReason`] classifies why a single attempt failed, and the module owns
 //! which reasons are retryable — so it never names a rig type. The single
-//! rig→reason mapping lives at the [`crate::llm`] boundary
-//! ([`crate::llm::classify_retry`]); this module is provider-agnostic.
+//! rig→reason mapping lives in [`crate::parse`]
+//! ([`crate::parse::classify_retry`]); this module is provider-agnostic.
 //!
 //! Five retry seams share it: the Drafted-Message (`schema`) and
 //! untyped-completion (`call`) paths via [`retry`] + [`RetryPolicy::transient`],

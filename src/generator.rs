@@ -169,7 +169,7 @@ impl Generator {
     pub async fn resolve_conflict(file_content: &str) -> anyhow::Result<String> {
         let p = PromptConfig::default().resolve_prompt;
         let raw = LlmConfig::load()?.agent(&p).call(file_content).await?;
-        Ok(crate::llm::strip_code_fence(&raw).to_string())
+        Ok(crate::parse::strip_code_fence(&raw).to_string())
     }
 }
 
