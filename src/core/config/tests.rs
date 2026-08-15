@@ -364,6 +364,106 @@ fn apply_use_merge_keeps_banked_value_when_source_field_blank() {
     assert_eq!(openai.api_key.as_deref(), Some("sk-remembered"));
 }
 
+/// `aic use claude` switches to the CLI-agent backend (claude code), not the
+/// Anthropic API provider — preset names win over provider aliases. The API
+/// row stays dormant-but-intact for a later switch back (ADR 0011).
+#[test]
+fn apply_use_preset_name_switches_to_cli_agent() {
+    let c = cfg("openai", Some("sk"), Some("gpt-5"), None);
+    let out = super::apply_use(c, "claude").unwrap();
+    assert_eq!(out.backend_kind, Some(BackendKind::Cli));
+    // The full preset spec lands in config — command, args, timeout_secs,
+    // encoding — pinned against `cli_preset` so a preset change that
+    // `aic use` fails to propagate fails here too.
+    let spec = crate::llm::cli_agent::cli_preset("claude").expect("claude preset");
+    assert_eq!(out.cli.active_command(), Some(spec.command.as_str()));
+    assert_eq!(out.cli.args.as_deref(), Some(spec.args.as_slice()));
+    assert_eq!(out.cli.timeout_secs, Some(spec.timeout_secs));
+    assert_eq!(out.cli.encoding, Some(spec.encoding));
+    // The API row is untouched, just dormant.
+    assert_eq!(out.backend.as_deref(), Some("openai"));
+    assert_eq!(out.api_key.as_deref(), Some("sk"));
+    assert_eq!(out.model.as_deref(), Some("gpt-5"));
+}
+
+/// Preset matching mirrors the clap arg's `ignore_case`: `aic use Codex` is
+/// the CLI agent, not an unknown-provider error.
+#[test]
+fn apply_use_preset_match_is_case_insensitive() {
+    let c = cfg("openai", None, None, None);
+    let out = super::apply_use(c, "Codex").unwrap();
+    assert_eq!(out.backend_kind, Some(BackendKind::Cli));
+    assert_eq!(out.cli.active_command(), Some("codex"));
+}
+
+/// `run_use`'s print contracts, pinned on the pure core: the CLI-agent arm
+/// names the agent and never emits the API-key note (the agent reuses its
+/// own auth — there is no key to warn about).
+#[test]
+fn use_messages_cli_arm_names_agent_and_skips_api_key_note() {
+    let out = super::apply_use(cfg("openai", Some("sk"), None, None), "claude").unwrap();
+    let (line, note) = super::use_messages(&out);
+    assert_eq!(line, "Switched to CLI agent claude.");
+    assert!(note.is_none(), "CLI arm must not print the API-key note");
+}
+
+/// The provider arm warns exactly when the restored profile has no key:
+/// a keyed profile stays silent, a keyless one gets the setup hint.
+#[test]
+fn use_messages_provider_arm_notes_only_a_missing_key() {
+    let mut keyed = cfg("openai", Some("sk"), None, None);
+    keyed.providers.push(ProviderProfile::new(
+        "anthropic",
+        Some("sk-a".into()),
+        None,
+        None,
+    ));
+    let out = super::apply_use(keyed, "anthropic").unwrap();
+    let (line, note) = super::use_messages(&out);
+    assert_eq!(line, "Switched to anthropic.");
+    assert!(note.is_none());
+
+    let mut keyless = cfg("openai", Some("sk"), None, None);
+    keyless
+        .providers
+        .push(ProviderProfile::new("anthropic", None, None, None));
+    let out = super::apply_use(keyless, "anthropic").unwrap();
+    let (line, note) = super::use_messages(&out);
+    assert_eq!(line, "Switched to anthropic.");
+    let note = note.expect("keyless profile must produce the note");
+    assert!(note.contains("no saved API key"), "got: {note}");
+}
+
+/// `aic use <preset>` works on a fresh machine — no config file at all —
+/// because the CLI agent reuses its own auth (the documented "no setup
+/// needed" promise). End-to-end through `run_use` against an isolated
+/// `$HOME`, so the load/default/save path is exercised for real.
+/// Unix-only: `config_path` resolves from `$HOME` there (ADR 0012).
+#[cfg(unix)]
+#[test]
+fn run_use_preset_creates_config_on_fresh_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    temp_env::with_var("HOME", Some(dir.path()), || {
+        super::run_use("claude").unwrap();
+        let saved = super::Config::load().unwrap().expect("config written");
+        assert_eq!(saved.backend_kind, Some(BackendKind::Cli));
+        assert_eq!(saved.cli.active_command(), Some("claude"));
+    });
+}
+
+/// A provider switch still requires an existing config (banked profiles
+/// come from `aic setup`); a fresh machine gets the pointed error.
+/// Unix-only, same `$HOME` reason as above.
+#[cfg(unix)]
+#[test]
+fn run_use_provider_without_config_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    temp_env::with_var("HOME", Some(dir.path()), || {
+        let err = super::run_use("openai").unwrap_err().to_string();
+        assert!(err.contains("no config found"), "got: {err}");
+    });
+}
+
 #[test]
 fn list_lines_api_branch_shows_resolved_provider() {
     let c = cfg("openai", Some("sk-live-key"), Some("gpt-4o"), None);

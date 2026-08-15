@@ -88,7 +88,7 @@ See [CLI-agent presets](#cli-agent-presets) for Codex, pi, and opencode.
 - **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge
 - **Live reasoning** — watch the model think as it decides the split
 - **Conventional Commits** — messages follow the [v1.0.0 spec](https://www.conventionalcommits.org/)
-- **Interactive setup** — `aic setup` is menu-driven; `aic use` switches between saved provider profiles
+- **Interactive setup** — `aic setup` is menu-driven; `aic use` switches between saved provider profiles and CLI agents (claude, codex, pi, opencode)
 
 ## Installation
 
@@ -107,7 +107,7 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 | `aic` | Commit staged files. If nothing is staged, auto-split all unstaged changes into hunk-level atomic commits. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
 | `aic setup` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. |
-| `aic use <provider>` | Switch to a provider already configured via `aic setup`. |
+| `aic use <name>` | Switch to a provider already configured via `aic setup`, or to a CLI agent (claude, codex, pi, opencode). |
 | `aic list` | Show resolved config and where each value comes from. |
 | `aic update` | Update to the latest release. |
 | `aic completion` | Install shell completions. |

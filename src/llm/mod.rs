@@ -228,7 +228,11 @@ impl Provider {
     /// wizard, which only ever offers known names) and [`Self::is_known_name`]
     /// (the strict check config validation uses).
     fn find_meta(s: &str) -> Option<&'static ProviderMeta> {
-        let lower = s.to_lowercase();
+        // ASCII fold: every registry name/alias is ASCII, and clap's
+        // `ignore_case` compares ASCII-insensitively, so one folding rule
+        // governs the whole `aic use` vocabulary (possible values, preset
+        // arm, provider arm) with no accepted-set drift for exotic input.
+        let lower = s.to_ascii_lowercase();
         REGISTRY
             .iter()
             .find(|m| m.name == lower || m.aliases.iter().any(|a| *a == lower))
@@ -255,6 +259,12 @@ impl Provider {
 
     pub fn display(&self) -> &'static str {
         self.meta().display
+    }
+
+    /// This provider's aliases — the extra names [`Self::from_name`] accepts,
+    /// straight from the registry (single source of truth).
+    pub fn aliases(&self) -> &'static [&'static str] {
+        self.meta().aliases
     }
 
     pub fn requires_key(&self) -> bool {

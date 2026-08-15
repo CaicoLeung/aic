@@ -353,6 +353,39 @@ mod tests {
         assert!(body.contains("aic"));
     }
 
+    /// `aic use <TAB>` must offer the full `use` vocabulary — CLI-agent
+    /// presets plus every provider canonical name and alias not shadowed by
+    /// a preset — instead of the `_default` action, which completes nothing
+    /// (the reported "completion not working for aic use"). Asserts exact
+    /// equality with [`cli::use_vocabulary`] (the single source both clap
+    /// and this script derive from), not loose `contains` — the arg's help
+    /// text already names several providers, so a loose check would pass
+    /// even with an empty value list.
+    #[test]
+    fn zsh_completion_offers_use_vocabulary() {
+        let mut buf = Vec::new();
+        write_completion(Shell::Zsh, &mut buf);
+        let script = String::from_utf8(buf).expect("completion output must be valid UTF-8");
+
+        let spec = script
+            .lines()
+            .find(|l| l.contains("':provider"))
+            .unwrap_or_else(|| panic!("no provider spec line in zsh script:\n{script}"));
+        let (_, values) = spec
+            .rsplit_once(":(")
+            .unwrap_or_else(|| panic!("provider spec carries no value list:\n{spec}"));
+        let offered: Vec<&str> = values
+            .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-')
+            .split_whitespace()
+            .collect();
+
+        assert_eq!(
+            offered,
+            cli::use_vocabulary(),
+            "zsh script must offer exactly the `aic use` vocabulary"
+        );
+    }
+
     /// `detect_shell` maps `$SHELL` (basename) to a supported shell; unknown
     /// names and an unset variable yield `None`, so the completion prompt can
     /// fall back to a manual pick. Uses `temp_env` to avoid unsafe env
