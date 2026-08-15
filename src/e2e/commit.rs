@@ -517,7 +517,7 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
     assert_eq!(sent.len(), 1, "planner must be called exactly once");
     let payload = &sent[0];
     assert!(
-        payload.contains(crate::prompt::BINARY_MARKER),
+        payload.contains(crate::llm::prompt::BINARY_MARKER),
         "a zero-hunk file must reach the model as the binary marker, not an empty diff"
     );
     assert!(

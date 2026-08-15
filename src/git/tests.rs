@@ -251,7 +251,7 @@ fn diff_returns_content_for_staged_deletion() {
 fn assert_commit_safe_blocks_mid_merge() {
     let dir = tempfile::tempdir().unwrap();
     init_test_repo(dir.path());
-    crate::conflict::tests::make_content_conflict(dir.path());
+    crate::git::conflict::tests::make_content_conflict(dir.path());
 
     let git = Git::at(dir.path()).unwrap();
     let err = git.assert_commit_safe().expect_err("must abort mid-merge");

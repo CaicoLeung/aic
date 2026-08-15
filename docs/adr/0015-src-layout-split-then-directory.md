@@ -1,6 +1,8 @@
-# ADR 0015: src/ layout policy — split-then-directory, test siblings, lib/bin split
+# ADR 0015: src/ layout policy — domain groups, module directories, test siblings, lib/bin split
 
-- **Status:** Accepted
+- **Status:** Accepted — amended same day: rule 1 inverted from
+  "never regroup" to "domain grouping adopted" (owner's call on navigation
+  grounds; see rule 1).
 - **Date:** 2026-08-15
 
 ## Context
@@ -26,22 +28,23 @@ declarations) and composition root, with e2e tests hanging off it via
 
 ## Decision
 
-Four rules, adopted together:
+1. **Five domain directories group the tree.** `src/` holds `lib.rs`,
+   `main.rs`, `e2e/`, and five group roots: `core/` (config, CLI entry,
+   cross-cutting aliases, self-update, completion), `git/`, `llm/`,
+   `render/`, `workflow/`. Grouping is for **navigation** — the src/ root
+   reads as five domains instead of 32 siblings. It is explicitly *not* a
+   coupling firewall: 55% of `use crate::` edges cross group lines
+   (re-measured after the split), which is expected for topic directories
+   (rust-analyzer's `ide/` depends on `syntax/` the same way). The research
+   doc's measurement remains true — regrouping does not reduce coupling —
+   but the owner judged findability the deciding criterion.
 
-1. **Directories only from splitting — never regrouping.** A module is
-   split into a directory only when the single file has been split for
-   readability — never to group unrelated modules into topic buckets. The
-   split threshold is a seam judgment (would the halves read
-   independently?), not a line count; in practice both splits to date were
-   files past ~1500 lines. `docs/research-src-layout.md`'s anti-regrouping
-   evidence stands.
 
-2. **Every module is a directory (`foo/mod.rs`).** `src/` holds only
-   `lib.rs`, `main.rs`, and module directories; product code, its children,
-   and its tests live together inside the module's directory. The directory
-   `foo/` exists for every module — including small unsplit ones — so the
-   `src/` root reads as the crate's table of contents and no module is a
-   special case.
+2. **Every module is a directory (`foo/mod.rs`) inside its group.** Product
+   code, its children, and its tests live together in the module's directory;
+   the directory `foo/` exists for every module — including small unsplit
+   ones — so no module is a special case and each group reads as a flat
+   list of modules.
 
 3. **Tests live in a sibling `tests.rs` once the file is large.** Small
    modules keep inline `#[cfg(test)] mod tests`. A module whose total (product
@@ -64,7 +67,11 @@ Four rules, adopted together:
   to test-only directories, and a directory whose only child is `tests.rs`
   reads as a half-moved module. One uniform rule (`foo/mod.rs` for every
   module) keeps `src/` a pure table of contents.
-- **Full topic-directory reorganization.** Rejected on the research doc's
+- **Full topic-directory reorganization.** Initially rejected on the
+  research doc's coupling measurement (51% cross-cluster edges, ~191 rewrite
+  lines, no coupling reduction); **overruled by the owner on navigation
+  grounds the same day** — see amended rule 1. The coupling data stands as a
+  true statement about what grouping does and does not buy.
 - **Cargo workspace split.** Rejected: one binary, one deployable, one test
   suite; a workspace adds ceremony with nothing to vary across crates.
 - **Move e2e to `tests/` (integration tests).** Rejected as in Decision 4 —

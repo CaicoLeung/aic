@@ -2,8 +2,7 @@
 //! (`run_git`), staging, and commit authoring. Status listing lives in
 //! [`status`]; diff computation and formatting in [`diff_view`].
 
-use crate::conflict;
-use crate::diff::parse_file_patch;
+use crate::git::diff::parse_file_patch;
 use anyhow::Context;
 use git2::{ObjectType, Repository, Status, Tree};
 use std::path::Path;
@@ -11,6 +10,11 @@ use std::process::{Command, ExitStatus, Stdio};
 
 mod diff_view;
 mod status;
+
+pub mod conflict;
+pub mod diff;
+pub mod diff_json;
+pub mod staging;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -108,7 +112,7 @@ impl Git {
         &self.repo
     }
 
-    /// The conflict-resolution surface over this handle — see `crate::conflict`.
+    /// The conflict-resolution surface over this handle — see `crate::git::conflict`.
     pub fn conflict(&self) -> conflict::Conflict<'_> {
         conflict::Conflict::new(self)
     }

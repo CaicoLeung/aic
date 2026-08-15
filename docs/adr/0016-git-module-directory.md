@@ -22,6 +22,12 @@ is that `git.rs` grew to 1550 lines (~775 of them tests), and the file — not
 the module — stopped reading well. ADR 0015 settled the layout policy this
 fits: directories grow from splits, never from regrouping.
 
+(Amended later the same day: ADR 0015's rule 1 was inverted to adopt domain
+grouping, so `git/` is now also a *group root* holding `conflict/`, `diff/`,
+`diff_json/`, `staging/` alongside this module's own children. The split
+itself — this ADR's subject — is unchanged: the coupled core stays in
+`mod.rs`, module path `crate::git` unchanged.)
+
 ## Decision
 
 `git` becomes a directory root: `src/git/mod.rs` + `src/git/{status,

@@ -10,9 +10,9 @@
 #![cfg(test)]
 
 use super::common::*;
-use crate::generator::validate_batch_plan;
-use crate::grouping::{GroupFile, GroupingConfig, blocks_to_plan, group};
-use crate::staging::Staging;
+use crate::git::staging::Staging;
+use crate::llm::generator::validate_batch_plan;
+use crate::workflow::grouping::{GroupFile, GroupingConfig, blocks_to_plan, group};
 
 /// Initialize a repo with a base tree, then leave unstaged edits that produce
 /// several hunks across several files and directories.

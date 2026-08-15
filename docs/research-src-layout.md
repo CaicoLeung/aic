@@ -25,6 +25,17 @@
 > (`foo/mod.rs`), so `src/` holds only `lib.rs`, `main.rs`, and module
 > directories. The anti-regrouping evidence stands: no topic buckets.
 
+> **Second revision (2026-08-15, later the same day):** the owner then
+> adopted topic grouping anyway — five domain roots (`core/ git/ llm/
+> render/ workflow/`) — overruling this document's anti-regrouping
+> recommendation **on navigation grounds, not coupling grounds**. The
+> re-measurement after the splits (78 edges, 55% crossing group lines)
+> confirms the coupling claim was never contested: directories are a topic
+> index, not a dependency firewall. What the owner bought is findability —
+> five domains at `src/` instead of 32 siblings — at a one-time cost of
+> ~232 path-rewrite sites. Lesson recorded: coupling is the wrong yardstick
+> for a navigation question.
+
 ---
 
 ## Question

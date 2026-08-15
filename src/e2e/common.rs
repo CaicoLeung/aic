@@ -2,16 +2,16 @@
 // All `pub` so the per-feature test modules can pull them in via
 // `use super::common::*;`.
 
-pub(super) use crate::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
-pub(super) use crate::conflict;
-pub(super) use crate::conflict::tests as cf;
-pub(super) use crate::display::{Display, DisplayWrite};
-pub(super) use crate::generator;
+pub(super) use crate::core::types::{BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver};
 pub(super) use crate::git::Git;
+pub(super) use crate::git::conflict;
+pub(super) use crate::git::conflict::tests as cf;
 pub(super) use crate::git::tests as gh;
-pub(super) use crate::resolve::{ResolveDeps, resolve_run};
-pub(super) use crate::run::{RunDeps, commit_run, default_run};
-pub(super) use crate::types::{BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver};
+pub(super) use crate::llm::generator;
+pub(super) use crate::render::display::{Display, DisplayWrite};
+pub(super) use crate::workflow::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
+pub(super) use crate::workflow::resolve::{ResolveDeps, resolve_run};
+pub(super) use crate::workflow::run::{RunDeps, commit_run, default_run};
 pub(super) use git2::Repository;
 pub(super) use parking_lot::Mutex;
 pub(super) use std::collections::VecDeque;

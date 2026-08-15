@@ -1,3 +1,6 @@
+//! The LLM backend layer: API providers, CLI agents, stream decoding,
+//! shared parsing, retries, prompt assembly, message generation.
+//!
 //! Retrying "no usable content" responses from reasoning models.
 //!
 //! Reasoning models (DeepSeek's `deepseek-v4-flash` included) intermittently
@@ -9,18 +12,25 @@
 //! Retrying usually succeeds because the model re-rolls its reasoning path
 //! each attempt (verified against the DeepSeek API: 3 of 4 budget-starved
 //! calls recovered within 3 attempts). All retry seams share the
-//! [`crate::retry`] module; the rig→reason mapping lives in [`crate::parse`]
-//! ([`crate::parse::classify_retry`]), shared with the CLI-agent backend.
+//! [`crate::llm::retry`] module; the rig→reason mapping lives in [`crate::llm::parse`]
+//! ([`crate::llm::parse::classify_retry`]), shared with the CLI-agent backend.
 //! Non-content errors are never retried.
 
-use crate::cli_agent::{CliAgent, CliSpec};
-use crate::parse::{classify_retry, parse_json_response};
-use crate::retry::{RetryPolicy, RetryReason, retry, should_retry};
+pub mod cli_agent;
+pub mod decoder;
+pub mod generator;
+pub mod parse;
+pub mod prompt;
+pub mod retry;
+use crate::llm::cli_agent::{CliAgent, CliSpec};
+use crate::llm::parse::{classify_retry, parse_json_response};
+use crate::llm::retry::{RetryPolicy, RetryReason, retry, should_retry};
 use anyhow::Result;
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::AgentClientExt;
 use rig::completion::{Prompt, StructuredOutputError, TypedPrompt};
+
 use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
 
 pub const DEFAULT_PROVIDER: &str = "openai";
@@ -231,7 +241,7 @@ impl Provider {
     }
 
     /// Whether `s` is a recognized provider name or alias. The strict check
-    /// behind [`ResolvedConfig::validate`](crate::config::ResolvedConfig::validate):
+    /// behind [`ResolvedConfig::validate`](crate::core::config::ResolvedConfig::validate):
     /// a hand-edited config with a typo'd `backend` is rejected at load time
     /// rather than silently routed to the OpenAI default and the wrong
     /// provider's endpoint.
@@ -337,8 +347,8 @@ pub struct LLM {
 
 impl LLM {
     /// The single construction seam: fields are private, so an `LLM` is only
-    /// built via [`ResolvedConfig::to_llm`](crate::config::ResolvedConfig)
-    /// after [`ResolvedConfig::validate`](crate::config::ResolvedConfig).
+    /// built via [`ResolvedConfig::to_llm`](crate::core::config::ResolvedConfig)
+    /// after [`ResolvedConfig::validate`](crate::core::config::ResolvedConfig).
     pub fn new(
         provider: Provider,
         model: String,
@@ -599,11 +609,11 @@ impl LLMAgent {
     /// [`StructuredOutputError::DeserializationError`] — so the parse runs
     /// INSIDE the retry loop: empty output and parse failure both count as
     /// "no usable content" and get the same budget and backoff as
-    /// [`Self::schema`] via the shared [`crate::retry::should_retry`] +
+    /// [`Self::schema`] via the shared [`crate::llm::retry::should_retry`] +
     /// [`RetryPolicy::transient`] (see [`classify_retry`]). A real stream
     /// error (auth, rate limit, network) propagates immediately, never
     /// retried.
-    /// The loop is inline rather than [`crate::retry::retry`]: the reasoning
+    /// The loop is inline rather than [`crate::llm::retry::retry`]: the reasoning
     /// callback is a borrowed `FnMut`, which an escaping async closure could
     /// not reborrow across attempts — the same constraint the old
     /// `stream_with_reasoning` documented. The budget gate and backoff are
@@ -735,7 +745,7 @@ impl Backend {
 /// Which backend a run uses, resolved from config (ADR 0011). The active kind
 /// is the `backend_kind` discriminator (`"cli"` ⇒ [`Cli`], absent / `"api"` ⇒
 /// [`Rig`]); resolved and consistency-validated by
-/// [`crate::config::Config::resolve_backend`].
+/// [`crate::core::config::Config::resolve_backend`].
 pub enum LlmConfig {
     Rig(LLM),
     Cli(CliSpec),
@@ -750,21 +760,21 @@ impl LlmConfig {
     /// absent / `"api"` ⇒ the rig API path, resolved exactly as before
     /// (ADR 0008: the config file is the single source of truth, no env vars).
     pub fn load() -> Result<Self> {
-        let config = crate::config::Config::load().ok().flatten();
+        let config = crate::core::config::Config::load().ok().flatten();
         let kind = match &config {
             Some(c) => c.resolve_backend()?,
-            None => crate::config::BackendKind::Api,
+            None => crate::core::config::BackendKind::Api,
         };
         match kind {
-            crate::config::BackendKind::Cli => Ok(Self::Cli(
+            crate::core::config::BackendKind::Cli => Ok(Self::Cli(
                 config
                     .as_ref()
                     .expect("cli backend implies config present")
                     .cli
                     .to_spec(),
             )),
-            crate::config::BackendKind::Api => {
-                let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
+            crate::core::config::BackendKind::Api => {
+                let resolved = crate::core::config::ResolvedConfig::resolve(config.as_ref());
                 resolved.validate()?;
                 Ok(Self::Rig(resolved.to_llm()))
             }
@@ -784,7 +794,7 @@ impl LlmConfig {
     /// The program name to label a cold-start notice with, when the active
     /// backend expects a live reasoning stream but has not produced one yet.
     /// `Some(name)` for a CLI-agent backend whose envelope
-    /// [`streams_reasoning_live`](crate::cli_agent::Encoding::streams_reasoning_live)
+    /// [`streams_reasoning_live`](crate::llm::cli_agent::Encoding::streams_reasoning_live)
     /// (claude `stream-json`, pi `--mode json`: both emit a live
     /// `thinking_delta` feed whose pre-first-delta wait is a cold start —
     /// hooks/MCP/TTFT, often 6–10 s — not a capability gap); `None`

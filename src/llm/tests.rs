@@ -1,5 +1,5 @@
 use super::*;
-use crate::cli_agent::{CliSpec, Encoding};
+use crate::llm::cli_agent::{CliSpec, Encoding};
 
 #[test]
 fn cold_start_program_behind_the_backend_seam() {

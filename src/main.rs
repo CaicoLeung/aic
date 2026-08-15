@@ -1,10 +1,13 @@
 //! Composition root: one-time config migrations and CLI dispatch. The module
 //! tree lives in the library root (`src/lib.rs`); the workflows live in their
-//! modules — the default commit Run in `aic::run`, the resolve workflow in
-//! `aic::resolve`.
+//! modules — the default commit Run in `aic::workflow::run`, the resolve workflow in
+//! `aic::workflow::resolve`.
 
-use aic::cli::Commands;
-use aic::{cli, completion, config, resolve, run, setup, update};
+use aic::core::cli::Commands;
+use aic::{
+    core::{cli, completion, config, update},
+    workflow::{resolve, run, setup},
+};
 use clap::Parser;
 use std::io::IsTerminal;
 
