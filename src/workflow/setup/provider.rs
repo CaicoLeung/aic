@@ -76,9 +76,12 @@ fn preview_model(p: Provider, draft: &Draft) -> String {
 pub(super) fn provider_choice_label(p: Provider, draft: &Draft) -> String {
     let model = preview_model(p, draft);
     if model.is_empty() {
-        format!("{}  (no default — you'll pick a model)", p.display())
+        format!(
+            "{ICON_SELECT} {}  (no default — you'll pick a model)",
+            p.display()
+        )
     } else {
-        format!("{}  ({model})", p.display())
+        format!("{ICON_SELECT} {}  ({model})", p.display())
     }
 }
 /// A configurable field inside the AI-provider sub-menu.
@@ -287,14 +290,14 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             let has_key = !key.is_empty();
             let items: Vec<String> = if has_key {
                 vec![
-                    format!("Keep current key ({})", mask_key(&key)),
-                    "Enter a new key…".to_string(),
-                    "No API key (keyless server)".to_string(),
+                    format!("{ICON_CHECK} Keep current key ({})", mask_key(&key)),
+                    format!("{ICON_PENCIL}  Enter a new key…"),
+                    format!("{ICON_SELECT} No API key (keyless server)"),
                 ]
             } else {
                 vec![
-                    "No API key (keyless server)".to_string(),
-                    "Enter API key…".to_string(),
+                    format!("{ICON_SELECT} No API key (keyless server)"),
+                    format!("{ICON_PENCIL}  Enter API key…"),
                 ]
             };
             let no_key_idx = if has_key { 2 } else { 0 };
@@ -377,14 +380,14 @@ fn step_base_url(
             let current = effective.as_deref().unwrap_or(default);
             let items: Vec<String> = if has_url {
                 vec![
-                    format!("Keep current URL ({current})"),
-                    format!("Use default ({default})"),
-                    "Enter custom URL…".to_string(),
+                    format!("{ICON_CHECK} Keep current URL ({current})"),
+                    format!("{ICON_SELECT} Use default ({default})"),
+                    format!("{ICON_PENCIL}  Enter custom URL…"),
                 ]
             } else {
                 vec![
-                    format!("Use default ({default})"),
-                    "Enter custom URL…".to_string(),
+                    format!("{ICON_SELECT} Use default ({default})"),
+                    format!("{ICON_PENCIL}  Enter custom URL…"),
                 ]
             };
             let use_default_idx = if has_url { 1 } else { 0 };
@@ -456,7 +459,10 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         };
     }
 
-    let mut items: Vec<String> = models.iter().map(|m| (*m).to_string()).collect();
+    let mut items: Vec<String> = models
+        .iter()
+        .map(|m| format!("{ICON_SELECT} {m}"))
+        .collect();
     items.push(format!("{ICON_PENCIL}  Custom model…"));
     let custom_idx = items.len() - 1;
     let highlight = initial
