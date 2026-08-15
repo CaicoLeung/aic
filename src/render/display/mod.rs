@@ -302,12 +302,14 @@ impl Display {
     /// `+N` and `−M` each right-align in their own column, with the `Σ` glyph
     /// in a column of its own on the total row, so the totals land exactly
     /// under the per-file counts; filenames left-align in the next column,
-    /// tags in the last. Green `+N`, red `−M`, muted filenames, a
-    /// green-bold `[new]` / red-bold `[del]` tag, and a bold-cyan `Σ +X −Y
-    /// total row when more than one file. Binary files render `(binary)`
-    /// right-aligned in the counts region, which widens to fit the label when
-    /// any shown file is binary; a binary file that is new or removed keeps
-    /// its `[new]`/`[del]` tag.
+    /// tags in the last. A zero per-file count renders as a blank column
+    /// (`git diff --stat` never shows zeros); the Σ total row keeps both
+    /// totals even at zero, like git's own summary line. Green `+N`, red
+    /// `−M`, muted filenames, a green-bold `[new]` / red-bold `[del]` tag,
+    /// and a bold-cyan `Σ +X −Y` total row when more than one file. Binary
+    /// files render `(binary)` right-aligned in the counts region, which
+    /// widens to fit the label when any shown file is binary; a binary file
+    /// that is new or removed keeps its `[new]`/`[del]` tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
     /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
@@ -420,21 +422,35 @@ impl Display {
         let sep_str = if sep > 0 { " " } else { "" };
         // Shared `+N`/`−M` column formatter — file rows and the Σ total row
         // pad identically, so the alignment math has one home and the two
-        // rows cannot drift apart.
+        // rows cannot drift apart. Empty strings (a suppressed zero column)
+        // skip styling: `styled("")` would wrap nothing in ANSI escapes and
+        // embed invisible escape pairs mid-line.
         let fmt_columns = |plus: &str, minus: &str| {
+            let paint = |text: &str, s: Style| {
+                if text.is_empty() {
+                    String::new()
+                } else {
+                    self.styled(text, s)
+                }
+            };
             format!(
                 "{}{}{}{}{}",
                 " ".repeat(plus_width.saturating_sub(plus.chars().count())),
-                self.styled(plus, green.clone()),
+                paint(plus, green.clone()),
                 sep_str,
                 " ".repeat(minus_width.saturating_sub(minus.chars().count())),
-                self.styled(minus, red.clone()),
+                paint(minus, red.clone()),
             )
         };
 
         for s in shown_stats {
             // Counts region: Σ column (blank on file rows), then `+N` and
-            // `−M` right-aligned to their own columns.
+            // `−M` right-aligned to their own columns. A zero count renders
+            // as an empty string — `git diff --stat` never shows zeros, and
+            // the column pad keeps the grid aligned for the rows that do
+            // carry the count. The Σ total row below keeps both totals even
+            // at zero (git's own summary line does), and the width math
+            // already sizes to the totals, so geometry is unchanged.
             let counts = if s.binary {
                 let pad = counts_region - binary_label;
                 format!(
@@ -443,8 +459,16 @@ impl Display {
                     self.styled("(binary)", gray.clone())
                 )
             } else {
-                let plus = format!("+{}", s.added);
-                let minus = format!("−{}", s.deleted);
+                let plus = if s.added > 0 {
+                    format!("+{}", s.added)
+                } else {
+                    String::new()
+                };
+                let minus = if s.deleted > 0 {
+                    format!("−{}", s.deleted)
+                } else {
+                    String::new()
+                };
                 format!("{lead}{sigma_blank}{}", fmt_columns(&plus, &minus))
             };
             // Name column: truncated with `…` when wider than the cap,

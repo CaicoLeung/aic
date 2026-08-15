@@ -233,9 +233,11 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
     // the counts, not the tag). "(binary)" spans the counts region; the
-    // name pads to align with src/old.rs (10 chars).
+    // name pads to align with src/old.rs (10 chars). The deletion-only file
+    // renders no `+0` column (git --stat convention) — its `−12` still ends
+    // where the Σ row's `−12` ends.
     assert_eq!(got[0], "  (binary)  img.png    [new]");
-    assert_eq!(got[1], "    +0 −12  src/old.rs [del]");
+    assert_eq!(got[1], "       −12  src/old.rs [del]");
     assert_eq!(got[2], "  Σ +0 −12  (2 files)");
     assert_eq!(rows, 3, "2 files + total");
 }
@@ -272,8 +274,11 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
     let got = lines.lock().clone();
     // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
     // sits under the total's `0` of `+10`; both end at the same column.
-    assert_eq!(got[0], "     +5 −0  a.rs");
-    assert_eq!(got[1], "     +5 −0  b.rs");
+    // The zero-deletion column renders blank (git --stat convention) but
+    // keeps its reserved width, so the name still lands where the Σ row's
+    // `(2 files)` label starts.
+    assert_eq!(got[0], "     +5     a.rs");
+    assert_eq!(got[1], "     +5     b.rs");
     assert_eq!(got[2], "  Σ +10 −0  (2 files)");
     assert_eq!(rows, 3, "2 files + total");
 }
@@ -351,9 +356,10 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
     // base region (Σ 2 + `+1` 2 + gap 1 + `−0` 2 = 7) widens to 8 for
     // `(binary)`; the text row and Σ row each carry one leading pad, so
     // all three rows' counts end at the same column and the filenames
-    // start at the same column.
+    // start at the same column. The text row's zero-deletion column renders
+    // blank but keeps its width, so `a.rs` still lands under `x.bin`.
     assert_eq!(got[0], "  (binary)  x.bin");
-    assert_eq!(got[1], "     +1 −0  a.rs");
+    assert_eq!(got[1], "     +1     a.rs");
     assert_eq!(got[2], "   Σ +1 −0  (2 files)");
     assert_eq!(rows, 3, "2 files + total");
 }
@@ -392,9 +398,10 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
     // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
     // gap (1) + `−0` (2) = 7; name column = 76 - 7 (counts) - 2 (gap)
     // - 6 (tag column) = 61 → 60 chars + "…". File rows carry a blank
-    // Σ column.
-    assert_eq!(got[0], format!("    +1 −0  {}", "x".repeat(60) + "…"));
-    assert_eq!(got[1], format!("    +1 −0  a.rs{} [new]", " ".repeat(57)));
+    // Σ column; the zero-deletion column renders blank but keeps its
+    // width, so the name column math is unchanged.
+    assert_eq!(got[0], format!("    +1     {}", "x".repeat(60) + "…"));
+    assert_eq!(got[1], format!("    +1     a.rs{} [new]", " ".repeat(57)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
