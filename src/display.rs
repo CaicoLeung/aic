@@ -132,8 +132,10 @@ impl Display {
     // ------------------------------------------------------------------
 
     /// Apply a console `Style` to text. Returns plain text when colors
-    /// are disabled (piped output, NO_COLOR, non-TTY).
-    fn styled(&self, text: &str, s: Style) -> String {
+    /// are disabled (piped output, NO_COLOR, non-TTY). `pub(crate)` because
+    /// the resolve-flow UI in `conflict` renders through these same
+    /// primitives — one seam, no parallel styling path.
+    pub(crate) fn styled(&self, text: &str, s: Style) -> String {
         if self.colors {
             s.apply_to(text).to_string()
         } else {
@@ -146,13 +148,13 @@ impl Display {
     /// whole output block sits at a uniform inset — nothing flush with the
     /// terminal edge. Content that wants deeper nesting keeps its own leading
     /// indent in the formatted string; `emit` adds the base margin on top.
-    fn emit(&self, line: &str) {
+    pub(crate) fn emit(&self, line: &str) {
         self.out.write_line(&format!("{MARGIN}{line}"));
     }
 
     /// Blank separator line — written bare (no margin) to avoid trailing
     /// whitespace.
-    fn emit_blank(&self) {
+    pub(crate) fn emit_blank(&self) {
         self.out.write_line("");
     }
 
