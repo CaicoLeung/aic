@@ -5,10 +5,9 @@
 //! This is the block-level diff engine called out in the charter: parse diffs,
 //! split into coherent atomic blocks across hunks/files, group related changes,
 //! detect logical commit boundaries. The LLM planner ([`crate::generator`])
-//! remains the production splitter; this module is the deterministic
-//! foundation underneath it — a predictable, testable baseline that can later
-//! serve as a fallback (no API key) or a pre-grouper. v1 delivers the engine,
-//! its heuristics, and tests; wiring it into the live Run is a follow-up.
+//! remains the production splitter; this module is the deterministic fallback
+//! underneath it — when the LLM's plan fails validation, the Run regroups via
+//! [`plan_from_diffs`] and completes instead of failing (see [`crate::run`]).
 //!
 //! # The two v1 heuristics
 //!
