@@ -356,14 +356,13 @@ mod tests {
     /// `aic use <TAB>` must offer the full `use` vocabulary — CLI-agent
     /// presets plus every provider canonical name and alias not shadowed by
     /// a preset — instead of the `_default` action, which completes nothing
-    /// (the reported "completion not working for aic use"). Asserts on the
-    /// actual value list in the provider spec line, not on loose `contains`
-    /// (the arg's help text already names several providers).
+    /// (the reported "completion not working for aic use"). Asserts exact
+    /// equality with [`cli::use_vocabulary`] (the single source both clap
+    /// and this script derive from), not loose `contains` — the arg's help
+    /// text already names several providers, so a loose check would pass
+    /// even with an empty value list.
     #[test]
     fn zsh_completion_offers_use_vocabulary() {
-        use crate::llm::Provider;
-        use crate::llm::cli_agent::PRESETS;
-
         let mut buf = Vec::new();
         write_completion(Shell::Zsh, &mut buf);
         let script = String::from_utf8(buf).expect("completion output must be valid UTF-8");
@@ -380,30 +379,10 @@ mod tests {
             .split_whitespace()
             .collect();
 
-        // Same expectation `use_values()` builds: presets first, then
-        // provider names/aliases, a preset-shadowed alias appearing once.
-        let mut expected: Vec<&str> = PRESETS.to_vec();
-        expected.extend(
-            Provider::all()
-                .iter()
-                .flat_map(|p| std::iter::once(p.name()).chain(p.aliases().iter().copied())),
-        );
-        let mut seen = std::collections::HashSet::new();
-        for word in expected
-            .into_iter()
-            .filter(|w| seen.insert(*w))
-            .collect::<Vec<_>>()
-        {
-            assert!(
-                offered.contains(&word),
-                "`aic use` completion does not offer {word:?} (offered: {offered:?})"
-            );
-        }
-        // The shadowed alias appears exactly once (the CLI agent claude).
         assert_eq!(
-            offered.iter().filter(|&&w| w == "claude").count(),
-            1,
-            "claude should appear once (the CLI agent), offered: {offered:?}"
+            offered,
+            cli::use_vocabulary(),
+            "zsh script must offer exactly the `aic use` vocabulary"
         );
     }
 

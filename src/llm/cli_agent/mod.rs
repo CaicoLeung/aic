@@ -10,10 +10,13 @@
 //! ## Shape
 //! The backend is a **generic command template**, not one adapter per CLI: a
 //! [`CliSpec`] carries the program + an args template containing a literal
-//! `{prompt}` placeholder. Selection is by the `command` config field being
-//! set — there are no magic `backend` names, so nothing collides with the
-//! provider registry (e.g. `claude` stays an Anthropic alias). Presets are
-//! [`cli_preset`] snippets offered by `aic setup`, not reserved words.
+//! `{prompt}` placeholder. Selection at run time is by the `backend_kind`
+//! discriminator plus `command` (ADR 0011) — but the preset names (`claude`,
+//! `codex`, `pi`, `opencode`) are **reserved words in `aic use`** that win
+//! over colliding provider aliases: `aic use claude` switches to this CLI
+//! agent, `aic use anthropic` to the Anthropic API provider. On disk a preset
+//! is just the snippet [`cli_preset`] returns, written as ordinary fields; a
+//! hand-written `command` matching no preset works identically.
 //!
 //! ## Contract
 //! - **Headless/print mode only** — never agentic/tool-use. The CLI is fed a
@@ -248,9 +251,11 @@ impl Encoding {
     }
 }
 
-/// Built-in preset templates offered by `aic setup` and the docs. These are
-/// **not** reserved `backend` names — `aic setup` writes the resolved
-/// `command`/`args` into config, and selection is purely "`command` is set".
+/// Built-in preset templates offered by `aic setup`, the docs, and `aic use`.
+/// The names are reserved words in `aic use` (see [`PRESETS`]); everywhere
+/// else they are plain snippets — `aic setup` writes the resolved
+/// `command`/`args` into config, and run-time selection is by `backend_kind`
+/// plus "`command` is set" (ADR 0011), never by matching a magic name.
 ///
 /// Every preset uses print/headless mode. The stdout [`Encoding`] is
 /// **stated per arm** — the preset is the single source of truth for which
@@ -266,6 +271,10 @@ impl Encoding {
 /// yields [`Encoding::CodexJson`] (answer via `agent_message` at
 /// `item.completed`; reasoning best-effort).
 pub fn cli_preset(name: &str) -> Option<CliSpec> {
+    // Case-insensitive, mirroring clap's `ignore_case` for the same word in
+    // `aic use` (see [`is_preset`]; callers never pre-fold).
+    let name = name.to_ascii_lowercase();
+    let name = name.as_str();
     // Least-permission defaults (ADR 0010): each preset pins itself to a
     // text-only / read-only stance so the "never agentic / no tool use"
     // promise is enforced by the invocation itself, not by trusting each
@@ -382,8 +391,20 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
     })
 }
 
-/// Names of the built-in presets, in setup-presentation order.
+/// Reserved preset names, in `aic use` vocabulary order (presets first —
+/// they win at match time over colliding provider aliases). Also the menu
+/// [`aic setup`](crate::workflow::setup) offers.
 pub const PRESETS: &[&str] = &["claude", "codex", "pi", "opencode"];
+
+/// Whether `name` is a CLI-agent preset name, case-insensitively — the
+/// reserved words `aic use` routes to the CLI-agent Backend ahead of provider
+/// aliases (`claude` = this CLI agent, not the Anthropic alias). Matching is
+/// ASCII-case-insensitive, mirroring clap's `ignore_case` and
+/// [`Provider::from_name`](crate::llm::Provider::from_name) — one folding rule
+/// governs the whole `aic use` vocabulary.
+pub fn is_preset(name: &str) -> bool {
+    PRESETS.contains(&name.to_ascii_lowercase().as_str())
+}
 
 /// Known historical preset shapes whose args differ from the current
 /// [`cli_preset`]. Each entry is `(name, command, legacy_args)`. Used by

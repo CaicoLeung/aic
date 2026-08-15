@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::llm::cli_agent::cli_preset;
+use crate::llm::cli_agent::{cli_preset, is_preset};
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, LLM, Provider};
 
 /// The CLI-agent Backend's four config fields — a unit (command + argv
@@ -816,7 +816,7 @@ fn apply_use(mut config: Config, name: &str) -> Result<Config> {
     // are stateless (auth is the CLI's own), so switching just overwrites
     // the CLI fields and flips the discriminator; the API fields stay
     // dormant-but-intact for a later switch back (ADR 0011).
-    if let Some(spec) = cli_preset(&name.to_ascii_lowercase()) {
+    if let Some(spec) = cli_preset(name) {
         config.cli = CliConfig {
             command: Some(spec.command),
             args: Some(spec.args),
@@ -876,40 +876,64 @@ fn apply_use(mut config: Config, name: &str) -> Result<Config> {
     Ok(config)
 }
 
+/// Pure core of `aic use`'s output: the stdout line naming the switched-to
+/// Backend, plus (API arm only, when the restored profile has no key) the
+/// stderr note. Split from [`run_use`] (cf. [`list_lines`]/[`run_list`]) so
+/// the print contracts — agent line, no key-note on the CLI arm — are
+/// unit-testable without capturing process stdout. Only called on a config
+/// [`apply_use`] just returned, so both arms' `expect`s are structural.
+fn use_messages(config: &Config) -> (String, Option<String>) {
+    match config.backend_kind {
+        Some(BackendKind::Cli) => {
+            let command = config
+                .cli
+                .active_command()
+                .expect("apply_use's preset arm always sets a command");
+            (format!("Switched to CLI agent {command}."), None)
+        }
+        _ => {
+            let normalized = config
+                .backend
+                .as_deref()
+                .expect("apply_use's provider arm always sets `backend`");
+            let had_key = config
+                .api_key
+                .as_deref()
+                .map(|k| !k.is_empty())
+                .unwrap_or(false);
+            let note = (!had_key).then(|| {
+                format!(
+                    "note: {normalized} has no saved API key — run `aic setup` to add one if \
+                     it's needed"
+                )
+            });
+            (format!("Switched to {normalized}."), note)
+        }
+    }
+}
+
 /// `aic use <name>` — switch the active Backend: a CLI-agent preset name
 /// (claude, codex, pi, opencode) activates that CLI agent (no setup needed —
-/// the agent reuses its own auth); a provider name restores a remembered
-/// profile without re-entering the key/model (the provider must already
-/// have been configured via `aic setup`). The inactive Backend's fields stay
-/// dormant for a switch back, per ADR 0011.
+/// the agent reuses its own auth, so it works even on a machine with no
+/// config yet); a provider name restores a remembered profile without
+/// re-entering the key/model (the provider must already have been configured
+/// via `aic setup`). The inactive Backend's fields stay dormant for a switch
+/// back, per ADR 0011.
 pub fn run_use(name: &str) -> Result<()> {
-    let mut config = Config::load()
-        .ok()
-        .flatten()
-        .context("no config found — run `aic setup` to configure a provider first")?;
+    let mut config = match Config::load().ok().flatten() {
+        Some(c) => c,
+        // Presets are stateless (auth is the CLI's own): a fresh machine can
+        // switch to one with no config file at all.
+        None if is_preset(name) => Config::default(),
+        None => anyhow::bail!("no config found — run `aic setup` to configure a provider first"),
+    };
     config = apply_use(config, name)?;
 
-    if config.backend_kind == Some(BackendKind::Cli) {
-        let command = config.cli.active_command().unwrap_or(name);
-        config.save()?;
-        println!("Switched to CLI agent {command}.");
-        return Ok(());
-    }
-
-    // The activated profile's key (now in the top-level row after apply_use).
-    let normalized = config.backend.as_deref().unwrap_or(name);
-    let had_key = config
-        .api_key
-        .as_deref()
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
+    let (line, note) = use_messages(&config);
     config.save()?;
-
-    println!("Switched to {normalized}.");
-    if !had_key {
-        eprintln!(
-            "note: {normalized} has no saved API key — run `aic setup` to add one if it's needed"
-        );
+    println!("{line}");
+    if let Some(note) = note {
+        eprintln!("{note}");
     }
     Ok(())
 }
