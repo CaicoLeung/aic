@@ -24,18 +24,20 @@ pub(super) fn smoke_check(program: &str) -> String {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return format!(
-                "⚠️  `{program}` not found on $PATH — install + authenticate it before using aic"
+                "{ICON_ALERT}  `{program}` not found on $PATH — install + authenticate it before using aic"
             );
         }
-        Err(_) => return format!("⚠️  could not verify `{program}`"),
+        Err(_) => return format!("{ICON_ALERT}  could not verify `{program}`"),
     };
     let deadline = std::time::Instant::now() + SMOKE_TIMEOUT;
     loop {
         match cmd.try_wait() {
-            Ok(Some(status)) if status.success() => return format!("✅ `{program}` found"),
+            Ok(Some(status)) if status.success() => {
+                return format!("{ICON_CHECK} `{program}` found");
+            }
             Ok(Some(_)) => {
                 return format!(
-                    "⚠️  `{program}` ran but `--version` exited non-zero — it may still work"
+                    "{ICON_ALERT}  `{program}` ran but `--version` exited non-zero — it may still work"
                 );
             }
             Ok(None) if std::time::Instant::now() < deadline => {
@@ -46,10 +48,10 @@ pub(super) fn smoke_check(program: &str) -> String {
                 let _ = cmd.kill();
                 let _ = cmd.wait();
                 return format!(
-                    "⚠️  `{program}` did not respond to `--version` within 3s — it may not support print mode, or is not installed"
+                    "{ICON_ALERT}  `{program}` did not respond to `--version` within 3s — it may not support print mode, or is not installed"
                 );
             }
-            Err(_) => return format!("⚠️  could not verify `{program}`"),
+            Err(_) => return format!("{ICON_ALERT}  could not verify `{program}`"),
         }
     }
 }
@@ -147,13 +149,15 @@ fn show_verify_result(
     term.write_line("")?;
     match result {
         Ok(reply) => {
-            term.write_line("✅ Success — the provider responded.")?;
+            term.write_line(&format!("{ICON_CHECK} Success — the provider responded."))?;
             if !reply.is_empty() {
                 term.write_line(&format!("  Reply: {reply}"))?;
             }
         }
         Err(e) => {
-            term.write_line("❌ Failed — the provider did not accept the request.")?;
+            term.write_line(&format!(
+                "{ICON_CROSS} Failed — the provider did not accept the request."
+            ))?;
             term.write_line(&format!("  Error: {e}"))?;
             term.write_line("")?;
             term.write_line("  Common causes: wrong API key, model name, base URL, or network.")?;
@@ -221,13 +225,13 @@ fn show_cli_verify_result(result: Result<String>) -> Result<()> {
     term.write_line("")?;
     match result {
         Ok(reply) => {
-            term.write_line("✅ Success — the CLI responded.")?;
+            term.write_line(&format!("{ICON_CHECK} Success — the CLI responded."))?;
             if !reply.is_empty() {
                 term.write_line(&format!("  Reply: {reply}"))?;
             }
         }
         Err(e) => {
-            term.write_line("❌ Failed — the CLI did not answer.")?;
+            term.write_line(&format!("{ICON_CROSS} Failed — the CLI did not answer."))?;
             term.write_line(&format!("  Error: {e}"))?;
             term.write_line("")?;
             term.write_line("  Common causes: the CLI is not installed, not")?;

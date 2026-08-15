@@ -457,7 +457,7 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
     }
 
     let mut items: Vec<String> = models.iter().map(|m| (*m).to_string()).collect();
-    items.push("✏️  Custom model…".to_string());
+    items.push(format!("{ICON_PENCIL}  Custom model…"));
     let custom_idx = items.len() - 1;
     let highlight = initial
         .as_deref()

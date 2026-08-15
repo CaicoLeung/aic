@@ -46,7 +46,7 @@ pub fn run_setup() -> Result<()> {
         Some(config) => {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
-            println!("\n✅ Saved to {}\n", path.display());
+            println!("\n{ICON_CHECK} Saved to {}\n", path.display());
             Ok(())
         }
         None => {
@@ -73,19 +73,28 @@ fn show_screen(section: &str) -> Result<()> {
 
 // Glyphs that visually distinguish each setup item across the menus. Each
 // appears at the start of its menu row so items are scannable at a glance
-// (AIC-15). Plain `&str` constants keep the menu code readable as labels.
-// ASCII-only on purpose: emoji with variation selectors render as tofu or
-// double-wide boxes in CJK-ambiguous terminals.
-const ICON_PROVIDER: &str = "@@";
-const ICON_API_KEY: &str = "**";
-const ICON_BASE_URL: &str = "//";
-const ICON_MODEL: &str = "{}";
-const ICON_CONFIRM: &str = "[ ]";
-const ICON_SAVE: &str = "->";
-const ICON_VERIFY: &str = ">>";
-const ICON_DONE: &str = "<-";
-const ICON_CLI: &str = ">_";
-const ICON_BACKEND: &str = "( )";
+// (AIC-15). Nerd Font icons (nf-md-*) written as escapes with their names,
+// so the source stays legible without a patched font. Deliberate trade:
+// they need a Nerd Font-patched terminal and render as tofu without one —
+// emoji were rejected because their VS16 forms go tofu or double-wide in
+// CJK-ambiguous terminals, and plain ASCII read as noise.
+const ICON_PROVIDER: &str = "\u{f167a}"; // nf-md-robot_outline
+const ICON_API_KEY: &str = "\u{f0306}"; // nf-md-key
+const ICON_BASE_URL: &str = "\u{f059f}"; // nf-md-web
+const ICON_MODEL: &str = "\u{f09d1}"; // nf-md-brain
+const ICON_CONFIRM: &str = "\u{f014c}"; // nf-md-clipboard_outline
+const ICON_SAVE: &str = "\u{f0193}"; // nf-md-content_save
+const ICON_VERIFY: &str = "\u{f1616}"; // nf-md-connection
+const ICON_DONE: &str = "\u{f004d}"; // nf-md-arrow_left
+const ICON_CLI: &str = "\u{f018d}"; // nf-md-console
+const ICON_BACKEND: &str = "\u{f0a1a}"; // nf-md-toggle_switch_outline
+
+// Status markers for verify outcomes and the save line — same Nerd Font
+// family, same trade.
+const ICON_CHECK: &str = "\u{f05e1}"; // nf-md-check_circle_outline
+const ICON_CROSS: &str = "\u{f1398}"; // nf-md-close_thick
+const ICON_ALERT: &str = "\u{f0026}"; // nf-md-alert
+const ICON_PENCIL: &str = "\u{f0cb6}"; // nf-md-pencil_outline
 
 /// Per-step outcome for the setup state machine.
 #[derive(PartialEq)]
