@@ -74,13 +74,15 @@ fn show_screen(section: &str) -> Result<()> {
 // Glyphs that visually distinguish each setup item across the menus. Each
 // appears at the start of its menu row so items are scannable at a glance
 // (AIC-15). Plain `&str` constants keep the menu code readable as labels.
-const ICON_PROVIDER: &str = "🤖";
-const ICON_API_KEY: &str = "🔑";
-const ICON_BASE_URL: &str = "🌐";
-const ICON_MODEL: &str = "🧠";
-const ICON_CONFIRM: &str = "📋";
-const ICON_SAVE: &str = "💾";
-const ICON_VERIFY: &str = "🔌";
+// ASCII-only on purpose: emoji with variation selectors render as tofu or
+// double-wide boxes in CJK-ambiguous terminals.
+const ICON_PROVIDER: &str = "@@";
+const ICON_API_KEY: &str = "**";
+const ICON_BASE_URL: &str = "//";
+const ICON_MODEL: &str = "{}";
+const ICON_CONFIRM: &str = "[ ]";
+const ICON_SAVE: &str = "->";
+const ICON_VERIFY: &str = ">>";
 const ICON_DONE: &str = "<-";
 const ICON_CLI: &str = ">_";
 const ICON_BACKEND: &str = "( )";

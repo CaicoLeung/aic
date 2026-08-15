@@ -276,11 +276,11 @@ fn submenu_labels_show_effective_value() {
             ProviderEntry::Done
         ]
     );
-    assert_eq!(labels[0], "🔑 API key — ••••••");
-    assert_eq!(labels[1], "🧠 Model — deepseek-v4-pro");
+    assert_eq!(labels[0], format!("{ICON_API_KEY} API key — ••••••"));
+    assert_eq!(labels[1], format!("{ICON_MODEL} Model — deepseek-v4-pro"));
     assert_eq!(
         labels[2],
-        "🔌 Verify — test this provider with a sample request"
+        format!("{ICON_VERIFY} Verify — test this provider with a sample request")
     );
     assert_eq!(labels[3], format!("{ICON_DONE} Done — back to main menu"));
 }
