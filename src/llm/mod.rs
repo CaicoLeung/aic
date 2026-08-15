@@ -520,6 +520,24 @@ macro_rules! with_agent {
 }
 
 impl LLMAgent {
+    /// Collapse an error escaping an LLM call to one line naming the
+    /// provider: `{provider} request failed: {root cause}`. rig's error
+    /// `Display` embeds its source's text at every chain level, so an
+    /// unflattened chain prints the provider's JSON error body once per
+    /// anyhow "Caused by" level — four-plus repetitions on an HTTP 401.
+    /// [`anyhow::Error::root_cause`] keeps only the deepest line: the
+    /// provider's actual message, the one a user needs. Applied at the
+    /// public-method boundary, AFTER retry classification
+    /// ([`classify_retry`](crate::llm::parse::classify_retry) downcasts the
+    /// rig error — flattening any earlier would break retry).
+    fn provider_error(&self, err: anyhow::Error) -> anyhow::Error {
+        anyhow::anyhow!(
+            "{} request failed: {}",
+            self.llm.provider.display(),
+            err.root_cause()
+        )
+    }
+
     /// One untyped-completion attempt via rig's `prompt`. Returns
     /// [`anyhow::Result`] so the provider-client `?`s inside [`with_agent!`]
     /// convert to `anyhow::Error`; the retry closure in [`Self::call`] maps
@@ -539,7 +557,7 @@ impl LLMAgent {
     pub async fn call(&self, prompt: &str) -> Result<String> {
         let this = self.clone();
         let prompt = prompt.to_string();
-        Ok(retry(
+        let outcome = retry(
             move || {
                 let this = this.clone();
                 let prompt = prompt.clone();
@@ -554,7 +572,8 @@ impl LLMAgent {
             },
             RetryPolicy::transient(),
         )
-        .await?)
+        .await;
+        outcome.map_err(|e| self.provider_error(anyhow::Error::new(e)))
     }
 
     /// One-shot connectivity check: a single minimal completion attempt with
@@ -567,7 +586,10 @@ impl LLMAgent {
     /// and the user can act on it. Returns the model's trimmed reply on
     /// success.
     pub async fn verify(&self) -> Result<String> {
-        let text = self.prompt_once("Reply with exactly: OK").await?;
+        let text = self
+            .prompt_once("Reply with exactly: OK")
+            .await
+            .map_err(|e| self.provider_error(e))?;
         Ok(text.trim().to_string())
     }
 
@@ -637,10 +659,29 @@ impl LLMAgent {
     where
         T: serde::de::DeserializeOwned,
     {
+        self.stream_typed_retry(prompt, &mut on_reasoning)
+            .await
+            .map_err(|e| self.provider_error(e))
+    }
+
+    /// The retry loop behind [`Self::stream_typed_with_reasoning`], split out
+    /// so the public method can flatten the escaping error at its boundary.
+    /// The reasoning callback stays a borrowed reborrow here for the same
+    /// reason the loop is inline rather than
+    /// [`crate::llm::retry::retry`]: an escaping async closure cannot reborrow
+    /// a borrowed `FnMut` across attempts.
+    async fn stream_typed_retry<T>(
+        &self,
+        prompt: &str,
+        on_reasoning: &mut impl FnMut(&str),
+    ) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let mut attempts = 0usize;
         loop {
             let raw = self
-                .stream_once_with_reasoning(prompt, &mut on_reasoning)
+                .stream_once_with_reasoning(prompt, &mut *on_reasoning)
                 .await?;
             let parsed = if raw.trim().is_empty() {
                 Err(anyhow::Error::new(StructuredOutputError::EmptyResponse))
@@ -685,7 +726,7 @@ impl LLMAgent {
     {
         let this = self.clone();
         let prompt = prompt.to_string();
-        Ok(retry(
+        let outcome = retry(
             move || {
                 let this = this.clone();
                 let prompt = prompt.clone();
@@ -697,7 +738,8 @@ impl LLMAgent {
             },
             RetryPolicy::transient(),
         )
-        .await?)
+        .await;
+        outcome.map_err(|e| self.provider_error(anyhow::Error::new(e)))
     }
 }
 

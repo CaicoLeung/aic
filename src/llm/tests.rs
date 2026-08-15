@@ -212,3 +212,21 @@ fn ollama_and_openai_compatible_do_not_require_keys() {
     assert!(Provider::OpenAI.requires_key());
     assert!(Provider::Xai.requires_key());
 }
+
+/// [`LLMAgent::provider_error`] collapses an error chain to one line: the
+/// provider's name plus the ROOT cause only. rig's error `Display` embeds
+/// its source's text at every level, so without the collapse an HTTP
+/// failure prints its JSON body once per anyhow "Caused by" level.
+#[test]
+fn provider_error_collapses_chain_to_root_cause() {
+    let agent = LLM::new(Provider::OpenAI, "gpt-5".into(), "k".into(), None).agent("p");
+    // root → wrapped twice, each layer's Display containing the inner text.
+    let root = "Invalid status code 401 Unauthorized with message: {code:invalid_api_key}";
+    let err = anyhow::anyhow!(root)
+        .context("HttpError: inner")
+        .context("CompletionError: HttpError: inner");
+    let flat = format!("{:#}", agent.provider_error(err));
+    assert!(flat.starts_with("OpenAI request failed: "), "got: {flat}");
+    assert_eq!(flat.matches("401").count(), 1, "root cause once: {flat}");
+    assert!(!flat.contains("HttpError"), "wrappers dropped: {flat}");
+}
