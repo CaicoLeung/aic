@@ -331,6 +331,20 @@ pub fn blocks_to_plan(blocks: &[Block]) -> BatchPlanOutput {
     }
 }
 
+/// Deterministic plan over raw per-file workdir diffs — the second producer
+/// behind the `BatchPlanner` seam, used as the Run's fallback when the LLM's
+/// plan fails validation. `diffs` must be in repo order (the order the LLM
+/// saw); the engine preserves it, so file and batch order match the LLM path.
+/// Uses the conservative default [`GroupingConfig`] — a fallback must be
+/// predictable above all.
+pub fn plan_from_diffs(diffs: &[(String, String)]) -> BatchPlanOutput {
+    let files: Vec<GroupFile> = diffs
+        .iter()
+        .map(|(path, diff)| GroupFile::from_diff(path, diff))
+        .collect();
+    blocks_to_plan(&group(&files, &GroupingConfig::default()))
+}
+
 /// Unchanged old-side lines strictly between two consecutive hunks' regions.
 /// `next` must follow `prev` in file order. Overlap (regions touch or cross)
 /// yields `0`.
@@ -774,5 +788,30 @@ diff --git a/a.rs b/a.rs\n\
         // Also via the test helper, which sets every field.
         let b = db("fn x", 1, 4, 1, 4);
         assert_eq!(b.old_count, 4);
+    }
+
+    // The fallback adapter: raw diffs in repo order → a plan that validates
+    // against the same hunk counts the LLM path is held to.
+    #[test]
+    fn plan_from_diffs_produces_a_valid_plan() {
+        let diffs = vec![
+            (
+                "src/a.rs".to_string(),
+                "@@ -1,3 +1,3 @@\n ctx\n-old\n+new\n ctx\n".to_string(),
+            ),
+            (
+                "docs/b.md".to_string(),
+                "@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n".to_string(),
+            ),
+        ];
+        let plan = plan_from_diffs(&diffs);
+        let counts = [("src/a.rs".to_string(), 1), ("docs/b.md".to_string(), 1)];
+        assert!(
+            validate_batch_plan(&plan, &counts).is_ok(),
+            "fallback plan must satisfy the same contract: {plan:?}"
+        );
+        // Conservative defaults: different directories stay separate batches,
+        // in repo order.
+        assert_eq!(plan.batches.len(), 2);
     }
 }
