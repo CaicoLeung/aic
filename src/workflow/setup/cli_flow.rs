@@ -15,7 +15,7 @@ use crate::llm::cli_agent::{PRESETS, cli_preset};
 /// API-provider config. Returns `true` only on Ctrl-C (cancel setup).
 pub(super) fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
     loop {
-        show_screen()?;
+        show_screen("CLI agent")?;
         let rows = cli_menu_rows(draft.active_cli_command().is_some());
         let labels: Vec<String> = rows.iter().map(CliRow::label).collect();
         match opt_nav("CLI agent backend", &labels, 0)? {
@@ -24,7 +24,7 @@ pub(super) fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
             OptNav::Value(i) => match rows.get(i).copied() {
                 Some(CliRow::Preset(name)) => {
                     let spec = cli_preset(name).unwrap();
-                    println!("\n{}", smoke_check(&spec.command));
+                    eprintln!("\n{}", smoke_check(&spec.command));
                     draft.cli = CliConfig {
                         command: Some(spec.command),
                         args: Some(spec.args),
@@ -70,12 +70,9 @@ impl CliRow {
     /// The text shown for this row in the [`opt_nav`] menu.
     fn label(&self) -> String {
         match self {
-            CliRow::Preset(name) => {
-                let spec = cli_preset(name).unwrap();
-                format!("{name} — `{} {}`", spec.command, spec.args.join(" "))
-            }
-            CliRow::Verify => "Verify (probe the CLI now)".to_string(),
-            CliRow::Done => "↩️ Done — back to main menu".to_string(),
+            CliRow::Preset(name) => format!("{ICON_SELECT} {name}"),
+            CliRow::Verify => format!("{ICON_VERIFY} Verify (probe the CLI now)"),
+            CliRow::Done => format!("{ICON_DONE} Done — back to main menu"),
         }
     }
 }

@@ -656,6 +656,16 @@ impl ResolvedConfig {
             );
         }
         let provider = Provider::from_name(&self.backend);
+        // A key-requiring provider with no key must fail HERE, at load time,
+        // with the setup hint — not mid-run as a provider 401 whose raw rig
+        // chain buries the fix. Keyless providers (Ollama,
+        // openai-compatible) pass with an empty key.
+        if provider.requires_key() && self.api_key.trim().is_empty() {
+            anyhow::bail!(
+                "provider '{}' requires an API key — set `api_key` in config (run `aic setup`)",
+                provider.name()
+            );
+        }
         if provider.base_url_requirement() == BaseUrlRequirement::Required
             && self.base_url.is_none()
         {

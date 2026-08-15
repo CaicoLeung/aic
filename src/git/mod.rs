@@ -429,9 +429,14 @@ impl Git {
         // commit-time *policy* that acts on it (ADR-0006).
         let state = self.conflict().state()?;
         if state.is_conflicted() {
+            // rebase/am: `aic resolve` refuses these (ADR 0005) — name the
+            // manual continuation instead of redirecting to a closed door.
+            let hint = state.manual_finalize_command().map_or_else(
+                || "run `aic resolve` or finalize manually".to_string(),
+                |args| format!("finish it with `git {}`", args.join(" ")),
+            );
             anyhow::bail!(
-                "repo is mid-{} (unresolved conflict state); run `aic resolve` \
-                 or finalize manually",
+                "repo is mid-{} (unresolved conflict state); {hint}",
                 state.label()
             );
         }

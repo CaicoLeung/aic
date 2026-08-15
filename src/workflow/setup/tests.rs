@@ -37,6 +37,28 @@ fn draft(
     }
 }
 
+/// [`draft_dirty`] is the Esc guard's truth: a session that changed nothing
+/// is not dirty (against a fresh install OR against an existing config,
+/// including migration noise folded into seeding), and any entered field is.
+#[test]
+fn draft_dirty_tracks_unsaved_changes() {
+    // Fresh install, nothing entered: an immediate save would write the same
+    // config the empty draft finalizes to.
+    assert!(!draft_dirty(&Draft::default(), &None));
+
+    // Any entered field makes Save write something new.
+    assert!(draft_dirty(&draft(None, Some("k"), None, None), &None));
+
+    // Re-opening the wizard and changing nothing is not dirty — the baseline
+    // is the re-seeded-and-finalized config, not the raw disk bytes, so
+    // migrations folded into seeding never fire the guard.
+    let existing = finalize(Draft::default());
+    assert!(!draft_dirty(
+        &seed_draft(&Some(existing.clone())),
+        &Some(existing)
+    ));
+}
+
 #[test]
 fn key_and_base_url_applicability() {
     // Cloud provider: key applies, no base URL.
@@ -254,13 +276,13 @@ fn submenu_labels_show_effective_value() {
             ProviderEntry::Done
         ]
     );
-    assert_eq!(labels[0], "🔑 API key — ••••••");
-    assert_eq!(labels[1], "🧠 Model — deepseek-v4-pro");
+    assert_eq!(labels[0], format!("{ICON_API_KEY} API key — ••••••"));
+    assert_eq!(labels[1], format!("{ICON_MODEL} Model — deepseek-v4-pro"));
     assert_eq!(
         labels[2],
-        "🔌 Verify — test this provider with a sample request"
+        format!("{ICON_VERIFY} Verify — test this provider with a sample request")
     );
-    assert_eq!(labels[3], "↩️ Done — back to main menu");
+    assert_eq!(labels[3], format!("{ICON_DONE} Done — back to main menu"));
 }
 
 #[test]
@@ -285,20 +307,20 @@ fn provider_choice_label_shows_chosen_model_for_selected_provider() {
     d.model = Some("deepseek-v4-pro".into());
     assert_eq!(
         provider_choice_label(Provider::DeepSeek, &d),
-        "DeepSeek  (deepseek-v4-pro)"
+        format!("{ICON_SELECT} DeepSeek  (deepseek-v4-pro)")
     );
 
     // Other providers still show their default for comparison.
     assert_eq!(
         provider_choice_label(Provider::OpenAI, &d),
-        "OpenAI  (gpt-5-mini)"
+        format!("{ICON_SELECT} OpenAI  (gpt-5-mini)")
     );
 
     // No chosen model -> the provider default for the selected provider.
     let d = draft(Some(Provider::DeepSeek), None, None, None);
     assert_eq!(
         provider_choice_label(Provider::DeepSeek, &d),
-        "DeepSeek  (deepseek-v4-flash)"
+        format!("{ICON_SELECT} DeepSeek  (deepseek-v4-flash)")
     );
 
     // Selected provider with no default and a chosen model -> chosen model.
@@ -306,14 +328,14 @@ fn provider_choice_label_shows_chosen_model_for_selected_provider() {
     d.model = Some("meta-llama/llama-4-scout".into());
     assert_eq!(
         provider_choice_label(Provider::OpenRouter, &d),
-        "OpenRouter  (meta-llama/llama-4-scout)"
+        format!("{ICON_SELECT} OpenRouter  (meta-llama/llama-4-scout)")
     );
 
     // Selected provider with no default and no chosen model -> the hint.
     let d = draft(Some(Provider::OpenRouter), None, None, None);
     assert_eq!(
         provider_choice_label(Provider::OpenRouter, &d),
-        "OpenRouter  (no default — you'll pick a model)"
+        format!("{ICON_SELECT} OpenRouter  (no default — you'll pick a model)")
     );
 }
 
@@ -654,11 +676,10 @@ fn switch_provider_merge_keeps_banked_key_when_field_blank() {
 }
 
 #[test]
-fn cli_label_shows_command_or_not_configured() {
-    assert_eq!(
-        cli_label(&draft_with_cli(Some("claude"))),
-        "claude -p {prompt}"
-    );
+fn cli_label_shows_command_name_or_not_configured() {
+    // Name only — args live in the picker rows and the config, not the
+    // selected display (owner call: the main-menu row reads cleaner).
+    assert_eq!(cli_label(&draft_with_cli(Some("claude"))), "claude");
     assert_eq!(cli_label(&draft_with_cli(None)), "(not configured)");
 }
 

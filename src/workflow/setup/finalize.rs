@@ -109,6 +109,20 @@ pub(super) fn finalize(draft: Draft) -> Config {
     }
 }
 
+/// Whether `Save & exit` would write a different config from what an
+/// immediate save of the re-seeded disk state would produce — i.e. whether
+/// this wizard session has unsaved changes (drives the Esc guard and the
+/// Save-row marker). Compared as serialized TOML so cosmetic equality (field
+/// order, omitted defaults) never trips the guard. The baseline is
+/// `finalize(seed_draft(existing))`, not `existing` itself: seeding folds
+/// migrations (e.g. pre-bank configs into `providers`), and a session that
+/// changed nothing must not fire the guard for migration noise alone.
+pub(super) fn draft_dirty(draft: &Draft, existing: &Option<Config>) -> bool {
+    let cur = toml::to_string(&finalize(seed_draft(existing))).expect("config is valid TOML");
+    let next = toml::to_string(&finalize(draft.clone())).expect("config is valid TOML");
+    cur != next
+}
+
 /// Effective initial value for one field, in precedence order: the in-session
 /// draft value first, then the existing-config value when the provider is
 /// unchanged, else none. `field` selects which `Config` column to read, so the

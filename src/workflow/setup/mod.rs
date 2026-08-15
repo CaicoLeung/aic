@@ -19,7 +19,7 @@ use std::io::{self, IsTerminal};
 
 use crate::core::config::{BackendKind, CliConfig, Config, ProviderProfile, config_path};
 use crate::llm::Provider;
-use crate::workflow::input::{OptNav, TextAct, opt_nav, prompt_text};
+use crate::workflow::input::{OptNav, TextAct, opt_nav, prompt_text, prompt_yes_no};
 mod cli_flow;
 mod finalize;
 mod provider;
@@ -46,7 +46,7 @@ pub fn run_setup() -> Result<()> {
         Some(config) => {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
-            println!("\n✅ Saved to {}\n", path.display());
+            println!("\n{ICON_CHECK} Saved to {}\n", path.display());
             Ok(())
         }
         None => {
@@ -59,11 +59,13 @@ pub fn run_setup() -> Result<()> {
 /// Clear the terminal and render the setup header, so each menu or prompt
 /// occupies a clean screen instead of leaving previous selections in the
 /// scrollback.
-fn show_screen() -> Result<()> {
-    let term = Term::stdout();
+fn show_screen(section: &str) -> Result<()> {
+    // stderr: all interactive chrome shares inquire's stream, so a piped
+    // stdout carries only real results (the save path's "Saved to" line).
+    let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    term.write_line("aic setup — configure your AI provider")?;
+    term.write_line(&format!("aic setup — {section}"))?;
     term.write_line("  ↑/↓ move · Enter confirm · Esc back/cancel · Ctrl-C cancel")?;
     term.write_line("")?;
     Ok(())
@@ -71,17 +73,29 @@ fn show_screen() -> Result<()> {
 
 // Glyphs that visually distinguish each setup item across the menus. Each
 // appears at the start of its menu row so items are scannable at a glance
-// (AIC-15). Plain `&str` constants keep the menu code readable as labels.
-const ICON_PROVIDER: &str = "🤖";
-const ICON_API_KEY: &str = "🔑";
-const ICON_BASE_URL: &str = "🌐";
-const ICON_MODEL: &str = "🧠";
-const ICON_CONFIRM: &str = "📋";
-const ICON_SAVE: &str = "💾";
-const ICON_VERIFY: &str = "🔌";
-const ICON_DONE: &str = "↩️";
-const ICON_CLI: &str = "⌨️";
-const ICON_BACKEND: &str = "🔘";
+// (AIC-15). Nerd Font icons (nf-md-*) written as escapes with their names,
+// so the source stays legible without a patched font. Deliberate trade:
+// they need a Nerd Font-patched terminal and render as tofu without one —
+// emoji were rejected because their VS16 forms go tofu or double-wide in
+// CJK-ambiguous terminals, and plain ASCII read as noise.
+const ICON_PROVIDER: &str = "\u{f167a}"; // nf-md-robot_outline
+const ICON_API_KEY: &str = "\u{f0306}"; // nf-md-key
+const ICON_BASE_URL: &str = "\u{f059f}"; // nf-md-web
+const ICON_MODEL: &str = "\u{f09d1}"; // nf-md-brain
+const ICON_CONFIRM: &str = "\u{f014c}"; // nf-md-clipboard_outline
+const ICON_SAVE: &str = "\u{f0193}"; // nf-md-content_save
+const ICON_VERIFY: &str = "\u{f1616}"; // nf-md-connection
+const ICON_DONE: &str = "\u{f004d}"; // nf-md-arrow_left
+const ICON_CLI: &str = "\u{f018d}"; // nf-md-console
+const ICON_BACKEND: &str = "\u{f0a1a}"; // nf-md-toggle_switch_outline
+const ICON_SELECT: &str = "\u{f0142}"; // nf-md-chevron_right — "pick this" row marker
+
+// Status markers for verify outcomes and the save line — same Nerd Font
+// family, same trade.
+const ICON_CHECK: &str = "\u{f05e1}"; // nf-md-check_circle_outline
+const ICON_CROSS: &str = "\u{f1398}"; // nf-md-close_thick
+const ICON_ALERT: &str = "\u{f0026}"; // nf-md-alert
+const ICON_PENCIL: &str = "\u{f0cb6}"; // nf-md-pencil_outline
 
 /// Per-step outcome for the setup state machine.
 #[derive(PartialEq)]
@@ -94,7 +108,7 @@ enum Nav {
 /// In-progress wizard selections. Values persist across sub-flow navigation so
 /// the user can edit one entry without losing the others. Seeded from the
 /// existing config ([`finalize::seed_draft`]) so untouched fields survive saving.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Draft {
     /// Which Backend this session has chosen (ADR 0011). `None` ⇒ not yet
     /// chosen; [`Draft::active_backend`] defaults it to [`BackendKind::Api`].
@@ -149,15 +163,18 @@ impl Draft {
     }
 }
 
-/// Top-level menu choices for the setup wizard. `Esc`/Ctrl-C at the menu
-/// cancels the whole setup; entering a sub-flow and finishing (or backing out
-/// of its first step) returns here.
+/// Top-level menu choices for the setup wizard. `Esc` and Ctrl-C at the menu
+/// both cancel; the wizard distinguishes them so `Esc` can offer to keep
+/// unsaved changes while Ctrl-C stays an immediate, unguarded exit.
 enum MenuChoice {
     Backend,
     Provider,
     CliAgent,
     Confirm,
     Save,
+    /// Esc — cancel, but the wizard guard-checks unsaved changes first.
+    Esc,
+    /// Ctrl-C — immediate cancel, no guard.
     Cancel,
 }
 
@@ -210,7 +227,8 @@ fn wizard() -> Result<Option<Config>> {
     // sub-flow highlights the entry the user just finished.
     let mut highlight = 0;
     loop {
-        match step_menu(&draft, highlight)? {
+        let dirty = finalize::draft_dirty(&draft, &existing);
+        match step_menu(&draft, dirty, highlight)? {
             MenuChoice::Backend => {
                 // Flip the active Backend (ADR 0011). Both backends keep their
                 // configured fields; only the selector changes, and `finalize`
@@ -239,6 +257,15 @@ fn wizard() -> Result<Option<Config>> {
                 highlight = 3;
             }
             MenuChoice::Save => return Ok(Some(finalize::finalize(draft))),
+            MenuChoice::Esc => {
+                // Esc cancels too, but not silently: with unsaved changes,
+                // confirm the discard (Enter = discard; "no" returns to the
+                // menu). Ctrl-C stays the unconditional exit.
+                if dirty && !prompt_yes_no("Discard unsaved changes?")? {
+                    continue;
+                }
+                return Ok(None);
+            }
             MenuChoice::Cancel => return Ok(None),
         }
     }
@@ -258,10 +285,10 @@ enum ModeChoice {
 /// two-backend model without forcing re-configuring users through it. Esc
 /// skips to the menu; Ctrl-C cancels setup.
 fn step_mode_choice() -> Result<ModeChoice> {
-    show_screen()?;
+    show_screen("choose a backend")?;
     let items = vec![
-        "API provider — use an API key (OpenAI, Anthropic, Gemini, …)".to_string(),
-        "CLI agent — reuse Claude Code / Codex / pi (no API key needed)".to_string(),
+        format!("{ICON_PROVIDER} API provider — use an API key (OpenAI, Anthropic, Gemini, …)"),
+        format!("{ICON_CLI} CLI agent — reuse Claude Code / Codex / pi (no API key needed)"),
     ];
     Ok(match opt_nav("How should aic get its model?", &items, 0)? {
         OptNav::Value(0) => ModeChoice::Api,
@@ -279,10 +306,10 @@ fn step_mode_choice() -> Result<ModeChoice> {
 /// seeds as API (the historical default). Returns `true` on Ctrl-C (cancel
 /// setup).
 fn step_backend_choice(draft: &mut Draft) -> Result<bool> {
-    show_screen()?;
+    show_screen("choose a backend")?;
     let items = vec![
-        "API provider — use an API key".to_string(),
-        "CLI agent — reuse a coding-agent CLI (no API key)".to_string(),
+        format!("{ICON_PROVIDER} API provider — use an API key"),
+        format!("{ICON_CLI} CLI agent — reuse a coding-agent CLI (no API key)"),
     ];
     let default = match draft.active_backend() {
         BackendKind::Api => 0,
@@ -326,25 +353,28 @@ fn confirm_label(draft: &Draft) -> String {
     }
 }
 
-/// `CLI agent` menu row: the configured command, or `(not configured)` when no
-/// CLI-agent backend is set. The active backend is named separately by the
-/// [`backend_banner`] on the main menu.
+/// `CLI agent` menu row: the configured command's name — args stay in the
+/// picker and the config, not on this row. `(not configured)` when no
+/// CLI-agent backend is set.
 fn cli_label(draft: &Draft) -> String {
     match draft.active_cli_command() {
-        Some(cmd) => {
-            let mut parts = vec![cmd.to_string()];
-            parts.extend(draft.cli.args.clone().unwrap_or_default());
-            parts.join(" ")
-        }
+        Some(cmd) => cmd.to_string(),
         None => "(not configured)".to_string(),
     }
 }
 /// Render and run the top-level menu. Entering an entry routes to its
-/// sub-flow; `Save & exit` finalizes; `Esc`/Ctrl-C cancels the whole setup.
+/// sub-flow; `Save & exit` finalizes; Esc/`Ctrl-C` cancel the whole setup.
 /// `default_idx` is the row highlighted when the menu opens (persisted from
-/// the entry the user just finished).
-fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
-    show_screen()?;
+/// the entry the user just finished). `dirty` marks the Save row when the
+/// session has changes [`finalize::draft_dirty`] would not write back as
+/// identical, so the cost of cancelling is visible before the user pays it.
+fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoice> {
+    show_screen("main menu")?;
+    let save_row = if dirty {
+        format!("{ICON_SAVE} Save & exit — unsaved changes")
+    } else {
+        format!("{ICON_SAVE} Save & exit")
+    };
     let items = vec![
         format!(
             "{ICON_BACKEND} Backend — {}",
@@ -356,7 +386,7 @@ fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
             "{ICON_CONFIRM} Confirm before commit — {}",
             confirm_label(draft)
         ),
-        format!("{ICON_SAVE} Save & exit"),
+        save_row,
     ];
     match opt_nav("What would you like to configure?", &items, default_idx)? {
         OptNav::Value(0) => Ok(MenuChoice::Backend),
@@ -365,7 +395,8 @@ fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
         OptNav::Value(3) => Ok(MenuChoice::Confirm),
         OptNav::Value(4) => Ok(MenuChoice::Save),
         OptNav::Value(_) => unreachable!("menu has exactly five entries"),
-        OptNav::Back | OptNav::Cancel => Ok(MenuChoice::Cancel),
+        OptNav::Back => Ok(MenuChoice::Esc),
+        OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
 }
 /// Run the confirmation-toggle sub-flow (a single Yes/No step). Returns `true`
@@ -393,11 +424,11 @@ fn confirm_initial(draft: &Draft, existing: &Option<Config>) -> bool {
 /// value, else `false` (the default — behavior unchanged until the user opts
 /// in).
 fn step_confirm_commit(existing: &Option<Config>, draft: &mut Draft) -> Result<Nav> {
-    show_screen()?;
+    show_screen("commit confirmation")?;
     let initial = confirm_initial(draft, existing);
     // A yes/no option list driven by arrow keys + Enter — never typed input,
     // so the user keeps their hands off the keyboard.
-    let items = vec!["yes".to_string(), "no".to_string()];
+    let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
     let default_idx = if initial { 0 } else { 1 };
     match opt_nav(
         "Require confirmation before each commit?",

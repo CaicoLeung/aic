@@ -272,7 +272,7 @@ impl<'a> Conflict<'a> {
                 .map(|args| format!(" (e.g. `git {}`)", args.join(" ")))
                 .unwrap_or_default();
             anyhow::anyhow!(
-                "aic cannot finalize a {} state in v1; resolve manually{hint}",
+                "aic cannot finalize a {} state yet; resolve manually{hint}",
                 state.label()
             )
         })?;
@@ -373,15 +373,14 @@ pub(crate) fn conflicted_summary(display: &Display, files: &[ConflictedFile]) {
     display.emit_blank();
 }
 
-/// Render the combined review diff (original worktree -> LLM resolution).
-/// Coloring by leading sign so a glance distinguishes additions, context,
-/// and the per-file path header:
-///   `+` addition → green, `-` deletion → red, ` ` context → dim,
-///   anything else → a bare file path acting as a section header → bold
-///   cyan. A path can't be mistaken for a diff line because unified-diff
-///   bodies only ever start with `+`/`-`/` `.
-pub(crate) fn review_section(display: &Display, diff: &str) {
-    display.emit(&display.styled("proposed resolutions:", palette::muted()));
+/// Render one file's review diff (original worktree -> LLM resolution) with
+/// its path as the header — called immediately before that file's `apply`
+/// prompt, so heading, diff, and question never drift apart.
+/// Coloring by leading sign so a glance distinguishes additions and context:
+///   `+` addition → green, `-` deletion → red, ` ` context → dim.
+pub(crate) fn review_section(display: &Display, path: &str, diff: &str) {
+    display.emit(&display.styled("proposed resolution:", palette::muted()));
+    display.emit(&display.styled(path, palette::header()));
     for line in diff.lines() {
         // Color is computed on the original diff line (leading +,-, or
         // space), then the shared margin is prepended by `emit` — so the
@@ -493,10 +492,11 @@ pub(crate) fn no_conflicts(display: &Display) {
     display.emit(&display.styled("no conflicts — nothing to resolve", palette::muted()));
 }
 
-/// `aic resolve` on a rebase/am state — detected but refused in v1.
+/// `aic resolve` on a rebase/am state — detected but refused (finalize-side
+/// support not built yet; only merge states resolve).
 pub(crate) fn refused(display: &Display, state: RepoState) {
     display.emit(&format!(
-        "{} cannot resolve a {} state in v1",
+        "{} cannot resolve a {} state yet",
         display.styled("\u{2717}", palette::failure()),
         state.label(),
     ));

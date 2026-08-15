@@ -247,6 +247,7 @@ fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
     let _ = term.write_str("\x1b7"); // DECSC: save cursor at the menu's start
     let choice = Select::new(&format!("Commit this message?  ({subject})"), labels)
         .with_starting_cursor(0)
+        .with_help_message("↑/↓ select · Enter confirm · Esc or Ctrl-C aborts")
         .raw_prompt();
     let _ = term.write_str("\x1b8"); // DECRC: back to the menu's start
     let _ = term.clear_to_end_of_screen(); // erase the menu's footprint
@@ -272,8 +273,10 @@ fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Op
     let new_subject = lines.next().unwrap_or("").to_string();
     // An empty/whitespace-only subject would fail at `git commit` with a
     // confusing error; treat a cleared subject like a cancel and keep the
-    // draft so the user can re-edit or Abort from the menu.
+    // draft so the user can re-edit or Abort from the menu. Warn so the
+    // keep-the-draft behavior is visible, not silent.
     if new_subject.trim().is_empty() {
+        Display::new().warn("subject left empty — kept the previous draft");
         return Ok((subject.to_string(), body.map(String::from)));
     }
     let new_body = lines.next().map(|s| s.trim_start().to_string());
