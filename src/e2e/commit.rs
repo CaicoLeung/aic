@@ -717,82 +717,64 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
     assert!(!head.contains("c1"), "batch 2 must NOT be committed");
 }
 
-/// Issue #34: an empty Batch plan (the planner returns zero batches over real
-/// unstaged work) is *rejected* before the batch loop, not silently no-op'd.
-/// The workflow validates the plan against the captured file/hunk counts the
-/// moment it returns, and [`validate_batch_plan`] bails on an empty `batches`
-/// list — so the loop never starts. This pins the intended contract end-to-end
-/// against a real repo (the validator itself is unit-tested in `generator.rs`,
-/// but whether the workflow rejects before the loop or no-ops was unpinned):
-/// the Run errors out with the validation message, *no* commit lands, the
-/// unstaged change survives in the workdir, and the `CommitMessenger` is
-/// never reached (the loop body never executes for zero batches).
+/// Issue #34, under the deterministic-fallback contract: an empty Batch plan
+/// (the planner returns zero batches over real unstaged work) is an LLM
+/// malfunction, not a user problem. The Run warns, regroups with the
+/// deterministic engine, and *completes* — the silent no-op #34 feared cannot
+/// recur, because the engine's output is a partition over the real work, so
+/// real changes always land in ≥1 batch. Pinned end-to-end: the warn notice
+/// renders, the fallback plan drives the normal loop (messenger reached per
+/// batch), and the work is committed.
 #[tokio::test]
-async fn commit_empty_batch_plan_is_rejected_before_the_loop() {
+async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
 
-    // One unstaged change on a single-hunk file — the entry condition for the
-    // unstaged/Batch path that reaches the planner.
-    std::fs::write(dir.path().join("tracked.txt"), "unstaged change\n").unwrap();
+    // Two single-hunk edits in different directories — conservative defaults
+    // keep them as two separate batches, proving the fallback plan (not a
+    // fluke single-batch regroup) drives the loop.
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "base a\n").unwrap();
+    std::fs::write(dir.path().join("docs/b.md"), "base b\n").unwrap();
+    git_in(dir.path(), &["add", "."]);
+    git_in(dir.path(), &["commit", "-m", "base tree"]);
+    std::fs::write(dir.path().join("src/a.rs"), "new a\n").unwrap();
+    std::fs::write(dir.path().join("docs/b.md"), "new b\n").unwrap();
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
+    let buf = BufferWrite::default();
+    let (messenger, calls) =
+        messenger_sequence(&["feat(a): fallback draft a", "docs(b): fallback draft b"]);
 
-    let err = commit_run(
+    let result = commit_run(
         &git,
         RunDeps {
-            display: sink(),
-            // Planner hands back a plan with zero batches — the regressions this
-            // test guards are (a) the workflow accepting it as a clean no-op and
-            // (b) the workflow entering the loop and committing nothing but still
-            // returning Ok. Both would surface as a missing error here.
+            display: Display::with(buf.clone()),
+            // Zero batches over real work — the most degenerate invalid plan.
             planner: planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
-            messenger: unreachable_messenger(),
+            messenger,
             confirm: Confirm::Disabled,
         },
     )
-    .await
-    .expect_err("an empty batch plan must be rejected, not silently no-op'd");
+    .await;
+    assert!(result.is_ok(), "fallback must complete the run: {result:?}");
 
-    // The documented outcome is validation rejection: the error carries the
-    // validator's "no batches" bail surfaced through the workflow's
-    // "batch plan validation failed" context.
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("no batches"),
-        "expected the empty-plan rejection, got: {msg}"
-    );
-    assert!(
-        msg.contains("batch plan validation failed"),
-        "expected the validation context, got: {msg}"
-    );
+    // The notice rendered: the user knows the LLM's plan was discarded.
+    let lines = buf.lines();
+    let notice = lines
+        .iter()
+        .find(|l| l.contains("regrouping deterministically"))
+        .unwrap_or_else(|| panic!("expected fallback notice, got: {lines:?}"))
+        .clone();
 
-    // No partial commit: commit count is unchanged.
-    assert_eq!(
-        commit_count(dir.path()),
-        before,
-        "an empty plan must not create a commit"
-    );
-
-    // The unstaged change survives intact — not committed (HEAD still holds the
-    // base) and not staged (still purely a workdir edit, not an index edit).
-    assert_eq!(
-        file_at_ref(dir.path(), "HEAD", "tracked.txt"),
-        "original\n",
-        "HEAD must still hold the base — the change must not be committed"
-    );
-    assert_eq!(
-        read_file(dir.path(), "tracked.txt"),
-        "unstaged change\n",
-        "the workdir edit must survive untouched"
-    );
-    let status = status_porcelain(dir.path());
-    assert_eq!(
-        status.trim_end(),
-        " M tracked.txt",
-        "the change must remain unstaged (not staged/committed), got: {status:?}"
-    );
+    // The fallback plan drove the normal loop: two batches, two drafts, two
+    // commits, clean tree.
+    assert_eq!(*calls.lock(), 2, "one draft per fallback batch");
+    assert_eq!(commit_count(dir.path()), before + 2);
+    assert!(is_clean(dir.path()), "all work must be committed");
+    assert!(notice.contains("no batches"), "the LLM's failure is named");
 }
 
 /// A pre-commit hook that re-stages whole files (the lint-staged/prettier
