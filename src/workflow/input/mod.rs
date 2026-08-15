@@ -138,9 +138,11 @@ pub(crate) fn prompt_text(
 /// a pipe in tests, and the label is written to stderr because `Display` is
 /// stderr-only so piped stdout stays clean). An empty answer (just Enter)
 /// defaults to `true` (yes); `n` / `no` / any other input returns `false`.
+/// The hint renders the default in caps (`[Y/n]`) so Enter's effect is
+/// visible, not memorized.
 pub(crate) fn prompt_yes_no(label: &str) -> Result<bool> {
     use std::io::Write as _;
-    eprint!("{label} [y/n] ");
+    eprint!("{label} [Y/n] ");
     io::stderr().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
