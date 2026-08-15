@@ -103,6 +103,26 @@ fn validate_requires_base_url_and_model() {
     assert!(r.validate().is_ok());
 }
 
+/// A key-requiring provider with no key fails at validate time with the
+/// setup hint — the no-config first run must error before any network call,
+/// never as a raw provider 401. Keyless providers pass with an empty key.
+#[test]
+fn validate_rejects_missing_api_key_for_keyed_providers() {
+    let r = ResolvedConfig::from_parts("openai".into(), String::new(), "gpt-5".into(), None);
+    let msg = format!("{:#}", r.validate().unwrap_err());
+    assert!(msg.contains("API key"), "got: {msg}");
+    assert!(msg.contains("aic setup"), "should name the fix: {msg}");
+
+    // Keyless providers (Ollama) validate fine without a key.
+    let r = ResolvedConfig::from_parts(
+        "ollama".into(),
+        String::new(),
+        "llama3.3".into(),
+        Some("http://localhost:11434".into()),
+    );
+    assert!(r.validate().is_ok());
+}
+
 /// The config file holds an API key, so the write helper must land it
 /// owner-only (0600) on Unix — never world-readable.
 #[cfg(unix)]
