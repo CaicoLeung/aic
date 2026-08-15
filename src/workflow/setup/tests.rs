@@ -37,6 +37,28 @@ fn draft(
     }
 }
 
+/// [`draft_dirty`] is the Esc guard's truth: a session that changed nothing
+/// is not dirty (against a fresh install OR against an existing config,
+/// including migration noise folded into seeding), and any entered field is.
+#[test]
+fn draft_dirty_tracks_unsaved_changes() {
+    // Fresh install, nothing entered: an immediate save would write the same
+    // config the empty draft finalizes to.
+    assert!(!draft_dirty(&Draft::default(), &None));
+
+    // Any entered field makes Save write something new.
+    assert!(draft_dirty(&draft(None, Some("k"), None, None), &None));
+
+    // Re-opening the wizard and changing nothing is not dirty — the baseline
+    // is the re-seeded-and-finalized config, not the raw disk bytes, so
+    // migrations folded into seeding never fire the guard.
+    let existing = finalize(Draft::default());
+    assert!(!draft_dirty(
+        &seed_draft(&Some(existing.clone())),
+        &Some(existing)
+    ));
+}
+
 #[test]
 fn key_and_base_url_applicability() {
     // Cloud provider: key applies, no base URL.

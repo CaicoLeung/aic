@@ -19,7 +19,7 @@ use std::io::{self, IsTerminal};
 
 use crate::core::config::{BackendKind, CliConfig, Config, ProviderProfile, config_path};
 use crate::llm::Provider;
-use crate::workflow::input::{OptNav, TextAct, opt_nav, prompt_text};
+use crate::workflow::input::{OptNav, TextAct, opt_nav, prompt_text, prompt_yes_no};
 mod cli_flow;
 mod finalize;
 mod provider;
@@ -96,7 +96,7 @@ enum Nav {
 /// In-progress wizard selections. Values persist across sub-flow navigation so
 /// the user can edit one entry without losing the others. Seeded from the
 /// existing config ([`finalize::seed_draft`]) so untouched fields survive saving.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Draft {
     /// Which Backend this session has chosen (ADR 0011). `None` ⇒ not yet
     /// chosen; [`Draft::active_backend`] defaults it to [`BackendKind::Api`].
@@ -151,15 +151,18 @@ impl Draft {
     }
 }
 
-/// Top-level menu choices for the setup wizard. `Esc`/Ctrl-C at the menu
-/// cancels the whole setup; entering a sub-flow and finishing (or backing out
-/// of its first step) returns here.
+/// Top-level menu choices for the setup wizard. `Esc` and Ctrl-C at the menu
+/// both cancel; the wizard distinguishes them so `Esc` can offer to keep
+/// unsaved changes while Ctrl-C stays an immediate, unguarded exit.
 enum MenuChoice {
     Backend,
     Provider,
     CliAgent,
     Confirm,
     Save,
+    /// Esc — cancel, but the wizard guard-checks unsaved changes first.
+    Esc,
+    /// Ctrl-C — immediate cancel, no guard.
     Cancel,
 }
 
@@ -212,7 +215,8 @@ fn wizard() -> Result<Option<Config>> {
     // sub-flow highlights the entry the user just finished.
     let mut highlight = 0;
     loop {
-        match step_menu(&draft, highlight)? {
+        let dirty = finalize::draft_dirty(&draft, &existing);
+        match step_menu(&draft, dirty, highlight)? {
             MenuChoice::Backend => {
                 // Flip the active Backend (ADR 0011). Both backends keep their
                 // configured fields; only the selector changes, and `finalize`
@@ -241,6 +245,15 @@ fn wizard() -> Result<Option<Config>> {
                 highlight = 3;
             }
             MenuChoice::Save => return Ok(Some(finalize::finalize(draft))),
+            MenuChoice::Esc => {
+                // Esc cancels too, but not silently: with unsaved changes,
+                // confirm the discard (Enter = discard; "no" returns to the
+                // menu). Ctrl-C stays the unconditional exit.
+                if dirty && !prompt_yes_no("Discard unsaved changes?")? {
+                    continue;
+                }
+                return Ok(None);
+            }
             MenuChoice::Cancel => return Ok(None),
         }
     }
@@ -342,11 +355,18 @@ fn cli_label(draft: &Draft) -> String {
     }
 }
 /// Render and run the top-level menu. Entering an entry routes to its
-/// sub-flow; `Save & exit` finalizes; `Esc`/Ctrl-C cancels the whole setup.
+/// sub-flow; `Save & exit` finalizes; Esc/`Ctrl-C` cancel the whole setup.
 /// `default_idx` is the row highlighted when the menu opens (persisted from
-/// the entry the user just finished).
-fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
-    show_screen()?;
+/// the entry the user just finished). `dirty` marks the Save row when the
+/// session has changes [`finalize::draft_dirty`] would not write back as
+/// identical, so the cost of cancelling is visible before the user pays it.
+fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoice> {
+    show_screen("main menu")?;
+    let save_row = if dirty {
+        format!("{ICON_SAVE} Save & exit — unsaved changes")
+    } else {
+        format!("{ICON_SAVE} Save & exit")
+    };
     let items = vec![
         format!(
             "{ICON_BACKEND} Backend — {}",
@@ -358,7 +378,7 @@ fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
             "{ICON_CONFIRM} Confirm before commit — {}",
             confirm_label(draft)
         ),
-        format!("{ICON_SAVE} Save & exit"),
+        save_row,
     ];
     match opt_nav("What would you like to configure?", &items, default_idx)? {
         OptNav::Value(0) => Ok(MenuChoice::Backend),
@@ -367,7 +387,8 @@ fn step_menu(draft: &Draft, default_idx: usize) -> Result<MenuChoice> {
         OptNav::Value(3) => Ok(MenuChoice::Confirm),
         OptNav::Value(4) => Ok(MenuChoice::Save),
         OptNav::Value(_) => unreachable!("menu has exactly five entries"),
-        OptNav::Back | OptNav::Cancel => Ok(MenuChoice::Cancel),
+        OptNav::Back => Ok(MenuChoice::Esc),
+        OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
 }
 /// Run the confirmation-toggle sub-flow (a single Yes/No step). Returns `true`
