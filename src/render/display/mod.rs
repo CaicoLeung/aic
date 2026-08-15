@@ -500,10 +500,10 @@ impl Display {
             rows += 1;
         }
         if stats.len() > Self::FILE_STATS_CAP {
-            self.emit(&self.styled(
-                &format!("… {} more ({} files)", stats.len() - shown, stats.len()),
-                gray.clone(),
-            ));
+            // The Σ total row below already carries the `(N files)` count —
+            // repeating it here was noise; the elision line names only how
+            // many rows were cut.
+            self.emit(&self.styled(&format!("… {} more", stats.len() - shown), gray.clone()));
             rows += 1;
         }
         if stats.len() > 1 {

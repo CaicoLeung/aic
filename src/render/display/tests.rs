@@ -181,8 +181,12 @@ fn commit_preview_truncates_long_file_lists() {
     let rows = d.commit_preview("feat: big", None, &stats);
     let got = lines.lock().clone();
     assert!(
-        got.iter().any(|l| l.contains("… 2 more (10 files)")),
+        got.iter().any(|l| l.contains("… 2 more")),
         "expected a truncated file list, got: {got:?}"
+    );
+    assert!(
+        !got.iter().any(|l| l.contains("… 2 more (")),
+        "the elision line must not repeat the Σ row's (N files) count, got: {got:?}"
     );
     assert!(
         got.iter().any(|l| l.contains("Σ +10 −0  (10 files)")),
