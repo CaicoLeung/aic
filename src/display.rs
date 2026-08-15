@@ -536,222 +536,19 @@ impl Display {
         rows + 1
     }
 
-    // ------------------------------------------------------------------
-    // Conflict resolution (ADR 0005)
-    // ------------------------------------------------------------------
-
-    /// Header shown when a conflicted repo state is detected.
-    pub fn conflict_detected(&self, state: RepoState, count: usize) {
-        let yellow = Style::new().yellow().bold();
-        let word = if count == 1 { "file" } else { "files" };
-        self.emit(&format!(
-            "{} conflicts detected — repo is mid-{} ({} {})",
-            self.styled("\u{26A0}", yellow.clone()),
-            state.label(),
-            count,
-            word,
-        ));
-    }
-
-    /// One-line prompt for the default-run auto-detect: `Resolve now? [y/n]`.
-    pub fn resolve_prompt(&self, state: RepoState) {
-        let yellow = Style::new().yellow();
-        self.emit(&self.styled(
-            &format!("repo is mid-{}; resolve with aic now?", state.label()),
-            yellow,
-        ));
-    }
-
-    /// List conflicted files with their kind. Resolvable files are unmarked;
-    /// unresolvable ones carry a `(reason)` tag.
-    pub fn conflicted_summary(&self, files: &[ConflictedFile]) {
-        let dim = Style::new().dim();
-        let yellow = Style::new().yellow();
-        for f in files {
-            let tag = if f.kind.resolvable() {
-                String::new()
-            } else {
-                format!(
-                    " {}",
-                    self.styled(&format!("({})", f.kind.reason()), yellow.clone())
-                )
-            };
-            self.emit(&format!("  {}{}", f.path, tag));
-            if let Some(note) = f.kind.size_note() {
-                self.emit(&format!("    {}", self.styled(&note, dim.clone())));
-            }
-        }
-        self.emit_blank();
-    }
-
-    /// Render the combined review diff (original worktree -> LLM resolution).
-    /// Coloring by leading sign so a glance distinguishes additions, context,
-    /// and the per-file path header:
-    ///   `+` addition → green, `-` deletion → red, ` ` context → dim,
-    ///   anything else → a bare file path acting as a section header → bold
-    ///   cyan. A path can't be mistaken for a diff line because unified-diff
-    ///   bodies only ever start with `+`/`-`/` `.
-    pub fn review_section(&self, diff: &str) {
-        let dim = Style::new().dim();
-        self.emit(&self.styled("proposed resolutions:", dim.clone()));
-        let header = Style::new().bold().cyan();
-        for line in diff.lines() {
-            // Color is computed on the original diff line (leading +,-, or
-            // space), then the shared margin is prepended by `emit` — so the
-            // sign-based coloring stays correct while the whole diff block
-            // sits at the uniform inset.
-            let styled = match line.chars().next() {
-                Some('+') => self.styled(line, Style::new().green()),
-                Some('-') => self.styled(line, Style::new().red()),
-                Some(' ') => self.styled(line, dim.clone()),
-                None => String::new(),
-                _ => self.styled(line, header.clone()),
-            };
-            self.emit(&styled);
-        }
-        self.emit_blank();
-    }
-
-    /// Per-file outcome lines.
-    pub fn resolved(&self, path: &str) {
-        let green = Style::new().green().bold();
-        self.emit(&format!(
-            "{} resolved + staged: {}",
-            self.styled("\u{2713}", green),
-            path,
-        ));
-    }
-
-    pub fn skipped(&self, path: &str, reason: &str) {
-        let yellow = Style::new().yellow();
-        self.emit(&format!(
-            "{} skipped: {} ({})",
-            self.styled("\u{26A0}", yellow.clone()),
-            path,
-            reason,
-        ));
-    }
-
-    pub fn rejected(&self, path: &str) {
-        let dim = Style::new().dim();
-        self.emit(&format!(
-            "{} rejected: {}",
-            self.styled("\u{2717}", Style::new().red()),
-            self.styled(path, dim),
-        ));
-    }
-
-    /// Finalize succeeded.
-    pub fn finalize_done(&self, state: RepoState) {
-        let green = Style::new().green().bold();
-        self.emit_blank();
-        self.emit(&format!(
-            "{} {} finalized",
-            self.styled("\u{2713}", green.clone()),
-            self.styled(state.label(), green),
-        ));
-    }
-
-    /// Partial: approved files staged, but some files still block finalize.
-    /// Breaks the blockers down by kind so the user knows whether to re-run
-    /// `aic resolve` (rejected/failed), retry a flaky LLM call (failed), or
-    /// resolve a binary/oversized file by hand (unresolvable). The old single
-    /// "unresolved" count conflated all three.
-    pub fn handoff(
-        &self,
-        approved: usize,
-        rejected: usize,
-        failed: usize,
-        unresolvable: usize,
-        state: RepoState,
-    ) {
-        let yellow = Style::new().yellow();
-        let green = Style::new().green().bold();
-        let dim = Style::new().dim();
-        let cyan = Style::new().cyan();
-
-        self.emit_blank();
-        self.emit(&format!(
-            "{} {approved} resolved + staged",
-            self.styled("\u{2713}", green),
-        ));
-
-        // Only list blocker categories that actually occurred.
-        let mut blockers: Vec<String> = Vec::new();
-        if rejected > 0 {
-            blockers.push(format!("{rejected} rejected"));
-        }
-        if failed > 0 {
-            blockers.push(format!("{failed} failed to resolve"));
-        }
-        if unresolvable > 0 {
-            blockers.push(format!("{unresolvable} need manual resolution"));
-        }
-        let blocker_text = if blockers.is_empty() {
-            String::from("nothing left")
-        } else {
-            blockers.join(", ")
-        };
-        self.emit(&format!(
-            "{} not finalized — {blocker_text}",
-            self.styled("\u{26A0}", yellow),
-        ));
-        self.emit(&format!(
-            "  {}",
-            self.styled(
-                "resolve the remaining files (or re-run `aic resolve`), then:",
-                dim,
-            ),
-        ));
-        self.emit(&format!("    {}", self.styled(&finalize_hint(state), cyan)));
-    }
-
-    /// `aic resolve` on a clean repo.
-    pub fn no_conflicts(&self) {
-        let dim = Style::new().dim();
-        self.emit(&self.styled("no conflicts — nothing to resolve", dim));
-    }
-
     /// `aic` with nothing staged and nothing unstaged — no work for the LLM.
     pub fn nothing_to_commit(&self) {
-        let dim = Style::new().dim();
-        self.emit(&self.styled("nothing to commit — working tree clean", dim));
-    }
-
-    /// `aic resolve` on a rebase/am state — detected but refused in v1.
-    pub fn refused(&self, state: RepoState) {
-        let red = Style::new().red().bold();
-        self.emit(&format!(
-            "{} cannot resolve a {} state in v1",
-            self.styled("\u{2717}", red),
-            state.label(),
-        ));
-        self.emit(&format!(
-            "  resolve manually, then run {}",
-            self.styled(&finalize_hint(state), Style::new().cyan()),
-        ));
-    }
-
-    /// State is conflicted but the index has no unmerged entries — the user
-    /// resolved everything by hand and just needs the finalize step.
-    pub fn all_resolved_offer_finalize(&self, state: RepoState) {
-        let dim = Style::new().dim();
-        self.emit(&self.styled(
-            "no unmerged files remain — conflicts already resolved manually",
-            dim,
-        ));
-        self.emit(&format!(
-            "  finalize with {}",
-            self.styled(&finalize_hint(state), Style::new().cyan()),
-        ));
+        self.emit(&self.styled("nothing to commit — working tree clean", palette::muted()));
     }
 
     /// Generic warning line, routed through the shared margin so ad-hoc
     /// status failures stay visually consistent with the rest of the run's
     /// output instead of being dumped flush to the edge via raw `eprintln!`.
     pub fn warn(&self, msg: &str) {
-        let yellow = Style::new().yellow().bold();
-        self.emit(&format!("{} {msg}", self.styled("\u{26A0}", yellow)));
+        self.emit(&format!(
+            "{} {msg}",
+            self.styled("\u{26A0}", palette::pending())
+        ));
     }
 }
 
@@ -777,50 +574,11 @@ const LEFT_MARGIN: usize = 2;
 /// strip them).
 const RIGHT_MARGIN: usize = 2;
 
-/// The git command a user runs to finalize a state by hand, for hand-off /
-/// refuse messages. Derived from [`RepoState::finalize_invocation`] (what aic
-/// runs) and [`RepoState::manual_finalize_command`] (what the user runs for
-/// states aic refuses) — one mapping, no hand-mirroring.
-fn finalize_hint(state: RepoState) -> String {
-    if state == RepoState::Clean {
-        // Unreachable in practice: hints render only for conflict states.
-        return "git commit".to_string();
-    }
-    let args = state
-        .finalize_invocation()
-        .or_else(|| state.manual_finalize_command())
-        .expect("every conflict state has a finalize or manual command");
-    format!("git {}", args.join(" "))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::Arc;
-
-    /// The contract that replaced the hand-mirrored hint: every conflict state
-    /// resolves to the exact command a user runs, derived from the single
-    /// `RepoState` mapping (`finalize_invocation` for what aic runs,
-    /// `manual_finalize_command` for what the user runs on refused states).
-    #[test]
-    fn finalize_hint_covers_every_state_with_the_right_command() {
-        for (state, expected) in [
-            (RepoState::Clean, "git commit"),
-            (RepoState::Merge, "git commit --no-edit"),
-            (RepoState::CherryPick, "git cherry-pick --continue"),
-            (RepoState::CherryPickSequence, "git cherry-pick --continue"),
-            (RepoState::Revert, "git revert --continue"),
-            (RepoState::RevertSequence, "git revert --continue"),
-            (RepoState::Rebase, "git rebase --continue"),
-            (RepoState::RebaseInteractive, "git rebase --continue"),
-            (RepoState::RebaseMerge, "git rebase --continue"),
-            (RepoState::ApplyMailbox, "git am --continue"),
-            (RepoState::ApplyMailboxOrRebase, "git am --continue"),
-        ] {
-            assert_eq!(finalize_hint(state), expected, "state {state:?}");
-        }
-    }
 
     // `console` reads the process-global `colors_enabled()` flag at format
     // time, so every test that flips it via `ColorGuard` races every other.

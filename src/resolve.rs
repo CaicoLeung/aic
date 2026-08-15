@@ -44,12 +44,12 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     let state = conflict.state()?;
 
     if !state.is_conflicted() {
-        display.no_conflicts();
+        crate::conflict::no_conflicts(&display);
         return Ok(());
     }
     if !state.resolvable() {
         // rebase / am — detected but refused in v1.
-        display.refused(state);
+        crate::conflict::refused(&display, state);
         anyhow::bail!("aic cannot resolve a {} state in v1", state.label());
     }
 
@@ -57,16 +57,16 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     if files.is_empty() {
         // Conflicted state but no unmerged index entries — the user resolved
         // every file by hand and only the finalize step remains.
-        display.all_resolved_offer_finalize(state);
+        crate::conflict::all_resolved_offer_finalize(&display, state);
         if prompt("finalize now?")? {
             conflict.finalize(state)?;
-            display.finalize_done(state);
+            crate::conflict::finalize_done(&display, state);
         }
         return Ok(());
     }
 
-    display.conflict_detected(state, files.len());
-    display.conflicted_summary(&files);
+    crate::conflict::conflict_detected(&display, state, files.len());
+    crate::conflict::conflicted_summary(&display, &files);
 
     // Per-file resolution. `plans` carries (path, original, resolved) so the
     // review diff can be built without re-reading disk. Track why each
@@ -79,7 +79,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     let mut skipped_failed = 0usize;
     for f in &files {
         if !f.kind.resolvable() {
-            display.skipped(&f.path, f.kind.reason());
+            crate::conflict::skipped(&display, &f.path, f.kind.reason());
             skipped_unresolvable += 1;
             continue;
         }
@@ -126,14 +126,14 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
                 last_reason: crate::retry::RetryReason::Markers,
                 ..
             })) => {
-                display.skipped(&f.path, "markers remain after retry");
+                crate::conflict::skipped(&display, &f.path, "markers remain after retry");
                 skipped_failed += 1;
                 continue;
             }
             // The LLM call errored (first attempt or retry) and propagated the
             // original error verbatim.
             Err(crate::retry::RetryError::Fatal(err)) => {
-                display.skipped(&f.path, &format!("LLM error: {err:#}"));
+                crate::conflict::skipped(&display, &f.path, &format!("LLM error: {err:#}"));
                 skipped_failed += 1;
                 continue;
             }
@@ -163,7 +163,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         combined.push_str(&unified_diff(original, resolved));
         combined.push('\n');
     }
-    display.review_section(&combined);
+    crate::conflict::review_section(&display, &combined);
 
     let mut approved = 0usize;
     let mut rejected = 0usize;
@@ -171,10 +171,10 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         if prompt(&format!("apply {path}?"))? {
             conflict.write_worktree(path, resolved)?;
             git.add(&[path.as_str()])?;
-            display.resolved(path);
+            crate::conflict::resolved(&display, path);
             approved += 1;
         } else {
-            display.rejected(path);
+            crate::conflict::rejected(&display, path);
             rejected += 1;
         }
     }
@@ -191,9 +191,10 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     let needs_manual = rejected + skipped_failed + skipped_unresolvable;
     if needs_manual == 0 {
         conflict.finalize(state)?;
-        display.finalize_done(state);
+        crate::conflict::finalize_done(&display, state);
     } else {
-        display.handoff(
+        crate::conflict::handoff(
+            &display,
             approved,
             rejected,
             skipped_failed,

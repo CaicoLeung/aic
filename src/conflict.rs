@@ -1,7 +1,9 @@
 //! Conflict resolution primitives (ADR 0005) — the domain aic resolves and
 //! finalizes: `RepoState` classification, conflicted-file detection, worktree
-//! I/O for conflicted files, and Finalize.
-//!
+//! I/O for conflicted files, Finalize, and the resolve-flow status UI (the
+//! free functions over [`crate::display::Display`] at the bottom of this
+//! file), which lives here next to the domain instead of on the commit
+//! panel.
 //! Reached as [`Git::conflict`] → [`Conflict`], which borrows the repo handle
 //! `Git` owns (`run_git`, `index`, and the `Repository` itself). The commit
 //! guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git`: they
@@ -317,11 +319,250 @@ fn classify_worktree(repo: &Repository, path: &str) -> ConflictKind {
     ConflictKind::Content
 }
 
+// ----------------------------------------------------------------------
+// Resolve-flow UI (ADR 0005)
+//
+// The status lines the resolve workflow paints as it walks the conflict
+// domain this module already owns: detection header, conflicted-file
+// summary, review diff, per-file outcomes, and the finalize hand-off.
+// These are free functions over the shared [`Display`] render seam (not
+// methods) so the conflict domain — not the commit panel — owns its
+// vocabulary; `run.rs` and `resolve.rs` call them as `conflict::…`.
+// ----------------------------------------------------------------------
+
+use crate::display::Display;
+use crate::palette;
+
+/// Header shown when a conflicted repo state is detected.
+pub(crate) fn conflict_detected(display: &Display, state: RepoState, count: usize) {
+    let word = if count == 1 { "file" } else { "files" };
+    display.emit(&format!(
+        "{} conflicts detected — repo is mid-{} ({} {})",
+        display.styled("\u{26A0}", palette::pending()),
+        state.label(),
+        count,
+        word,
+    ));
+}
+
+/// One-line prompt for the default-run auto-detect: `Resolve now? [y/n]`.
+pub(crate) fn resolve_prompt(display: &Display, state: RepoState) {
+    display.emit(&display.styled(
+        &format!("repo is mid-{}; resolve with aic now?", state.label()),
+        palette::caution(),
+    ));
+}
+
+/// List conflicted files with their kind. Resolvable files are unmarked;
+/// unresolvable ones carry a `(reason)` tag.
+pub(crate) fn conflicted_summary(display: &Display, files: &[ConflictedFile]) {
+    for f in files {
+        let tag = if f.kind.resolvable() {
+            String::new()
+        } else {
+            format!(
+                " {}",
+                display.styled(&format!("({})", f.kind.reason()), palette::caution())
+            )
+        };
+        display.emit(&format!("  {}{}", f.path, tag));
+        if let Some(note) = f.kind.size_note() {
+            display.emit(&format!("    {}", display.styled(&note, palette::muted())));
+        }
+    }
+    display.emit_blank();
+}
+
+/// Render the combined review diff (original worktree -> LLM resolution).
+/// Coloring by leading sign so a glance distinguishes additions, context,
+/// and the per-file path header:
+///   `+` addition → green, `-` deletion → red, ` ` context → dim,
+///   anything else → a bare file path acting as a section header → bold
+///   cyan. A path can't be mistaken for a diff line because unified-diff
+///   bodies only ever start with `+`/`-`/` `.
+pub(crate) fn review_section(display: &Display, diff: &str) {
+    display.emit(&display.styled("proposed resolutions:", palette::muted()));
+    for line in diff.lines() {
+        // Color is computed on the original diff line (leading +,-, or
+        // space), then the shared margin is prepended by `emit` — so the
+        // sign-based coloring stays correct while the whole diff block
+        // sits at the uniform inset.
+        let styled = match line.chars().next() {
+            Some('+') => display.styled(line, palette::added()),
+            Some('-') => display.styled(line, palette::removed()),
+            Some(' ') => display.styled(line, palette::muted()),
+            None => String::new(),
+            _ => display.styled(line, palette::header()),
+        };
+        display.emit(&styled);
+    }
+    display.emit_blank();
+}
+
+/// Per-file outcome lines.
+pub(crate) fn resolved(display: &Display, path: &str) {
+    display.emit(&format!(
+        "{} resolved + staged: {}",
+        display.styled("\u{2713}", palette::success()),
+        path,
+    ));
+}
+
+pub(crate) fn skipped(display: &Display, path: &str, reason: &str) {
+    display.emit(&format!(
+        "{} skipped: {} ({})",
+        display.styled("\u{26A0}", palette::caution()),
+        path,
+        reason,
+    ));
+}
+
+pub(crate) fn rejected(display: &Display, path: &str) {
+    display.emit(&format!(
+        "{} rejected: {}",
+        display.styled("\u{2717}", palette::removed()),
+        display.styled(path, palette::muted()),
+    ));
+}
+
+/// Finalize succeeded.
+pub(crate) fn finalize_done(display: &Display, state: RepoState) {
+    let green = palette::success();
+    display.emit_blank();
+    display.emit(&format!(
+        "{} {} finalized",
+        display.styled("\u{2713}", green.clone()),
+        display.styled(state.label(), green),
+    ));
+}
+
+/// Partial: approved files staged, but some files still block finalize.
+/// Breaks the blockers down by kind so the user knows whether to re-run
+/// `aic resolve` (rejected/failed), retry a flaky LLM call (failed), or
+/// resolve a binary/oversized file by hand (unresolvable). The old single
+/// "unresolved" count conflated all three.
+pub(crate) fn handoff(
+    display: &Display,
+    approved: usize,
+    rejected: usize,
+    failed: usize,
+    unresolvable: usize,
+    state: RepoState,
+) {
+    display.emit_blank();
+    display.emit(&format!(
+        "{} {approved} resolved + staged",
+        display.styled("\u{2713}", palette::success()),
+    ));
+
+    // Only list blocker categories that actually occurred.
+    let mut blockers: Vec<String> = Vec::new();
+    if rejected > 0 {
+        blockers.push(format!("{rejected} rejected"));
+    }
+    if failed > 0 {
+        blockers.push(format!("{failed} failed to resolve"));
+    }
+    if unresolvable > 0 {
+        blockers.push(format!("{unresolvable} need manual resolution"));
+    }
+    let blocker_text = if blockers.is_empty() {
+        String::from("nothing left")
+    } else {
+        blockers.join(", ")
+    };
+    display.emit(&format!(
+        "{} not finalized — {blocker_text}",
+        display.styled("\u{26A0}", palette::caution()),
+    ));
+    display.emit(&format!(
+        "  {}",
+        display.styled(
+            "resolve the remaining files (or re-run `aic resolve`), then:",
+            palette::muted(),
+        ),
+    ));
+    display.emit(&format!(
+        "    {}",
+        display.styled(&finalize_hint(state), palette::hint())
+    ));
+}
+
+/// `aic resolve` on a clean repo.
+pub(crate) fn no_conflicts(display: &Display) {
+    display.emit(&display.styled("no conflicts — nothing to resolve", palette::muted()));
+}
+
+/// `aic resolve` on a rebase/am state — detected but refused in v1.
+pub(crate) fn refused(display: &Display, state: RepoState) {
+    display.emit(&format!(
+        "{} cannot resolve a {} state in v1",
+        display.styled("\u{2717}", palette::failure()),
+        state.label(),
+    ));
+    display.emit(&format!(
+        "  resolve manually, then run {}",
+        display.styled(&finalize_hint(state), palette::hint()),
+    ));
+}
+
+/// State is conflicted but the index has no unmerged entries — the user
+/// resolved everything by hand and just needs the finalize step.
+pub(crate) fn all_resolved_offer_finalize(display: &Display, state: RepoState) {
+    display.emit(&display.styled(
+        "no unmerged files remain — conflicts already resolved manually",
+        palette::muted(),
+    ));
+    display.emit(&format!(
+        "  finalize with {}",
+        display.styled(&finalize_hint(state), palette::hint()),
+    ));
+}
+
+/// The git command a user runs to finalize a state by hand, for hand-off /
+/// refuse messages. Derived from [`RepoState::finalize_invocation`] (what aic
+/// runs) and [`RepoState::manual_finalize_command`] (what the user runs for
+/// states aic refuses) — one mapping, no hand-mirroring.
+fn finalize_hint(state: RepoState) -> String {
+    if state == RepoState::Clean {
+        // Unreachable in practice: hints render only for conflict states.
+        return "git commit".to_string();
+    }
+    let args = state
+        .finalize_invocation()
+        .or_else(|| state.manual_finalize_command())
+        .expect("every conflict state has a finalize or manual command");
+    format!("git {}", args.join(" "))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::path::Path;
     use std::process::Command;
+
+    /// The contract that replaced the hand-mirrored hint: every conflict state
+    /// resolves to the exact command a user runs, derived from the single
+    /// `RepoState` mapping (`finalize_invocation` for what aic runs,
+    /// `manual_finalize_command` for what the user runs on refused states).
+    #[test]
+    fn finalize_hint_covers_every_state_with_the_right_command() {
+        for (state, expected) in [
+            (RepoState::Clean, "git commit"),
+            (RepoState::Merge, "git commit --no-edit"),
+            (RepoState::CherryPick, "git cherry-pick --continue"),
+            (RepoState::CherryPickSequence, "git cherry-pick --continue"),
+            (RepoState::Revert, "git revert --continue"),
+            (RepoState::RevertSequence, "git revert --continue"),
+            (RepoState::Rebase, "git rebase --continue"),
+            (RepoState::RebaseInteractive, "git rebase --continue"),
+            (RepoState::RebaseMerge, "git rebase --continue"),
+            (RepoState::ApplyMailbox, "git am --continue"),
+            (RepoState::ApplyMailboxOrRebase, "git am --continue"),
+        ] {
+            assert_eq!(finalize_hint(state), expected, "state {state:?}");
+        }
+    }
 
     #[test]
     fn conflict_markers_detected() {

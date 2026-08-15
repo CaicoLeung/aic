@@ -120,7 +120,7 @@ The git operation that ends a Conflict after all its Resolutions are approved: `
 _Avoid_: complete, finish, commit (overloaded — see Run, Drafted Message)
 
 **Conflict module**:
-The module (`src/conflict.rs`, reached as `Git::conflict() -> Conflict<'_>`) that owns conflict detection, classification, worktree I/O for conflicted files, and Finalize. Owns the `RepoState`, `ConflictKind`, `ConflictedFile` types and `has_conflict_markers`. The commit guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git` and call across this seam; `Git` keeps the repo handle, `run_git`, and the libgit2/CLI commit path.
+The module (`src/conflict.rs`, reached as `Git::conflict() -> Conflict<'_>`) that owns conflict detection, classification, worktree I/O for conflicted files, Finalize, and the resolve-flow status UI — the free functions over `Display` (`conflict_detected`, `handoff`, `refused`, …) that paint the resolve workflow's lines. They render through the Display module's `styled`/`emit` primitives, so the two surfaces share one seam and margin while the vocabulary stays with the domain. Owns the `RepoState`, `ConflictKind`, `ConflictedFile` types and `has_conflict_markers`. The commit guards (`assert_commit_safe`, `verify_commit_clean`) stay on `Git` and call across this seam; `Git` keeps the repo handle, `run_git`, and the libgit2/CLI commit path.
 _Avoid_: merge module, conflict service
 
 **Resolve module**:

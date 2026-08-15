@@ -294,7 +294,7 @@ pub(crate) async fn default_run(
 ) -> anyhow::Result<()> {
     let state = git.conflict().state()?;
     if state.is_conflicted() {
-        commit.display.resolve_prompt(state);
+        crate::conflict::resolve_prompt(&commit.display, state);
         if (resolve.prompt)("resolve now?")? {
             return resolve_run(git, resolve).await;
         }
