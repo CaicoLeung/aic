@@ -195,6 +195,16 @@ pub const ALL_PROVIDERS: &[Provider] = &[
     Provider::OpenAiCompatible,
 ];
 
+/// The provider used when none is chosen — OpenAI, the historical default.
+/// Single home of the "unset provider ⇒ OpenAI" policy (the wizard's display,
+/// finalize, and verify paths); the on-disk string form is
+/// [`DEFAULT_PROVIDER`].
+impl Default for Provider {
+    fn default() -> Self {
+        Self::OpenAI
+    }
+}
+
 impl Provider {
     fn meta(&self) -> &'static ProviderMeta {
         REGISTRY
@@ -319,13 +329,30 @@ impl Provider {
 
 #[derive(Clone)]
 pub struct LLM {
-    pub provider: Provider,
-    pub model: String,
-    pub api_key: String,
-    pub base_url: Option<String>,
+    provider: Provider,
+    model: String,
+    api_key: String,
+    base_url: Option<String>,
 }
 
 impl LLM {
+    /// The single construction seam: fields are private, so an `LLM` is only
+    /// built via [`ResolvedConfig::to_llm`](crate::config::ResolvedConfig)
+    /// after [`ResolvedConfig::validate`](crate::config::ResolvedConfig).
+    pub fn new(
+        provider: Provider,
+        model: String,
+        api_key: String,
+        base_url: Option<String>,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            api_key,
+            base_url,
+        }
+    }
+
     pub fn agent(&self, system_prompt: impl Into<String>) -> LLMAgent {
         LLMAgent {
             llm: self.clone(),
@@ -739,12 +766,7 @@ impl LlmConfig {
             crate::config::BackendKind::Api => {
                 let resolved = crate::config::ResolvedConfig::resolve(config.as_ref());
                 resolved.validate()?;
-                Ok(Self::Rig(LLM {
-                    provider: Provider::from_name(&resolved.backend),
-                    model: resolved.model,
-                    api_key: resolved.api_key,
-                    base_url: resolved.base_url,
-                }))
+                Ok(Self::Rig(resolved.to_llm()))
             }
         }
     }
@@ -816,12 +838,12 @@ mod tests {
         assert_eq!(codex.cold_start_program(), None);
 
         // The API/rig path never cold-starts a reasoning feed → None.
-        let rig = LlmConfig::Rig(LLM {
-            provider: Provider::OpenAI,
-            model: String::new(),
-            api_key: String::new(),
-            base_url: None,
-        });
+        let rig = LlmConfig::Rig(LLM::new(
+            Provider::OpenAI,
+            String::new(),
+            String::new(),
+            None,
+        ));
         assert_eq!(rig.cold_start_program(), None);
     }
 

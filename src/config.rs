@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, Provider};
+use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, LLM, Provider};
 
 /// The CLI-agent Backend's four config fields — a unit (command + argv
 /// template + timeout + stdout encoding) that travels together through
@@ -602,6 +602,43 @@ impl ResolvedConfig {
         }
     }
 
+    /// Build a [`ResolvedConfig`] from already-effective values (the setup
+    /// wizard's Verify step: the draft choice, else the provider default) —
+    /// the same pipeline the Run path runs (`resolve` → `validate` →
+    /// `to_llm`), minus the config-file read. Sources are all
+    /// [`Source::Default`]: provenance is display-only, and the wizard shows
+    /// sources itself via the `resolve_*` helpers.
+    pub(crate) fn from_parts(
+        backend: String,
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+    ) -> Self {
+        Self {
+            backend,
+            backend_source: Source::Default,
+            api_key,
+            api_key_source: Source::Default,
+            model,
+            model_source: Source::Default,
+            base_url,
+            base_url_source: Source::Default,
+        }
+    }
+
+    /// Build the API-backend [`LLM`] these resolved values select — the
+    /// single construction seam, used by both the Run path
+    /// ([`crate::llm::LlmConfig::load`]) and the setup wizard's Verify step
+    /// (mirrors [`CliConfig::to_spec`]).
+    pub fn to_llm(&self) -> LLM {
+        LLM::new(
+            Provider::from_name(&self.backend),
+            self.model.clone(),
+            self.api_key.clone(),
+            self.base_url.clone(),
+        )
+    }
+
     /// Validate provider-specific requirements (a model or base URL the provider
     /// cannot default). Called when constructing an `LLM`, not when merely
     /// displaying resolved config (`aic list`).
@@ -936,6 +973,28 @@ mod tests {
             msg.contains("anthropic"),
             "should list valid names as a hint: {msg}"
         );
+    }
+
+    /// The two required-field branches of [`ResolvedConfig::validate`] (ported
+    /// from the setup wizard's deleted `verify_preflight`): a provider that
+    /// cannot default its base URL, and one that cannot default its model.
+    #[test]
+    fn validate_requires_base_url_and_model() {
+        // openai-compatible requires a base URL it cannot default.
+        let r =
+            ResolvedConfig::from_parts("openai-compatible".into(), "k".into(), "m".into(), None);
+        let msg = format!("{:#}", r.validate().unwrap_err());
+        assert!(msg.contains("base URL"), "got: {msg}");
+
+        // OpenRouter has no default model — an empty model fails with a hint.
+        let r = ResolvedConfig::from_parts("openrouter".into(), "k".into(), String::new(), None);
+        let msg = format!("{:#}", r.validate().unwrap_err());
+        assert!(msg.contains("model"), "got: {msg}");
+
+        // OpenAI needs no base URL; a present model (here the provider
+        // default an effective-model resolve would supply) validates.
+        let r = ResolvedConfig::from_parts("openai".into(), "k".into(), "gpt-5".into(), None);
+        assert!(r.validate().is_ok());
     }
 
     /// The config file holds an API key, so the write helper must land it

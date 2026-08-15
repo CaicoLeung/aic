@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use crate::cli_agent::{PRESETS, cli_preset};
 use crate::config::{
-    BackendKind, CliConfig, Config, ProviderProfile, Source, config_path, resolve_api_key,
-    resolve_base_url, resolve_field,
+    BackendKind, CliConfig, Config, ProviderProfile, ResolvedConfig, Source, config_path,
+    resolve_api_key, resolve_base_url, resolve_field,
 };
 use crate::input::{OptNav, TextAct, opt_nav, prompt_text};
 use crate::llm::{BaseUrlRequirement, Provider};
@@ -1198,7 +1198,7 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
 /// multi-thread runtime so a nested runtime can drive the async verify call
 /// without panicking.
 fn step_verify(draft: &Draft) -> Result<Nav> {
-    let p = draft.provider.unwrap_or(Provider::OpenAI);
+    let p = draft.provider.unwrap_or_default();
     // Effective values: the draft (a user edit or the seeded config value),
     // then the default.
     let api_key = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty())).0;
@@ -1208,20 +1208,21 @@ fn step_verify(draft: &Draft) -> Result<Nav> {
         p.default_model(),
     )
     .0;
+    let resolved = ResolvedConfig::from_parts(
+        p.name().to_string(),
+        api_key,
+        model.clone(),
+        base_url.clone(),
+    );
 
-    // Pre-flight validation mirrors ResolvedConfig::validate so a missing
+    // The same validation the Run path runs (`LlmConfig::load`), so a missing
     // required field reads as a setup hint, not an opaque provider error.
-    if let Err(e) = verify_preflight(p, base_url.as_deref(), &model) {
-        show_verify_result(&p, &model, &api_key, base_url.as_deref(), Err(e))?;
+    if let Err(e) = resolved.validate() {
+        show_verify_result(&p, &model, &resolved.api_key, base_url.as_deref(), Err(e))?;
         return Ok(Nav::Next);
     }
 
-    let llm = crate::llm::LLM {
-        provider: p,
-        model: model.clone(),
-        api_key: api_key.clone(),
-        base_url: base_url.clone(),
-    };
+    let llm = resolved.to_llm();
     let label = format!("Contacting {} ({model})…", p.display());
     // block_in_place parks the outer multi-thread task; the nested
     // current-thread runtime then drives the async verify future. Without
@@ -1238,27 +1239,8 @@ fn step_verify(draft: &Draft) -> Result<Nav> {
         }))
     });
 
-    show_verify_result(&p, &model, &api_key, base_url.as_deref(), result)?;
+    show_verify_result(&p, &model, &resolved.api_key, base_url.as_deref(), result)?;
     Ok(Nav::Next)
-}
-
-/// Pre-flight checks for Verify: a provider whose base URL is required must
-/// have one, and the model must be set. Catches missing-field misconfigurations
-/// before they become opaque provider/HTTP errors.
-fn verify_preflight(p: Provider, base_url: Option<&str>, model: &str) -> Result<()> {
-    if p.base_url_requirement() == BaseUrlRequirement::Required && base_url.is_none() {
-        anyhow::bail!(
-            "the {} provider requires a base URL — set one in this menu first",
-            p.display()
-        );
-    }
-    if model.trim().is_empty() {
-        anyhow::bail!(
-            "no model is set — pick one in this menu first ({} has no default model)",
-            p.display()
-        );
-    }
-    Ok(())
 }
 
 /// Render the Verify result on a fresh screen and pause for a keypress so the
@@ -1850,23 +1832,6 @@ mod tests {
         let (key, source) = resolve_api_key(None);
         assert_eq!(key, "");
         assert_eq!(source, Source::Default);
-    }
-
-    #[test]
-    fn verify_preflight_requires_base_url_and_model() {
-        // OpenAI-compatible requires a base URL — without one it fails with a
-        // readable hint, before any network call.
-        let err = verify_preflight(Provider::OpenAiCompatible, None, "m").unwrap_err();
-        assert!(err.to_string().contains("base URL"));
-        // With a URL + model it is fine.
-        assert!(verify_preflight(Provider::OpenAiCompatible, Some("http://h/v1"), "m").is_ok());
-
-        // OpenRouter has no default model — an empty model fails with a hint.
-        let err = verify_preflight(Provider::OpenRouter, None, "").unwrap_err();
-        assert!(err.to_string().contains("model"));
-
-        // OpenAI needs no base URL and carries a default model — ok.
-        assert!(verify_preflight(Provider::OpenAI, None, "gpt-5-mini").is_ok());
     }
 
     fn draft_with_cli(command: Option<&str>) -> Draft {
