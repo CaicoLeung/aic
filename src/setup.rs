@@ -130,6 +130,18 @@ impl Draft {
     fn active_backend(&self) -> BackendKind {
         self.backend_kind.unwrap_or(BackendKind::Api)
     }
+
+    /// The model the selected provider will actually use, for display: the
+    /// in-session draft choice (seeded from the existing config in
+    /// [`seed_draft`]) first, else the provider default. Empty when the
+    /// provider has no default (OpenRouter, OpenAI-compatible).
+    fn effective_model(&self, p: Provider) -> String {
+        self.model
+            .as_deref()
+            .filter(|m| !m.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| p.default_model().to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,19 +359,6 @@ fn seed_draft(existing: &Option<Config>) -> Draft {
     draft
 }
 
-/// The model the selected provider will actually use, for display: the
-/// in-session draft choice (seeded from the existing config in
-/// [`seed_draft`]) first, else the provider default. Empty when the provider
-/// has no default (OpenRouter, OpenAI-compatible).
-fn effective_model(p: Provider, draft: &Draft) -> String {
-    draft
-        .model
-        .as_deref()
-        .filter(|m| !m.is_empty())
-        .map(String::from)
-        .unwrap_or_else(|| p.default_model().to_string())
-}
-
 /// `AI provider` menu row: the current provider and the model that would be
 /// used (the chosen one, else the provider default). The API backend always
 /// resolves to a provider — OpenAI by default, matching [`finalize`] — so the
@@ -371,10 +370,10 @@ fn provider_label(draft: &Draft) -> String {
         // API backend defaults to OpenAI (mirrors `finalize`), so the menu
         // shows what aic will actually use instead of the misleading
         // "(not set)" after the API mode/backend is chosen.
-        None if draft.active_backend() == BackendKind::Api => Provider::OpenAI,
+        None if draft.active_backend() == BackendKind::Api => Provider::default(),
         None => return "(not set)".to_string(),
     };
-    let model = effective_model(p, draft);
+    let model = draft.effective_model(p);
     if model.is_empty() {
         p.display().to_string()
     } else {
@@ -389,7 +388,7 @@ fn provider_label(draft: &Draft) -> String {
 /// the detail never disagree on which model a provider will use.
 fn preview_model(p: Provider, draft: &Draft) -> String {
     if draft.provider == Some(p) {
-        return effective_model(p, draft);
+        return draft.effective_model(p);
     }
     draft
         .known_providers
@@ -488,7 +487,7 @@ fn model_label(model: &str, source: Source) -> String {
 /// current provider) plus `Done`, each with its current value inline. The
 /// provider itself is chosen on the screen before this menu.
 fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<String>) {
-    let p = draft.provider.unwrap_or(Provider::OpenAI);
+    let p = draft.provider.unwrap_or_default();
     let mut entries = Vec::new();
     let mut labels = Vec::new();
     for step in applicable_steps(p) {
@@ -791,13 +790,7 @@ fn finalize(draft: Draft) -> Config {
     // (historical behavior). When it is dormant (CLI active), preserve the
     // draft's value verbatim so switching back restores it.
     let backend = match active {
-        BackendKind::Api => Some(
-            draft
-                .provider
-                .unwrap_or(Provider::OpenAI)
-                .name()
-                .to_string(),
-        ),
+        BackendKind::Api => Some(draft.provider.unwrap_or_default().name().to_string()),
         BackendKind::Cli => draft.provider.map(|p| p.name().to_string()),
     };
 
@@ -1679,13 +1672,13 @@ mod tests {
     fn effective_model_prefers_draft_then_default() {
         // Draft model wins over the provider default.
         let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
-        assert_eq!(effective_model(Provider::OpenAI, &d), "gpt-5");
+        assert_eq!(d.effective_model(Provider::OpenAI), "gpt-5");
         // No draft model -> provider default.
         let d = draft(Some(Provider::OpenAI), None, None, None);
-        assert_eq!(effective_model(Provider::OpenAI, &d), "gpt-5-mini");
+        assert_eq!(d.effective_model(Provider::OpenAI), "gpt-5-mini");
         // Provider with no default -> empty string.
         let d = draft(Some(Provider::OpenRouter), None, None, None);
-        assert_eq!(effective_model(Provider::OpenRouter, &d), "");
+        assert_eq!(d.effective_model(Provider::OpenRouter), "");
     }
 
     #[test]
