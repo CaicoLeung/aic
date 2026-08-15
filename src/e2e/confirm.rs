@@ -22,16 +22,16 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_commit_workflow_impl(
+    let err = commit_run(
         &git,
-        unreachable_resolver(),
-        prompt_queue(vec![]),
-        sink(),
-        unreachable_planner(), // staged path must NOT plan
-        messenger_fixed("feat: staged change"),
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Abort]),
-            editor: unreachable_editor(),
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(), // staged path must NOT plan,
+            messenger: messenger_fixed("feat: staged change"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Abort]),
+                editor: unreachable_editor(),
+            },
         },
     )
     .await
@@ -74,16 +74,16 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
     let display = Display::with(buf.clone());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        unreachable_resolver(),
-        prompt_queue(vec![]),
-        display,
-        unreachable_planner(),
-        messenger_fixed("feat: staged change"),
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Commit]),
-            editor: unreachable_editor(),
+        RunDeps {
+            display,
+            planner: unreachable_planner(),
+            messenger: messenger_fixed("feat: staged change"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Commit]),
+                editor: unreachable_editor(),
+            },
         },
     )
     .await;
@@ -139,16 +139,16 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
     let git = Git::at(dir.path()).unwrap();
     let (messenger, calls) = messenger_sequence(&["feat: first draft", "feat: second draft"]);
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        unreachable_resolver(),
-        prompt_queue(vec![]),
-        display,
-        unreachable_planner(),
-        messenger,
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
-            editor: unreachable_editor(),
+        RunDeps {
+            display,
+            planner: unreachable_planner(),
+            messenger,
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
+                editor: unreachable_editor(),
+            },
         },
     )
     .await;
@@ -197,16 +197,16 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        unreachable_resolver(),
-        prompt_queue(vec![]),
-        sink(),
-        unreachable_planner(),
-        messenger_fixed("feat: draft"),
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
-            editor: editor_fixed("feat: edited", Some("edited body")),
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: messenger_fixed("feat: draft"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
+                editor: editor_fixed("feat: edited", Some("edited body")),
+            },
         },
     )
     .await;
@@ -241,16 +241,16 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        unreachable_resolver(),
-        prompt_queue(vec![]),
-        sink(),
-        unreachable_planner(),
-        messenger_fixed("feat: draft"),
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
-            editor: editor_cancel(),
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: messenger_fixed("feat: draft"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
+                editor: editor_cancel(),
+            },
         },
     )
     .await;
@@ -306,16 +306,16 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_commit_workflow_impl(
+    let err = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: stub"),
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
-            editor: unreachable_editor(),
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: stub"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
+                editor: unreachable_editor(),
+            },
         },
     )
     .await
@@ -400,16 +400,16 @@ async fn commit_confirm_commits_every_batch() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: stub"),
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Commit]),
-            editor: unreachable_editor(),
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: stub"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Commit]),
+                editor: unreachable_editor(),
+            },
         },
     )
     .await;
@@ -468,14 +468,14 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
 
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        display,
-        planner_fixed(plan),
-        messenger_fixed("chore: both"),
-        Confirm::Disabled,
+        RunDeps {
+            display,
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: both"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(result.is_ok(), "multi-file batch should land: {:?}", result);
@@ -533,16 +533,16 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let err = run_commit_workflow_impl(
+    let err = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: stub"),
-        Confirm::Interactive {
-            menu: menu_queue(vec![ConfirmChoice::Abort]),
-            editor: unreachable_editor(),
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: stub"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Abort]),
+                editor: unreachable_editor(),
+            },
         },
     )
     .await

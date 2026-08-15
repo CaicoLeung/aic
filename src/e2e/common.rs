@@ -2,16 +2,16 @@
 // All `pub` so the per-feature test modules can pull them in via
 // `use super::common::*;`.
 
-pub(super) use crate::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
-pub(super) use crate::conflict;
-pub(super) use crate::conflict::tests as cf;
-pub(super) use crate::display::{Display, DisplayWrite};
+pub(super) use crate::core::types::{BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver};
 pub(super) use crate::git::Git;
+pub(super) use crate::git::conflict;
+pub(super) use crate::git::conflict::tests as cf;
 pub(super) use crate::git::tests as gh;
-pub(super) use crate::{
-    BatchPlanner, BoxFuture, CommitMessenger, Prompt, Resolver, generator,
-    run_commit_workflow_impl, run_resolve_workflow_impl,
-};
+pub(super) use crate::llm::generator;
+pub(super) use crate::render::display::{Display, DisplayWrite};
+pub(super) use crate::workflow::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
+pub(super) use crate::workflow::resolve::{ResolveDeps, resolve_run};
+pub(super) use crate::workflow::run::{RunDeps, commit_run, default_run};
 pub(super) use git2::Repository;
 pub(super) use parking_lot::Mutex;
 pub(super) use std::collections::VecDeque;
@@ -20,9 +20,9 @@ pub(super) use std::process::Command;
 pub(super) use std::sync::Arc;
 
 // Erased resolver / prompt closures. Both are `Box<dyn Fn>` (which itself
-// implements `Fn`), so they pass straight into the workflow impls' concrete
-// `Resolver` / `Prompt` parameters. `BoxFuture`, `Resolver`, and `Prompt` are
-// re-used from the crate root so the stub types stay identical to the seam's.
+// implements `Fn`), so they pass straight into the workflow deps' concrete
+// `Resolver` / `Prompt` fields. `BoxFuture`, `Resolver`, and `Prompt` are
+// re-used from `types` so the stub types stay identical to the seam's.
 
 pub fn resolver_returning(answer: &str) -> Resolver {
     let answer = answer.to_string();
@@ -342,14 +342,6 @@ pub fn unreachable_messenger() -> CommitMessenger {
             Box::pin(async { panic!("CommitMessenger reached on a path that must skip the LLM") })
         },
     )
-}
-
-/// Resolver stub that panics if called — same purpose as
-/// [`unreachable_planner`] for the conflict-resolution step.
-pub fn unreachable_resolver() -> Resolver {
-    Box::new(|_content: String| -> BoxFuture<anyhow::Result<String>> {
-        Box::pin(async { panic!("Resolver reached on a path that must skip the LLM") })
-    })
 }
 
 /// In-memory [`DisplayWrite`] capturing every line the workflow emits. Clones

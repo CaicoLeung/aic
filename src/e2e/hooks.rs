@@ -30,14 +30,14 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
     let plan = plan_single_batch("tracked.txt", "hook test");
 
     let git = Git::at(dir.path()).unwrap();
-    let result = run_commit_workflow_impl(
+    let result = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: hook run"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: hook run"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await;
     assert!(
@@ -92,14 +92,14 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
     let git = Git::at(dir.path()).unwrap();
     let before = commit_count(dir.path());
 
-    let err = run_commit_workflow_impl(
+    let err = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: vetoed"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: vetoed"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await
     .expect_err("a vetoing pre-commit hook must abort the Run");
@@ -157,14 +157,14 @@ async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
     let git = Git::at(dir.path()).unwrap();
     let before = commit_count(dir.path());
 
-    let err = run_commit_workflow_impl(
+    let err = commit_run(
         &git,
-        resolver_returning(""),
-        prompt_queue(vec![]),
-        sink(),
-        planner_fixed(plan),
-        messenger_fixed("chore: vetoed"),
-        Confirm::Disabled,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("chore: vetoed"),
+            confirm: Confirm::Disabled,
+        },
     )
     .await
     .expect_err("a vetoing commit-msg hook must abort the Run");
