@@ -282,7 +282,7 @@ fn submenu_labels_show_effective_value() {
         labels[2],
         "🔌 Verify — test this provider with a sample request"
     );
-    assert_eq!(labels[3], "↩️ Done — back to main menu");
+    assert_eq!(labels[3], format!("{ICON_DONE} Done — back to main menu"));
 }
 
 #[test]

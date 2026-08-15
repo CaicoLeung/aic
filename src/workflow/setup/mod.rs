@@ -81,9 +81,9 @@ const ICON_MODEL: &str = "🧠";
 const ICON_CONFIRM: &str = "📋";
 const ICON_SAVE: &str = "💾";
 const ICON_VERIFY: &str = "🔌";
-const ICON_DONE: &str = "↩️";
-const ICON_CLI: &str = "⌨️";
-const ICON_BACKEND: &str = "🔘";
+const ICON_DONE: &str = "<-";
+const ICON_CLI: &str = ">_";
+const ICON_BACKEND: &str = "( )";
 
 /// Per-step outcome for the setup state machine.
 #[derive(PartialEq)]

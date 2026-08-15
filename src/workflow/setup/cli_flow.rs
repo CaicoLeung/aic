@@ -75,7 +75,7 @@ impl CliRow {
                 format!("{name} — `{} {}`", spec.command, spec.args.join(" "))
             }
             CliRow::Verify => "Verify (probe the CLI now)".to_string(),
-            CliRow::Done => "↩️ Done — back to main menu".to_string(),
+            CliRow::Done => format!("{ICON_DONE} Done — back to main menu"),
         }
     }
 }
