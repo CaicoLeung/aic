@@ -13,7 +13,7 @@ use self_update::cargo_crate_version;
 /// Raw 32-byte ed25519 public key — zipsign `gen-key` writes the bare key with
 /// no armor. The `&[u8; 32]` annotation makes a malformed key file a compile
 /// error.
-const ZIPSIGN_PUBLIC_KEY: &[u8; 32] = include_bytes!("../keys/zipsign.pub");
+const ZIPSIGN_PUBLIC_KEY: &[u8; 32] = include_bytes!("../../keys/zipsign.pub");
 
 /// True if a resolved binary path lives inside a Homebrew Cellar.
 ///

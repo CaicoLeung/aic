@@ -15,7 +15,7 @@ the refresh strategy or seam the shared handle for no behavioural gain.
 That argument is about *module* coupling, and it still holds. But ADR 0006
 equated "one module" with "one file". In Rust those are different claims: a
 module's definition can span a parent file and its submodule files
-(`git.rs` + `git/`), with **zero seam introduced** — child modules see the
+(`git/mod.rs` + child files), with **zero seam introduced** — child modules see the
 parent's private items, `impl Git` blocks can live in several files, and the
 module path `crate::git` is unchanged. What actually changed since ADR 0006
 is that `git.rs` grew to 1550 lines (~775 of them tests), and the file — not
@@ -24,10 +24,10 @@ fits: directories grow from splits, never from regrouping.
 
 ## Decision
 
-`git.rs` becomes a directory root: `src/git.rs` + `src/git/{status,
+`git` becomes a directory root: `src/git/mod.rs` + `src/git/{status,
 diff_view, tests}.rs`. One module, several files — not a new seam.
 
-- **Stays in `git.rs`** (the coupled core ADR 0006 defended): the
+- **Stays in `git/mod.rs`** (the coupled core ADR 0006 defended): the
   `Git`/`Repository` handle, `repo()`, `conflict()`, `run_git`,
   `nonzero_exit`, `at`, `index()` (the refresh strategy, one owner), `add`,
   `stage_hunks` (parser + CLI in one method), `commit`,
@@ -57,6 +57,6 @@ This change introduces none: no trait, no new visibility beyond
   construction — the handle, `run_git`, `index()`, and `stage_hunks` never
   left the parent file.
 - **Negative:** `Git`'s impl blocks now span three files; finding a method
-  means knowing which file owns it (mitigated by `git.rs`'s `//!` pointer).
+  means knowing which file owns it (mitigated by `git/mod.rs`'s `//!` pointer).
 - **Negative:** `git log --follow` + copy detection replace pure rename
   tracking for the moved regions.

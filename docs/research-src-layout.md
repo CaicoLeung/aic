@@ -17,12 +17,13 @@
 > **Revision (2026-08-15):** The measurement and recommendation above stand
 > for what they measured — *regrouping* existing modules into topic buckets
 > (Options B/C). They do not cover splitting an oversized single module into
-> a directory, which is what ADR 0015 ("split-then-directory") adopted:
-> `setup.rs` and `git.rs` became `setup.rs + setup/…` and `git.rs + git/…`
-> roots (ADR 0016 supersedes ADR 0006's one-*file* reading), test mods moved
-> to sibling `tests.rs` files, and the module root moved from `main.rs` to
-> `lib.rs`. The flat layout — and this document's anti-regrouping evidence —
-> remains the default for every module that is not being split.
+> a directory, which is what ADR 0015 adopted: `setup.rs` and `git.rs`
+> split into `setup/` and `git/` directories (ADR 0016 supersedes ADR
+> 0006's one-*file* reading), test mods moved to sibling `tests.rs` files,
+> the module root moved from `main.rs` to `lib.rs`, and — overriding this
+> document's flat-file default — every module became a directory
+> (`foo/mod.rs`), so `src/` holds only `lib.rs`, `main.rs`, and module
+> directories. The anti-regrouping evidence stands: no topic buckets.
 
 ---
 
