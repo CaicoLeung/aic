@@ -23,6 +23,7 @@ use anyhow::Context;
 use crate::core::config;
 use crate::core::types::{BatchPlanner, BoxFuture, CommitMessenger};
 use crate::git::Git;
+use crate::git::StatusKind;
 use crate::git::diff;
 use crate::git::diff_json;
 use crate::git::staging;
@@ -211,8 +212,23 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
-        git.add(&refs)?;
+        // Re-stage folds a staged file's workdir changes into the index
+        // (`git add` semantics) — but a staged deletion has nothing to fold:
+        // its path is neither on disk nor in the index, so `Git::add`'s
+        // pathspec guard (built for LLM-plan paths) bails on it. Skip
+        // deleted entries; they are already staged and stay in `paths` for
+        // the diff, stats, and commit below.
+        let re_stage_paths: Vec<&str> = staged_files
+            .iter()
+            .filter(|f| f.kind != StatusKind::Deleted)
+            .map(|f| f.path.as_str())
+            .collect();
+        // Guard is load-bearing: `Git::add(&[])` falls through to
+        // `add_all(["*"])`, which would stage every untracked file — an
+        // all-deletions staged set must skip the call instead.
+        if !re_stage_paths.is_empty() {
+            git.add(&re_stage_paths)?;
+        }
         let diff_str = staged_diff_json(git, &paths)?;
         let draft =
             progress::with_spinner("Generating commit message", messenger(diff_str.clone()))
