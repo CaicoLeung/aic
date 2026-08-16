@@ -715,6 +715,118 @@ async fn commit_staged_files_in_one_commit() {
     );
 }
 
+/// A staged *deletion* (`git rm`) is a staged entry whose path is neither on
+/// disk nor in the index — `Git::add`'s pathspec guard bails on exactly that
+/// shape. Reported as "Error: pathspec '…' did not match any tracked or
+/// working-tree file" when a Run's staged path re-staged every staged file.
+/// The Run must commit the staged deletion, not die on re-staging it.
+#[tokio::test]
+async fn commit_staged_deletion_in_one_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // Stage the file's removal — the entry condition, exactly as reported:
+    // one `git rm` drops the path from both the index and the workdir, so
+    // nothing of it remains except in HEAD.
+    git_in(dir.path(), &["rm", "tracked.txt"]);
+
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let result = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: messenger_fixed("feat: remove tracked file"),
+            confirm: Confirm::Disabled,
+        },
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "staged-deletion Run should succeed, got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "the staged deletion must land as exactly one commit"
+    );
+    assert!(
+        !dir.path().join("tracked.txt").exists(),
+        "the file must stay deleted"
+    );
+    assert!(
+        is_clean(dir.path()) && worktree_is_empty(dir.path()),
+        "working tree must be clean after the staged-deletion commit"
+    );
+}
+
+/// A staged set mixing a modification with a deletion must land both in one
+/// commit: the re-stage step keeps the modification (it folds workdir state
+/// into the index) while skipping the deletion (nothing to fold) — but both
+/// stay in the commit's path list. Without the `Deleted` filter this Run
+/// died on the pathspec guard; without keeping the paths it would silently
+/// drop the deletion from the commit.
+#[tokio::test]
+async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    // A second tracked file, so the staged set can mix both kinds.
+    std::fs::write(dir.path().join("other.txt"), "base\n").unwrap();
+    git_in(dir.path(), &["add", "other.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+
+    // Staged modification (tracked.txt) + staged deletion (other.txt).
+    std::fs::write(dir.path().join("tracked.txt"), "modified\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["rm", "other.txt"]);
+
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let result = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: messenger_fixed("feat: mixed staged set"),
+            confirm: Confirm::Disabled,
+        },
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "mixed staged-deletion Run should succeed, got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "the mixed staged set must land as exactly one commit"
+    );
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "tracked.txt"),
+        "modified\n",
+        "the staged modification must be in the commit"
+    );
+    assert!(
+        !dir.path().join("other.txt").exists()
+            && !git_out(dir.path(), &["ls-tree", "--name-only", "HEAD"])
+                .lines()
+                .any(|l| l == "other.txt"),
+        "the staged deletion must be in the commit"
+    );
+    assert!(
+        is_clean(dir.path()) && worktree_is_empty(dir.path()),
+        "working tree must be clean after the mixed staged-set commit"
+    );
+}
+
 /// A mid-loop failure (here: the 2nd batch's message step errors after batch 1
 /// already committed) must abort with the unified message naming how many
 /// batches committed — and those earlier commits must persist in the repo.
