@@ -5,7 +5,9 @@ use super::verify::{pause_done, smoke_check, step_verify_cli};
 use super::*;
 use crate::llm::cli_agent::{PRESETS, cli_preset};
 
-/// Configure the CLI-agent backend: pick a preset (claude/codex/pi/opencode).
+/// Configure the CLI-agent backend: pick a preset (claude/codex/pi/opencode/
+/// omp/gemini/cursor/windsurf/copilot/trae/qwen), write it to config, and
+/// (for a streamed preset) offer a connectivity probe.
 /// Custom commands are intentionally not offered — every streaming backend
 /// needs a dedicated decoder for its stdout envelope (claude `stream-json`,
 /// pi `--mode json`, opencode `--format json`), and a free-form command has

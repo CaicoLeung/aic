@@ -47,12 +47,13 @@ placeholder), `timeout_secs`. All optional, so existing configs are unchanged �
 ### Generic command template, not one adapter per CLI
 
 The backend is a single `CliSpec { command, args, timeout_secs }` carrying an
-argv template with a literal `{prompt}` placeholder. Three presets
-(`cli_preset("claude" | "codex" | "pi")`) are offered as snippets by `aic setup`
-and the docs; any other CLI (Opencode, Copilot, OhMyPi, future ones) is covered
-by a custom `command`/`args` with **zero new code**. This deliberately rejects
-the "one hardcoded adapter per CLI" alternative — six adapters doing the same
-text-in/text-out job is a maintenance treadmill.
+argv template with a literal `{prompt}` placeholder. Presets are data, not
+adapters: the preset names live in one registry ([`PRESETS`], resolved by
+`cli_preset`), and adding one is a single match arm plus an `Encoding` choice —
+omp needed zero new decoder code because it reuses pi's. A CLI without a
+preset is still covered by a custom `command`/`args` with **zero new code**.
+This deliberately rejects the "one hardcoded adapter per CLI" alternative —
+many adapters doing the same text-in/text-out job is a maintenance treadmill.
 
 ### Dispatch: an enum, not `Box<dyn>`
 
@@ -76,9 +77,11 @@ single prompt and reads stdout. No tool loop is ever allowed: an agent that can
 run tools could act on prompt-injected instructions against the working tree.
 Print mode removes that entire class of risk.
 
-**Least-permission presets.** The promise above is enforced by the invocation
-itself, not by trusting each CLI's default — every preset pins itself to a
-text-only / read-only stance, because defaults differ and one (pi) is unsafe:
+**Least-permission presets.** The promise above is enforced by the invocation,
+not by tool-use mode: every preset runs single-shot print mode, where no TTY
+exists to answer an approval prompt. On top of that shared guarantee, presets
+pin explicit flags where the CLI's defaults need it — defaults differ and one
+(pi) is unsafe even in print mode:
 
 | Preset | Pinned flags | Why |
 | --- | --- | --- |
@@ -86,13 +89,24 @@ text-only / read-only stance, because defaults differ and one (pi) is unsafe:
 | `codex` | `exec -s read-only` | `exec` runs non-interactively; the sandbox is pinned to `read-only` so model-generated shell commands cannot write, even if a global config widens the default. `--dangerously-bypass-approvals-and-sandbox` is opt-in. |
 | `pi` | `--no-tools -p` | **Required.** pi enables `read/bash/edit/write` tools by default; in print mode on a *trusted* project it can auto-run them (it cannot prompt) — effectively yolo. `--no-tools` disables all tools so print mode is genuinely text-only. |
 
-Custom `command`/`args` backends are the user's responsibility to harden. The
-`aic setup` wizard offers **only the four presets** (claude / codex / pi /
-opencode) — each ships a dedicated decoder for its CLI's stdout envelope, so
-aic can stream reasoning where the CLI exposes it and cleanly extract the
-answer. A hand-edited custom `command`/`args` still runs, but in plain-text mode
-with no reasoning feed and no envelope decoding; it is the config-edit escape
-hatch for a CLI without a preset, not a wizard option.
+Custom `command`/`args` backends are the user's responsibility to harden.
+
+The remaining presets pin **no** flags — deliberately. They rely on headless
+print mode itself: with no TTY, approval-gated tools cannot run (gemini,
+copilot, trae, qwen); cursor runs untrusted (writes disabled) because
+`--trust` is omitted; opencode and omp expose no equivalent of pi's
+`--no-tools`, so like claude their text-only stance rests on print mode's
+conservative default. This weakening of "pin flags everywhere" is accepted
+here on purpose: per-CLI permission flags drift between CLI versions, while
+the headless default is shared by all eleven and cannot regress per CLI.
+
+The `aic setup` wizard offers **only the presets** ([`PRESETS`]). The five
+with a decodable stdout envelope (claude, codex, pi, opencode — and omp, which
+reuses pi's decoder) get reasoning streamed or extracted where the CLI exposes
+it; the rest are plain print mode (stdout IS the answer). A hand-edited custom
+`command`/`args` still runs, but in plain-text mode with no reasoning feed and
+no envelope decoding; it is the config-edit escape hatch for a CLI without a
+preset, not a wizard option.
 
 ### Preset auto-migration
 

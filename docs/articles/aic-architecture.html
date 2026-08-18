@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aic — 架构全景</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2331;
+    --border:#2d333b; --border2:#3d444d;
+    --fg:#e6edf3; --fg-dim:#9198a1; --fg-faint:#6e7681;
+    --green:#3fb950; --green-dim:#238636; --green-bg:rgba(63,185,80,.1);
+    --red:#f85149; --red-bg:rgba(248,81,73,.1);
+    --blue:#58a6ff; --blue-bg:rgba(88,166,255,.1);
+    --purple:#bc8cff; --purple-bg:rgba(188,140,255,.1);
+    --yellow:#d29922; --yellow-bg:rgba(210,153,34,.12);
+    --cyan:#39c5cf; --cyan-bg:rgba(57,197,207,.1);
+    --orange:#f0883e;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",Menlo,Consolas,monospace;
+    --sans:-apple-system,"PingFang SC","Noto Sans SC","Segoe UI",Helvetica,Arial,sans-serif;
+    --sidebar-w:240px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth;scroll-padding-top:24px}
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  a:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
+  body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:15px;line-height:1.75}
+  ::selection{background:rgba(88,166,255,.3)}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.88em;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--cyan);white-space:nowrap}
+  strong{color:#fff}
+
+  /* ===== layout ===== */
+  .layout{display:flex;min-height:100vh}
+  nav.toc{width:var(--sidebar-w);flex-shrink:0;position:sticky;top:0;height:100vh;height:100dvh;overflow-y:auto;
+    border-right:1px solid var(--border);padding:28px 16px;background:var(--bg2)}
+  nav.toc .toc-title{font-family:var(--mono);font-size:12px;color:var(--fg-faint);letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px;padding-left:10px}
+  nav.toc a{display:block;color:var(--fg-dim);font-size:13px;padding:5px 10px;border-radius:6px;border-left:2px solid transparent}
+  nav.toc a:hover{color:var(--fg);background:var(--bg3);text-decoration:none}
+  nav.toc a.active{color:var(--green);border-left-color:var(--green);background:var(--green-bg)}
+  nav.toc .toc-group{font-family:var(--mono);font-size:11px;color:var(--fg-faint);margin:16px 0 6px;padding-left:10px;letter-spacing:.08em}
+  main{flex:1;min-width:0;max-width:880px;margin:0 auto;padding:48px 48px 120px}
+  @media(max-width:960px){
+    html{scroll-padding-top:70px}
+    .layout{display:block}
+    /* TOC → 粘性横向 chip 条（tab bar）*/
+    nav.toc{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:8px;width:100%;height:auto;
+      overflow-x:auto;border-right:none;border-bottom:1px solid var(--border);padding:10px 16px;
+      background:var(--bg2);scrollbar-width:none;-webkit-overflow-scrolling:touch}
+    nav.toc::-webkit-scrollbar{display:none}
+    nav.toc .toc-title,nav.toc .toc-group{display:none}
+    nav.toc a{flex-shrink:0;border:1px solid var(--border2);border-radius:99px;padding:4px 13px;
+      font-family:var(--mono);font-size:12.5px;line-height:1.4}
+    nav.toc a.active{border-color:var(--green);background:var(--green-bg)}
+    main{padding:32px 20px 80px}
+  }
+
+  /* ===== hero ===== */
+  .hero{padding:40px 0 8px}
+  .hero .crumb{font-family:var(--mono);font-size:13px;color:var(--fg-faint);margin-bottom:14px}
+  .hero .crumb .p{color:var(--green)}
+  .hero h1{font-size:clamp(30px,6.5vw,44px);font-weight:800;letter-spacing:-.02em;line-height:1.15;margin-bottom:16px}
+  .hero h1 .accent{color:var(--green)}
+  .hero .tagline{font-size:clamp(15.5px,3.4vw,18px);color:var(--fg-dim);max-width:640px;margin-bottom:28px}
+  .hero .tagline em{color:var(--fg);font-style:normal;font-weight:600}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:28px 0 8px}
+  .stat{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+  .stat .n{font-family:var(--mono);font-size:24px;font-weight:700;color:var(--green)}
+  .stat .n.b{color:var(--blue)} .stat .n.p{color:var(--purple)} .stat .n.y{color:var(--yellow)} .stat .n.c{color:var(--cyan)}
+  .stat .l{font-size:12px;color:var(--fg-dim);margin-top:2px}
+  .hero .prompt{margin-top:26px}
+
+  /* ===== terminal / code blocks ===== */
+  .term{background:#0a0d12;border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:18px 0}
+  .term .bar{display:flex;align-items:center;gap:7px;padding:9px 14px;background:var(--bg2);border-bottom:1px solid var(--border)}
+  .term .bar .dot{width:11px;height:11px;border-radius:50%}
+  .term .bar .r{background:#ff5f57}.term .bar .y{background:#febc2e}.term .bar .g{background:#28c840}
+  .term .bar .title{font-family:var(--mono);font-size:12px;color:var(--fg-faint);margin-left:6px}
+  .term pre{font-family:var(--mono);font-size:13px;line-height:1.7;padding:16px 18px;overflow-x:auto;color:var(--fg)}
+  .c-green{color:var(--green)} .c-red{color:var(--red)} .c-blue{color:var(--blue)} .c-purple{color:var(--purple)}
+  .c-yellow{color:var(--yellow)} .c-cyan{color:var(--cyan)} .c-orange{color:var(--orange)}
+  .c-dim{color:var(--fg-faint)} .c-fg{color:var(--fg)}
+  pre code{background:none;border:none;padding:0;color:inherit;white-space:pre}
+
+  /* ===== sections ===== */
+  section{padding-top:56px;margin-top:8px}
+  .sec-num{font-family:var(--mono);font-size:13px;color:var(--green);letter-spacing:.1em;margin-bottom:6px}
+  h2{font-size:28px;font-weight:800;letter-spacing:-.01em;margin-bottom:8px}
+  h3{font-size:19px;font-weight:700;margin:34px 0 10px;color:#fff}
+  h3 .h3-tag{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--fg-faint);margin-left:8px}
+  h4{font-size:15px;font-weight:700;margin:22px 0 8px;color:var(--blue)}
+  .lede{color:var(--fg-dim);font-size:16px;margin-bottom:20px}
+  p{margin-bottom:14px}
+  ul.list{margin:0 0 16px 20px}
+  ul.list li{margin-bottom:8px}
+  ul.list li::marker{color:var(--green)}
+
+  /* ===== callouts ===== */
+  .callout{border:1px solid var(--border);border-left:3px solid var(--blue);background:var(--blue-bg);
+    border-radius:0 10px 10px 0;padding:14px 18px;margin:18px 0;font-size:14px}
+  .callout.green{border-left-color:var(--green);background:var(--green-bg)}
+  .callout.yellow{border-left-color:var(--yellow);background:var(--yellow-bg)}
+  .callout.purple{border-left-color:var(--purple);background:var(--purple-bg)}
+  .callout.red{border-left-color:var(--red);background:var(--red-bg)}
+  .callout .co-title{font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px;color:var(--blue)}
+  .callout.green .co-title{color:var(--green)}
+  .callout.yellow .co-title{color:var(--yellow)}
+  .callout.purple .co-title{color:var(--purple)}
+  .callout.red .co-title{color:var(--red)}
+  .callout p:last-child{margin-bottom:0}
+
+  /* ===== tables ===== */
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th{font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-dim);
+    text-align:left;padding:8px 12px;border-bottom:2px solid var(--border2)}
+  td{padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:hover td{background:rgba(88,166,255,.04)}
+  td code{white-space:nowrap}
+
+  /* ===== architecture tree ===== */
+  .tree{background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+    padding:20px 22px;margin:18px 0;overflow-x:auto}
+  .trow{display:flex;align-items:baseline;gap:16px;padding:2.5px 0}
+  .trow:hover{background:rgba(88,166,255,.05);border-radius:4px}
+  .tpath{font-family:var(--mono);font-size:13px;white-space:pre;flex-shrink:0;min-width:max-content}
+  .tpath .conn{color:var(--fg-faint)}
+  .tpath .dir{font-weight:700}
+  .tpath .d-core{color:var(--yellow)} .tpath .d-git{color:var(--orange)}
+  .tpath .d-llm{color:var(--purple)} .tpath .d-render{color:var(--cyan)} .tpath .d-work{color:var(--green)}
+  .tpath .hot{color:var(--yellow)}
+  .tdesc{font-size:12.5px;color:var(--fg-dim);line-height:1.6;flex:1;min-width:220px;padding-right:4px}
+  .tdesc code{font-size:.9em}
+  .tdomain{display:flex;flex-wrap:wrap;gap:8px 16px;margin:16px 0 4px;font-size:12.5px;color:var(--fg-dim)}
+  .tdomain .td-item{display:flex;align-items:center;gap:6px}
+  .tdomain .td-dot{width:9px;height:9px;border-radius:2.5px;flex-shrink:0}
+
+  /* ===== domain cards ===== */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:18px 0}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+  .card .card-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .card .card-icon{font-size:16px}
+  .card h5{font-size:14.5px;font-weight:700;color:#fff}
+  .card h5 code{background:none;border:none;padding:0;color:inherit;font-size:1em}
+  .card p{font-size:13px;color:var(--fg-dim);margin:0}
+  .card .card-tag{font-family:var(--mono);font-size:10.5px;color:var(--green);background:var(--green-bg);
+    border-radius:4px;padding:1px 6px;margin-left:auto;flex-shrink:0}
+
+  /* ===== flow diagrams ===== */
+  .flow{display:flex;flex-direction:column;align-items:stretch;margin:20px 0}
+  .fnode{background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:12px 18px;position:relative}
+  .fnode .fnum{position:absolute;left:-13px;top:50%;transform:translateY(-50%);width:26px;height:26px;border-radius:50%;
+    background:var(--green);color:#0d1117;font-family:var(--mono);font-weight:700;font-size:13px;
+    display:flex;align-items:center;justify-content:center;z-index:2}
+  .fnode .ftitle{font-weight:700;font-size:14.5px;color:#fff}
+  .fnode .ftitle .fmod{font-family:var(--mono);font-size:11.5px;font-weight:500;color:var(--fg-faint);margin-left:8px}
+  .fnode .fdesc{font-size:13px;color:var(--fg-dim);margin-top:3px}
+  .fnode.git{border-color:rgba(210,153,34,.5)} .fnode.git .fnum{background:var(--yellow)}
+  .fnode.llm{border-color:rgba(188,140,255,.5)} .fnode.llm .fnum{background:var(--purple)}
+  .fnode.warn{border-color:rgba(248,81,73,.5)} .fnode.warn .fnum{background:var(--red)}
+  .fnode.io{border-color:rgba(88,166,255,.5)} .fnode.io .fnum{background:var(--blue)}
+  .farrow{align-self:center;height:30px;width:2px;background:linear-gradient(var(--border2),var(--fg-faint));position:relative;flex-shrink:0}
+  .farrow::after{content:"";position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);
+    border:5px solid transparent;border-top-color:var(--fg-faint)}
+  .farrow .flabel{position:absolute;left:12px;top:50%;transform:translateY(-50%);font-family:var(--mono);
+    font-size:11px;color:var(--fg-faint);white-space:nowrap;background:var(--bg);padding:0 4px}
+  .fbranch{display:flex;gap:14px;margin:0}
+  .fbranch>.fcol{flex:1;display:flex;flex-direction:column;min-width:0}
+  .fsplit{align-self:center;color:var(--fg-faint);font-family:var(--mono);font-size:12px;padding:4px 0;text-align:center}
+
+  /* ===== seam diagram ===== */
+  .seam{display:flex;flex-direction:column;gap:0;margin:20px 0}
+  .seam-row{display:flex;gap:12px}
+  .seam-box{flex:1;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:12px 16px;text-align:center}
+  .seam-box .sb-t{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--cyan)}
+  .seam-box .sb-d{font-size:12px;color:var(--fg-dim);margin-top:2px}
+  .seam-gap{height:34px;position:relative;margin:0}
+  .seam-gap::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--border2)}
+  .seam-gap .sg-label{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--bg);
+    border:1px dashed var(--green);color:var(--green);font-family:var(--mono);font-size:11px;padding:2px 10px;border-radius:99px;white-space:nowrap}
+
+  /* ===== hunk timeline ===== */
+  .hunkmap{display:flex;gap:6px;margin:14px 0;flex-wrap:wrap}
+  .hunk{font-family:var(--mono);font-size:12px;padding:5px 12px;border-radius:6px;border:1px solid}
+  .hunk.b1{background:var(--green-bg);border-color:var(--green-dim);color:var(--green)}
+  .hunk.b2{background:var(--purple-bg);border-color:rgba(188,140,255,.5);color:var(--purple)}
+  .hunk.b3{background:var(--blue-bg);border-color:rgba(88,166,255,.5);color:var(--blue)}
+  .hunkmap-legend{font-size:12.5px;color:var(--fg-dim);margin-top:8px}
+
+  /* ===== ADR list ===== */
+  .adr{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:10px;margin:18px 0}
+  .adr-item{display:flex;gap:12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:13px}
+  .adr-item .adr-n{font-family:var(--mono);color:var(--yellow);font-weight:700;flex-shrink:0}
+  .adr-item .adr-t{color:var(--fg-dim)}
+  .adr-item .adr-t b{color:var(--fg);font-weight:600}
+  @media(max-width:900px){.adr{grid-template-columns:1fr}}
+
+  /* ===== provider grid ===== */
+  .pgrid{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+  .pill{font-family:var(--mono);font-size:12.5px;padding:4px 13px;border-radius:99px;border:1px solid var(--border2);color:var(--fg-dim)}
+  .pill.hl{border-color:var(--green);color:var(--green);background:var(--green-bg)}
+  .pill.hp{border-color:rgba(188,140,255,.6);color:var(--purple);background:var(--purple-bg)}
+
+  /* ===== two-col compare ===== */
+  .compare{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}
+  @media(max-width:760px){.compare{grid-template-columns:1fr}}
+  .cmp{border:1px solid var(--border);border-radius:10px;padding:16px 18px;background:var(--bg2)}
+  .cmp .cmp-title{font-family:var(--mono);font-size:13px;font-weight:700;margin-bottom:10px}
+  .cmp.left .cmp-title{color:var(--green)} .cmp.right .cmp-title{color:var(--purple)}
+  .cmp ul{margin-left:18px;font-size:13.5px;color:var(--fg-dim)}
+  .cmp li{margin-bottom:7px}
+  .cmp li b{color:var(--fg)}
+
+  /* ===== responsive: 平板 ===== */
+  @media(max-width:760px){
+    table{display:block;overflow-x:auto;font-size:12.5px;-webkit-overflow-scrolling:touch}
+    th,td{padding:8px 10px}
+  }
+
+  /* ===== responsive: 手机 ===== */
+  @media(max-width:640px){
+    code{white-space:normal}
+    .term pre{font-size:11.5px;padding:12px}
+    .callout,.cmp{padding:12px 14px}
+    .hero .crumb .c-dim{display:none}
+    section{padding-top:44px}
+    h3{margin-top:26px}
+    /* 流程图：编号圆从「挂边」改为左轨列 */
+    .fnode{display:grid;grid-template-columns:auto 1fr;column-gap:10px;padding:12px 14px}
+    .fnode .fnum{position:static;transform:none;width:22px;height:22px;font-size:12px;align-self:start;margin-top:3px}
+    .fnode .ftitle{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+    .fnode .ftitle .fmod{margin-left:0}
+    .fnode .fdesc{grid-column:2}
+    .farrow{height:26px}
+    .farrow .flabel{left:50%;transform:translate(-50%,-50%);max-width:calc(100vw - 56px);
+      white-space:normal;text-align:center;padding:1px 4px}
+    /* 树：路径与描述上下堆叠 */
+    .trow{flex-direction:column;align-items:flex-start;gap:1px;padding:6px 0;border-bottom:1px solid var(--border)}
+    .trow:last-child{border-bottom:none}
+    .tdesc{min-width:0}
+    .seam-gap .sg-label{max-width:calc(100vw - 72px);white-space:normal;text-align:center}
+    .seam-box{padding:10px 12px}
+  }
+
+  .footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--border);font-family:var(--mono);font-size:12px;color:var(--fg-faint)}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- ============ TOC ============ -->
+<nav class="toc" id="toc">
+  <div class="toc-title">aic / 全景</div>
+  <a href="#hero">总览</a>
+  <div class="toc-group">理解</div>
+  <a href="#concepts">01 · 领域语言</a>
+  <a href="#arch">02 · 五域架构</a>
+  <a href="#flow">03 · 主流程：Run</a>
+  <a href="#validate">04 · 计划校验</a>
+  <a href="#staging">05 · Batch staging</a>
+  <div class="toc-group">深入</div>
+  <a href="#llm">06 · LLM 双后端</a>
+  <a href="#grouping">07 · 确定性兜底</a>
+  <a href="#resolve">08 · 冲突解决</a>
+  <a href="#render">09 · 渲染层</a>
+  <div class="toc-group">工程</div>
+  <a href="#principles">10 · 设计原则</a>
+  <a href="#adr">11 · ADR 谱系</a>
+  <a href="#tests">12 · 测试策略</a>
+  <a href="#config">13 · 配置与分发</a>
+</nav>
+
+<main>
+
+<!-- ============ HERO ============ -->
+<div class="hero" id="hero">
+  <div class="crumb"><span class="p">~/code/aic</span> $ git log --oneline <span class="c-dim"># 由 aic 自己写的提交</span></div>
+  <h1>AI 驱动的<br><span class="accent">原子提交</span>生成器</h1>
+  <p class="tagline">aic 读取你的 diff，让 LLM 规划出<em>逻辑独立的提交批次</em>，为每个批次起草一条 Conventional Commit 消息，然后逐批 stage + commit —— 精确到 <em>hunk 级</em>。</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">aic — zsh</span></div>
+    <pre><span class="c-dim">$</span> aic
+<span class="c-purple">◆ Analyzing changes…</span>   <span class="c-dim">(LLM 流式思考，实时渲染 Markdown 推理)</span>
+<span class="c-dim">├─ Batch 1/2 · 3 files · planner reason: “config schema 重构”</span>
+<span class="c-dim">├─ Batch 2/2 · 1 file  · planner reason: “修复 Windows 路径回归”</span>
+
+<span class="c-green">✓</span> <span class="c-yellow">[1/2]</span> refactor(config): split config into resolved/unresolved halves
+    src/core/config/mod.rs  <span class="c-green">+142</span> <span class="c-red">−38</span>
+<span class="c-green">✓</span> <span class="c-yellow">[2/2]</span> fix(git): handle CRLF in pathspec on Windows
+    src/git/staging/mod.rs  <span class="c-green">+9</span> <span class="c-red">−1</span></pre>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="n">Rust</div><div class="l">edition 2024 · MSRV 1.88</div></div>
+    <div class="stat"><div class="n b">5</div><div class="l">领域模块（core/git/llm/render/workflow）</div></div>
+    <div class="stat"><div class="n p">12+4</div><div class="l">API 提供商 + CLI agent 后端</div></div>
+    <div class="stat"><div class="n y">16</div><div class="l">ADR（架构决策记录）</div></div>
+    <div class="stat"><div class="n">~330</div><div class="l">测试 · 全部 hermetic</div></div>
+    <div class="stat"><div class="n b">8</div><div class="l">并发起草上限（ADR 0014）</div></div>
+  </div>
+</div>
+
+<!-- ============ 01 CONCEPTS ============ -->
+<section id="concepts">
+  <div class="sec-num">01 / CONCEPTS</div>
+  <h2>领域语言</h2>
+  <p class="lede">aic 的词汇表是规范性的（<code>CONTEXT.md</code> 定义）——代码、文档、提交消息都用同一套词。理解这 8 个词，就理解了整个工具。</p>
+
+  <div class="cards">
+    <div class="card"><div class="card-head"><span class="card-icon">▶</span><h5><code>Run</code></h5></div><p>默认提交工作流的一次执行：要么对已 stage 的文件做一次提交，要么对未 stage 的工作做一次批次规划。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">▣</span><h5><code>Batch</code></h5></div><p>LLM 拆分计划分配给一次提交的一组文件/hunk。一个 Run 包含一个或多个 Batch；每个 Batch 产出一条提交。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">✎</span><h5><code>Drafted Message</code></h5></div><p>LLM 为一个 Batch 的 diff 起草的 Conventional Commit 消息（含可选 body）。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">⇄</span><h5><code>Batch staging</code></h5></div><p>把 Batch 计划的 hunk 映射到<strong>当前</strong> index→workdir diff 并 stage 的阶段——重读新 diff 而非计划时快照，所以 pre-commit hook 不会让后续 Batch 失步。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">▦</span><h5><code>Block</code></h5></div><p>确定性分组引擎（无 LLM）产出的原子变更单元，携带 <code>BlockHeuristic</code>（为什么这些 hunk 被合并）。一个 Block 转换为一个 Batch。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">⏣</span><h5><code>Backend</code></h5></div><p>aic 获取 LLM 回答的方式——恰好两种：API-provider（HTTP 调 Provider）或 CLI-agent（shell 出外部 CLI 复用其认证）。由 <code>backend_kind</code> 显式判别。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">⚡</span><h5><code>Conflict / Resolution</code></h5></div><p>Conflict = 检测到的合并态冲突；Resolution = LLM 产出的无标记文件内容。批准后写入工作树并 stage。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">✓</span><h5><code>Finalize</code></h5></div><p>结束 Conflict 的 git 操作（<code>git commit</code> / <code>cherry-pick --continue</code> / <code>revert --continue</code>），用 git 默认消息，<strong>不</strong>调 LLM。</p></div>
+  </div>
+</section>
+
+<!-- ============ 02 ARCH ============ -->
+<section id="arch">
+  <div class="sec-num">02 / ARCHITECTURE</div>
+  <h2>五域架构</h2>
+  <p class="lede">一个薄二进制（<code>main.rs</code> 只做迁移 + 分发）罩在一个五域库上。依赖单向流动：<span style="color:var(--blue)">workflow</span> 组合其余四域，四域之间互不知晓。</p>
+
+  <div class="tdomain">
+    <span class="td-item"><span class="td-dot" style="background:var(--yellow)"></span>core — 横切面</span>
+    <span class="td-item"><span class="td-dot" style="background:var(--orange)"></span>git — 仓库表面</span>
+    <span class="td-item"><span class="td-dot" style="background:var(--purple)"></span>llm — 后端</span>
+    <span class="td-item"><span class="td-dot" style="background:var(--cyan)"></span>render — 终端输出</span>
+    <span class="td-item"><span class="td-dot" style="background:var(--green)"></span>workflow — 用户流程（组合其余四域）</span>
+  </div>
+
+  <div class="tree">
+    <div class="trow"><span class="tpath"><span class="dir d-git">src/</span></span><span class="tdesc">库根 <code>lib.rs</code> = 模块树；二进制只是薄壳（ADR 0015）</span></div>
+
+    <div class="trow"><span class="tpath"><span class="conn">├── </span><span class="hot">main.rs</span></span><span class="tdesc">唯一职责：<code>#[tokio::main]</code> → clap 解析 → 两次幂等配置迁移 → 子命令分发；无子命令 = 默认 Run</span></div>
+
+    <div class="trow"><span class="tpath"><span class="conn">├── </span><span class="dir d-core">core/</span></span><span class="tdesc">跨切面：无状态横切设施，其余四域都可能依赖</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>cli/</span><span class="tdesc">clap 命令树（setup / use / list / update / resolve / completion）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>config/</span><span class="tdesc"><code>Config</code> / <code>ResolvedConfig</code> / <code>BackendKind</code>、位置+preset 两种迁移、<code>run_use</code> / <code>run_list</code></span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>types/</span><span class="tdesc">seam 词汇表：<code>Resolver</code> · <code>Prompt</code> · <code>BatchPlanner</code> · <code>CommitMessenger</code>（一切注入经此）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;└── </span>update/</span><span class="tdesc">自更新：内嵌 zipsign 公钥验签（<code>include_bytes!</code>）</span></div>
+
+    <div class="trow"><span class="tpath"><span class="conn">├── </span><span class="dir d-git">git/</span></span><span class="tdesc">仓库表面：libgit2 读 + 真 git CLI 写的双策略（ADR 0006/0016）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>status.rs</span><span class="tdesc">staged / unstaged 文件清单（libgit2 单文件叶子）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>diff_view.rs</span><span class="tdesc">workdir / index diff 抓取入口</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>diff/</span><span class="tdesc">纯解析：<code>FilePatch</code>、编号 hunk、按函数分块的 scope 化格式</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>diff_json/</span><span class="tdesc">Diff JSON 信封 <code>{"unstaged_files":[{path,diff}]}</code>——纯函数零 IO</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>staging/</span><span class="tdesc">Batch staging 状态机：plan 时索引 → 当前 diff 重映射（§05）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;└── </span>conflict/</span><span class="tdesc">冲突检测 / 分类 / Finalize + resolve 流程状态 UI</span></div>
+
+    <div class="trow"><span class="tpath"><span class="conn">├── </span><span class="dir d-llm">llm/</span></span><span class="tdesc">后端层：永不触碰 git——只吃 diff 字符串，吐文本/JSON</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>mod.rs</span><span class="tdesc">Provider <code>REGISTRY</code>（12 项，ADR 0003）、<code>Backend{Rig,Cli}</code> 枚举、<code>with_agent!</code> 宏</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>generator/</span><span class="tdesc">三次类型化调用 + <code>validate_batch_plan</code>（§04 信任边界）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>cli_agent/</span><span class="tdesc">11 个 CLI agent 预设的无头外壳（ADR 0010），唯一 <code>async-trait</code> seam</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>decoder/</span><span class="tdesc">流式 NDJSON 事件解码</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>parse/</span><span class="tdesc">容错 JSON 解析 + 截断/围栏容忍 + 可重试错误分类</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>retry/</span><span class="tdesc">共享重试策略——推理模型「预算饥饿」恢复</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;└── </span>prompt/</span><span class="tdesc">三个系统提示词：batch_plan / git_message / resolve</span></div>
+
+    <div class="trow"><span class="tpath"><span class="conn">├── </span><span class="dir d-render">render/</span></span><span class="tdesc">终端输出：纯输出域，无业务知识（ADR 0013 禁 TUI 框架）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>display/</span><span class="tdesc">提交行 / 预览卡 / File stats footer 等面板元素</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>progress/</span><span class="tdesc">spinner 与字节级帧/行装配（<code>ReasoningRenderer</code>）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>reasoning_feed/</span><span class="tdesc">流式推理的「何时重绘」策略：滚动窗口，思考毕即擦除</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>markdown/</span><span class="tdesc">纯 Markdown → ANSI 行画家：分类 + 内联解析 + syntect 高亮，零 IO</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;└── </span>palette/</span><span class="tdesc">全部颜色经角色函数（WCAG 校验），按 Commit Type 键控</span></div>
+
+    <div class="trow"><span class="tpath"><span class="conn">└── </span><span class="dir d-work">workflow/</span></span><span class="tdesc">用户流程：唯一被允许组合其余四域的顶层</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">&#160;&#160;&#160;&#160;&#160;├── </span>run/</span><span class="tdesc">Run 脊柱：<code>commit_run</code> / <code>default_run</code> / <code>default_workflow</code> + <code>RunDeps</code>（§03）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">&#160;&#160;&#160;&#160;&#160;├── </span>resolve/</span><span class="tdesc">resolve 流程：<code>resolve_run</code> + <code>ResolveDeps</code>（§08）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">&#160;&#160;&#160;&#160;&#160;├── </span>grouping/</span><span class="tdesc">确定性 Block 分组引擎——LLM 之下的第二生产者（§07）</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">&#160;&#160;&#160;&#160;&#160;├── </span>confirm/</span><span class="tdesc">确认菜单：Commit / Re-generate / Edit / Abort</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">&#160;&#160;&#160;&#160;&#160;├── </span>setup/</span><span class="tdesc">配置向导：provider / cli 双路，验证 + 定稿</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">&#160;&#160;&#160;&#160;&#160;└── </span>input.rs</span><span class="tdesc">stdin y/n 提示原语</span></div>
+  </div>
+
+  <div class="callout green">
+    <div class="co-title">分层规则（ADR 0015 / 0016）</div>
+    <p><strong>workflow 组合，其余服务。</strong> workflow 依赖 core/git/llm/render；llm 永不碰 git（只吃 diff 字符串）；render 是纯输出；core 是无状态的横切设施。模块 = 目录 + <code>mod.rs</code>（<code>//!</code> 文档头），测试与实现同目录共存。</p>
+  </div>
+</section>
+
+<!-- ============ 03 FLOW ============ -->
+<section id="flow">
+  <div class="sec-num">03 / MAIN FLOW</div>
+  <h2>主流程：一次 Run</h2>
+  <p class="lede">入口 <code>default_workflow()</code> 装配真实依赖 → <code>default_run()</code> 先检查冲突态（有冲突则提供 resolve 移交）→ 干净仓库进入 <code>commit_run()</code>，按「是否有已 stage 文件」二分为两条路径。</p>
+
+  <h3>路由 <span class="h3-tag">git.status() → staged 文件集</span></h3>
+  <div class="term">
+    <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">决策</span></div>
+    <pre><span class="c-dim">status = git.status()?</span>
+<span class="c-cyan">if</span> staged_files.is_empty() &amp;&amp; unstaged.is_empty() → <span class="c-dim">“nothing to commit”，结束（不调 LLM）</span>
+<span class="c-cyan">if</span> staged_files.is_empty()               → <span class="c-purple">路径 B：批次规划（unstaged）</span>
+<span class="c-cyan">else</span>                                    → <span class="c-green">路径 A：单次提交（staged）</span></pre>
+  </div>
+
+  <h3>路径 A — 有已 stage 文件 <span class="h3-tag">一次提交</span></h3>
+  <div class="flow">
+    <div class="fnode io"><div class="fnum">1</div><div class="ftitle">折入工作树变更<span class="fmod">git.add(paths)</span></div><div class="fdesc">git add 语义：把 staged 文件的 workdir 改动折进 index。纯删除文件跳过（路径守卫：<code>add(&[])</code> 会退化为 <code>add -A</code>，绝不允许）。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode git"><div class="fnum">2</div><div class="ftitle">抓取 staged diff → JSON 信封<span class="fmod">git.diff → diff_json::files_json</span></div><div class="fdesc">逐文件从 index 读 live diff，scope 化格式化（按函数分块标注），组装成 <code>{"files":[{path,diff}]}</code>。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode llm"><div class="fnum">3</div><div class="ftitle">起草消息<span class="fmod">Generator::generate_commit_message → CommitOutput{message,body}</span></div><div class="fdesc">单次类型化调用：schema 约束 + 容错解析 + 重试，全部藏在 LLMAgent seam 里。进度条是纯 spinner（消息路径不流式）。</div></div>
+    <div class="farrow"><span class="flabel">可选：confirm_before_commit</span></div>
+    <div class="fnode io"><div class="fnum">4</div><div class="ftitle">确认菜单<span class="fmod">workflow/confirm</span></div><div class="fdesc">Commit / <b>Re-generate</b>（重跑 LLM）/ <b>Edit</b>（$EDITOR 编辑）/ Abort。Re-generate 与 Edit 回到同一菜单。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode git"><div class="fnum">5</div><div class="ftitle">提交 + 渲染 ✓ 行<span class="fmod">git.commit → display.commit_line</span></div><div class="fdesc">真 <code>git commit</code> CLI（hooks/gpgsign 生效），返回 hash；落地统计（<code>committed_stats</code>）渲染 File stats footer。</div></div>
+  </div>
+
+  <h3>路径 B — 无 staged、有 unstaged <span class="h3-tag">hunk 级批次规划 —— aic 的灵魂</span></h3>
+  <div class="flow">
+    <div class="fnode git"><div class="fnum">1</div><div class="ftitle">快照 workdir diff（每文件一次）<span class="fmod">git.diff_workdir → parse_file_patch</span></div><div class="fdesc">同一份快照喂两个必须对齐 hunk 编号的消费者：发给模型的编号视图 + <code>file_hunk_counts</code>（校验用）。零文本 hunk 的文件（二进制/权限/重命名）发送显式 <code>BINARY_MARKER</code>，防止模型当作“没变化”丢掉。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode llm"><div class="fnum">2</div><div class="ftitle">LLM 批次规划（流式）<span class="fmod">Generator::split_patch_streaming → BatchPlanOutput</span></div><div class="fdesc">模型边思考边把推理流进 Reasoning feed（原位滚动重绘，思考结束即擦除）。产出 <code>{batches:[{changes:[{file,hunks:[1,3]}], reason}]}</code> —— 一个文件的不同 hunk 可以分属不同批次（<code>git add -p</code> 式）。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode warn"><div class="fnum">3</div><div class="ftitle">校验：精确 hunk 划分<span class="fmod">generator::validate_batch_plan</span></div><div class="fdesc">每个文件的每个 hunk 必须恰好分给一个批次：无重叠、无遗漏、无越界、无未知文件。无效 = LLM 故障而非用户问题 → <b>警告并降级到确定性分组</b>（见 §07），Run 继续完成。</div></div>
+    <div class="farrow"><span class="flabel">ADR 0014：并发上限 8</span></div>
+    <div class="fnode llm"><div class="fnum">4</div><div class="ftitle">并发起草全部批次消息<span class="fmod">buffered × MAX_CONCURRENT_DRAFTS = 8</span></div><div class="fdesc">计划的全部 diff 内容在计划时已知 → N 个串行 LLM 往返折叠为一次。每条草稿挂自己的 <code>[i/N]</code> 进度条；保序 buffered 让调用顺序确定。切片自计划时 diff（模型看到的编号），而非 staged diff。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode"><div class="fnum">5</div><div class="ftitle">逐批：stage → commit 循环<span class="fmod">staging::Staging::stage_batch → generate_and_commit</span></div><div class="fdesc">每批：把计划 hunk 重映射到<strong>当前</strong> diff 并 <code>git apply --cached</code>（§05）→ 确认菜单 → 提交 → ✓ 行。中途失败/拒绝 = 干净中止，报「已提交 N 批，剩余仍 staged，重跑 aic 即可继续」。</div></div>
+  </div>
+
+  <div class="callout">
+    <div class="co-title">为什么先全部起草再逐批提交？</div>
+    <p>LLM 往返主导多批 Run 的墙钟时间。计划一旦定下，每批的 diff 内容完全已知，fan-out 把 N 次串行等待坍缩成一次——而 staging 必须串行（每批提交改变 index，后续批次的当前 diff 会变）。上限 8 是防 provider 限流（HTTP 429）的护栏。</p>
+  </div>
+</section>
+
+<!-- ============ 04 VALIDATE ============ -->
+<section id="validate">
+  <div class="sec-num">04 / TRUST BOUNDARY</div>
+  <h2>计划校验：不信 LLM 一个字</h2>
+  <p class="lede">LLM 输出是不可信输入。<code>validate_batch_plan</code> 把「批次计划」当作必须证明的命题：它是全部 hunk 的<strong>精确划分</strong>，否则整个计划作废，确定性引擎接管。</p>
+
+  <div class="hunkmap">
+    <span style="font-family:var(--mono);font-size:12px;color:var(--fg-faint);align-self:center;margin-right:6px">display.rs 的 5 个 hunk：</span>
+    <span class="hunk b1">h1</span><span class="hunk b1">h2</span><span class="hunk b2">h3</span><span class="hunk b2">h3…重叠 ✗</span><span class="hunk b3">h5</span><span class="hunk" style="border-color:var(--red);color:var(--red);background:var(--red-bg)">h4 缺失 ✗</span>
+  </div>
+  <div class="hunkmap-legend">上图示意一个会被拒绝的计划：h3 被分给两个批次（重叠）、h4 没人认领（缺口）。合法计划 = 每个 hunk 恰好一种颜色，无空色、无重复。</div>
+
+  <table>
+    <tr><th>校验规则</th><th>拒绝原因（错误消息原文）</th></tr>
+    <tr><td>至少一个批次</td><td><code>LLM returned no batches — no commits were created</code></td></tr>
+    <tr><td>批次非空</td><td><code>batch N has no changes</code></td></tr>
+    <tr><td>不引用未知文件</td><td><code>batch N references unknown file: …</code></td></tr>
+    <tr><td>hunk 索引在范围内</td><td><code>batch N references hunk 5 of a.rs, which has only 2 hunk(s)</code></td></tr>
+    <tr><td>无重叠（一 hunk 一批次）</td><td><code>hunk 2 of a.rs is assigned to more than one batch</code></td></tr>
+    <tr><td>无缺口（全覆盖）</td><td><code>LLM response did not cover all hunks. Missing: a.rs:hunk 2…</code></td></tr>
+    <tr><td>零 hunk 文件（二进制）也必须被引用</td><td><code>LLM response did not include every file. Unreferenced: blob.bin</code></td></tr>
+  </table>
+
+  <div class="callout red">
+    <div class="co-title">回归防线</div>
+    <p>最后一条规则是真实回归的补丁：hunk 覆盖检查抓不到没有 hunk 的文件（二进制/权限/重命名）被遗漏——Run 会报成功却把变更留在工作树。同理，issue #34 的「静默零提交」由确定性分组的构造保证堵死：引擎输出必是合法划分，真实工作永远产出 ≥1 批。</p>
+  </div>
+</section>
+
+<!-- ============ 05 STAGING ============ -->
+<section id="staging">
+  <div class="sec-num">05 / STAGING</div>
+  <h2>Batch staging：两套索引空间的重映射</h2>
+  <p class="lede">计划时模型看到的是「workdir vs HEAD」编号的 hunk；staging 时真正要 apply 的是「index vs workdir」的<strong>当前</strong> diff——每批提交后 diff 都会变。<code>Staging</code> 状态机弥合这两套编号。</p>
+
+  <div class="term">
+    <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">重映射算术</span></div>
+    <pre><span class="c-dim">// Staging 内部：file → 已落地的【原始】hunk 索引集合</span>
+committed_hunks: HashMap&lt;String, HashSet&lt;usize&gt;&gt;
+
+<span class="c-dim">// 每批 stage 时：</span>
+1. <span class="c-cyan">重读当前 diff</span>（不是计划快照！）→ 当前 hunk 列表
+2. 当前 hunk 中，减去已 committed_hunks 的，剩下 = <span class="c-green">计划索引的直接映射</span>
+3. <code>git apply --cached</code> 选中 hunk → 落地索引记回 committed_hunks
+4. 文件全部 hunk 已落地 → 该文件跳过（附提示），批次继续</pre>
+  </div>
+
+  <div class="callout yellow">
+    <div class="co-title">为什么「重读当前 diff」是承重墙</div>
+    <p>lint-staged / prettier 类 pre-commit hook 会 <strong>re-stage 整个文件</strong>：第一个碰该文件的批次可能把它的<strong>全部</strong> hunk 带进提交。如果重放计划时快照，后续批次的 <code>git apply</code> 会死在 "patch does not apply"。重读当前 diff 让后续批次看到「该文件已无剩余 hunk」→ 优雅跳过，Run 存活。历史 bug：3+ hunk 单文件 Run 因把重映射位置误写回原始索引而中止——所以状态只存<strong>原始</strong>索引。</p>
+  </div>
+
+  <div class="seam">
+    <div class="seam-row">
+      <div class="seam-box"><div class="sb-t">计划时视图</div><div class="sb-d">workdir vs HEAD<br>模型看到的 hunk 编号</div></div>
+      <div class="seam-box"><div class="sb-t">当前视图（每批重读）</div><div class="sb-d">index vs workdir<br>apply 目标的 hunk 编号</div></div>
+    </div>
+    <div class="seam-gap"><span class="sg-label">Staging · committed_hunks 原始索引账本</span></div>
+    <div class="seam-row">
+      <div class="seam-box"><div class="sb-t">git apply --cached</div><div class="sb-d">真 CLI 变更路径（hooks 生效）</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 06 LLM ============ -->
+<section id="llm">
+  <div class="sec-num">06 / BACKENDS</div>
+  <h2>LLM 双后端</h2>
+  <p class="lede">取 LLM 回答的方式恰好两种，<code>Backend</code> 枚举分发（刻意不用 trait object——保持 <code>schema&lt;T&gt;</code> / 流式调用的泛型单态化）。<code>backend_kind</code>（"api"|"cli"）是唯一权威判别，休眠后端的配置字段保留但运行时忽略（ADR 0011）。</p>
+
+  <div class="compare">
+    <div class="cmp left">
+      <div class="cmp-title">Backend::Rig — API-provider</div>
+      <ul>
+        <li><b>12 个 Provider</b> 经 rig-core：OpenAI、Anthropic、Gemini、DeepSeek、Groq、Ollama、xAI、Mistral、OpenRouter、Perplexity、Together、OpenAI-compatible</li>
+        <li><b>REGISTRY 单一事实源</b>（ADR 0003）：加 provider = 一行注册表 + 一个 <code>default_model</code> 臂 + 一个 <code>with_agent!</code> 臂</li>
+        <li><b>类型化输出</b>：<code>schema::&lt;T&gt;</code>（schemars 生成 JSON Schema）+ 容错 JSON 解析（截断/围栏容忍）</li>
+        <li><b>流式 + 推理</b>：<code>stream_typed_with_reasoning</code> 边解码 NDJSON 边把 thinking delta 喂给渲染层</li>
+        <li>认证靠 <code>api_key</code>；Base URL 可覆写（OpenAI-compatible 必填，服务 LM Studio / vLLM / 网关）</li>
+      </ul>
+    </div>
+    <div class="cmp right">
+      <div class="cmp-title">Backend::Cli — CLI-agent（ADR 0010）</div>
+      <ul>
+        <li><b>无头 shell 出</b>外部编码 agent：11 个预设（claude、codex、pi、opencode、omp、gemini 等）的 print 模式</li>
+        <li><b>零 API key</b>：复用该 CLI 自己的登录态/订阅</li>
+        <li>配置是 <code>command/args/timeout_secs</code> 模板；NDJSON 流事件解码进共享 decoder</li>
+        <li><code>CommandRunner</code> trait seam 是全库唯一 <code>async-trait</code>——为了测试注入 FakeRunner 队列</li>
+        <li>不产出流式推理的 agent（冷启动）→ Reasoning feed 显示加载帧 + 过宽限期后的解释性提示</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>共享重试 <span class="h3-tag">llm/retry — 推理模型的「预算饥饿」</span></h3>
+  <p>推理模型（如 DeepSeek）偶发把整个输出预算花在 <code>reasoning_content</code> 上，返回空 content 或截断 JSON。rig 把它们报成 <code>EmptyResponse</code> / <code>DeserializationError</code>——此前单次不走运会中止整个多批 Run。现在这两类错误分类为可重试（实测 3/4 的饥饿调用在 3 次内恢复，模型每次重掷推理路径），其余错误一律不重试。rig 与 CLI agent 两条路共用同一套分类。</p>
+
+  <h3>三次类型化调用 <span class="h3-tag">generator</span></h3>
+  <table>
+    <tr><th>调用</th><th>提示词</th><th>输出</th><th>推理</th></tr>
+    <tr><td><code>split_patch_streaming</code></td><td>batch_plan</td><td><code>BatchPlanOutput</code>（schema 约束）</td><td>流式（Reasoning feed）</td></tr>
+    <tr><td><code>generate_commit_message</code></td><td>git_message</td><td><code>CommitOutput{message,body}</code></td><td>纯 spinner（Claude Code 是阶段末爆发式推理，流式买不到顺滑 UI）</td></tr>
+    <tr><td><code>resolve_conflict</code></td><td>resolve</td><td>整文件原文（非 JSON——整源文件塞 JSON 字段会膨胀+截断），剥代码围栏</td><td>—</td></tr>
+  </table>
+</section>
+
+<!-- ============ 07 GROUPING ============ -->
+<section id="grouping">
+  <div class="sec-num">07 / FALLBACK</div>
+  <h2>确定性分组：LLM 之下的第二生产者</h2>
+  <p class="lede">生产主拆分器是 LLM；当其计划过不了校验，<code>plan_from_diffs</code>（保守默认、保仓库序）接管并完成 Run。引擎不是死代码——它是 <code>BatchPlanner</code> seam 背后的确定性第二生产者。</p>
+
+  <div class="flow">
+    <div class="fnode"><div class="fnum">1</div><div class="ftitle">Adjacency（文件内）</div><div class="fdesc">连续 hunk 间隔 ≤ <code>adjacency_gap</code>（默认 3 行）未变行 → 合并为一个 Block；<code>join_same_context</code> 额外合并共享 git 上下文头（函数/节名）的 hunk——最强「同一编辑」信号。</div></div>
+    <div class="farrow"><span class="flabel">第二阶段</span></div>
+    <div class="fnode"><div class="fnum">2</div><div class="ftitle">Same-scope（跨文件）</div><div class="fdesc">不同文件但共享父目录的 Block 合并。<strong>默认关闭</strong>——同目录只是「同一逻辑变更」的弱代理。根目录文件（Cargo.toml/README）永不自动合并。</div></div>
+  </div>
+
+  <div class="callout purple">
+    <div class="co-title">v1 的保守主义是显式的</div>
+    <p>输出必是合法划分（每个 hunk 恰好落一个 Block）→ 直接喂 <code>validate_batch_plan</code> 与 staging。被 adjacency 拆成多 Block 的文件不被 same-scope 经由兄弟文件拉回。每个 Block 携带 <code>BlockHeuristic</code>（Single / Adjacency / SameContext / SameScope），作为批次 <code>reason</code> 浮出给用户。</p>
+  </div>
+</section>
+
+<!-- ============ 08 RESOLVE ============ -->
+<section id="resolve">
+  <div class="sec-num">08 / CONFLICTS</div>
+  <h2>冲突解决：aic resolve</h2>
+  <p class="lede">默认 Run 的前门先查仓库态（ADR 0005）：处于 Merge/CherryPick/Revert 冲突 → 主动提供「现在解决？」并移交整个 <code>ResolveDeps</code>；Rebase/am 态则拒绝并指出手工续命命令（resolve 本身也拒绝它们——建议永不指向会拒绝你的命令）。</p>
+
+  <div class="flow">
+    <div class="fnode git"><div class="fnum">1</div><div class="ftitle">检测与分类<span class="fmod">git.conflict() → RepoState</span></div><div class="fdesc">libgit2 报告活动合并态操作 + index 含未合并条目 + 工作树文件有 <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> 标记。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode llm"><div class="fnum">2</div><div class="ftitle">逐文件 Resolution<span class="fmod">Generator::resolve_conflict</span></div><div class="fdesc">LLM 返回无标记的完整文件内容。拒绝/跳过 → 文件原样保留。</div></div>
+    <div class="farrow"><span class="flabel">ADR 0005：sticky 批准</span></div>
+    <div class="fnode io"><div class="fnum">3</div><div class="ftitle">diff 审阅 + 粘性批准<span class="fmod">resolve_run</span></div><div class="fdesc">展示合并后 unified diff；批准 → 写入工作树并 stage（之后不再追问），拒绝 → 文件不动。全部批准后进入 Finalize。</div></div>
+    <div class="farrow"></div>
+    <div class="fnode git"><div class="fnum">4</div><div class="ftitle">Finalize<span class="fmod">git commit / cherry-pick --continue / revert --continue</span></div><div class="fdesc">用 git 默认消息——Finalize 不调 LLM。</div></div>
+  </div>
+</section>
+
+<!-- ============ 09 RENDER ============ -->
+<section id="render">
+  <div class="sec-num">09 / RENDER</div>
+  <h2>渲染层：无框架的流式终端 UI</h2>
+  <p class="lede">ADR 0013 禁 TUI 框架——一切手绘。分工：Markdown 画家管「画什么」，Reasoning feed 管「何时画」，progress 管帧/行字节装配。</p>
+
+  <div class="cards">
+    <div class="card"><div class="card-head"><span class="card-icon">◧</span><h5>Reasoning feed</h5></div><p>流式思考的原位滚动窗口：边想边重绘，思考结束整窗擦除——滚动缓冲区不留残迹。无推理 delta（CLI print 模式 / API 冷启动）→ 加载帧 + 宽限期后的解释提示。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">▦</span><h5>Markdown 画家</h5></div><p>纯函数：部分 Markdown → ANSI styled rows。行级分类 + 围栏状态、内联 <code>**bold**</code>/<code>`code`</code>、syntect 代码高亮、通用 wrap 引擎。零 IO，全管线可单测。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">◐</span><h5>Palette</h5></div><p>所有颜色经由 WCAG 校验的角色函数（success/pending/caution/added/removed…），按 Commit Type 键控——渲染器调角色，绝不手搓 <code>console::Style</code>。</p></div>
+    <div class="card"><div class="card-head"><span class="card-icon">↕</span><h5>DSR 光标</h5></div><p>终端几何探针走真实 PTY 测试；DSR 查询（~200ms 阻塞 tty IO）进 spawn_blocking；探针失败降级到 fallback 窗口——装饰永不弄坏提交。</p></div>
+  </div>
+</section>
+
+<!-- ============ 10 PRINCIPLES ============ -->
+<section id="principles">
+  <div class="sec-num">10 / PRINCIPLES</div>
+  <h2>关键设计原则</h2>
+  <p class="lede">这套代码库的可维护性来自几条被一致执行的纪律。</p>
+
+  <h3>依赖注入：seam 捆绑包 <span class="h3-tag">core/types</span></h3>
+  <p>工作流接缝是擦除闭包（<code>BoxFuture</code>）： <code>Resolver</code>、<code>Prompt</code>、<code>BatchPlanner</code>、<code>CommitMessenger</code> —— 打包成 <code>RunDeps</code> / <code>ResolveDeps</code>。生产端接线真 <code>Generator</code> 闭包；e2e 注入脚本化桩。<code>git</code> 永远是独立参数——它是每个阶段都读的基底，不是可换接缝。</p>
+
+  <div class="seam">
+    <div class="seam-row">
+      <div class="seam-box"><div class="sb-t">e2e 测试</div><div class="sb-d">resolver_returning(…) · prompt_queue(…)<br>menu_queue(…) 脚本化桩</div></div>
+      <div class="seam-box"><div class="sb-t">生产 wiring</div><div class="sb-d">default_workflow()<br>真 Generator + 真 stdin/menu/editor</div></div>
+    </div>
+    <div class="seam-gap"><span class="sg-label">RunDeps{ display · planner · messenger · confirm }</span></div>
+    <div class="seam-row">
+      <div class="seam-box"><div class="sb-t">commit_run / resolve_run</div><div class="sb-d">同一份纯工作流核心，两边共用</div></div>
+    </div>
+  </div>
+
+  <h3>其余纪律</h3>
+  <table>
+    <tr><th>原则</th><th>内容</th></tr>
+    <tr><td><b>枚举分发 ≠ trait object</b></td><td>LLM 后端用 <code>Backend{Rig,Cli}</code> 枚举——泛型 <code>schema&lt;T&gt;</code>/<code>stream_typed_with_reasoning&lt;T&gt;</code> 保持单态化。trait seam（DisplayWrite/ReasoningSink/CommandRunner）只为测试注入存在。</td></tr>
+    <tr><td><b>双 git 策略</b></td><td>libgit2 读（status/diff，快且结构化），真 <code>git</code> CLI 写（run_git → commit/apply/add），hooks 与 gpgsign 照常运行。git 自己的 stderr 经 <code>nonzero_exit</code> 浮出——真实原因（hook 否决/缺 merge message/patch 拒绝），不是裸退出码。</td></tr>
+    <tr><td><b>anyhow 到处</b></td><td>无 thiserror。向下转型的标记错误仅两个：<code>CommitDeclined</code>、<code>LlmError/RetryError</code>。上下文名都是用户可读的操作名。</td></tr>
+    <tr><td><b>无全局状态</b></td><td>配置 = <code>~/.config/aic/config.toml</code> 单一事实源（ADR 0008/0012），刻意不读环境变量；目录 0700 / 文件 0600；经 <code>home_dir()</code> 解析使三平台路径一致。</td></tr>
+    <tr><td><b>失败语义</b></td><td>部分提交是合法中间态：中止消息总说明「已提交 N 批 + 剩余仍 staged + 重跑即续」。拒绝确认是用户选择，报干净中止而非错误。</td></tr>
+    <tr><td><b>模块 = 目录 + mod.rs</b></td><td><code>//!</code> 文档头密集引用 ADR/issue；rusted 捷径标 <code>// ponytail:</code> 命名天花板。可见性最小：<code>pub(crate)</code> 内部接缝，单构造路径（LLM 只经 <code>ResolvedConfig::to_llm</code> 诞生）。</td></tr>
+    <tr><td><b>自食其力</b></td><td>aic 用 aic 提交 aic（Conventional Commits 强制）；git-cliff 只让 feat/fix/perf/docs/breaking 进 CHANGELOG。</td></tr>
+  </table>
+</section>
+
+<!-- ============ 11 ADR ============ -->
+<section id="adr">
+  <div class="sec-num">11 / DECISIONS</div>
+  <h2>ADR 谱系</h2>
+  <p class="lede">16 份带编号的架构决策记录，含 supersession 链。非平凡改动前必读；与 ADR 冲突必须显式标出，不许静默覆盖。</p>
+  <div class="adr">
+    <div class="adr-item"><span class="adr-n">0001</span><span class="adr-t"><b>自更新 Homebrew 守卫</b> — brew 安装的二进制拒绝自更新</span></div>
+    <div class="adr-item"><span class="adr-n">0002</span><span class="adr-t"><b>签名自更新</b> — zipsign 验签，内嵌公钥</span></div>
+    <div class="adr-item"><span class="adr-n">0003</span><span class="adr-t"><b>Provider 注册表</b> — 单表 + per-provider 客户端，加 provider 的成本三处</span></div>
+    <div class="adr-item"><span class="adr-n">0004</span><span class="adr-t"><b>aic update 走 brew upgrade</b>（brew 安装时）</span></div>
+    <div class="adr-item"><span class="adr-n">0005</span><span class="adr-t"><b>逐文件 Resolution + 粘性批准</b> — resolve 流程的契约</span></div>
+    <div class="adr-item"><span class="adr-n">0006</span><span class="adr-t"><b>git 保持一个模块</b> — 仓库表面收敛</span></div>
+    <div class="adr-item"><span class="adr-n">0007</span><span class="adr-t"><b>交互菜单统一于 inquire</b></span></div>
+    <div class="adr-item"><span class="adr-n">0008</span><span class="adr-t"><b>配置文件单一事实源</b> — 刻意不读环境变量</span></div>
+    <div class="adr-item"><span class="adr-n">0009</span><span class="adr-t"><b>发布目标单一来源</b></span></div>
+    <div class="adr-item"><span class="adr-n">0010</span><span class="adr-t"><b>CLI-agent 后端</b> — shell 出 claude/codex/pi 复用其认证</span></div>
+    <div class="adr-item"><span class="adr-n">0011</span><span class="adr-t"><b>显式后端判别</b> — backend_kind 权威，休眠字段保留 <span style="color:var(--yellow)">⟵ 取代 0010 的选择机制</span></span></div>
+    <div class="adr-item"><span class="adr-n">0012</span><span class="adr-t"><b>配置位置 = home_dir</b> — 三平台同路径 <code>~/.config/aic/</code>，附一次性位置迁移</span></div>
+    <div class="adr-item"><span class="adr-n">0013</span><span class="adr-t"><b>流式 Markdown 渲染器依赖</b> — 禁 TUI 框架，纯函数画家</span></div>
+    <div class="adr-item"><span class="adr-n">0014</span><span class="adr-t"><b>并行批次消息起草</b> — MAX_CONCURRENT_DRAFTS = 8</span></div>
+    <div class="adr-item"><span class="adr-n">0015</span><span class="adr-t"><b>src 布局：先拆分后目录</b> — 五域库 + 薄 bin</span></div>
+    <div class="adr-item"><span class="adr-n">0016</span><span class="adr-t"><b>git 模块目录化</b> — 0006 的形态演进</span></div>
+  </div>
+</section>
+
+<!-- ============ 12 TESTS ============ -->
+<section id="tests">
+  <div class="sec-num">12 / QUALITY</div>
+  <h2>测试策略</h2>
+  <p class="lede">约 330 个测试全在 <code>cargo test</code> 里，两层，零网络、零 API key、完全 hermetic、并行安全。</p>
+
+  <div class="compare">
+    <div class="cmp left">
+      <div class="cmp-title">层 1 · 内联单元测试</div>
+      <ul>
+        <li>每模块 <code>#[cfg(test)]</code> 同目录共存（sibling <code>tests.rs</code> 或尾部 mod 块）</li>
+        <li>纯逻辑：diff 解析、NDJSON 解码、容错 JSON、配置迁移、分组启发式、校验规则</li>
+        <li>命名是行为句：<code>commit_batch_loop_aborts_after_partial_commit</code></li>
+        <li>桩队列耗尽即 panic——欠编排的测试响亮地失败</li>
+      </ul>
+    </div>
+    <div class="cmp right">
+      <div class="cmp-title">层 2 · e2e（src/e2e/）</div>
+      <ul>
+        <li>seam 捆绑包驱动 <code>default_run</code>/<code>commit_run</code>/<code>resolve_run</code></li>
+        <li><b>真 git 仓库</b>在每测试独立 tempdir——不 chdir、不全局锁、真 hooks（含 restaging pre-commit 路径）</li>
+        <li>LLM/UI 全部脚本化桩：resolver_returning / prompt_queue / menu_queue</li>
+        <li>真实 PTY harness 测 DSR 光标；<code>start_paused</code> tokio 时钟只用于 reasoning feed</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="term">
+    <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">CI 门禁 (.github/workflows/ci.yml)</span></div>
+    <pre><span class="c-dim">$</span> cargo fmt --all -- --check        <span class="c-dim"># rustfmt 默认，无自定义配置</span>
+<span class="c-dim">$</span> cargo clippy --all-targets -- <span class="c-green">-D warnings</span>  <span class="c-dim"># 任何警告即失败</span>
+<span class="c-dim">$</span> cargo test                        <span class="c-dim"># ubuntu + windows（Windows 一等目标）</span>
+<span class="c-dim">$</span> cargo deny check                  <span class="c-dim"># advisories / licenses / bans (yanked=deny)</span></pre>
+  </div>
+</section>
+
+<!-- ============ 13 CONFIG ============ -->
+<section id="config">
+  <div class="sec-num">13 / RUNTIME</div>
+  <h2>配置、子命令与分发</h2>
+
+  <h3>配置 <span class="h3-tag">单一事实源 · ADR 0008/0012</span></h3>
+  <div class="term">
+    <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">~/.config/aic/config.toml · 0700/0600</span></div>
+    <pre><span class="c-purple">backend_kind</span> = <span class="c-green">"api"</span>          <span class="c-dim"># "api" | "cli" — 唯一权威判别（ADR 0011）</span>
+<span class="c-purple">provider</span>    = <span class="c-green">"anthropic"</span>     <span class="c-dim"># 仅 API 后端有意义</span>
+<span class="c-purple">api_key</span>     = <span class="c-green">"sk-…"</span>           <span class="c-dim"># API 后端凭据</span>
+<span class="c-purple">base_url</span>    = <span class="c-green">"http://localhost:11434"</span>  <span class="c-dim"># 可选覆写</span>
+<span class="c-purple">model</span>       = <span class="c-green">"claude-sonnet-4"</span>  <span class="c-dim"># 未设 → Provider 的 Default Model（选快选便宜）</span>
+<span class="c-purple">confirm_before_commit</span> = <span class="c-cyan">false</span> <span class="c-dim"># 确认菜单开关</span>
+
+<span class="c-dim"># CLI 后端激活时的休眠示例（api 时忽略）：</span>
+<span class="c-purple">cli_command</span> = <span class="c-green">"claude"</span>
+<span class="c-purple">cli_args</span>    = [<span class="c-green">"-p"</span>, <span class="c-green">"--output-format"</span>, <span class="c-green">"stream-json"</span>]</pre>
+  </div>
+  <p>每次启动跑两次幂等迁移：<b>位置迁移</b>（0012，旧 macOS 路径 → 新路径，新文件已存在则静默跳过）和 <b>preset 迁移</b>（陈旧 CLI preset 的 args 原地重写；只动与已知旧快照字节相同的配置，自定义命令永不碰）。迁移失败只记日志，不阻塞运行。</p>
+
+  <h3>子命令 <span class="h3-tag">无子命令 = 默认 Run</span></h3>
+  <table>
+    <tr><th>命令</th><th>作用</th></tr>
+    <tr><td><code>aic</code></td><td>默认提交 Run（本文 §03 的全部）</td></tr>
+    <tr><td><code>aic resolve</code></td><td>冲突解决流程（§08）</td></tr>
+    <tr><td><code>aic setup</code></td><td>交互式配置向导（provider/cli 双路，验证 + 定稿）</td></tr>
+    <tr><td><code>aic use &lt;provider&gt;</code></td><td>切换 Provider</td></tr>
+    <tr><td><code>aic list</code></td><td>列出可用 Provider</td></tr>
+    <tr><td><code>aic update</code></td><td>zipsign 验签自更新（brew 安装则引导 brew upgrade）</td></tr>
+    <tr><td><code>aic completion</code></td><td>安装 shell 补全（bash/zsh/fish/nushell）</td></tr>
+  </table>
+
+  <h3>发布 <span class="h3-tag">cargo-dist + GitHub Actions</span></h3>
+  <p>发布构建走 <code>[profile.dist]</code>（thin LTO + strip）→ <code>target/dist/aic</code>。版本永不在 PR 里 bump——维护者经 <code>prepare-release.sh</code> / <code>release.sh</code> 操作（脚本自带 bash 单测套件）。发布档案用 zipsign 签名，Unix .tar.gz + Windows .zip 两种格式都必须保留压缩 feature（砍掉 <code>compression-tar-gz</code> 会编译掉自更新的 tar 提取臂——Cargo.toml 里那条注释是承重的）。</p>
+
+  <div class="callout green">
+    <div class="co-title">一句话总结</div>
+    <p>aic = <b>纯函数 diff 管线</b>（解析→编号→JSON 信封）+ <b>不可信 LLM 计划的强校验</b>（精确 hunk 划分，失败降级确定性引擎）+ <b>两套索引空间的状态机 staging</b>（hook 免疫）+ <b>seam 驱动的全链路可测</b>（真 git tempdir + 脚本化 LLM）。LLM 负责「理解意图」，工程负责「绝不信它」。</p>
+  </div>
+
+  <div class="footer">
+    aic v0.5.4 · MIT · 单 crate · 无 feature flags · 线性历史（squash merge）<br>
+    事实来源：源码 + CONTEXT.md（规范词汇表）+ docs/adr/0001–0016 · CLAUDE.md 部分陈旧
+  </div>
+</section>
+
+</main>
+</div>
+
+<script>
+// TOC active-section highlighting
+(function(){
+  const nav=document.querySelector('nav.toc');
+  const links=[...document.querySelectorAll('nav.toc a[href^="#"]')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const sections=[...map.keys()].map(id=>document.getElementById(id)).filter(Boolean);
+  let last=null;
+  function centerChip(a){
+    // 只滚 nav 自身的 scrollLeft，绝不触碰页面滚动
+    const x=a.offsetLeft-(nav.clientWidth-a.offsetWidth)/2;
+    nav.scrollLeft=Math.max(0,Math.min(x,nav.scrollWidth-nav.clientWidth));
+  }
+  function update(){
+    let active=null;
+    for(const s of sections){
+      const r=s.getBoundingClientRect();
+      if(r.top<=140) active=s.id;
+    }
+    if(active===last) return;
+    last=active;
+    links.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+active));
+    const act=active&&map.get(active);
+    if(act&&nav.scrollWidth>nav.clientWidth) centerChip(act);
+  }
+  addEventListener('scroll',update,{passive:true});update();
+})();
+</script>
+</body>
+</html>

@@ -177,7 +177,84 @@ fn presets_use_print_mode_and_known_programs() {
     // opencode is batch too (answer arrives whole at completion).
     assert_eq!(oc.timeout_secs, BATCH_TIMEOUT_SECS);
     assert!(cli_preset("nope").is_none());
-    assert_eq!(PRESETS, &["claude", "codex", "pi", "opencode"]);
+    assert_eq!(
+        PRESETS,
+        &[
+            "claude", "codex", "pi", "opencode", "omp", "gemini", "cursor", "windsurf", "copilot",
+            "trae", "qwen"
+        ]
+    );
+}
+
+#[test]
+fn new_presets_are_headless_print_mode() {
+    // The seven added presets: every one is a single-shot `-p`-style print
+    // mode against its own binary. omp reuses pi's NDJSON envelope (it is a
+    // pi fork) so it gets the live reasoning feed; the rest are Plain print
+    // mode (no decoder needed — stdout IS the answer).
+    let cases = [
+        (
+            "omp",
+            "omp",
+            vec!["--mode", "json", PROMPT_PLACEHOLDER],
+            Encoding::PiStreamJson,
+            DEFAULT_TIMEOUT_SECS,
+        ),
+        (
+            "gemini",
+            "gemini",
+            vec!["-p", PROMPT_PLACEHOLDER],
+            Encoding::Plain,
+            DEFAULT_TIMEOUT_SECS,
+        ),
+        (
+            "cursor",
+            "cursor-agent",
+            vec!["-p", PROMPT_PLACEHOLDER],
+            Encoding::Plain,
+            DEFAULT_TIMEOUT_SECS,
+        ),
+        (
+            "windsurf",
+            "devin",
+            vec!["-p", PROMPT_PLACEHOLDER],
+            Encoding::Plain,
+            DEFAULT_TIMEOUT_SECS,
+        ),
+        (
+            "copilot",
+            "copilot",
+            vec!["-p", PROMPT_PLACEHOLDER],
+            Encoding::Plain,
+            DEFAULT_TIMEOUT_SECS,
+        ),
+        (
+            "trae",
+            "traecli",
+            vec!["-p", PROMPT_PLACEHOLDER],
+            Encoding::Plain,
+            DEFAULT_TIMEOUT_SECS,
+        ),
+        (
+            "qwen",
+            "qwen",
+            vec!["-p", PROMPT_PLACEHOLDER],
+            Encoding::Plain,
+            DEFAULT_TIMEOUT_SECS,
+        ),
+    ];
+    for (name, command, args, encoding, timeout) in cases {
+        let spec = cli_preset(name).unwrap_or_else(|| panic!("{name} preset missing"));
+        assert_eq!(spec.command, command, "{name}");
+        assert_eq!(spec.args, args, "{name}");
+        assert_eq!(spec.encoding, encoding, "{name}");
+        assert_eq!(spec.timeout_secs, timeout, "{name}");
+    }
+    // The `gemini` preset shadows the provider name in `aic use` (presets
+    // win), so the Google API stays reachable via its alias.
+    assert!(is_preset("gemini"));
+    assert!(is_preset("OMP"));
+    assert!(is_preset("Qwen"));
 }
 
 #[test]

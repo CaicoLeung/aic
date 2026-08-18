@@ -12,7 +12,8 @@
 //! [`CliSpec`] carries the program + an args template containing a literal
 //! `{prompt}` placeholder. Selection at run time is by the `backend_kind`
 //! discriminator plus `command` (ADR 0011) — but the preset names (`claude`,
-//! `codex`, `pi`, `opencode`) are **reserved words in `aic use`** that win
+//! `codex`, `pi`, `opencode`, `omp`, `gemini`, `cursor`, `windsurf`,
+//! `copilot`, `trae`, `qwen`) are **reserved words in `aic use`** that win
 //! over colliding provider aliases: `aic use claude` switches to this CLI
 //! agent, `aic use anthropic` to the Anthropic API provider. On disk a preset
 //! is just the snippet [`cli_preset`] returns, written as ordinary fields; a
@@ -208,7 +209,8 @@ pub enum Encoding {
     /// Claude Code `--output-format stream-json --include-partial-messages`:
     /// stdout is NDJSON. Decoded per-line by [`ClaudeDecoder`].
     ClaudeStreamJson,
-    /// pi's `--mode json`: stdout is NDJSON of `message_update` events whose
+    /// pi's `--mode json` — and omp's, a pi fork emitting the same envelope:
+    /// stdout is NDJSON of `message_update` events whose
     /// `assistantMessageEvent` carries `thinking_delta`/`text_delta` chunks —
     /// a complete reasoning + answer stream (290 thinking + 142 text deltas
     /// observed on a 120-word generation). Decoded per-line by
@@ -372,6 +374,82 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
             ],
             Encoding::OpenCodeJson,
         ),
+        // oh-my-pi (`omp`) is a pi fork; its `--mode json` emits the same
+        // `message_update`/`assistantMessageEvent` NDJSON envelope (the
+        // `thinking_delta`/`text_delta` chunks pi emits), so it reuses
+        // [`Encoding::PiStreamJson`] and gets the live reasoning feed for
+        // free. The prompt is a trailing positional in this mode (the
+        // `omp -p "prompt"` text form is print-only; `--mode json` already
+        // implies print mode). omp exposes no `--no-tools` (it pins tools via
+        // `--tools read,edit,…` instead), so the text-only stance rests on
+        // headless print mode itself, like claude.
+        "omp" => (
+            "omp",
+            vec![
+                "--mode".to_string(),
+                "json".to_string(),
+                PROMPT_PLACEHOLDER.to_string(),
+            ],
+            Encoding::PiStreamJson,
+        ),
+        // `-p` print mode: one prompt, answer to stdout, exit. Without
+        // `--yolo`, tool calls that need approval are denied in headless mode
+        // (no TTY to answer), so the run stays text-only. Note this preset
+        // shadows the `gemini` *provider* name in `aic use` (presets win); the
+        // Google API stays reachable via the provider alias `google` — same
+        // pattern as `claude` shadowing the `anthropic` alias.
+        "gemini" => (
+            "gemini",
+            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
+            Encoding::Plain,
+        ),
+        // `cursor-agent -p` print mode. `--trust` is deliberately omitted:
+        // without it the agent runs untrusted (writes and sensitive reads are
+        // disabled), which matches the never-agentic stance better than
+        // trusting the workspace.
+        "cursor" => (
+            "cursor-agent",
+            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
+            Encoding::Plain,
+        ),
+        // Windsurf was renamed Devin Desktop (Cognition); its CLI is the
+        // `devin` binary, `devin -p "prompt"` print mode (auth via
+        // `devin auth login`). The preset keeps the familiar name and maps to
+        // the current binary. `--respect-workspace-trust` is left at its
+        // default (`true`): an untrusted workspace fails print mode rather
+        // than silently widening permission (add the flag manually if you
+        // want it skipped in CI).
+        "windsurf" => (
+            "devin",
+            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
+            Encoding::Plain,
+        ),
+        // GitHub Copilot CLI `-p` prompt mode: single prompt, answer to
+        // stdout, exit. Without an approval option (`--yolo` or similar),
+        // tool use requires an interactive approval headless mode cannot
+        // give, so runs stay text-only.
+        "copilot" => (
+            "copilot",
+            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
+            Encoding::Plain,
+        ),
+        // Trae CLI (`traecli -p "prompt"`, docs.trae.cn). Non-read tools are
+        // gated behind a permission prompt (docs.trae.cn/cli_permission-mode),
+        // which headless print mode cannot answer — so the run stays
+        // text-only without an explicit `--allowed-tool` list.
+        "trae" => (
+            "traecli",
+            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
+            Encoding::Plain,
+        ),
+        // Qwen Code CLI (`qwen -p`, gemini-cli lineage): `-p`/`--prompt`
+        // non-interactive mode, default text output. Same headless stance as
+        // gemini above (no `--yolo`, so approval-gated tools stay off).
+        "qwen" => (
+            "qwen",
+            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
+            Encoding::Plain,
+        ),
         _ => return None,
     };
     // Batch CLIs (codex, opencode) stay silent while reasoning — their answer
@@ -394,7 +472,10 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
 /// Reserved preset names, in `aic use` vocabulary order (presets first —
 /// they win at match time over colliding provider aliases). Also the menu
 /// [`aic setup`](crate::workflow::setup) offers.
-pub const PRESETS: &[&str] = &["claude", "codex", "pi", "opencode"];
+pub const PRESETS: &[&str] = &[
+    "claude", "codex", "pi", "opencode", "omp", "gemini", "cursor", "windsurf", "copilot", "trae",
+    "qwen",
+];
 
 /// Whether `name` is a CLI-agent preset name, case-insensitively — the
 /// reserved words `aic use` routes to the CLI-agent Backend ahead of provider
@@ -746,9 +827,9 @@ impl CliAgent {
         // The runner surfaces a timeout (and not-installed) as a typed
         // `LlmError` directly via `?`; auth/non-zero-exit classification on a
         // finished process happens below.
-        // Plain stdout is the answer verbatim (custom commands only — every
-        // built-in preset now carries a decodable envelope). The four
-        // streamed envelopes each pick a [`Decoder`] and share one
+        // Plain stdout is the answer verbatim (custom commands and any
+        // preset whose stdout aic does not decode). The four envelope
+        // encodings each pick a [`Decoder`] and share one
         // run/decode/error tail ([`Self::run_streamed`]).
         match self.spec.encoding {
             Encoding::Plain => {

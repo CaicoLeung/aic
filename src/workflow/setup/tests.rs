@@ -701,8 +701,8 @@ fn cli_menu_rows_have_no_unmappable_header() {
     // row is an actionable CliRow paired with its label, so there is no
     // separate index to leave unmapped. There is also no "Custom command…"
     // row: a free-form command has no decoder for its stdout envelope, so
-    // it would silently run in plain-text mode — only the four presets
-    // (each with a dedicated decoder) are offered.
+    // it would silently run in plain-text mode — only the presets
+    // (see [`PRESETS`]) are offered.
     for command_set in [false, true] {
         let rows = cli_menu_rows(command_set);
         // Row 0 must be a real preset, never a bare label.
