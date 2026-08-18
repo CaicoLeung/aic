@@ -53,7 +53,7 @@ aic
 # → 从你的工作区生成 3 个原子提交
 ```
 
-> 💡 **没有 API key？** 跳过 provider 配置 —— 直接使用 [Claude Code、Codex、pi 或 opencode](#-没有-api-key复用你的-ai-agent)，aic 会复用它们的登录认证。
+> 💡 **没有 API key？** 跳过 provider 配置 —— 直接使用 [Claude Code、Codex、pi、opencode 以及另外 7 个 CLI agent](#-没有-api-key复用你的-ai-agent)，aic 会复用它们的登录认证。
 
 > **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
 
@@ -62,6 +62,8 @@ aic
 ## 🔑 没有 API key？复用你的 AI agent
 
 已经安装并登录了 [Claude Code](https://docs.anthropic.com/claude/docs/claude-code)、[OpenAI Codex](https://github.com/openai/codex)、[pi](https://pi.dev) 或 [opencode](https://opencode.ai)？aic 可以在 **headless 模式** 下驱动它 —— 无需 API key。
+
+同样支持：**oh-my-pi**（`omp`）、**Gemini**（`gemini`）、**Cursor**（`cursor-agent`）、**Windsurf**（`devin` —— Windsurf 已更名为 Devin Desktop）、**GitHub Copilot**（`copilot`）、**Trae**（`traecli`）和 **Qwen Code**（`qwen`）。
 
 ```sh
 aic setup    # → 选择 "CLI agent" → 选你的工具 → 完成
@@ -77,18 +79,18 @@ args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-m
 
 aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下运行 agent。每个预设都锁定为只读或纯文本，因此注入的指令无法触碰你的工作区。两个 backend 的字段可以共存于配置文件中；`backend_kind` 决定哪个生效。
 
-其他预设（Codex、pi、opencode）见 [CLI-agent 预设](#cli-agent-预设)。
+其他预设见 [CLI-agent 预设](#cli-agent-预设)。
 
 ---
 
 ## 功能特性
 
 - **Hunk 级别拆分** —— 一个文件、多种 concern？按 hunk 拆成多个原子提交，完全非交互
-- **两种 backend** —— API provider（支持 12+ 家）或 CLI agent（Claude Code、Codex、pi、opencode —— 无需 API key）
+- **两种 backend** —— API provider（支持 12+ 家）或 CLI agent（11 个预设：claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen —— 无需 API key）
 - **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
 - **实时推理** —— 观看模型思考拆分方案的全过程
 - **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
-- **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode）之间切换
+- **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）之间切换
 
 ## 安装
 
@@ -107,7 +109,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
-| `aic use <name>` | 切换到已通过 `aic setup` 配置过的 provider，或切换到 CLI agent（claude、codex、pi、opencode）。 |
+| `aic use <name>` | 切换到已通过 `aic setup` 配置过的 provider，或切换到 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）。 |
 | `aic list` | 展示已 resolve 的 config 及每个值的来源。 |
 | `aic update` | 更新到最新版本。 |
 | `aic completion` | 安装 shell 补全。 |
@@ -169,7 +171,7 @@ OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config �
 
 ### CLI-agent 预设
 
-每个预配有专用的解码器来处理对应 CLI 的 stdout 格式，因此 aic 能在 CLI 支持的情况下流式输出推理过程，并干净地提取回答。
+带流式 stdout 封装的预设（claude、codex、pi、opencode、omp）配有专用解码器，aic 能在 CLI 支持的情况下流式输出推理过程并干净地提取回答；其余预设为纯打印模式 —— stdout 即回答。
 
 ```toml
 # OpenAI Codex — exec --json，只读沙箱
@@ -191,6 +193,18 @@ backend_kind = "cli"
 command = "opencode"
 args = ["run", "--format", "json", "{prompt}"]
 ```
+
+其余预设 —— 均为单次打印模式（`-p`），回答输出到 stdout：
+
+| 预设 | 命令 | 说明 |
+|------|------|------|
+| `omp` | `omp --mode json {prompt}` | pi 分支；pi 同构 NDJSON，带推理流 |
+| `gemini` | `gemini -p {prompt}` | 在 `aic use` 中遮蔽 `gemini` provider 名 —— Google API 仍可通过 `aic use google` 使用 |
+| `cursor` | `cursor-agent -p {prompt}` | 不带 `--trust` → 以未信任模式运行（禁用写入） |
+| `windsurf` | `devin -p {prompt}` | Windsurf 已更名 Devin Desktop；`devin auth login` 登录 |
+| `copilot` | `copilot -p {prompt}` | 工具调用需要 headless 无法给出的交互式审批 |
+| `trae` | `traecli -p {prompt}` | 非只读工具被权限提示门控 |
+| `qwen` | `qwen -p {prompt}` | Qwen Code，gemini-cli 血统 |
 
 该 CLI 必须已安装并登录 —— aic 不负责安装或认证。
 

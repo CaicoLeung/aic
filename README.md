@@ -53,7 +53,7 @@ aic
 # → 3 atomic commits from your working tree
 ```
 
-> 💡 **No API key?** Skip the provider setup — use [Claude Code, Codex, pi, or opencode](#-no-api-key-use-your-ai-agent) instead. aic reuses their auth.
+> 💡 **No API key?** Skip the provider setup — use [Claude Code, Codex, pi, opencode, and 7 more CLI agents](#-no-api-key-use-your-ai-agent) instead. aic reuses their auth.
 
 > **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
 
@@ -62,6 +62,8 @@ aic
 ## 🔑 No API key? Use your AI agent
 
 Already have [Claude Code](https://docs.anthropic.com/claude/docs/claude-code), [OpenAI Codex](https://github.com/openai/codex), [pi](https://pi.dev), or [opencode](https://opencode.ai) installed and authenticated? aic can drive it in **headless mode** — no API key needed.
+
+Also supported: **oh-my-pi** (`omp`), **Gemini** (`gemini`), **Cursor** (`cursor-agent`), **Windsurf** (`devin` — Windsurf was renamed Devin Desktop), **GitHub Copilot** (`copilot`), **Trae** (`traecli`), and **Qwen Code** (`qwen`).
 
 ```sh
 aic setup    # → select "CLI agent" → pick your tool → done
@@ -77,18 +79,18 @@ args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-m
 
 aic sends one prompt and reads the answer — it never runs the agent in tool-use mode. Each preset pins itself to read-only or text-only, so an injected instruction can't touch your working tree. Both backends' fields can coexist in the config; `backend_kind` selects the active one.
 
-See [CLI-agent presets](#cli-agent-presets) for Codex, pi, and opencode.
+See [CLI-agent presets](#cli-agent-presets) for the full preset list.
 
 ---
 
 ## Features
 
 - **Hunk-level splitting** — one file, many concerns? Splits per-hunk into atomic commits, fully non-interactive
-- **Two backends** — API provider (12+ supported) or CLI agent (Claude Code, Codex, pi, opencode — no API key)
+- **Two backends** — API provider (12+ supported) or CLI agent (11 presets: claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen — no API key)
 - **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge
 - **Live reasoning** — watch the model think as it decides the split
 - **Conventional Commits** — messages follow the [v1.0.0 spec](https://www.conventionalcommits.org/)
-- **Interactive setup** — `aic setup` is menu-driven; `aic use` switches between saved provider profiles and CLI agents (claude, codex, pi, opencode)
+- **Interactive setup** — `aic setup` is menu-driven; `aic use` switches between saved provider profiles and CLI agents (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen)
 
 ## Installation
 
@@ -107,7 +109,7 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 | `aic` | Commit staged files. If nothing is staged, auto-split all unstaged changes into hunk-level atomic commits. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
 | `aic setup` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. |
-| `aic use <name>` | Switch to a provider already configured via `aic setup`, or to a CLI agent (claude, codex, pi, opencode). |
+| `aic use <name>` | Switch to a provider already configured via `aic setup`, or to a CLI agent (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen). |
 | `aic list` | Show resolved config and where each value comes from. |
 | `aic update` | Update to the latest release. |
 | `aic completion` | Install shell completions. |
@@ -169,7 +171,7 @@ OpenRouter and the OpenAI-compatible provider have no default model — set `mod
 
 ### CLI-agent presets
 
-Each preset ships a dedicated decoder for its CLI's stdout envelope, so aic can stream reasoning where the CLI exposes it and cleanly extract the answer.
+Presets with a streamed stdout envelope (claude, codex, pi, opencode, omp) ship a dedicated decoder, so aic streams reasoning where the CLI exposes it and cleanly extracts the answer; the rest use plain print mode — stdout IS the answer.
 
 ```toml
 # OpenAI Codex — exec --json, read-only sandbox
@@ -191,6 +193,18 @@ backend_kind = "cli"
 command = "opencode"
 args = ["run", "--format", "json", "{prompt}"]
 ```
+
+Additional presets — all single-shot print mode (`-p`), answer on stdout:
+
+| preset | command | notes |
+|--------|---------|-------|
+| `omp` | `omp --mode json {prompt}` | pi fork; pi-shaped NDJSON, reasoning feed |
+| `gemini` | `gemini -p {prompt}` | shadows the `gemini` provider name in `aic use` — the Google API stays reachable via `aic use google` |
+| `cursor` | `cursor-agent -p {prompt}` | no `--trust` → runs untrusted (writes disabled) |
+| `windsurf` | `devin -p {prompt}` | Windsurf renamed to Devin Desktop; auth via `devin auth login` |
+| `copilot` | `copilot -p {prompt}` | tool use needs interactive approval headless mode can't give |
+| `trae` | `traecli -p {prompt}` | non-read tools gated behind a permission prompt |
+| `qwen` | `qwen -p {prompt}` | Qwen Code, gemini-cli lineage |
 
 The CLI must already be installed and logged in — aic does not install or authenticate it.
 
