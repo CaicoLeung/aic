@@ -810,8 +810,8 @@ pub fn run_list() -> Result<()> {
 }
 
 /// Pure core of `aic use <name>`: a CLI-agent preset name (claude, codex,
-/// pi, opencode — case-insensitive) switches the CLI-agent Backend to that
-/// preset; anything else is a provider switch — validate the name, bank the
+/// pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen —
+/// case-insensitive) switches the CLI-agent Backend to that preset; anything else is a provider switch — validate the name, bank the
 /// currently active provider's live top-level state into the memory bank,
 /// then activate the target profile (restore its key/model/base_url and
 /// force the API backend). Split from [`run_use`] (which owns the
@@ -923,7 +923,8 @@ fn use_messages(config: &Config) -> (String, Option<String>) {
 }
 
 /// `aic use <name>` — switch the active Backend: a CLI-agent preset name
-/// (claude, codex, pi, opencode) activates that CLI agent (no setup needed —
+/// (any of [`crate::llm::cli_agent::PRESETS`] — claude, codex, pi, opencode,
+/// omp, gemini, …) activates that CLI agent (no setup needed —
 /// the agent reuses its own auth, so it works even on a machine with no
 /// config yet); a provider name restores a remembered profile without
 /// re-entering the key/model (the provider must already have been configured

@@ -55,10 +55,12 @@ pub enum Commands {
     /// Resolve git merge conflicts in the working tree via the LLM
     Resolve,
     /// Switch the active backend: an API provider already configured via
-    /// `aic setup`, or a CLI agent (claude, codex, pi, opencode)
+    /// `aic setup`, or a CLI agent (claude, codex, pi, opencode, omp, gemini,
+    /// cursor, windsurf, copilot, trae, qwen)
     Use {
-        /// API provider name/alias (e.g. openai, anthropic, gemini), or a
-        /// CLI agent (claude, codex, pi, opencode)
+        /// API provider name/alias (e.g. openai, anthropic, google), or a
+        /// CLI agent (claude, codex, pi, opencode, omp, gemini, cursor,
+        /// windsurf, copilot, trae, qwen)
         #[arg(value_parser = use_values(), ignore_case = true)]
         provider: String,
     },
