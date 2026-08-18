@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.5] - 2026-08-18
+
+> 🎉 **0.5.5** — 2 changes · 1 contributor
+
+### Features
+
+- Support 7 more CLI agents headless (#145)
+
+### Bug Fixes
+
+- Commit staged deletions instead of erroring on re-stage (#144)
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.5.4] - 2026-08-15
 
 > 🎉 **0.5.4** — 5 changes · 1 contributor
