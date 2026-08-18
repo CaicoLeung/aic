@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`aic` is an AI-powered git commit message generator (Rust CLI, edition 2024). It produces hunk-level atomic Conventional Commits: nothing staged → the LLM plans unstaged hunks into logical Batches → one commit per Batch; something staged → one commit. Two LLM backends: 12 API providers via `rig` (openai, anthropic, gemini, deepseek, groq, xai, mistral, openrouter, perplexity, together, ollama, openai-compatible) or external CLI agents (claude/codex/pi/opencode) run headless. Subcommands: `resolve` (merge-conflict resolution), `setup`, `use`, `list`, `update` (zipsign-verified self-update), `completion`.
+`aic` is an AI-powered git commit message generator (Rust CLI, edition 2024). It produces hunk-level atomic Conventional Commits: nothing staged → the LLM plans unstaged hunks into logical Batches → one commit per Batch; something staged → one commit. Two LLM backends: 12 API providers via `rig` (openai, anthropic, gemini, deepseek, groq, xai, mistral, openrouter, perplexity, together, ollama, openai-compatible) or external CLI agents (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen) run headless. Subcommands: `resolve` (merge-conflict resolution), `setup`, `use`, `list`, `update` (zipsign-verified self-update), `completion`.
 
 ## Architecture & Data Flow
 

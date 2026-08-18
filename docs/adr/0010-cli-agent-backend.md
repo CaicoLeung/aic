@@ -87,12 +87,14 @@ text-only / read-only stance, because defaults differ and one (pi) is unsafe:
 | `pi` | `--no-tools -p` | **Required.** pi enables `read/bash/edit/write` tools by default; in print mode on a *trusted* project it can auto-run them (it cannot prompt) — effectively yolo. `--no-tools` disables all tools so print mode is genuinely text-only. |
 
 Custom `command`/`args` backends are the user's responsibility to harden. The
-`aic setup` wizard offers **only the four presets** (claude / codex / pi /
-opencode) — each ships a dedicated decoder for its CLI's stdout envelope, so
-aic can stream reasoning where the CLI exposes it and cleanly extract the
-answer. A hand-edited custom `command`/`args` still runs, but in plain-text mode
-with no reasoning feed and no envelope decoding; it is the config-edit escape
-hatch for a CLI without a preset, not a wizard option.
+`aic setup` wizard offers **only the presets** (claude / codex / pi / opencode /
+omp / gemini / cursor / windsurf / copilot / trae / qwen) — the streamed ones
+(claude, codex, pi, opencode, omp) each ship a dedicated decoder for their
+CLI's stdout envelope, so aic can stream reasoning where the CLI exposes it and
+cleanly extract the answer; the rest are plain print mode (stdout IS the
+answer). A hand-edited custom `command`/`args` still runs, but in plain-text
+mode with no reasoning feed and no envelope decoding; it is the config-edit
+escape hatch for a CLI without a preset, not a wizard option.
 
 ### Preset auto-migration
 
