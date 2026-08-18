@@ -209,7 +209,8 @@ pub enum Encoding {
     /// Claude Code `--output-format stream-json --include-partial-messages`:
     /// stdout is NDJSON. Decoded per-line by [`ClaudeDecoder`].
     ClaudeStreamJson,
-    /// pi's `--mode json`: stdout is NDJSON of `message_update` events whose
+    /// pi's `--mode json` — and omp's, a pi fork emitting the same envelope:
+    /// stdout is NDJSON of `message_update` events whose
     /// `assistantMessageEvent` carries `thinking_delta`/`text_delta` chunks —
     /// a complete reasoning + answer stream (290 thinking + 142 text deltas
     /// observed on a 120-word generation). Decoded per-line by
@@ -826,9 +827,9 @@ impl CliAgent {
         // The runner surfaces a timeout (and not-installed) as a typed
         // `LlmError` directly via `?`; auth/non-zero-exit classification on a
         // finished process happens below.
-        // Plain stdout is the answer verbatim (custom commands only — every
-        // built-in preset now carries a decodable envelope). The four
-        // streamed envelopes each pick a [`Decoder`] and share one
+        // Plain stdout is the answer verbatim (custom commands and any
+        // preset whose stdout aic does not decode). The four envelope
+        // encodings each pick a [`Decoder`] and share one
         // run/decode/error tail ([`Self::run_streamed`]).
         match self.spec.encoding {
             Encoding::Plain => {

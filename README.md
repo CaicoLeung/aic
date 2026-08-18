@@ -77,7 +77,7 @@ command = "claude"
 args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
 ```
 
-aic sends one prompt and reads the answer — it never runs the agent in tool-use mode. Each preset pins itself to read-only or text-only, so an injected instruction can't touch your working tree. Both backends' fields can coexist in the config; `backend_kind` selects the active one.
+aic sends one prompt and reads the answer — it never runs the agent in tool-use mode. Presets pin explicit flags where needed (codex's read-only sandbox, pi's `--no-tools`); the rest rely on headless print mode, where approval-gated tools can't run without a TTY — so an injected instruction can't touch your working tree. Both backends' fields can coexist in the config; `backend_kind` selects the active one.
 
 See [CLI-agent presets](#cli-agent-presets) for the full preset list.
 
@@ -171,7 +171,7 @@ OpenRouter and the OpenAI-compatible provider have no default model — set `mod
 
 ### CLI-agent presets
 
-Presets with a streamed stdout envelope (claude, codex, pi, opencode, omp) ship a dedicated decoder, so aic streams reasoning where the CLI exposes it and cleanly extracts the answer; the rest use plain print mode — stdout IS the answer.
+Presets with a decodable stdout envelope (claude, codex, pi, opencode, omp) get a decoder — omp reuses pi's, being a pi fork — so aic streams reasoning where the CLI exposes it and cleanly extracts the answer; the rest use plain print mode — stdout IS the answer.
 
 ```toml
 # OpenAI Codex — exec --json, read-only sandbox

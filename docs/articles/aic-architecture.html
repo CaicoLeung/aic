@@ -355,7 +355,7 @@
     <div class="trow"><span class="tpath"><span class="conn">├── </span><span class="dir d-llm">llm/</span></span><span class="tdesc">后端层：永不触碰 git——只吃 diff 字符串，吐文本/JSON</span></div>
     <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>mod.rs</span><span class="tdesc">Provider <code>REGISTRY</code>（12 项，ADR 0003）、<code>Backend{Rig,Cli}</code> 枚举、<code>with_agent!</code> 宏</span></div>
     <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>generator/</span><span class="tdesc">三次类型化调用 + <code>validate_batch_plan</code>（§04 信任边界）</span></div>
-    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>cli_agent/</span><span class="tdesc">claude / codex / pi / opencode 无头外壳（ADR 0010），唯一 <code>async-trait</code> seam</span></div>
+    <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>cli_agent/</span><span class="tdesc">11 个 CLI agent 预设的无头外壳（ADR 0010），唯一 <code>async-trait</code> seam</span></div>
     <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>decoder/</span><span class="tdesc">流式 NDJSON 事件解码</span></div>
     <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>parse/</span><span class="tdesc">容错 JSON 解析 + 截断/围栏容忍 + 可重试错误分类</span></div>
     <div class="trow"><span class="tpath"><span class="conn">│&#160;&#160;&#160;├── </span>retry/</span><span class="tdesc">共享重试策略——推理模型「预算饥饿」恢复</span></div>
@@ -514,7 +514,7 @@ committed_hunks: HashMap&lt;String, HashSet&lt;usize&gt;&gt;
     <div class="cmp right">
       <div class="cmp-title">Backend::Cli — CLI-agent（ADR 0010）</div>
       <ul>
-        <li><b>无头 shell 出</b>外部编码 agent：claude / codex / pi / opencode 的 print 模式</li>
+        <li><b>无头 shell 出</b>外部编码 agent：11 个预设（claude、codex、pi、opencode、omp、gemini 等）的 print 模式</li>
         <li><b>零 API key</b>：复用该 CLI 自己的登录态/订阅</li>
         <li>配置是 <code>command/args/timeout_secs</code> 模板；NDJSON 流事件解码进共享 decoder</li>
         <li><code>CommandRunner</code> trait seam 是全库唯一 <code>async-trait</code>——为了测试注入 FakeRunner 队列</li>

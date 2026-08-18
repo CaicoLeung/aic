@@ -77,7 +77,7 @@ command = "claude"
 args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
 ```
 
-aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下运行 agent。每个预设都锁定为只读或纯文本，因此注入的指令无法触碰你的工作区。两个 backend 的字段可以共存于配置文件中；`backend_kind` 决定哪个生效。
+aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下运行 agent。需要时预设会显式锁定权限（codex 的只读沙箱、pi 的 `--no-tools`）；其余预设依赖无头 print 模式 —— 没有 TTY，需审批的工具无法运行 —— 因此注入的指令无法触碰你的工作区。两个 backend 的字段可以共存于配置文件中；`backend_kind` 决定哪个生效。
 
 其他预设见 [CLI-agent 预设](#cli-agent-预设)。
 
@@ -171,7 +171,7 @@ OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config �
 
 ### CLI-agent 预设
 
-带流式 stdout 封装的预设（claude、codex、pi、opencode、omp）配有专用解码器，aic 能在 CLI 支持的情况下流式输出推理过程并干净地提取回答；其余预设为纯打印模式 —— stdout 即回答。
+带可解码 stdout 封装的预设（claude、codex、pi、opencode、omp）配有解码器 —— omp 作为 pi 的复刻直接复用 pi 的解码器 —— aic 能在 CLI 支持的情况下流式输出推理过程并干净地提取回答；其余预设为纯打印模式 —— stdout 即回答。
 
 ```toml
 # OpenAI Codex — exec --json，只读沙箱
