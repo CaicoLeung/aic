@@ -228,36 +228,32 @@ impl Display {
 
         // Body hangs under the message start; footer block anchors at the
         // hash with names pinned to the message start.
-        let (_, hash_off, message_off) = Self::subject_offsets(prefix, hash);
+        let subject = Self::subject_offsets(prefix, hash);
         if let Some(b) = body {
-            self.emit_body(b, message_off);
+            self.emit_body(b, subject.message);
         }
-        self.emit_file_stats(stats, message_off, hash_off);
+        self.emit_file_stats(stats, &subject);
     }
 
-    /// Subject-prefix geometry: the columns (beyond the shared [`MARGIN`])
-    /// where the `✓` marker, the short hash, and the subject's message text
-    /// start — the hang anchors for the body (message start), the footer's
-    /// file rows (hash start), and its Σ total (tick). Computed from plain
-    /// char lengths (`[n/m] ` prefix, `✓ ` marker, hash) because the styled
-    /// strings carry ANSI bytes, not columns.
-    ///
-    /// With no prefix (`""`, single-commit / staged Runs) the marker sits at
-    /// column 0, the hash at 2, the message at 10; each `[n/m] ` prefix
-    /// shifts all three. A Run with ≥10 batches widens the prefix mid-run
-    /// (`[9/9]` → `[10/9]`) and the hangs shift with it — accepted: rare, and
-    /// tracking the real subject start beats freezing a stale column. Pure,
-    /// so the geometry is unit-testable without a sink.
-    fn subject_offsets(prefix: &str, hash: &str) -> (usize, usize, usize) {
+    /// Subject-prefix geometry, as [`SubjectOffsets`]: with no prefix
+    /// (`""`, single-commit / staged Runs) the marker sits at column 0,
+    /// the hash at 2, the message at 10; each `[n/m] ` prefix shifts all
+    /// three. A Run with ≥10 batches widens the prefix mid-run (`[9/9]` →
+    /// `[10/9]`) and the hangs shift with it — accepted: rare, and
+    /// tracking the real subject start beats freezing a stale column.
+    /// Pure, so the geometry is unit-testable without a sink.
+    fn subject_offsets(prefix: &str, hash: &str) -> SubjectOffsets {
         // Optional `[n/m] ` prefix, then "✓ " — marker and space.
         let tick = if prefix.is_empty() {
             0
         } else {
             prefix.chars().count() + 1
         };
-        let hash_at = tick + 2;
-        let message_at = hash_at + hash.chars().count() + 1;
-        (tick, hash_at, message_at)
+        SubjectOffsets {
+            tick,
+            hash: tick + 2,
+            message: tick + 2 + hash.chars().count() + 1,
+        }
     }
 
     /// Style a conventional-commit subject line the same way in every
@@ -336,9 +332,9 @@ impl Display {
     /// `+N` and `−M` each right-align in their own column, with the `Σ` glyph
     /// in a column of its own on the total row, so the totals land exactly
     /// under the per-file counts; filenames left-align at `name_col` —
-    /// pinned under the subject's message text (`message_off`) so the footer
+    /// pinned under the subject's message text (`subject.message`) so the footer
     /// reads as keyed to the commit message — with the same gap on every
-    /// row. The counts block anchors at the hash column (`hash_off`) and its
+    /// row. The counts block anchors at the hash column (`subject.hash`) and its
     /// right edge is capped 2 short of the message start: a block wider than
     /// the hash→message span (4-digit Σ totals) grows leftward instead of
     /// pushing names off the message, clamped 2 columns left of the hash —
@@ -363,7 +359,7 @@ impl Display {
     /// matching [`wrap_line`]'s `width == 0` convention. The
     /// [`FILE_STATS_CAP`] bounds height. Returns the rows emitted, for the
     /// preview's erase accounting.
-    fn emit_file_stats(&self, stats: &[FileStats], message_off: usize, hash_off: usize) -> usize {
+    fn emit_file_stats(&self, stats: &[FileStats], subject: &SubjectOffsets) -> usize {
         if stats.is_empty() {
             return 0;
         }
@@ -395,9 +391,10 @@ impl Display {
         // row's numbers land exactly under the per-file counts. The block
         // anchors at the hash column; its right edge is capped 2 short of
         // the message start so the name column can pin there — wider blocks
-        // (4-digit Σ totals) grow leftward, clamped at the ✓ column (2 left
-        // of the hash) so they never cross into the batch prefix. The Σ
-        // row adds its `Σ ` glyph at the block's left edge — landing under
+        // (4-digit Σ totals) grow leftward, clamped at the tick column
+        // (`SubjectOffsets::tick`) so they never cross into the batch
+        // prefix. The Σ row adds its `Σ ` glyph at the block's left edge —
+        // landing under
         // the ✓ whenever the block starts at the hash (the common case,
         // since hash = ✓ + 2) — and needs the block to start ≥ 2 so the
         // glyph never crosses the margin. Tag column exists only when a
@@ -406,7 +403,9 @@ impl Display {
         // resolved text width.
         let total_added: usize = stats.iter().map(|s| s.added).sum();
         let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
-        let sigma_col: usize = 2;
+        // The Σ glyph's own cell width ("Σ ") — the Σ row pads one cell
+        // left of the block start.
+        let sigma_cell: usize = 2;
         let sigma_row = stats.len() > 1;
         // Size to the Σ total too, not just the per-file max: the total can
         // carry more digits than any single file (ten `+1` → `+10`), and an
@@ -447,21 +446,24 @@ impl Display {
         let lead = " ".repeat(counts_region - base_region);
         // Fixed 2-column gutter between the counts block and the names.
         let name_gap: usize = 2;
-        // Block anchor: start at the hash, slide left only as far as the ✓
-        // column (2 left of the hash) when the capped right edge demands it;
-        // the Σ row's glyph needs 2 columns of its own left of the block.
-        let start = hash_off
+        // Block anchor: start at the hash, slide left only as far as the
+        // tick column (`SubjectOffsets::tick`) when the capped right edge
+        // demands it; the Σ row's glyph needs 2 columns of its own left of
+        // the block.
+        let start = subject
+            .hash
             .min(
-                message_off
+                subject
+                    .message
                     .saturating_sub(name_gap)
                     .saturating_sub(counts_region),
             )
-            .max(hash_off.saturating_sub(sigma_col))
-            .max(if sigma_row { sigma_col } else { 0 });
+            .max(subject.tick)
+            .max(if sigma_row { sigma_cell } else { 0 });
         let right = start + counts_region;
         // Name column pins under the message start, pushed right only when
         // the counts block is too wide to leave a gap.
-        let name_col = message_off.max(right + name_gap);
+        let name_col = subject.message.max(right + name_gap);
         let gap = " ".repeat(name_col - right);
         let start_pad = " ".repeat(start);
         let tag_col = if shown_stats.iter().any(|s| s.new || s.removed) {
@@ -583,9 +585,9 @@ impl Display {
             let sigma_text = format!(
                 "{}{}",
                 self.styled("Σ", sigma_color().bold()),
-                " ".repeat(sigma_col.saturating_sub(1)),
+                " ".repeat(sigma_cell.saturating_sub(1)),
             );
-            let sigma_pad = " ".repeat(start.saturating_sub(sigma_col));
+            let sigma_pad = " ".repeat(start.saturating_sub(sigma_cell));
             self.emit(&format!(
                 "{sigma_pad}{sigma_text}{lead}{}{gap}{}",
                 fmt_columns(&plus, &minus),
@@ -604,8 +606,9 @@ impl Display {
     /// the file-stats footer ([`Display::emit_file_stats`]). The preview's
     /// own prefix rule: body hangs under the subject's message start (the
     /// `? ` marker is the whole prefix, so 2 cols); the footer has no ref
-    /// line to key on, so its counts anchor at the margin (hash offset 0)
-    /// and names pin to the message start.
+    /// line to key on, so its counts anchor at the margin — nudged 2 cols
+    /// right when the Σ row is present, so the glyph still lands under the
+    /// `?` — and names pin to the message start.
     ///
     /// Returns how many rows the preview occupies, so the caller can erase it
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
@@ -625,14 +628,19 @@ impl Display {
         let mut rows = 2;
         // `? ` — the preview subject's marker prefix: body hangs under the
         // message start (2 cols); the footer anchors its counts at the
-        // margin (no ref line) with names pinned to the message start (see
-        // [`Self::subject_offsets`] for the landed twin's rule).
-        const PREVIEW_HANG: usize = 2;
-        const PREVIEW_HASH_OFF: usize = 0;
+        // margin (no ref line) — nudged 2 right on multi-file footers so
+        // the Σ glyph lands under the `?` — with names pinned to the
+        // message start (see [`Self::subject_offsets`] for the landed
+        // twin's rule).
+        const PREVIEW_OFFSETS: SubjectOffsets = SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        };
         if let Some(b) = body {
-            rows += self.emit_body(b, PREVIEW_HANG);
+            rows += self.emit_body(b, PREVIEW_OFFSETS.message);
         }
-        rows += self.emit_file_stats(stats, PREVIEW_HANG, PREVIEW_HASH_OFF);
+        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS);
         self.emit_blank();
         rows + 1
     }
@@ -674,6 +682,23 @@ const LEFT_MARGIN: usize = 2;
 /// trailing spaces are ever printed (they break copy-paste and some terminals
 /// strip them).
 const RIGHT_MARGIN: usize = 2;
+
+/// Columns (beyond the shared [`MARGIN`]) where the subject line's `✓`
+/// marker, short hash, and message text start — the hang anchors for the
+/// body (message start), the footer's counts block (hash start), and its
+/// Σ glyph (tick). Plain char lengths, because the styled subject carries
+/// ANSI bytes, not columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubjectOffsets {
+    /// Column of the `✓` marker — the Σ glyph's landing spot, and the
+    /// counts block's leftward clamp.
+    tick: usize,
+    /// Column of the short hash — the footer counts block's anchor.
+    hash: usize,
+    /// Column of the subject's message text — the body hang and the
+    /// footer's name pin.
+    message: usize,
+}
 
 #[cfg(test)]
 mod tests;

@@ -238,8 +238,11 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
                 binary: false,
             },
         ],
-        2,
-        0,
+        &SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        },
     );
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
@@ -283,8 +286,11 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
                 binary: false,
             },
         ],
-        2,
-        0,
+        &SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        },
     );
     let got = lines.lock().clone();
     // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
@@ -327,8 +333,11 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
                 binary: true,
             },
         ],
-        2,
-        0,
+        &SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        },
     );
     let got = lines.lock().clone();
     // New binary keeps `[new]`; non-new binary carries no tag. The counts
@@ -372,8 +381,11 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
                 binary: false,
             },
         ],
-        2,
-        0,
+        &SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        },
     );
     let got = lines.lock().clone();
     // base region (Σ 2 + `+1` 2 + gap 1 + `−0` 2 = 7) widens to 8 for
@@ -418,8 +430,11 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
                 binary: false,
             },
         ],
-        2,
-        0,
+        &SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        },
     );
     let got = lines.lock().clone();
     // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
