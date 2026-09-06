@@ -1,9 +1,10 @@
 Output "docs/resolve-demo.gif"
 
-Set FontFamily "JetBrainsMonoNL Nerd Font"
+Set Shell "zsh"
+Set FontFamily "JetBrainsMono Nerd Font"
 Set FontSize 22
 Set Width 1200
-Set Height 660
+Set Height 720
 Set Padding 24
 Set Theme {
   "background": "#1e1e2e",
@@ -29,18 +30,30 @@ Set Theme {
   "15": "#a6adc8"
 }
 
-# Set up demo repo with merge conflict (hidden)
+# Set up ~/aic-resolve repo with a real merge conflict (hidden)
 Hide
-Type "source demo/resolve-setup.sh"
+Sleep 1s
+Type "unset http_proxy https_proxy all_proxy; export GIT_PAGER=cat PAGER=cat; bash demo/resolve-setup.sh; alias aic=~/aic-resolve/bin/aic"
 Enter
-Sleep 2s
+Sleep 3s
+Type "cd ~/aic-resolve"
+Enter
+Sleep 1s
 Type "clear"
 Enter
 Sleep 500ms
 Show
 
-# Run aic resolve — straight in, no git status clutter
+# Run aic resolve — real binary, real LLM
 Type@50ms "aic resolve"
 Sleep 150ms
 Enter
-Sleep 16s
+Sleep 9s
+
+# Accept the first proposed resolution (Enter = yes)
+Enter
+Sleep 3s
+
+# Accept the second proposed resolution
+Enter
+Sleep 5s
