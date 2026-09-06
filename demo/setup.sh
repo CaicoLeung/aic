@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# Sets up a temp git repo + fake `aic` for the VHS demo.
-# Usage: source demo/setup.sh  (modifies PATH + cds into the demo repo)
+# Sets up ~/aic-demo — a scratch git repo whose unstaged diff the REAL aic
+# binary splits into three atomic commits — for the VHS demo GIF.
+# Usage: bash demo/setup.sh
+#   then: export PATH="$HOME/aic-demo/bin:$PATH" && cd ~/aic-demo
 set -euo pipefail
 
-DEMO_DIR=$(mktemp -d /tmp/aic-demo-XXXXXX)
-trap 'rm -rf "$DEMO_DIR" /tmp/aic-demo-path' EXIT
-BIN_DIR="$DEMO_DIR/bin"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="$REPO_ROOT/target/release/aic"
+if [ ! -x "$BIN" ]; then
+  echo "demo needs target/release/aic — run: cargo build --release" >&2
+  exit 1
+fi
 
-mkdir -p "$BIN_DIR" "$DEMO_DIR/src"
+DEMO_DIR="$HOME/aic-demo"
+rm -rf "$DEMO_DIR"
+mkdir -p "$DEMO_DIR/bin" "$DEMO_DIR/src"
+cp "$BIN" "$DEMO_DIR/bin/aic"
 
-# Fake aic → simulation script
-cp "$SCRIPT_DIR/aic-sim.sh" "$BIN_DIR/aic"
-chmod +x "$BIN_DIR/aic"
-
-# Mini git repo with one file that has 3 distinct changes
 git init -q "$DEMO_DIR"
 git -C "$DEMO_DIR" symbolic-ref HEAD refs/heads/main
 cd "$DEMO_DIR"
@@ -40,7 +42,7 @@ RUST
 git add -A
 git commit -q -m "feat(auth): initial authentication module"
 
-# Now make 3 unrelated changes to the same file
+# Now make 3 unrelated changes to the same file (fix + feat + style)
 cat > src/auth.rs <<'RUST'
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,8 +62,3 @@ pub fn login_oauth2(provider: &str) -> Option<String> { None }
 RUST
 
 # Leave changes unstaged — aic will detect and split them
-export PATH="$BIN_DIR:$PATH"
-export STARSHIP_CONFIG="$SCRIPT_DIR/starship.toml"
-eval "$(starship init bash)"
-echo "$DEMO_DIR" > /tmp/aic-demo-path
-set +e +u +o pipefail

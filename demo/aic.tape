@@ -1,6 +1,7 @@
 Output "docs/demo.gif"
 
-Set FontFamily "JetBrainsMonoNL Nerd Font"
+Set Shell "zsh"
+Set FontFamily "JetBrainsMono Nerd Font"
 Set FontSize 22
 Set Width 1200
 Set Height 820
@@ -29,11 +30,15 @@ Set Theme {
   "15": "#a6adc8"
 }
 
-# Set up demo repo + fake aic (hidden)
+# Set up ~/aic-demo repo + real release binary on PATH (hidden)
 Hide
-Type "source demo/setup.sh"
+Sleep 1s
+Type "export GIT_PAGER=cat PAGER=cat; bash demo/setup.sh; alias aic=~/aic-demo/bin/aic"
 Enter
-Sleep 2s
+Sleep 3s
+Type "cd ~/aic-demo"
+Enter
+Sleep 1s
 Type "clear"
 Enter
 Sleep 500ms
@@ -49,8 +54,8 @@ Sleep 200ms
 Enter
 Sleep 1s
 
-# Run aic — the money shot
+# Run aic — the money shot (real binary, real LLM)
 Type@50ms "aic"
 Sleep 150ms
 Enter
-Sleep 11s
+Sleep 38s
