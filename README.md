@@ -11,7 +11,7 @@ AI commit messages that are **actually atomic** — and work with your existing 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
-![aic splits one file into three atomic commits](https://vhs.charm.sh/vhs-78XLWnaEdLvjDqeCkETQVh.gif)
+![aic splits one file's changes into atomic commits](https://vhs.charm.sh/vhs-2lPY6yY1uBpk7fWCgd7ypH.gif)
 
 ---
 
@@ -19,7 +19,7 @@ AI commit messages that are **actually atomic** — and work with your existing 
 
 Most AI commit tools treat a **file** as the atomic unit. aic treats a **hunk** — a single contiguous change — as the unit.
 
-Edit one file in three unrelated ways and `aic` produces three clean commits. No manual `git add -p`, no mixed-concern history.
+Edit one file in three unrelated ways and `aic` produces clean, isolated commits. No manual `git add -p`, no mixed-concern history.
 
 ```
 src/auth.rs  (one file, three changes)
@@ -133,7 +133,7 @@ Full reference: [provider table](#supported-providers) · [CLI-agent presets](#c
 
 ## Resolving merge conflicts
 
-![aic resolve proposes resolutions and finalizes the merge](https://vhs.charm.sh/vhs-3ZyDoDLS0ZghlrrVsJa70w.gif)
+![aic resolve proposes resolutions and finalizes the merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
 
 Run `aic resolve` in a repo mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. When nothing's left unmerged, it runs the merge's `--continue` for you. Plain `aic` in a conflicted repo notices and offers to hand off.
 

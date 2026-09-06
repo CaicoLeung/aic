@@ -11,7 +11,7 @@ AI 驱动的 git commit 工具，写出 **真正原子化** 的提交信息 —�
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
-![aic 把一个文件拆成三个原子提交](https://vhs.charm.sh/vhs-78XLWnaEdLvjDqeCkETQVh.gif)
+![aic 把一个文件的改动拆成原子提交](https://vhs.charm.sh/vhs-2lPY6yY1uBpk7fWCgd7ypH.gif)
 
 ---
 
@@ -19,7 +19,7 @@ AI 驱动的 git commit 工具，写出 **真正原子化** 的提交信息 —�
 
 多数 AI commit 工具把 **file** 当作原子单位。aic 则把 **hunk**（一段连续的代码改动）当作原子单位。
 
-在一个文件里做了三处互不相关的改动，`aic` 会产出三个干净的提交 —— 无需手动 `git add -p`，也不会出现 concern 混杂的历史。
+在一个文件里做了三处互不相关的改动，`aic` 会产出干净的原子提交 —— 无需手动 `git add -p`，也不会出现 concern 混杂的历史。
 
 ```
 src/auth.rs  （一个文件，三处改动）
@@ -133,7 +133,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 
 ## 解决 merge 冲突
 
-![aic resolve 提出解决方案并完成 merge](https://vhs.charm.sh/vhs-3ZyDoDLS0ZghlrrVsJa70w.gif)
+![aic resolve 提出解决方案并完成 merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
 
 在处于 merge 中的 repo 运行 `aic resolve`。它会读取每个冲突文件，提出不含 marker 的解决方案，展示 diff，并逐文件询问 `apply?`。当没有未 merge 的内容残留时，它会替你执行 merge 的 `--continue`。在冲突 repo 中直接运行 `aic` 也会察觉并提议移交给 resolve。
 

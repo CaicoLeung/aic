@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Sets up a temp git repo with a real merge conflict for the VHS resolve demo.
-# Usage: source demo/resolve-setup.sh
+# Sets up ~/aic-resolve — a scratch git repo with a real merge conflict —
+# for the VHS resolve demo GIF, driven by the REAL aic binary.
+# Usage: bash demo/resolve-setup.sh
+#   then: export PATH="$HOME/aic-resolve/bin:$PATH" && cd ~/aic-resolve
 set -euo pipefail
 
-DEMO_DIR=$(mktemp -d /tmp/aic-resolve-demo-XXXXXX)
-trap 'rm -rf "$DEMO_DIR" /tmp/aic-resolve-demo-path' EXIT
-BIN_DIR="$DEMO_DIR/bin"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="$REPO_ROOT/target/release/aic"
+if [ ! -x "$BIN" ]; then
+  echo "demo needs target/release/aic — run: cargo build --release" >&2
+  exit 1
+fi
 
-mkdir -p "$BIN_DIR" "$DEMO_DIR/src"
-
-# Fake aic → resolve simulation (ignores args, just plays the resolve flow)
-cp "$SCRIPT_DIR/resolve-sim.sh" "$BIN_DIR/aic"
-chmod +x "$BIN_DIR/aic"
+DEMO_DIR="$HOME/aic-resolve"
+rm -rf "$DEMO_DIR"
+mkdir -p "$DEMO_DIR/bin" "$DEMO_DIR/src"
+cp "$BIN" "$DEMO_DIR/bin/aic"
 
 git init -q "$DEMO_DIR"
 git -C "$DEMO_DIR" symbolic-ref HEAD refs/heads/main
@@ -22,7 +25,6 @@ git config user.name "Demo Dev"
 echo "bin/" > .gitignore
 
 # Shared base: a config + parser
-mkdir -p src
 cat > src/config.rs <<'RUST'
 pub struct Config {
     timeout_secs: u32,
@@ -99,9 +101,3 @@ git commit -q -m "feat: add confirm flag and reverse parse order"
 
 # Merge → conflict
 git merge -q feature-a 2>/dev/null || true
-
-export PATH="$BIN_DIR:$PATH"
-export STARSHIP_CONFIG="$SCRIPT_DIR/starship.toml"
-eval "$(starship init bash)"
-echo "$DEMO_DIR" > /tmp/aic-resolve-demo-path
-set +e +u +o pipefail

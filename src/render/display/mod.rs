@@ -187,9 +187,12 @@ impl Display {
     /// Layout (ADR: commit-line readability): the whole block is inset by
     /// [`LEFT_MARGIN`] so it isn't flush with the terminal edge. The subject
     /// is a single title line and is **never wrapped** (overflow preferable to
-    /// truncation/re-flow). The body is greedy word-wrapped to
-    /// [`Display::text_width`] with continuation lines aligned under the first
-    /// body char; no hanging indent. Blank body lines stay blank.
+    /// truncation/re-flow). The body hangs to the column where the subject's
+    /// message text starts (see [`Self::subject_offsets`]); the file-stats
+    /// footer hangs shallower — file rows under the commit ID, the Σ total
+    /// under the `✓` marker — so the footer reads as keyed to the ref line
+    /// while the body reads as the message's own continuation. Blank body
+    /// lines stay blank.
     ///
     /// `stats` render as the file-stats footer ([`Display::emit_file_stats`]) —
     /// the landed twin of the preview's footer, so the confirmed draft and the
@@ -223,13 +226,34 @@ impl Display {
             self.styled_subject(message)
         ));
 
-        // Optional body — margin + greedy word-wrap to text_width, gray.
-        // The body's old ad-hoc `  ` indent is subsumed by the shared margin so
-        // the whole block sits at one uniform inset.
+        // Body hangs under the message start; footer block anchors at the
+        // hash with names pinned to the message start.
+        let subject = Self::subject_offsets(prefix, hash);
         if let Some(b) = body {
-            self.emit_body(b);
+            self.emit_body(b, subject.message);
         }
-        self.emit_file_stats(stats);
+        self.emit_file_stats(stats, &subject);
+    }
+
+    /// Subject-prefix geometry, as [`SubjectOffsets`]: with no prefix
+    /// (`""`, single-commit / staged Runs) the marker sits at column 0,
+    /// the hash at 2, the message at 10; each `[n/m] ` prefix shifts all
+    /// three. A Run with ≥10 batches widens the prefix mid-run (`[9/9]` →
+    /// `[10/9]`) and the hangs shift with it — accepted: rare, and
+    /// tracking the real subject start beats freezing a stale column.
+    /// Pure, so the geometry is unit-testable without a sink.
+    fn subject_offsets(prefix: &str, hash: &str) -> SubjectOffsets {
+        // Optional `[n/m] ` prefix, then "✓ " — marker and space.
+        let tick = if prefix.is_empty() {
+            0
+        } else {
+            prefix.chars().count() + 1
+        };
+        SubjectOffsets {
+            tick,
+            hash: tick + 2,
+            message: tick + 2 + hash.chars().count() + 1,
+        }
     }
 
     /// Style a conventional-commit subject line the same way in every
@@ -266,16 +290,21 @@ impl Display {
         }
     }
 
-    /// Emit a commit body — margin + greedy word-wrap to text_width, gray.
-    /// Blank body lines stay blank (no trailing-whitespace margin). Shared by
-    /// [`Display::commit_line`] and [`Display::commit_preview`].
-    fn emit_body(&self, body: &str) -> usize {
+    /// Emit a commit body — hang-indented by `indent` columns beyond the
+    /// shared margin, greedy word-wrap to `text_width − indent` (saturating;
+    /// a pathologically deep indent on a tiny terminal degrades to
+    /// [`wrap_line`]'s `width == 0` "don't wrap" convention instead of
+    /// panicking), gray. Blank body lines stay bare blanks (no
+    /// trailing-whitespace indent). Shared by [`Display::commit_line`] and
+    /// [`Display::commit_preview`].
+    fn emit_body(&self, body: &str, indent: usize) -> usize {
         // Muted gray, darkened from #8a8f9f to #6b7280 for light-bg readability.
         let gray = neutral_gray();
         let trimmed = body.trim();
         let mut rows = 0;
         if !trimmed.is_empty() {
-            let width = self.text_width();
+            let pad = " ".repeat(indent);
+            let width = self.text_width().saturating_sub(indent);
             for src_line in trimmed.lines() {
                 if src_line.is_empty() {
                     self.emit_blank();
@@ -283,7 +312,7 @@ impl Display {
                     continue;
                 }
                 for piece in wrap_line(src_line, width) {
-                    self.emit(&self.styled(&piece, gray.clone()));
+                    self.emit(&format!("{pad}{}", self.styled(&piece, gray.clone())));
                     rows += 1;
                 }
             }
@@ -302,10 +331,17 @@ impl Display {
     /// line shows — rendered as an aligned grid (`git diff --stat` style):
     /// `+N` and `−M` each right-align in their own column, with the `Σ` glyph
     /// in a column of its own on the total row, so the totals land exactly
-    /// under the per-file counts; filenames left-align in the next column,
-    /// tags in the last. A zero per-file count renders as a blank column
-    /// (`git diff --stat` never shows zeros); the Σ total row keeps both
-    /// totals even at zero, like git's own summary line. Green `+N`, red
+    /// under the per-file counts; filenames left-align at `name_col` —
+    /// pinned under the subject's message text (`subject.message`) so the footer
+    /// reads as keyed to the commit message — with the same gap on every
+    /// row. The counts block anchors at the hash column (`subject.hash`) and its
+    /// right edge is capped 2 short of the message start: a block wider than
+    /// the hash→message span (4-digit Σ totals) grows leftward instead of
+    /// pushing names off the message, clamped 2 columns left of the hash —
+    /// exactly the ✓ marker's column, where the Σ glyph itself sits (`Σ `
+    /// wide, hugging the block's left edge). A zero per-file count renders
+    /// as a blank column (`git diff --stat` never shows zeros); the Σ total
+    /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
     /// `−M`, muted filenames, a green-bold `[new]` / red-bold `[del]` tag,
     /// and a bold-cyan `Σ +X −Y` total row when more than one file. Binary
     /// files render `(binary)` right-aligned in the counts region, which
@@ -323,7 +359,7 @@ impl Display {
     /// matching [`wrap_line`]'s `width == 0` convention. The
     /// [`FILE_STATS_CAP`] bounds height. Returns the rows emitted, for the
     /// preview's erase accounting.
-    fn emit_file_stats(&self, stats: &[FileStats]) -> usize {
+    fn emit_file_stats(&self, stats: &[FileStats], subject: &SubjectOffsets) -> usize {
         if stats.is_empty() {
             return 0;
         }
@@ -350,19 +386,27 @@ impl Display {
             }
         };
 
-        // Grid geometry. Counts region: the Σ glyph has its own column —
-        // 2 wide (`Σ `, blank on file rows) so it never touches the numbers.
-        // Always reserved (even for a single-file commit) so counts align
-        // across every commit's footer — a multi-file commit's file rows
-        // have a blank where Σ would be, same as a single-file commit's one
-        // row. Then `+N` and `−M` each right-align in their own column with a
-        // 1-char gap, so the total row's numbers land exactly under the
-        // per-file counts. Tag column exists only when a shown file carries
-        // one (` [new]` / ` [del]` are both 6 chars). Name column: widest
-        // shown name, capped so the row fits the resolved text width.
+        // Grid geometry. One counts block per footer: `+N` and `−M` each
+        // right-align in their own column with a 1-char gap, so the total
+        // row's numbers land exactly under the per-file counts. The block
+        // anchors at the hash column; its right edge is capped 2 short of
+        // the message start so the name column can pin there — wider blocks
+        // (4-digit Σ totals) grow leftward, clamped at the tick column
+        // (`SubjectOffsets::tick`) so they never cross into the batch
+        // prefix. The Σ row adds its `Σ ` glyph at the block's left edge —
+        // landing under
+        // the ✓ whenever the block starts at the hash (the common case,
+        // since hash = ✓ + 2) — and needs the block to start ≥ 2 so the
+        // glyph never crosses the margin. Tag column exists only when a
+        // shown file carries one (` [new]` / ` [del]` are both 6 chars).
+        // Name column: widest shown name, capped so the row fits the
+        // resolved text width.
         let total_added: usize = stats.iter().map(|s| s.added).sum();
         let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
-        let sigma_col = 2;
+        // The Σ glyph's own cell width ("Σ ") — the Σ row pads one cell
+        // left of the block start.
+        let sigma_cell: usize = 2;
+        let sigma_row = stats.len() > 1;
         // Size to the Σ total too, not just the per-file max: the total can
         // carry more digits than any single file (ten `+1` → `+10`), and an
         // all-binary diff totals `+0`/`−0` where every per-file width is 0 —
@@ -393,21 +437,41 @@ impl Display {
         // — occupy the same `counts_region` and the filename column lands at
         // one column across every row.
         let binary_label = "(binary)".chars().count();
-        let base_region = sigma_col + plus_width + sep + minus_width;
+        let base_region = plus_width + sep + minus_width;
         let counts_region = if shown_stats.iter().any(|s| s.binary) {
             base_region.max(binary_label)
         } else {
             base_region
         };
         let lead = " ".repeat(counts_region - base_region);
+        // Fixed 2-column gutter between the counts block and the names.
+        let name_gap: usize = 2;
+        // Block anchor: start at the hash, slide left only as far as the
+        // tick column (`SubjectOffsets::tick`) when the capped right edge
+        // demands it; the Σ row's glyph needs 2 columns of its own left of
+        // the block.
+        let start = subject
+            .hash
+            .min(
+                subject
+                    .message
+                    .saturating_sub(name_gap)
+                    .saturating_sub(counts_region),
+            )
+            .max(subject.tick)
+            .max(if sigma_row { sigma_cell } else { 0 });
+        let right = start + counts_region;
+        // Name column pins under the message start, pushed right only when
+        // the counts block is too wide to leave a gap.
+        let name_col = subject.message.max(right + name_gap);
+        let gap = " ".repeat(name_col - right);
+        let start_pad = " ".repeat(start);
         let tag_col = if shown_stats.iter().any(|s| s.new || s.removed) {
             6
         } else {
             0
         };
-        let name_cap = self
-            .text_width()
-            .saturating_sub(counts_region + 2 + tag_col);
+        let name_cap = self.text_width().saturating_sub(name_col + tag_col);
         let align = name_cap > 0;
         let name_width = if align {
             shown_stats
@@ -419,7 +483,6 @@ impl Display {
         } else {
             0
         };
-        let sigma_blank = " ".repeat(sigma_col);
         let sep_str = if sep > 0 { " " } else { "" };
         // Shared `+N`/`−M` column formatter — file rows and the Σ total row
         // pad identically, so the alignment math has one home and the two
@@ -470,7 +533,7 @@ impl Display {
                 } else {
                     String::new()
                 };
-                format!("{lead}{sigma_blank}{}", fmt_columns(&plus, &minus))
+                format!("{lead}{}", fmt_columns(&plus, &minus))
             };
             // Name column: truncated with `…` when wider than the cap,
             // padded to the grid width otherwise.
@@ -491,7 +554,7 @@ impl Display {
             // plain spaces, so it is safe with ANSI styling enabled too.
             self.emit(
                 format!(
-                    "{counts}  {}{}{}",
+                    "{start_pad}{counts}{gap}{}{}{}",
                     self.styled(&name, gray.clone()),
                     " ".repeat(name_pad),
                     tag
@@ -503,8 +566,13 @@ impl Display {
         if stats.len() > Self::FILE_STATS_CAP {
             // The Σ total row below already carries the `(N files)` count —
             // repeating it here was noise; the elision line names only how
-            // many rows were cut.
-            self.emit(&self.styled(&format!("… {} more", stats.len() - shown), gray.clone()));
+            // many rows were cut, and sits in the name column with the
+            // filenames it stands in for.
+            self.emit(&format!(
+                "{}{}",
+                " ".repeat(name_col),
+                self.styled(&format!("… {} more", stats.len() - shown), gray.clone())
+            ));
             rows += 1;
         }
         if stats.len() > 1 {
@@ -517,11 +585,11 @@ impl Display {
             let sigma_text = format!(
                 "{}{}",
                 self.styled("Σ", sigma_color().bold()),
-                " ".repeat(sigma_col.saturating_sub(1)),
+                " ".repeat(sigma_cell.saturating_sub(1)),
             );
+            let sigma_pad = " ".repeat(start.saturating_sub(sigma_cell));
             self.emit(&format!(
-                "{lead}{}{}  {}",
-                sigma_text,
+                "{sigma_pad}{sigma_text}{lead}{}{gap}{}",
                 fmt_columns(&plus, &minus),
                 self.styled(&format!("({} files)", stats.len()), gray.clone()),
             ));
@@ -535,7 +603,12 @@ impl Display {
     /// ✓ lines of already-landed batches — a yellow `?` marker on the header
     /// and subject (the subject keeps its conventional-commit coloring, so the
     /// draft previews the exact styling the ✓ line will use), gray body, and
-    /// the file-stats footer ([`Display::emit_file_stats`]).
+    /// the file-stats footer ([`Display::emit_file_stats`]). The preview's
+    /// own prefix rule: body hangs under the subject's message start (the
+    /// `? ` marker is the whole prefix, so 2 cols); the footer has no ref
+    /// line to key on, so its counts anchor at the margin — nudged 2 cols
+    /// right when the Σ row is present, so the glyph still lands under the
+    /// `?` — and names pin to the message start.
     ///
     /// Returns how many rows the preview occupies, so the caller can erase it
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
@@ -553,10 +626,21 @@ impl Display {
             self.styled_subject(message)
         ));
         let mut rows = 2;
+        // `? ` — the preview subject's marker prefix: body hangs under the
+        // message start (2 cols); the footer anchors its counts at the
+        // margin (no ref line) — nudged 2 right on multi-file footers so
+        // the Σ glyph lands under the `?` — with names pinned to the
+        // message start (see [`Self::subject_offsets`] for the landed
+        // twin's rule).
+        const PREVIEW_OFFSETS: SubjectOffsets = SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        };
         if let Some(b) = body {
-            rows += self.emit_body(b);
+            rows += self.emit_body(b, PREVIEW_OFFSETS.message);
         }
-        rows += self.emit_file_stats(stats);
+        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS);
         self.emit_blank();
         rows + 1
     }
@@ -598,6 +682,23 @@ const LEFT_MARGIN: usize = 2;
 /// trailing spaces are ever printed (they break copy-paste and some terminals
 /// strip them).
 const RIGHT_MARGIN: usize = 2;
+
+/// Columns (beyond the shared [`MARGIN`]) where the subject line's `✓`
+/// marker, short hash, and message text start — the hang anchors for the
+/// body (message start), the footer's counts block (hash start), and its
+/// Σ glyph (tick). Plain char lengths, because the styled subject carries
+/// ANSI bytes, not columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubjectOffsets {
+    /// Column of the `✓` marker — the Σ glyph's landing spot, and the
+    /// counts block's leftward clamp.
+    tick: usize,
+    /// Column of the short hash — the footer counts block's anchor.
+    hash: usize,
+    /// Column of the subject's message text — the body hang and the
+    /// footer's name pin.
+    message: usize,
+}
 
 #[cfg(test)]
 mod tests;
