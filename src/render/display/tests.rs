@@ -82,25 +82,25 @@ fn commit_preview_renders_message_body_and_file_list() {
         ],
     );
     let got = lines.lock().clone();
-    // Pending header + subject carry the `?` marker; body sits at the
-    // shared margin; the file-stats footer is aligned with it — counts
-    // first, then filename, `[new]`/`[del]` tag, and a Σ total; a trailing
-    // blank separates the preview from the confirmation menu. `rows` is
-    // the whole block, so the caller can erase it after the draft is
-    // confirmed.
+    // Pending header + subject carry the `?` marker; body hangs under the
+    // subject's message start (`? ` = 2 cols beyond the margin); the
+    // file-stats footer hangs at the same column — counts first, then
+    // filename, `[new]`/`[del]` tag, and a Σ total; a trailing blank
+    // separates the preview from the confirmation menu. `rows` is the whole
+    // block, so the caller can erase it after the draft is confirmed.
     assert_eq!(got[0], "  ? proposed commit:");
     assert_eq!(got[1], "  ? feat(auth): add OAuth2 login support");
     assert_eq!(
         got[2],
-        "  Allow users to sign in via Google and GitHub OAuth2 providers"
+        "    Allow users to sign in via Google and GitHub OAuth2 providers"
     );
     // File rows carry a blank Σ column (`Σ ` wide); +N and −M each
     // right-align in their own column (" +4" carries the pad). The Σ
     // row's +16/−4 end exactly where +12/−3 and +4/−1 end, and the Σ
     // glyph sits in the same column as the file rows' blank.
-    assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
-    assert_eq!(got[4], "     +4 −1  src/main.rs");
-    assert_eq!(got[5], "  Σ +16 −4  (2 files)");
+    assert_eq!(got[3], "      +12 −3  src/auth.rs [new]");
+    assert_eq!(got[4], "       +4 −1  src/main.rs");
+    assert_eq!(got[5], "    Σ +16 −4  (2 files)");
     assert_eq!(got[6], "");
     assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
 }
@@ -127,8 +127,9 @@ fn commit_preview_singleton_file_list_omits_count() {
     let got = lines.lock().clone();
     assert_eq!(got[0], "  ? proposed commit:");
     assert_eq!(got[1], "  ? chore: bump dep");
-    // Single file: no Σ total line; no body line emitted.
-    assert_eq!(got[2], "    +5 −2  Cargo.toml");
+    // Single file: no Σ total line; no body line emitted. The footer hangs
+    // under the subject's message start (`? ` marker = 2 cols).
+    assert_eq!(got[2], "      +5 −2  Cargo.toml");
     assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
     assert_eq!(rows, 4, "header + subject + file + blank");
 }
@@ -216,24 +217,27 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
         colors: false,
         lines: lines.clone(),
     });
-    let rows = d.emit_file_stats(&[
-        FileStats {
-            path: "img.png".into(),
-            added: 0,
-            deleted: 0,
-            new: true,
-            removed: false,
-            binary: true,
-        },
-        FileStats {
-            path: "src/old.rs".into(),
-            added: 0,
-            deleted: 12,
-            new: false,
-            removed: true,
-            binary: false,
-        },
-    ]);
+    let rows = d.emit_file_stats(
+        &[
+            FileStats {
+                path: "img.png".into(),
+                added: 0,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "src/old.rs".into(),
+                added: 0,
+                deleted: 12,
+                new: false,
+                removed: true,
+                binary: false,
+            },
+        ],
+        0,
+    );
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
     // the counts, not the tag). "(binary)" spans the counts region; the
@@ -257,24 +261,27 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
         colors: false,
         lines: lines.clone(),
     });
-    let rows = d.emit_file_stats(&[
-        FileStats {
-            path: "a.rs".into(),
-            added: 5,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: false,
-        },
-        FileStats {
-            path: "b.rs".into(),
-            added: 5,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: false,
-        },
-    ]);
+    let rows = d.emit_file_stats(
+        &[
+            FileStats {
+                path: "a.rs".into(),
+                added: 5,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+            FileStats {
+                path: "b.rs".into(),
+                added: 5,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+        ],
+        0,
+    );
     let got = lines.lock().clone();
     // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
     // sits under the total's `0` of `+10`; both end at the same column.
@@ -297,24 +304,27 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
         colors: false,
         lines: lines.clone(),
     });
-    let rows = d.emit_file_stats(&[
-        FileStats {
-            path: "img.png".into(),
-            added: 0,
-            deleted: 0,
-            new: true,
-            removed: false,
-            binary: true,
-        },
-        FileStats {
-            path: "data.bin".into(),
-            added: 0,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: true,
-        },
-    ]);
+    let rows = d.emit_file_stats(
+        &[
+            FileStats {
+                path: "img.png".into(),
+                added: 0,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "data.bin".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+            },
+        ],
+        0,
+    );
     let got = lines.lock().clone();
     // New binary keeps `[new]`; non-new binary carries no tag. The counts
     // region widens to fit `(binary)` (8 > the `+0`/`−0` base region of 7),
@@ -338,24 +348,27 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
         colors: false,
         lines: lines.clone(),
     });
-    let rows = d.emit_file_stats(&[
-        FileStats {
-            path: "x.bin".into(),
-            added: 0,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: true,
-        },
-        FileStats {
-            path: "a.rs".into(),
-            added: 1,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: false,
-        },
-    ]);
+    let rows = d.emit_file_stats(
+        &[
+            FileStats {
+                path: "x.bin".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+            },
+            FileStats {
+                path: "a.rs".into(),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+        ],
+        0,
+    );
     let got = lines.lock().clone();
     // base region (Σ 2 + `+1` 2 + gap 1 + `−0` 2 = 7) widens to 8 for
     // `(binary)`; the text row and Σ row each carry one leading pad, so
@@ -380,24 +393,27 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
         lines: lines.clone(),
     });
     let long = "x".repeat(70);
-    let rows = d.emit_file_stats(&[
-        FileStats {
-            path: long.clone(),
-            added: 1,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: false,
-        },
-        FileStats {
-            path: "a.rs".into(),
-            added: 1,
-            deleted: 0,
-            new: true,
-            removed: false,
-            binary: false,
-        },
-    ]);
+    let rows = d.emit_file_stats(
+        &[
+            FileStats {
+                path: long.clone(),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+            FileStats {
+                path: "a.rs".into(),
+                added: 1,
+                deleted: 0,
+                new: true,
+                removed: false,
+                binary: false,
+            },
+        ],
+        0,
+    );
     let got = lines.lock().clone();
     // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
     // gap (1) + `−0` (2) = 7; name column = 76 - 7 (counts) - 2 (gap)
@@ -488,6 +504,55 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
     );
 }
 
+/// The body and the file-stats footer hang under the column where the
+/// subject's message text starts — not flush with the `✓` marker. Pinned
+/// twice: with a `[n/m] ` batch prefix and without one (staged / single
+/// commit Runs), so the hang tracks the real subject start rather than a
+/// frozen column. The message column is derived from the emitted subject
+/// line itself, so the assert stays honest if the prefix format changes.
+#[test]
+fn commit_body_and_footer_hang_under_the_subject_message_start() {
+    for prefix in ["[1/2]", ""] {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with(Buf {
+            colors: false,
+            lines: lines.clone(),
+        });
+        d.commit_line(
+            "abc1234",
+            "feat: add thing",
+            Some("body line"),
+            prefix,
+            &[FileStats {
+                path: "src/a.rs".into(),
+                added: 1,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+            }],
+        );
+        let got = lines.lock().clone();
+        let msg_col = got[0]
+            .find("feat: add thing")
+            // `find` yields a byte offset; the `✓` marker is multi-byte, so
+            // convert to columns (chars) before measuring the hang.
+            .map(|i| got[0][..i].chars().count())
+            .expect("subject must carry the message");
+        let pad = " ".repeat(msg_col);
+        assert_eq!(
+            got[1],
+            format!("{pad}body line"),
+            "body must hang under the message start (prefix {prefix:?}): {got:?}"
+        );
+        assert_eq!(
+            got[2],
+            format!("{pad}  +1     src/a.rs"),
+            "footer must hang under the message start (prefix {prefix:?}): {got:?}"
+        );
+    }
+}
+
 #[test]
 fn plain_when_colors_disabled() {
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -504,11 +569,11 @@ fn plain_when_colors_disabled() {
     );
     let got = lines.lock().clone();
     // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
-    // Type prefix "feat" is present, followed by ": add thing". Subject now
-    // carries a 2-col left margin; body line sits at the same margin (its
-    // old ad-hoc indent was subsumed by the shared margin).
+    // Type prefix "feat" is present, followed by ": add thing". Subject
+    // carries the 2-col left margin; the body hangs under the subject's
+    // message start — `[1/3] ✓ abc1234 ` = 16 cols past the margin.
     assert_eq!(got[0], "  [1/3] \u{2713} abc1234 feat: add thing");
-    assert_eq!(got[1], "  body line");
+    assert_eq!(got[1], "                  body line");
 }
 
 #[test]
