@@ -118,7 +118,7 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
         "post-commit line missing, got: {lines:?}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("+1 −1  tracked.txt")),
+        lines.iter().any(|l| l.contains("+1 −1   tracked.txt")),
         "committed line must show the file stats footer, got: {lines:?}"
     );
 }

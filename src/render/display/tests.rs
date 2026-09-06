@@ -131,7 +131,7 @@ fn commit_preview_singleton_file_list_omits_count() {
     assert_eq!(got[1], "  ? chore: bump dep");
     // Single file: no Σ total line; no body line emitted. The footer hangs
     // under the subject's message start (`? ` marker = 2 cols).
-    assert_eq!(got[2], "    +5 −2  Cargo.toml");
+    assert_eq!(got[2], "  +5 −2  Cargo.toml");
     assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
     assert_eq!(rows, 4, "header + subject + file + blank");
 }
@@ -249,7 +249,7 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
     // where the Σ row's `−12` ends.
     assert_eq!(got[0], "    (binary)  img.png    [new]");
     assert_eq!(got[1], "         −12  src/old.rs [del]");
-    assert_eq!(got[2], "    Σ +0 −12  (2 files)");
+    assert_eq!(got[2], "  Σ   +0 −12  (2 files)");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -337,7 +337,7 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
     // the same column as the filenames above.
     assert_eq!(got[0], "    (binary)  img.png  [new]");
     assert_eq!(got[1], "    (binary)  data.bin");
-    assert_eq!(got[2], "     Σ +0 −0  (2 files)");
+    assert_eq!(got[2], "  Σ    +0 −0  (2 files)");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -383,7 +383,7 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
     // blank but keeps its width, so `a.rs` still lands under `x.bin`.
     assert_eq!(got[0], "    (binary)  x.bin");
     assert_eq!(got[1], "       +1     a.rs");
-    assert_eq!(got[2], "     Σ +1 −0  (2 files)");
+    assert_eq!(got[2], "  Σ    +1 −0  (2 files)");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -457,7 +457,7 @@ fn commit_line_renders_file_stats_footer() {
     );
     let got = lines.lock().clone();
     assert!(
-        got.iter().any(|l| l.contains("+7 −2  src/auth.rs [new]")),
+        got.iter().any(|l| l.contains("+7 −2   src/auth.rs [new]")),
         "committed line must show the footer, got: {got:?}"
     );
     assert!(
@@ -557,12 +557,69 @@ fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
             format!("{}body line", " ".repeat(msg_col)),
             "body must hang under the message start (prefix {prefix:?}): {got:?}"
         );
+        // Counts (`+1`, region 2) anchor at the hash; the gap to the name
+        // fills the rest of the hash→message span (uniform across rows).
         assert_eq!(
             got[2],
-            format!("{}+1     src/a.rs", " ".repeat(hash_col)),
+            format!(
+                "{}+1{}src/a.rs",
+                " ".repeat(hash_col),
+                " ".repeat(msg_col - hash_col - 2)
+            ),
             "footer must hang under the commit ID (prefix {prefix:?}): {got:?}"
         );
     }
+}
+
+/// When the counts block is exactly as wide as the hash→message span
+/// minus the gap — the `+152 −84` shape a big multi-file Run produces —
+/// the block slides left to the ✓ column instead of pushing names off the
+/// message: counts still end 2 short of the message start, names still pin
+/// under the message, gap stays 2, and the Σ glyph leads the block from the
+/// prefix's tail. The regression this pins: names drifting right of the
+/// commit message when Σ totals carry more digits than any single file.
+#[test]
+fn commit_footer_wide_counts_grow_left_not_right() {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let d = Display::with(Buf {
+        colors: false,
+        lines: lines.clone(),
+    });
+    d.commit_line(
+        "0875db3",
+        "fix(display): align footer",
+        None,
+        "[1/1]",
+        &[
+            FileStats {
+                path: "src/render/display/mod.rs".into(),
+                added: 64,
+                deleted: 51,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+            FileStats {
+                path: "src/render/display/tests.rs".into(),
+                added: 88,
+                deleted: 33,
+                new: false,
+                removed: false,
+                binary: false,
+            },
+        ],
+    );
+    let got = lines.lock().clone();
+    // Region 8 (`+152 −84` sized): block starts at the ✓ column (6 past
+    // margin, so `+64` carries 1 pad col), ends 2 short of the message
+    // (16), names pin at 16.
+    assert_eq!(
+        got[0],
+        "  [1/1] \u{2713} 0875db3 fix(display): align footer"
+    );
+    assert_eq!(got[1], "         +64 −51  src/render/display/mod.rs");
+    assert_eq!(got[2], "         +88 −33  src/render/display/tests.rs");
+    assert_eq!(got[3], "      Σ +152 −84  (2 files)");
 }
 
 /// The Σ total row hangs under the `✓` marker — exactly `sigma_col` (2)
@@ -601,11 +658,14 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
         ],
     );
     let got = lines.lock().clone();
-    // `[1/2] ` = 6 cols past the margin: tick at 6, hash at 8.
+    // `[1/2] ` = 6 cols past the margin: tick at 6, hash at 8, message at
+    // 16. Region 5 (`+8 −1` sized): block starts at the hash (8), ends 13,
+    // names pin at the message (16) — a 3-col gap — and the Σ glyph hugs
+    // the block's left edge at 6, exactly under the ✓.
     assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing");
-    assert_eq!(got[1], "          +3 −1  src/a.rs");
-    assert_eq!(got[2], "          +5     src/b.rs");
-    assert_eq!(got[3], "        Σ +8 −1  (2 files)");
+    assert_eq!(got[1], "          +3 −1   src/a.rs");
+    assert_eq!(got[2], "          +5      src/b.rs");
+    assert_eq!(got[3], "        Σ +8 −1   (2 files)");
 }
 
 #[test]
