@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.7] - 2026-10-05
+
+> 🎉 **0.5.7** — 2 changes · 1 contributor
+
+### Bug Fixes
+
+- Bump rustls to 0.23.45 for RUSTSEC-2026-0285 (#151)
+- Commit the index exactly as staged (#152)
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.5.6] - 2026-09-06
 
 > 🎉 **0.5.6** — 1 change · 1 contributor
