@@ -650,9 +650,8 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
 /// The other Run commit shape (issue #26): when files are already staged, the
 /// default Run commits the index exactly as staged — drafting one message via
 /// the `CommitMessenger` — never reaching the `BatchPlanner`. This is the
-/// simpler of the
-/// two Run shapes and the one the README leads with ("stage a diff, get one
-/// commit"). The unstaged multi-Batch path is pinned by
+/// simpler of the two Run shapes and the one the README leads with
+/// ("stage a diff, get one commit"). The unstaged multi-Batch path is pinned by
 /// [`commit_splits_one_file_across_two_batches`]; this pins its staged
 /// counterpart so a regression that drops the staged file or routes staged
 /// work into the planner would fail loudly instead of shipping green.
@@ -717,32 +716,18 @@ async fn commit_staged_files_in_one_commit() {
 }
 
 /// Issue #150: the staged path commits the index exactly as the user staged
-/// it. A file hunk-staged by the user (one region staged, another left
-/// unstaged — lazygit / `git add -p`) must land only its staged hunk; the
-/// unstaged hunk survives in the worktree for a follow-up Run. Historically
-/// the staged path re-staged every staged file (`git add` semantics), which
-/// folded the file's full workdir state into the single commit and silently
-/// swallowed the unstaged hunk — a vestige of the removed rustfmt step
-/// (#87), whose output that re-stage existed to capture.
+/// it. A file hunk-staged by the user (lazygit / `git add -p`) must land only
+/// its staged hunk; the unstaged hunk survives in the worktree for a
+/// follow-up Run. Historically the staged path re-staged every staged file
+/// (`git add` semantics), which folded the file's full workdir state into
+/// the single commit and silently swallowed the unstaged hunk — a vestige of
+/// the removed rustfmt step (#87), whose output that re-stage existed to
+/// capture. Setup via [`partial_stage_two_hunk_file`].
 #[tokio::test]
 async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-
-    // A base with two edit regions separated by seven filler lines, so the
-    // two edits are distinct hunks under git's default 3-line context.
-    let base = "top\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nbottom\n";
-    let a_state = "A-staged\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nbottom\n";
-    let b_state = "A-staged\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nB-unstaged\n";
-    std::fs::write(dir.path().join("tracked.txt"), base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-
-    // The user stages hunk A only: the index holds the A-state...
-    std::fs::write(dir.path().join("tracked.txt"), a_state).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    // ...then keeps editing, leaving hunk B unstaged in the workdir.
-    std::fs::write(dir.path().join("tracked.txt"), b_state).unwrap();
+    let (a_state, b_state) = partial_stage_two_hunk_file(dir.path());
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();

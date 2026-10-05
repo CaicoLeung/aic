@@ -733,6 +733,25 @@ pub fn merge_mixed_blockers(dir: &Path) {
     git_in(dir, &["merge", "other"]);
 }
 
+/// Hunk-level staging fixture (issue #150): commits a base, then stages
+/// hunk A only and leaves hunk B unstaged in the workdir — the shape lazygit
+/// space-on-hunk / `git add -p` produce. The file's two edit regions are
+/// separated by seven filler lines, so they are distinct hunks under git's
+/// default 3-line context. Returns `(a_state, b_state)` for assertions:
+/// the index content and the workdir content.
+pub fn partial_stage_two_hunk_file(dir: &Path) -> (String, String) {
+    let base = "top\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nbottom\n";
+    let a_state = "A-staged\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nbottom\n";
+    let b_state = "A-staged\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nB-unstaged\n";
+    std::fs::write(dir.join("tracked.txt"), base).unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    git_in(dir, &["commit", "-m", "base"]);
+    std::fs::write(dir.join("tracked.txt"), a_state).unwrap();
+    git_in(dir, &["add", "tracked.txt"]);
+    std::fs::write(dir.join("tracked.txt"), b_state).unwrap();
+    (a_state.to_string(), b_state.to_string())
+}
+
 pub fn read_file(dir: &Path, rel: &str) -> String {
     String::from_utf8_lossy(&std::fs::read(dir.join(rel)).unwrap()).into_owned()
 }

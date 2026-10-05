@@ -58,6 +58,63 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
     );
 }
 
+/// Staged single-commit path + Abort on a hunk-staged file (issue #150):
+/// the abort must leave the user's hunk-level staging selection untouched —
+/// hunk A stays staged in the index, hunk B stays unstaged in the workdir —
+/// so a re-run sees exactly the same partial staging.
+#[tokio::test]
+async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let (_a_state, b_state) = partial_stage_two_hunk_file(dir.path());
+
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let err = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(), // staged path must NOT plan,
+            messenger: messenger_fixed("feat: staged hunk only"),
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Abort]),
+                editor: unreachable_editor(),
+            },
+        },
+    )
+    .await
+    .expect_err("aborting the confirmation must abort the Run");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("aborted — no commit made"),
+        "expected the 'no commit made' abort, got: {msg}"
+    );
+
+    // No commit landed.
+    assert_eq!(
+        commit_count(dir.path()),
+        before,
+        "an aborted confirmation must not create a commit"
+    );
+    // The index still holds exactly hunk A — the staged diff carries the
+    // staged region and not the unstaged one.
+    let cached = git_out(dir.path(), &["diff", "--cached"]);
+    assert!(
+        cached.contains("A-staged") && !cached.contains("B-unstaged"),
+        "the index must keep hunk A alone, got cached diff:\n{cached}"
+    );
+    // The unstaged hunk survives in the workdir as an unstaged entry.
+    assert_eq!(read_file(dir.path(), "tracked.txt"), b_state);
+    assert_eq!(
+        status_porcelain(dir.path()).trim_end(),
+        "MM tracked.txt",
+        "abort must preserve the split: staged hunk A + unstaged hunk B, got: {:?}",
+        status_porcelain(dir.path())
+    );
+    assert!(is_clean(dir.path()), "no merge/rebase state must remain");
+}
+
 /// Staged single-commit path + Commit: the confirmation shows the drafted
 /// message and file list, then commits normally and prints the post-commit
 /// line — output includes the preview block.
