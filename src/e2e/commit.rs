@@ -648,10 +648,10 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
 }
 
 /// The other Run commit shape (issue #26): when files are already staged, the
-/// default Run re-stages them, drafts one message via the `CommitMessenger`,
-/// and commits — never reaching the `BatchPlanner`. This is the simpler of the
-/// two Run shapes and the one the README leads with ("stage a diff, get one
-/// commit"). The unstaged multi-Batch path is pinned by
+/// default Run commits the index exactly as staged — drafting one message via
+/// the `CommitMessenger` — never reaching the `BatchPlanner`. This is the
+/// simpler of the two Run shapes and the one the README leads with
+/// ("stage a diff, get one commit"). The unstaged multi-Batch path is pinned by
 /// [`commit_splits_one_file_across_two_batches`]; this pins its staged
 /// counterpart so a regression that drops the staged file or routes staged
 /// work into the planner would fail loudly instead of shipping green.
@@ -715,6 +715,66 @@ async fn commit_staged_files_in_one_commit() {
     );
 }
 
+/// Issue #150: the staged path commits the index exactly as the user staged
+/// it. A file hunk-staged by the user (lazygit / `git add -p`) must land only
+/// its staged hunk; the unstaged hunk survives in the worktree for a
+/// follow-up Run. Historically the staged path re-staged every staged file
+/// (`git add` semantics), which folded the file's full workdir state into
+/// the single commit and silently swallowed the unstaged hunk — a vestige of
+/// the removed rustfmt step (#87), whose output that re-stage existed to
+/// capture. Setup via [`partial_stage_two_hunk_file`].
+#[tokio::test]
+async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let (a_state, b_state) = partial_stage_two_hunk_file(dir.path());
+
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    let result = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(), // staged path must NOT plan,
+            messenger: messenger_fixed("feat: staged hunk only"),
+            confirm: Confirm::Disabled,
+        },
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "partially staged Run should succeed, got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    // Exactly one new commit, carrying only the staged hunk.
+    assert_eq!(
+        commit_count(dir.path()),
+        before + 1,
+        "the staged path must land exactly one commit"
+    );
+    assert_eq!(
+        file_at_ref(dir.path(), "HEAD", "tracked.txt"),
+        a_state,
+        "the commit must carry only the staged hunk, not the workdir state"
+    );
+    // The unstaged hunk survives untouched in the workdir...
+    assert_eq!(
+        read_file(dir.path(), "tracked.txt"),
+        b_state,
+        "the workdir must keep the unstaged hunk — nothing may fold it in"
+    );
+    // ...and it remains an unstaged entry for a follow-up Run.
+    assert_eq!(
+        status_porcelain(dir.path()).trim_end(),
+        " M tracked.txt",
+        "only the unstaged hunk may remain, got: {:?}",
+        status_porcelain(dir.path())
+    );
+    assert!(is_clean(dir.path()), "no merge/rebase state must remain");
+}
+
 /// A staged *deletion* (`git rm`) is a staged entry whose path is neither on
 /// disk nor in the index — `Git::add`'s pathspec guard bails on exactly that
 /// shape. Reported as "Error: pathspec '…' did not match any tracked or
@@ -765,11 +825,12 @@ async fn commit_staged_deletion_in_one_commit() {
 }
 
 /// A staged set mixing a modification with a deletion must land both in one
-/// commit: the re-stage step keeps the modification (it folds workdir state
-/// into the index) while skipping the deletion (nothing to fold) — but both
-/// stay in the commit's path list. Without the `Deleted` filter this Run
-/// died on the pathspec guard; without keeping the paths it would silently
-/// drop the deletion from the commit.
+/// commit: the staged path commits the index as-is (issue #150), and the
+/// index already carries both entries — a staged deletion (path neither on
+/// disk nor in the index) has nothing to fold and nothing that can break a
+/// `git add` pathspec guard. Historically this Run died re-staging the
+/// deletion (#144); the index-only contract keeps both entries in the
+/// commit's path list.
 #[tokio::test]
 async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
     let dir = tempfile::tempdir().unwrap();
