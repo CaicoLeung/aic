@@ -215,6 +215,31 @@ async fn undo_prompt_discloses_commits_made_after_the_run() {
     );
 }
 
+/// The Run's own commits rewritten — HEAD amended while sitting on the
+/// Run tip, so the start anchor is still an ancestor but the recorded
+/// tip no longer is → undo must refuse on the *tip* check, the branch
+/// the start-only proof cannot catch.
+#[tokio::test]
+async fn undo_refuses_when_run_tip_was_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let _start = run_two_batches(&dir).await;
+
+    let git = Git::at(dir.path()).unwrap();
+    git.run_git(
+        &["commit", "--amend", "-m", "rewritten run commit"],
+        None,
+        &[],
+    )
+    .unwrap();
+
+    let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("refusing to undo"),
+        "got: {err:#}"
+    );
+}
+
 /// History rewritten past the recorded start (the baseline itself was
 /// amended or reset away) → undo refuses and points at the reflog instead of
 /// orphaning commits the user never meant to hand back.
