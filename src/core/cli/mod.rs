@@ -22,6 +22,20 @@ pub(crate) fn use_vocabulary() -> Vec<&'static str> {
     words.into_iter().filter(|w| seen.insert(*w)).collect()
 }
 
+/// `--hint` value parser: trim, then reject blank input — an empty
+/// directive would append a "User directive" block that says nothing, so
+/// clap stops it at the edge with a message instead of the Run silently
+/// ignoring it. (A trim-only pass is accepted: surrounding whitespace
+/// carries no intent.)
+fn hint_value(raw: &str) -> Result<String, String> {
+    let hint = raw.trim();
+    if hint.is_empty() {
+        Err("--hint must not be blank".to_string())
+    } else {
+        Ok(hint.to_string())
+    }
+}
+
 /// Flat clap possible values so shell completion offers exactly what
 /// `aic use` accepts — built from [`use_vocabulary`].
 fn use_values() -> clap::builder::PossibleValuesParser {
@@ -37,7 +51,10 @@ fn use_values() -> clap::builder::PossibleValuesParser {
 #[command(
     name = "aic",
     version,
-    about = "An AI-powered Rust CLI for generating git commit messages in bulk.\naic[https://github.com/CaicoLeung/aic]"
+    about = "An AI-powered Rust CLI for generating git commit messages in bulk.\naic[https://github.com/CaicoLeung/aic]",
+    // `--hint` is Run-scoped and the only top-level user arg; pairing it
+    // with a subcommand must error, not silently drop the directive.
+    args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
     /// One-off directive for this Run's commits — e.g. `aic --hint "breaking
@@ -45,7 +62,8 @@ pub struct Cli {
     /// and commit-message prompts, so it can steer grouping, type, scope, and
     /// body content. Per-Run intent only; there is deliberately no config
     /// field (a persisted hint would silently stamp every future commit).
-    #[arg(long)]
+    /// Run-scoped: rejected alongside a subcommand, and rejected when blank.
+    #[arg(long, value_parser = hint_value)]
     pub hint: Option<String>,
 
     #[command(subcommand)]
@@ -87,6 +105,44 @@ pub enum Commands {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// A blank `--hint` (empty or whitespace-only) is rejected at parse
+    /// time — the Run must never append an empty "User directive" block.
+    #[test]
+    fn blank_hint_is_rejected_at_parse_time() {
+        for raw in ["", " \t "] {
+            let err = Cli::try_parse_from(["aic", "--hint", raw])
+                .err()
+                .expect("blank hint must fail to parse");
+            assert!(
+                err.to_string().contains("--hint must not be blank"),
+                "raw {raw:?} got: {err}"
+            );
+        }
+    }
+
+    /// A hint is Run-scoped: pairing it with a subcommand is rejected
+    /// instead of silently ignored (`aic --hint "x" undo` would otherwise
+    /// swallow the directive).
+    #[test]
+    fn hint_cannot_be_combined_with_a_subcommand() {
+        let err = Cli::try_parse_from(["aic", "--hint", "closes #78", "undo"])
+            .err()
+            .expect("hint with subcommand must fail to parse");
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "got: {err}"
+        );
+    }
+
+    /// A hint is trimmed on the way in, so the directive block carries the
+    /// intent only — no stray shell quoting whitespace.
+    #[test]
+    fn hint_value_trims_surrounding_whitespace() {
+        let cli = Cli::try_parse_from(["aic", "--hint", "  closes #78  "]).unwrap();
+        assert_eq!(cli.hint.as_deref(), Some("closes #78"));
+    }
 
     /// The `use` vocabulary contract: presets first (they win at match
     /// time), every registry canonical name and alias present, and a
