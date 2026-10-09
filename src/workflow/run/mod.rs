@@ -312,12 +312,13 @@ async fn generate_and_commit(
     // everything that landed, and rewriting the same Run-start OID per batch
     // is idempotent), the tip OID just after — so the undo confirmation can
     // split the Run's commits from the user's own later ones.
-    if let Some(start) = undo_start.as_deref() {
+    let undoable = undo_start.as_deref();
+    if let Some(start) = undoable {
         undo::record(git, start)?;
     }
     display.clear_last(preview_rows);
     let hash = git.commit(message.clone(), body.clone())?;
-    if undo_start.is_some() {
+    if undoable.is_some() {
         undo::record_tip(git)?;
     }
     let landed = git.committed_stats(paths)?;

@@ -106,7 +106,7 @@ pub(crate) fn undo_run(
     // from the recorded tip (the Run's own commits were rewritten),
     // resetting would orphan commits the user never meant to hand back.
     // Refuse and point at the reflog — the manual recovery path.
-    for anchor in [&start, tip.as_deref().unwrap_or(&start)] {
+    for anchor in [Some(start.as_str()), tip.as_deref()].into_iter().flatten() {
         if !git.is_ancestor_of_head(anchor)? {
             anyhow::bail!(
                 "history has been rewritten past the last aic run; refusing to undo. \
