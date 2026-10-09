@@ -110,7 +110,7 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 |---------|-------------|
 | `aic` | Commit staged files. If nothing is staged, auto-split all unstaged changes into hunk-level atomic commits. |
 | `aic --hint "<text>"` | Same, with a one-off directive appended to both prompts — e.g. `aic --hint "closes #78"` or `aic --hint "prefer more batches"`. |
-| `aic undo` | Undo the last Run: reset back to where it started, all its changes back in the working tree (unstaged). Refuses if history was rewritten since. |
+| `aic undo` | Undo the last Run: reset back to where it started, all its changes back in the working tree (unstaged). Confirms exactly which commits will be reset — including any made after the Run — and refuses if history was rewritten since. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
 | `aic setup` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. |
 | `aic use <name>` | Switch to a provider already configured via `aic setup`, or to a CLI agent (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen). |

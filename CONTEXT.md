@@ -9,7 +9,7 @@ One execution of the default commit workflow — either a single commit over sta
 _Avoid_: execution, invocation, session
 
 **Undo**:
-`aic undo` — revert the last Run that reached a commit: `git reset --mixed` back to the Run-start HEAD (recorded under `.git/aic/undo-run` just before the Run's first commit), so every committed change returns to the working tree unstaged. Refuses when HEAD no longer descends from the recorded start (rewritten history) and clears a zero-commit stale record.
+`aic undo` — revert the last Run that reached a commit: `git reset --mixed` back to the Run-start HEAD (two anchors under `.git/aic/`: the Run start, recorded just before its first commit, and the Run tip, recorded just after its last), so every committed change returns to the working tree unstaged. The confirmation names every commit the reset would strip — the Run's own plus any made after it. Refuses when HEAD no longer descends from either anchor (rewritten history) and clears a zero-commit stale record.
 _Avoid_: rollback, revert, restore
 
 **Run hint**:

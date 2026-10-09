@@ -306,15 +306,20 @@ async fn generate_and_commit(
     )
     .await?;
 
-    // Erase the confirmed preview and commit. The undo record is (re)written
-    // just before the commit lands: a Run that aborts after earlier batches
-    // committed is still undoable for everything that landed, and rewriting
-    // the same Run-start OID per batch is idempotent.
+    // Erase the confirmed preview and commit. The undo anchors are written
+    // around the commit itself: the start OID just before it lands (a Run
+    // that aborts after earlier batches committed is still undoable for
+    // everything that landed, and rewriting the same Run-start OID per batch
+    // is idempotent), the tip OID just after — so the undo confirmation can
+    // split the Run's commits from the user's own later ones.
     if let Some(start) = undo_start.as_deref() {
         undo::record(git, start)?;
     }
     display.clear_last(preview_rows);
     let hash = git.commit(message.clone(), body.clone())?;
+    if undo_start.is_some() {
+        undo::record_tip(git)?;
+    }
     let landed = git.committed_stats(paths)?;
     display.commit_line(&hash, &message, body.as_deref(), prefix, &landed);
     Ok(())

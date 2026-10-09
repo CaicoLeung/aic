@@ -51,8 +51,9 @@ async fn run_two_batches(dir: &tempfile::TempDir) -> String {
 }
 
 /// The happy path: after a two-commit Run, `aic undo` resets HEAD back to the
-/// Run start, returns both files as unstaged additions, and clears the state
-/// file — the repo is exactly pre-Run, byte for byte.
+/// Run start, returns both files as unstaged additions, and clears both
+/// state files (start anchor and Run tip) — the repo is exactly pre-Run,
+/// byte for byte.
 #[tokio::test]
 async fn undo_resets_run_commits_and_unstages_changes() {
     let dir = tempfile::tempdir().unwrap();
@@ -62,6 +63,7 @@ async fn undo_resets_run_commits_and_unstages_changes() {
     let git = Git::at(dir.path()).unwrap();
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 2);
     assert!(git.git_dir().join("aic/undo-run").exists());
+    assert!(git.git_dir().join("aic/undo-run-tip").exists());
 
     undo::undo_run(&git, &|_| Ok(true)).unwrap();
 
@@ -74,8 +76,9 @@ async fn undo_resets_run_commits_and_unstages_changes() {
         "{paths:?}"
     );
     assert!(
-        !git.git_dir().join("aic/undo-run").exists(),
-        "state file must be cleared after undo"
+        !git.git_dir().join("aic/undo-run").exists()
+            && !git.git_dir().join("aic/undo-run-tip").exists(),
+        "state files must be cleared after undo"
     );
 }
 
@@ -128,6 +131,88 @@ fn undo_after_zero_commit_run_clears_stale_state() {
         "got: {msg}"
     );
     assert!(!git.git_dir().join("aic/undo-run").exists());
+}
+
+/// The staged single-commit path is as undoable as the batch path: the
+/// Run anchors are written around the shared commit step, so a Run over
+/// pre-staged files records, commits, and resets back cleanly.
+#[tokio::test]
+async fn undo_covers_staged_single_commit_run() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    let git = Git::at(dir.path()).unwrap();
+    let start = git.head_sha().unwrap();
+    std::fs::write(dir.path().join("staged.txt"), "staged\n").unwrap();
+    git.add(&["staged.txt"]).unwrap();
+
+    commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: messenger_fixed("feat: stub"),
+            confirm: Confirm::Disabled,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 1);
+    assert!(git.git_dir().join("aic/undo-run").exists());
+    assert!(git.git_dir().join("aic/undo-run-tip").exists());
+
+    undo::undo_run(&git, &|_| Ok(true)).unwrap();
+
+    assert_eq!(git.head_sha().unwrap(), start);
+    assert!(
+        git.status()
+            .unwrap()
+            .iter()
+            .any(|f| f.path == "staged.txt" && !f.staged),
+        "the staged Run's file must return unstaged"
+    );
+}
+
+/// Commits made *after* the Run (the user's own) are disclosed in the
+/// confirmation — counted separately from the Run's — because the reset
+/// strips them too; their changes still return to the working tree.
+#[tokio::test]
+async fn undo_prompt_discloses_commits_made_after_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let start = run_two_batches(&dir).await;
+
+    // The user's own commit after the Run — inside the reset's blast
+    // radius (start..HEAD), outside the Run's own commits (start..tip).
+    std::fs::write(dir.path().join("mine.txt"), "mine\n").unwrap();
+    let git = Git::at(dir.path()).unwrap();
+    git.add(&["mine.txt"]).unwrap();
+    git.run_git(&["commit", "-m", "user commit"], None, &[])
+        .unwrap();
+
+    let seen = std::cell::RefCell::new(String::new());
+    undo::undo_run(&git, &|label| {
+        *seen.borrow_mut() = label.to_string();
+        Ok(true)
+    })
+    .unwrap();
+
+    let label = seen.into_inner();
+    assert!(
+        label.contains("3 commits will be reset")
+            && label.contains("2 commits from the run")
+            && label.contains("1 commit made after it"),
+        "prompt must disclose the split, got: {label}"
+    );
+    assert_eq!(git.head_sha().unwrap(), start);
+    assert!(
+        git.status()
+            .unwrap()
+            .iter()
+            .any(|f| f.path == "mine.txt" && !f.staged),
+        "the user's post-Run changes must survive, unstaged"
+    );
 }
 
 /// History rewritten past the recorded start (the baseline itself was

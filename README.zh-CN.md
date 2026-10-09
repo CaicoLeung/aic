@@ -110,7 +110,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 |------|------|
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
 | `aic --hint "<文本>"` | 同上，但为本次 Run 追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
-| `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。若期间历史被改写则拒绝执行。 |
+| `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。确认时列明将重置哪些提交 —— 含 Run 之后手动提交的；若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
 | `aic use <name>` | 切换到已通过 `aic setup` 配置过的 provider，或切换到 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）。 |

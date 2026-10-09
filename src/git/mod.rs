@@ -227,9 +227,12 @@ impl Git {
         Ok(oid.to_string())
     }
 
-    /// The repository's git dir (`.git/`, or the file's target for a
-    /// worktree/link). Runtime state that must never appear in a diff —
-    /// currently the `aic undo` Run-start record — lives under here.
+    /// The repository's git dir: `.git/` for a plain repo, or the
+    /// per-worktree dir (`.git/worktrees/<name>/`) for a linked worktree —
+    /// `Repository::path()` does *not* resolve a `.git` file to the common
+    /// dir, so runtime state derived from it is per-worktree. Runtime state
+    /// that must never appear in a diff — the `aic undo` Run anchors —
+    /// lives under here.
     pub(crate) fn git_dir(&self) -> &Path {
         self.repo.path()
     }
@@ -259,8 +262,9 @@ impl Git {
     }
 
     /// `git rev-list --count <start>..<end>` — how many commits separate two
-    /// points on one line of history. Feeds `aic undo`'s "N commit(s)"
-    /// confirmation wording.
+    /// points on one line of history. Feeds `aic undo`'s confirmation
+    /// wording: the Run's own commits (`start..tip`) and the user's commits
+    /// made after it (`tip..HEAD`).
     pub fn commit_count(&self, start: &str, end: &str) -> anyhow::Result<usize> {
         let range = format!("{start}..{end}");
         let out = self.run_git(&["rev-list", "--count", &range], None, &[])?;
