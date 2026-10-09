@@ -215,6 +215,70 @@ impl Git {
         Ok(index)
     }
 
+    /// The full OID of HEAD as a hex string — the Run-start snapshot that
+    /// `aic undo` resets back to. Fails on an unborn branch (no commit to
+    /// resolve), which callers treat as "nothing to record".
+    pub fn head_sha(&self) -> anyhow::Result<String> {
+        let head = self.repo.head().context("failed to resolve HEAD")?;
+        let oid = head
+            .peel_to_commit()
+            .context("failed to peel HEAD to a commit")?
+            .id();
+        Ok(oid.to_string())
+    }
+
+    /// The repository's git dir (`.git/`, or the file's target for a
+    /// worktree/link). Runtime state that must never appear in a diff —
+    /// currently the `aic undo` Run-start record — lives under here.
+    pub(crate) fn git_dir(&self) -> &Path {
+        self.repo.path()
+    }
+
+    /// Whether HEAD still descends from `sha` (or is `sha`) — the
+    /// precondition for a safe `aic undo`. Read via libgit2 per the dual
+    /// git strategy: `git merge-base <sha> HEAD` exits 1 both for
+    /// "not an ancestor" and for disjoint roots (an amended-away root
+    /// commit), which the CLI surface cannot distinguish — libgit2's
+    /// `NotFound` maps cleanly to `false` instead.
+    pub fn is_ancestor_of_head(&self, sha: &str) -> anyhow::Result<bool> {
+        let target = git2::Oid::from_str(sha)
+            .with_context(|| format!("malformed commit id {sha} in undo state"))?;
+        let head = self
+            .repo
+            .head()
+            .context("failed to resolve HEAD")?
+            .peel_to_commit()
+            .context("failed to peel HEAD to a commit")?
+            .id();
+        match self.repo.merge_base(target, head) {
+            Ok(base) => Ok(base == target),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(false),
+            Err(e) => Err(anyhow::Error::new(e))
+                .with_context(|| format!("failed to compute merge-base of {sha} and HEAD")),
+        }
+    }
+
+    /// `git rev-list --count <start>..<end>` — how many commits separate two
+    /// points on one line of history. Feeds `aic undo`'s "N commit(s)"
+    /// confirmation wording.
+    pub fn commit_count(&self, start: &str, end: &str) -> anyhow::Result<usize> {
+        let range = format!("{start}..{end}");
+        let out = self.run_git(&["rev-list", "--count", &range], None, &[])?;
+        out.trim()
+            .parse::<usize>()
+            .with_context(|| format!("git rev-list --count {range} returned unexpected output"))
+    }
+
+    /// `git reset --mixed <sha>` — the `aic undo` mutation: HEAD (and the
+    /// index) move back to `sha` while every working-tree file is left
+    /// byte-for-byte alone, so the undone Run's changes return as unstaged
+    /// modifications. Deliberately `--mixed`, not `--hard`: hard would
+    /// destroy the very changes the user is undoing to recover.
+    pub fn reset_mixed(&self, sha: &str) -> anyhow::Result<()> {
+        self.run_git(&["reset", "--mixed", sha], None, &[])?;
+        Ok(())
+    }
+
     pub fn add(&self, paths: &[&str]) -> anyhow::Result<()> {
         let repo = &self.repo;
         let mut index = self.index()?;

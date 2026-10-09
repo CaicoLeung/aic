@@ -88,6 +88,7 @@ aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下�
 - **Hunk 级别拆分** —— 一个文件、多种 concern？按 hunk 拆成多个原子提交，完全非交互
 - **两种 backend** —— API provider（支持 12+ 家）或 CLI agent（11 个预设：claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen —— 无需 API key）
 - **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
+- **一键撤销** —— `aic undo` 重置上一次 Run 的提交，全部改动原样回到工作区（未暂存）
 - **实时推理** —— 观看模型思考拆分方案的全过程
 - **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
 - **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）之间切换
@@ -107,6 +108,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 | 命令 | 说明 |
 |------|------|
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
+| `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
 | `aic use <name>` | 切换到已通过 `aic setup` 配置过的 provider，或切换到 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）。 |

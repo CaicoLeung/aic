@@ -88,6 +88,7 @@ See [CLI-agent presets](#cli-agent-presets) for the full preset list.
 - **Hunk-level splitting** — one file, many concerns? Splits per-hunk into atomic commits, fully non-interactive
 - **Two backends** — API provider (12+ supported) or CLI agent (11 presets: claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen — no API key)
 - **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge
+- **One-command undo** — `aic undo` resets the last Run's commits and returns every change to the working tree, unstaged
 - **Live reasoning** — watch the model think as it decides the split
 - **Conventional Commits** — messages follow the [v1.0.0 spec](https://www.conventionalcommits.org/)
 - **Interactive setup** — `aic setup` is menu-driven; `aic use` switches between saved provider profiles and CLI agents (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen)
@@ -107,6 +108,7 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 | Command | Description |
 |---------|-------------|
 | `aic` | Commit staged files. If nothing is staged, auto-split all unstaged changes into hunk-level atomic commits. |
+| `aic undo` | Undo the last Run: reset back to where it started, all its changes back in the working tree (unstaged). Refuses if history was rewritten since. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
 | `aic setup` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. |
 | `aic use <name>` | Switch to a provider already configured via `aic setup`, or to a CLI agent (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen). |

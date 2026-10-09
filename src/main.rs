@@ -6,7 +6,7 @@
 use aic::core::cli::Commands;
 use aic::{
     core::{cli, completion, config, update},
-    workflow::{resolve, run, setup},
+    workflow::{resolve, run, setup, undo},
 };
 use clap::Parser;
 use std::io::IsTerminal;
@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Use { provider }) => config::run_use(&provider),
         Some(Commands::Update) => update::run_update(),
         Some(Commands::Resolve) => resolve::resolve_workflow().await,
+        Some(Commands::Undo) => undo::run_undo(),
         Some(Commands::Completion) => {
             // Interactive when stdout is a terminal; fall back to $SHELL
             // detection for scripts and pipes.

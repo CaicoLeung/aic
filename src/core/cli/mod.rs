@@ -54,6 +54,9 @@ pub enum Commands {
     Update,
     /// Resolve git merge conflicts in the working tree via the LLM
     Resolve,
+    /// Undo the last commit Run: reset the repo back to where that Run
+    /// started, with all its changes back in the working tree (unstaged)
+    Undo,
     /// Switch the active backend: an API provider already configured via
     /// `aic setup`, or a CLI agent (claude, codex, pi, opencode, omp, gemini,
     /// cursor, windsurf, copilot, trae, qwen)

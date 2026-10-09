@@ -35,6 +35,7 @@ use crate::workflow::confirm::{CommitDeclined, Confirm, confirm_draft, ensure_co
 use crate::workflow::grouping;
 use crate::workflow::input;
 use crate::workflow::resolve::{ResolveDeps, resolve_run};
+use crate::workflow::undo;
 
 /// Cap on concurrent commit-message drafts during a multi-batch Run (ADR 0014).
 /// Each batch's draft fans out after the plan; this bounds in-flight LLM requests
@@ -68,6 +69,12 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
     } = deps;
 
     let status = git.status()?;
+    // The Run-start HEAD snapshot `aic undo` resets back to — captured before
+    // any planning or staging, and recorded just before the Run's first
+    // commit lands (see `generate_and_commit`). `None` on an unborn repo
+    // (no HEAD commit yet): there is nothing earlier to reset back to, so
+    // the Run simply isn't undoable.
+    let undo_start = git.head_sha().ok();
     let staged_files: Vec<_> = status.iter().filter(|f| f.staged).collect();
 
     if staged_files.is_empty() {
@@ -179,8 +186,19 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                     return Ok(());
                 }
                 let draft = draft?;
-                generate_and_commit(git, &paths, &display, &prefix, draft, &messenger, &confirm)
-                    .await
+                generate_and_commit(
+                    git,
+                    &paths,
+                    &display,
+                    &prefix,
+                    DraftedCommit {
+                        undo_start: undo_start.clone(),
+                        draft,
+                    },
+                    &messenger,
+                    &confirm,
+                )
+                .await
             };
             if let Err(e) = outcome.await {
                 let batch_word = if i == 1 { "batch" } else { "batches" };
@@ -224,7 +242,20 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         let draft =
             progress::with_spinner("Generating commit message", messenger(diff_str.clone()))
                 .await?;
-        match generate_and_commit(git, &paths, &display, "", draft, &messenger, &confirm).await {
+        match generate_and_commit(
+            git,
+            &paths,
+            &display,
+            "",
+            DraftedCommit {
+                undo_start: undo_start.clone(),
+                draft,
+            },
+            &messenger,
+            &confirm,
+        )
+        .await
+        {
             Ok(()) => {}
             // Declining the confirmation is a user choice, not an error: report
             // it as a clean abort naming the outcome — nothing committed.
@@ -238,15 +269,24 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One commit's payload into [`generate_and_commit`]: the pre-drafted
+/// message plus the Run's undo anchor. Bundled so the commit step's
+/// signature stays under clippy's argument budget as it accretes state.
+struct DraftedCommit {
+    undo_start: Option<String>,
+    draft: generator::CommitOutput,
+}
+
 async fn generate_and_commit(
     git: &Git,
     paths: &[String],
     display: &Display,
     prefix: &str,
-    draft: generator::CommitOutput,
+    drafted: DraftedCommit,
     messenger: &CommitMessenger,
     confirm: &Confirm,
 ) -> anyhow::Result<()> {
+    let DraftedCommit { undo_start, draft } = drafted;
     // The first draft was produced up front by the caller (the unstaged
     // multi-batch path drafts all batches concurrently — ADR 0014 — and the
     // single-commit path drafts inline before calling this). What remains is
@@ -266,7 +306,13 @@ async fn generate_and_commit(
     )
     .await?;
 
-    // Erase the confirmed preview and commit.
+    // Erase the confirmed preview and commit. The undo record is (re)written
+    // just before the commit lands: a Run that aborts after earlier batches
+    // committed is still undoable for everything that landed, and rewriting
+    // the same Run-start OID per batch is idempotent.
+    if let Some(start) = undo_start.as_deref() {
+        undo::record(git, start)?;
+    }
     display.clear_last(preview_rows);
     let hash = git.commit(message.clone(), body.clone())?;
     let landed = git.committed_stats(paths)?;
