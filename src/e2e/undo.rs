@@ -65,9 +65,18 @@ async fn undo_resets_run_commits_and_unstages_changes() {
     assert!(git.git_dir().join("aic/undo-run").exists());
     assert!(git.git_dir().join("aic/undo-run-tip").exists());
 
-    undo::undo_run(&git, &|_| Ok(true)).unwrap();
-
+    let seen = std::cell::RefCell::new(String::new());
+    undo::undo_run(&git, &|label| {
+        *seen.borrow_mut() = label.to_string();
+        Ok(true)
+    })
+    .unwrap();
     assert_eq!(git.head_sha().unwrap(), start, "HEAD must be pre-Run");
+    let label = seen.into_inner();
+    assert!(
+        label.contains("2 commits from the run will be reset"),
+        "tip-known, no-post-run wording must pin plural-safe phrasing, got: {label}"
+    );
     let status = git.status().unwrap();
     let unstaged: Vec<_> = status.iter().filter(|f| !f.staged).collect();
     let paths: Vec<&str> = unstaged.iter().map(|f| f.path.as_str()).collect();
@@ -238,6 +247,37 @@ async fn undo_refuses_when_run_tip_was_rewritten() {
         format!("{err:#}").contains("refusing to undo"),
         "got: {err:#}"
     );
+}
+
+/// Without a tip anchor (a Run predating tip tracking, or a crash between
+/// start and first commit) the run/after split is unavailable — the prompt
+/// must disclose that instead of mislabeling every commit as the Run's own.
+#[test]
+fn undo_without_tip_discloses_unknown_split() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    let git = Git::at(dir.path()).unwrap();
+    let start = git.head_sha().unwrap();
+    undo::record(&git, &start).unwrap(); // start anchor only — no tip file
+    std::fs::write(dir.path().join("c.txt"), "c\n").unwrap();
+    git.add(&["c.txt"]).unwrap();
+    git.run_git(&["commit", "-m", "x"], None, &[]).unwrap();
+
+    let seen = std::cell::RefCell::new(String::new());
+    undo::undo_run(&git, &|label| {
+        *seen.borrow_mut() = label.to_string();
+        Ok(true)
+    })
+    .unwrap();
+
+    let label = seen.into_inner();
+    assert!(
+        label.contains("1 commit since the run started will be reset")
+            && label.contains("run tip unknown"),
+        "must disclose the unknown split, got: {label}"
+    );
+    assert_eq!(git.head_sha().unwrap(), start);
 }
 
 /// History rewritten past the recorded start (the baseline itself was

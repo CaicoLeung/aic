@@ -154,8 +154,19 @@ pub(crate) fn undo_run(
             after,
             commits(after),
         )
+    } else if tip.is_some() {
+        // Uniform "will be reset" sidesteps the is/are plural split.
+        format!("{} {} from the run will be reset", run, commits(run))
     } else {
-        format!("{} {} from the run are reset", run, commits(run))
+        // No tip anchor (a Run from before tip tracking, or a crash between
+        // start and first commit): the split is unavailable, so say so
+        // instead of mislabeling everything as the Run's own.
+        format!(
+            "{} {} since the run started will be reset (run tip unknown — may \
+             include commits made after it) —",
+            run,
+            commits(run),
+        )
     };
     let approved = prompt(&format!(
         "undo this aic run? {scope} and all their changes return to the working tree \
