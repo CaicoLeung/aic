@@ -40,6 +40,14 @@ fn use_values() -> clap::builder::PossibleValuesParser {
     about = "An AI-powered Rust CLI for generating git commit messages in bulk.\naic[https://github.com/CaicoLeung/aic]"
 )]
 pub struct Cli {
+    /// One-off directive for this Run's commits — e.g. `aic --hint "breaking
+    /// change"` or `aic --hint "closes #78"`. Appended to both the batch-plan
+    /// and commit-message prompts, so it can steer grouping, type, scope, and
+    /// body content. Per-Run intent only; there is deliberately no config
+    /// field (a persisted hint would silently stamp every future commit).
+    #[arg(long)]
+    pub hint: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

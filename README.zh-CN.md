@@ -89,6 +89,7 @@ aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下�
 - **两种 backend** —— API provider（支持 12+ 家）或 CLI agent（11 个预设：claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen —— 无需 API key）
 - **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
 - **一键撤销** —— `aic undo` 重置上一次 Run 的提交，全部改动原样回到工作区（未暂存）
+- **Run 指令** —— `aic --hint "breaking change"` 为单次 Run 指定意图（如 `--hint "closes #78"`），影响拆分、类型与措辞
 - **实时推理** —— 观看模型思考拆分方案的全过程
 - **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
 - **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）之间切换
@@ -108,6 +109,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 | 命令 | 说明 |
 |------|------|
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
+| `aic --hint "<文本>"` | 同上，但为本次 Run 追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
 | `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |

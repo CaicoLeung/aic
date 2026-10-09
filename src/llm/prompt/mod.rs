@@ -141,6 +141,25 @@ Rules:
 Resolve the whole file, not just the first conflict.
 "#;
 
+impl PromptConfig {
+    /// Fold a one-off `--hint` directive into both commit-Run prompts. The
+    /// block is appended (never interpolated) so the base prompts stay the
+    /// single reviewed artifact, and frames the hint as binding user intent
+    /// — commit type, scope, batch grouping, subject wording, or body
+    /// content such as an issue reference.
+    pub fn with_hint(mut self, hint: &str) -> Self {
+        let directive = format!(
+            "\n\n## User directive\n\nThe user supplied this one-line directive for this \
+             run of commits; honor it wherever it applies (commit type, scope, batch \
+             grouping, subject wording, or body content such as an issue \
+             reference):\n\n{hint}"
+        );
+        self.git_message.push_str(&directive);
+        self.batch_plan_prompt.push_str(&directive);
+        self
+    }
+}
+
 impl Default for PromptConfig {
     fn default() -> Self {
         Self {
@@ -164,5 +183,34 @@ mod tests {
             super::SYSTEM_PROMPT_BATCH_PLAN.contains(BINARY_MARKER),
             "SYSTEM_PROMPT_BATCH_PLAN must contain BINARY_MARKER verbatim"
         );
+    }
+
+    /// `--hint` appends the same directive block to both commit-Run prompts —
+    /// the planner (grouping) and the messenger (wording) must see identical
+    /// user intent, and the base prompts must stay intact above it.
+    #[test]
+    fn with_hint_appends_directive_to_both_prompts() {
+        let base = super::PromptConfig::default();
+        let hinted = super::PromptConfig::default().with_hint("closes #78");
+        for (name, before, after) in [
+            ("git_message", &base.git_message, &hinted.git_message),
+            (
+                "batch_plan_prompt",
+                &base.batch_plan_prompt,
+                &hinted.batch_plan_prompt,
+            ),
+        ] {
+            assert!(
+                after.starts_with(before.as_str()),
+                "{name} must keep the base prompt intact"
+            );
+            assert!(
+                after.contains("closes #78") && after.contains("User directive"),
+                "{name} must carry the directive"
+            );
+        }
+        // The resolve prompt is untouched — a hint is Run-scoped, and resolve
+        // is a different workflow.
+        assert_eq!(base.resolve_prompt, hinted.resolve_prompt);
     }
 }

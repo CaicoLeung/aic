@@ -12,6 +12,10 @@ _Avoid_: execution, invocation, session
 `aic undo` — revert the last Run that reached a commit: `git reset --mixed` back to the Run-start HEAD (recorded under `.git/aic/undo-run` just before the Run's first commit), so every committed change returns to the working tree unstaged. Refuses when HEAD no longer descends from the recorded start (rewritten history) and clears a zero-commit stale record.
 _Avoid_: rollback, revert, restore
 
+**Run hint**:
+A one-off `--hint` directive attached to a single Run, appended as a "User directive" block to both the batch-plan and commit-message prompts — steering grouping, type, scope, and body content. Deliberately CLI-only (no config field): a persisted hint would silently stamp every future commit.
+_Avoid_: prompt override, custom instruction, memo
+
 **Batch**:
 A group of files the LLM's split plan assigns to one commit. A Run contains one or more Batches; each Batch yields one Drafted Message and one commit.
 _Avoid_: group, chunk, package

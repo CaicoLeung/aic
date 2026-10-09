@@ -67,6 +67,6 @@ async fn main() -> anyhow::Result<()> {
             };
             completion::install_completion(shell)
         }
-        None => run::default_workflow().await,
+        None => run::default_workflow(cli.hint.as_deref()).await,
     }
 }

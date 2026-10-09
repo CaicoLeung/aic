@@ -397,7 +397,7 @@ where
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
 /// into [`default_run`].
-pub async fn default_workflow() -> anyhow::Result<()> {
+pub async fn default_workflow(hint: Option<&str>) -> anyhow::Result<()> {
     let resolve = ResolveDeps {
         resolve: Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
             Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
@@ -412,15 +412,23 @@ pub async fn default_workflow() -> anyhow::Result<()> {
     let planner_cold = crate::llm::LlmConfig::load()
         .ok()
         .and_then(|c| c.cold_start_program());
+    // The `--hint` directive rides along with every planner and messenger
+    // call of this Run — including the confirmation menu's Re-generate, which
+    // re-enters the same messenger closure — so a re-roll honors the same
+    // user intent as the first draft. Cloned per call like `planner_cold`.
+    let hint_planner = hint.map(str::to_string);
+    let hint_messenger = hint.map(str::to_string);
     let planner: BatchPlanner = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
             let cold_start = planner_cold.clone();
+            let hint = hint_planner.clone();
             Box::pin(run_with_reasoning_feed(
                 "Analyzing changes",
                 cold_start,
                 move |tap| -> BoxFuture<anyhow::Result<generator::BatchPlanOutput>> {
                     Box::pin(async move {
-                        generator::Generator::split_patch_streaming(&diff, tap).await
+                        generator::Generator::split_patch_streaming(&diff, tap, hint.as_deref())
+                            .await
                     })
                 },
             ))
@@ -428,7 +436,10 @@ pub async fn default_workflow() -> anyhow::Result<()> {
     );
     let messenger: CommitMessenger = Box::new(
         move |diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-            Box::pin(async move { generator::Generator::generate_commit_message(&diff).await })
+            let hint = hint_messenger.clone();
+            Box::pin(async move {
+                generator::Generator::generate_commit_message(&diff, hint.as_deref()).await
+            })
         },
     );
     let git = Git::at(Path::new("."))?;
