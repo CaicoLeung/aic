@@ -192,9 +192,52 @@ fn commits(n: usize) -> &'static str {
     if n == 1 { "commit" } else { "commits" }
 }
 
+/// `aic undo` mutates the repo (`git reset --mixed`) behind a single y/n
+/// gate, and that gate reads raw stdin where empty input (EOF) counts as
+/// approval — so a non-TTY stdin (script, CI, `< /dev/null`) would
+/// auto-approve the reset, including commits the disclosure prompt never
+/// got to name. Refuse up front, before any state is read: the same shape
+/// as the Run's `ensure_confirm_terminal`, but unconditional — undo has no
+/// configuration that could turn its gate off, so there is no second
+/// flag to honor. The escape hatch for scripted callers is plain git:
+/// `git reset --mixed $(cat .git/aic/undo-run)`.
+fn ensure_undo_terminal(stdin_tty: bool) -> anyhow::Result<()> {
+    if !stdin_tty {
+        anyhow::bail!(
+            "aic undo needs an interactive terminal to confirm the reset — \n\
+             for a scripted equivalent, run \n\
+             `git reset --mixed $(cat .git/aic/undo-run)` manually"
+        );
+    }
+    Ok(())
+}
+
 /// Production entry point for `aic undo` — discover the repo around the
-/// process CWD and run the undo core with the real y/n prompt.
+/// process CWD and run the undo core with the real y/n prompt. Refuses a
+/// non-TTY stdin first ([`ensure_undo_terminal`]): the y/n gate would
+/// otherwise read EOF as approval.
 pub fn run_undo() -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    ensure_undo_terminal(std::io::stdin().is_terminal())?;
     let git = Git::at(Path::new("."))?;
     undo_run(&git, &|label| input::prompt_yes_no(label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_undo_terminal;
+
+    /// The undo gate must refuse non-TTY stdin: the y/n prompt counts EOF
+    /// as approval, so a scripted/CI invocation would silently reset the
+    /// Run's commits (and any made after it). Mirrors
+    /// `ensure_confirm_terminal`'s guard test.
+    #[test]
+    fn ensure_undo_terminal_guards_non_tty_stdin() {
+        assert!(ensure_undo_terminal(true).is_ok());
+        let err = ensure_undo_terminal(false).expect_err("must refuse non-TTY stdin");
+        assert!(
+            format!("{err:#}").contains("interactive terminal"),
+            "got: {err:#}"
+        );
+    }
 }
