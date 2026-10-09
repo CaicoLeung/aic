@@ -8,6 +8,14 @@ aic is an AI-powered git commit tool: it reads a diff, drafts a conventional-com
 One execution of the default commit workflow — either a single commit over staged files, or a batch plan over unstaged files.
 _Avoid_: execution, invocation, session
 
+**Undo**:
+`aic undo` — revert the last Run that reached a commit: `git reset --mixed` back to the Run-start HEAD (two anchors under `.git/aic/`: the Run start, recorded just before its first commit, and the Run tip, recorded just after its last), so every committed change returns to the working tree unstaged. The confirmation names every commit the reset would strip — the Run's own plus any made after it. Refuses when HEAD no longer descends from either anchor (rewritten history) and clears a zero-commit stale record.
+_Avoid_: rollback, revert, restore
+
+**Run hint**:
+A one-off `--hint` directive attached to a single Run, appended as a "User directive" block to both the batch-plan and commit-message prompts — steering grouping, type, scope, and body content. Deliberately CLI-only (no config field): a persisted hint would silently stamp every future commit.
+_Avoid_: prompt override, custom instruction, memo
+
 **Batch**:
 A group of files the LLM's split plan assigns to one commit. A Run contains one or more Batches; each Batch yields one Drafted Message and one commit.
 _Avoid_: group, chunk, package

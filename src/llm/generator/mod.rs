@@ -138,10 +138,16 @@ impl Generator {
     /// reasoning into an end-of-phase burst rather than a live token stream,
     /// so streaming it bought no smooth UI — see
     /// `docs/research-cli-agent-streaming.md`.)
-    pub async fn generate_commit_message(diff: &str) -> anyhow::Result<CommitOutput> {
-        let p = PromptConfig::default().git_message;
+    pub async fn generate_commit_message(
+        diff: &str,
+        hint: Option<&str>,
+    ) -> anyhow::Result<CommitOutput> {
+        let mut p = PromptConfig::default();
+        if let Some(h) = hint {
+            p = p.with_hint(h);
+        }
         LlmConfig::load()?
-            .agent(&p)
+            .agent(&p.git_message)
             .schema::<CommitOutput>(diff)
             .await
     }
@@ -154,10 +160,14 @@ impl Generator {
     pub async fn split_patch_streaming(
         diff: &str,
         on_reasoning: impl FnMut(&str) + Send,
+        hint: Option<&str>,
     ) -> anyhow::Result<BatchPlanOutput> {
-        let p = PromptConfig::default().batch_plan_prompt;
+        let mut p = PromptConfig::default();
+        if let Some(h) = hint {
+            p = p.with_hint(h);
+        }
         LlmConfig::load()?
-            .agent(&p)
+            .agent(&p.batch_plan_prompt)
             .stream_typed_with_reasoning::<BatchPlanOutput>(diff, on_reasoning)
             .await
     }
