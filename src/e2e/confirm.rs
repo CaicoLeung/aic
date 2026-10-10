@@ -33,6 +33,7 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
                 editor: unreachable_editor(),
             },
         },
+        false,
     )
     .await
     .expect_err("aborting the confirmation must abort the Run");
@@ -82,6 +83,7 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
                 editor: unreachable_editor(),
             },
         },
+        false,
     )
     .await
     .expect_err("aborting the confirmation must abort the Run");
@@ -142,6 +144,7 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
                 editor: unreachable_editor(),
             },
         },
+        false,
     )
     .await;
     assert!(
@@ -207,6 +210,7 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
                 editor: unreachable_editor(),
             },
         },
+        false,
     )
     .await;
     assert!(
@@ -265,6 +269,7 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
                 editor: editor_fixed("feat: edited", Some("edited body")),
             },
         },
+        false,
     )
     .await;
     assert!(
@@ -309,6 +314,7 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
                 editor: editor_cancel(),
             },
         },
+        false,
     )
     .await;
     assert!(
@@ -374,6 +380,7 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
                 editor: unreachable_editor(),
             },
         },
+        false,
     )
     .await
     .expect_err("aborting batch 2 must abort the Run");
@@ -468,6 +475,7 @@ async fn commit_confirm_commits_every_batch() {
                 editor: unreachable_editor(),
             },
         },
+        false,
     )
     .await;
     assert!(
@@ -533,6 +541,7 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
             messenger: messenger_fixed("chore: both"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(result.is_ok(), "multi-file batch should land: {:?}", result);
@@ -601,6 +610,7 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
                 editor: unreachable_editor(),
             },
         },
+        false,
     )
     .await
     .expect_err("aborting batch 1 must abort the Run");

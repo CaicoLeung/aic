@@ -38,6 +38,7 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
             messenger: messenger_fixed("chore: hook run"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -100,6 +101,7 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
             messenger: messenger_fixed("chore: vetoed"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await
     .expect_err("a vetoing pre-commit hook must abort the Run");
@@ -165,6 +167,7 @@ async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
             messenger: messenger_fixed("chore: vetoed"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await
     .expect_err("a vetoing commit-msg hook must abort the Run");

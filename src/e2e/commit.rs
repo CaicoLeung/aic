@@ -21,6 +21,7 @@ async fn commit_clean_repo_is_a_noop() {
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
@@ -55,6 +56,7 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await
     .expect_err("must abort when user declines resolve");
@@ -93,6 +95,7 @@ async fn commit_run_rebase_state_aborts_with_manual_continuation() {
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await
     .expect_err("rebase state must abort without offering resolve");
@@ -156,6 +159,7 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -208,6 +212,7 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -289,6 +294,7 @@ async fn commit_splits_one_file_across_two_batches() {
             messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -363,6 +369,7 @@ async fn commit_splits_two_files_across_two_batches() {
             messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -448,6 +455,7 @@ async fn commit_batches_two_files_into_one_commit() {
             messenger: messenger_fixed("chore: both files"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -524,6 +532,7 @@ async fn commit_includes_binary_file_in_batch_plan() {
             messenger: messenger_fixed("chore: update blob"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(result.is_ok(), "binary batch should succeed: {:?}", result);
@@ -573,6 +582,7 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
             messenger: messenger_fixed("chore: update blob"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(result.is_ok(), "batch should succeed: {:?}", result);
@@ -629,6 +639,7 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
             messenger: messenger_fixed("chmod: make script executable"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -677,6 +688,7 @@ async fn commit_staged_files_in_one_commit() {
             messenger: messenger_fixed("feat: staged change"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -740,6 +752,7 @@ async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
             messenger: messenger_fixed("feat: staged hunk only"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -801,6 +814,7 @@ async fn commit_staged_deletion_in_one_commit() {
             messenger: messenger_fixed("feat: remove tracked file"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -857,6 +871,7 @@ async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
             messenger: messenger_fixed("feat: mixed staged set"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -933,6 +948,7 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
             messenger,
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await
     .expect_err("must abort when a later batch fails");
@@ -994,6 +1010,7 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
             messenger,
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(result.is_ok(), "fallback must complete the run: {result:?}");
@@ -1078,6 +1095,7 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
             messenger: messenger_fixed("feat: hook swallows the rest"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -1152,6 +1170,7 @@ async fn commit_splits_one_file_across_three_batches() {
             messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -1240,6 +1259,7 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
             messenger: messenger_fixed("feat: same-file disjoint hunks"),
             confirm: Confirm::Disabled,
         },
+        false,
     )
     .await;
     assert!(
@@ -1264,4 +1284,127 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
         is_clean(dir.path()),
         "working tree must be clean after the Run"
     );
+}
+
+/// An unstaged file containing a secret-shaped token (AWS key ID) makes the
+/// Run refuse via the Redaction Gate *before any LLM call* (issue #155):
+/// planner and messenger stubs panic if reached, and the error names the
+/// file, the pattern kind, and the `--no-redact` override.
+#[tokio::test]
+async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(
+        dir.path().join("tracked.txt"),
+        "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
+    )
+    .unwrap();
+
+    let git = Git::at(dir.path()).unwrap();
+    let err = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
+        false,
+    )
+    .await
+    .expect_err("secret-shaped unstaged diff must refuse the Run");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("tracked.txt"), "must name the file: {msg}");
+    assert!(
+        msg.contains("AWS access key ID"),
+        "must name the kind: {msg}"
+    );
+    assert!(msg.contains("--no-redact"), "must name the override: {msg}");
+    assert!(
+        !msg.contains("AKIAIOSFODNN7EXAMPLE"),
+        "the full secret must never print: {msg}"
+    );
+    // Nothing was staged or committed by the refused Run (init_test_repo's
+    // initial commit + the base commit = 2).
+    assert_eq!(commit_count(dir.path()), 2);
+}
+
+/// `--no-redact` (`no_redact = true`) skips the gate knowingly: the same
+/// secret-shaped diff plans, drafts, and commits normally.
+#[tokio::test]
+async fn commit_run_no_redact_proceeds_past_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(
+        dir.path().join("tracked.txt"),
+        "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
+    )
+    .unwrap();
+
+    let git = Git::at(dir.path()).unwrap();
+    let result = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: planner_fixed(plan_single_batch("tracked.txt", "rotate key")),
+            messenger: messenger_fixed("chore: rotate deploy key"),
+            confirm: Confirm::Disabled,
+        },
+        true,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "--no-redact must commit normally: {:?}",
+        result
+    );
+    assert_eq!(commit_count(dir.path()), 3, "exactly one new commit");
+    assert!(is_clean(dir.path()));
+}
+
+/// A secret in a *staged* file (PEM private key block) refuses the staged
+/// single-commit path before its one LLM call — the gate covers every
+/// initial payload the Run sends (issue #155), not just the batch plan.
+#[tokio::test]
+async fn commit_run_refuses_secret_in_staged_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    std::fs::write(dir.path().join("id_ed25519"), "placeholder\n").unwrap();
+    git_in(dir.path(), &["add", "id_ed25519"]);
+    git_in(dir.path(), &["commit", "-m", "base"]);
+    std::fs::write(
+        dir.path().join("id_ed25519"),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    git_in(dir.path(), &["add", "id_ed25519"]);
+
+    let git = Git::at(dir.path()).unwrap();
+    let err = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
+        false,
+    )
+    .await
+    .expect_err("secret-shaped staged diff must refuse the Run");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("id_ed25519"), "must name the file: {msg}");
+    assert!(
+        msg.contains("private key block (PEM)"),
+        "must name the kind: {msg}"
+    );
+    assert_eq!(commit_count(dir.path()), 2, "nothing committed");
 }
