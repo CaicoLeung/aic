@@ -16,6 +16,10 @@ _Avoid_: rollback, revert, restore
 A one-off `--hint` directive attached to a single Run, appended as a "User directive" block to both the batch-plan and commit-message prompts — steering grouping, type, scope, and body content. Deliberately CLI-only (no config field): a persisted hint would silently stamp every future commit.
 _Avoid_: prompt override, custom instruction, memo
 
+**Redaction Gate**:
+The refusal check (issue #155, ADR 0017) that scans a Run's *initial* LLM payloads — the Diff JSON envelope and its sliced batch inputs on the unstaged path, the staged single-commit diff on the staged path — for secret-shaped content (structural token patterns and PEM private-key blocks, per the `src/llm/redact/` vocabulary). On a hit the Run refuses before any Backend call, naming each offending file and pattern kind with masked previews; `--no-redact` skips the gate for that Run only (same CLI-only policy as the Run hint). The confirmation menu's Re-generate redraft re-sends already-gated content and is deliberately ungated. The resolve workflow's whole-file payloads are a tracked follow-up that will reuse the same detector.
+_Avoid_: secret filter, sanitizer, leak protection, privacy mode
+
 **Batch**:
 A group of files the LLM's split plan assigns to one commit. A Run contains one or more Batches; each Batch yields one Drafted Message and one commit.
 _Avoid_: group, chunk, package

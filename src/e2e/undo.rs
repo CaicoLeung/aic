@@ -39,6 +39,7 @@ async fn run_two_batches(dir: &tempfile::TempDir) -> String {
     commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("feat: stub"),
@@ -158,6 +159,7 @@ async fn undo_covers_staged_single_commit_run() {
     commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: messenger_fixed("feat: stub"),
@@ -348,6 +350,7 @@ async fn partial_run_is_undoable_for_landed_batches() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger,

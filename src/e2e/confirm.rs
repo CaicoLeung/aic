@@ -25,6 +25,7 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(), // staged path must NOT plan,
             messenger: messenger_fixed("feat: staged change"),
@@ -74,6 +75,7 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(), // staged path must NOT plan,
             messenger: messenger_fixed("feat: staged hunk only"),
@@ -134,6 +136,7 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display,
             planner: unreachable_planner(),
             messenger: messenger_fixed("feat: staged change"),
@@ -199,6 +202,7 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display,
             planner: unreachable_planner(),
             messenger,
@@ -241,6 +245,54 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
     );
 }
 
+/// `--no-redact` covers the Run's *whole* confirm loop (ADR 0017): the
+/// override skips the initial gate AND the Re-generate redraft re-sends the
+/// secret-shaped staged diff without a second gate surprise-blocking it — the
+/// menu [Regenerate, Commit] flow drafts twice and the second message lands.
+#[tokio::test]
+async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+
+    std::fs::write(
+        dir.path().join("tracked.txt"),
+        "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
+    )
+    .unwrap();
+    git_in(dir.path(), &["add", "tracked.txt"]);
+
+    let before = commit_count(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+    let (messenger, calls) = messenger_sequence(&["feat: first draft", "feat: second draft"]);
+
+    let result = commit_run(
+        &git,
+        RunDeps {
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger,
+            confirm: Confirm::Interactive {
+                menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
+                editor: unreachable_editor(),
+            },
+            redact: Redact::Off,
+        },
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "--no-redact + Regenerate must complete the Run: {:?}",
+        result
+    );
+    assert_eq!(*calls.lock(), 2, "the redraft must reach the messenger");
+    assert_eq!(commit_count(dir.path()), before + 1, "one commit lands");
+    assert_eq!(
+        git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
+        "feat: second draft",
+        "the regenerated message must be the one committed"
+    );
+}
+
 /// Edit → Commit: the editor rewrites the message, the edited version is what
 /// lands (subject + body).
 #[tokio::test]
@@ -257,6 +309,7 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: messenger_fixed("feat: draft"),
@@ -301,6 +354,7 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: messenger_fixed("feat: draft"),
@@ -366,6 +420,7 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: stub"),
@@ -460,6 +515,7 @@ async fn commit_confirm_commits_every_batch() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: stub"),
@@ -528,6 +584,7 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display,
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: both"),
@@ -593,6 +650,7 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: stub"),

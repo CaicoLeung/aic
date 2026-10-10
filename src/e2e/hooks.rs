@@ -33,6 +33,7 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: hook run"),
@@ -95,6 +96,7 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: vetoed"),
@@ -160,6 +162,7 @@ async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: vetoed"),

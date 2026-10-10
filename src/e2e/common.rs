@@ -8,6 +8,7 @@ pub(super) use crate::git::conflict;
 pub(super) use crate::git::conflict::tests as cf;
 pub(super) use crate::git::tests as gh;
 pub(super) use crate::llm::generator;
+pub(super) use crate::llm::redact::Redact;
 pub(super) use crate::render::display::{Display, DisplayWrite};
 pub(super) use crate::workflow::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
 pub(super) use crate::workflow::resolve::{ResolveDeps, resolve_run};

@@ -27,6 +27,7 @@ use crate::git::diff;
 use crate::git::diff_json;
 use crate::git::staging;
 use crate::llm::generator;
+use crate::llm::redact::{self, Redact};
 use crate::render::cursor;
 use crate::render::display::Display;
 use crate::render::progress;
@@ -46,26 +47,31 @@ use crate::workflow::undo;
 const MAX_CONCURRENT_DRAFTS: usize = 8;
 
 /// The commit Run's seam bundle: display, batch planner, commit messenger,
-/// and the opt-in confirmation gate (issue #78). When confirmation is enabled,
-/// every drafted message is shown (message + body + file list) and its menu
-/// must approve it (Commit) — or Re-generate / Edit it, or Abort — before the
-/// commit lands.
+/// the opt-in confirmation gate (issue #78), and the Redaction Gate policy
+/// (issue #155, ADR 0017). When confirmation is enabled, every drafted
+/// message is shown (message + body + file list) and its menu must approve it
+/// (Commit) — or Re-generate / Edit it, or Abort — before the commit lands.
+/// `redact` mirrors `confirm` as run policy carried with the seams: `Off` is
+/// the `--no-redact` one-off override.
 pub(crate) struct RunDeps {
     pub(crate) display: Display,
     pub(crate) planner: BatchPlanner,
     pub(crate) messenger: CommitMessenger,
     pub(crate) confirm: Confirm,
+    pub(crate) redact: Redact,
 }
 
 /// The Run spine: stage + commit what is staged, or plan + batch-commit what
 /// is unstaged. Assumes a non-conflicted repo — [`default_run`] owns the
-/// conflicted-repo gate.
+/// conflicted-repo gate. `deps.redact` = [`Redact::Off`] skips the secrets
+/// Redaction Gate (issue #155, ADR 0017) — the `--no-redact` one-off override.
 pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
     let RunDeps {
         display,
         planner,
         messenger,
         confirm,
+        redact,
     } = deps;
 
     let status = git.status()?;
@@ -114,6 +120,25 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });
+        // (path, raw diff) pairs from the snapshot above — the single
+        // source for the Redaction Gate below and the deterministic
+        // fallback's regrouping, so both consume exactly what the model
+        // sees.
+        let raw_pairs: Vec<(String, String)> = unstaged_files
+            .iter()
+            .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
+            .collect();
+
+        // Redaction Gate, first payload site (issue #155, ADR 0017): the
+        // raw per-file diffs feed every LLM payload of this branch — the
+        // plan envelope above and each batch's Drafted Message input (sliced
+        // from `raw_diffs`) — so gating here once refuses before any Backend
+        // call. The confirmation menu's Re-generate redraft stays ungated by
+        // design: it re-sends content this gate already cleared.
+        if redact == Redact::On {
+            redact::gate(&raw_pairs)?;
+        }
+
         let result = planner(diff.to_string()).await?;
 
         // An invalid plan is an LLM malfunction, not a user problem: warn and
@@ -128,11 +153,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 display.warn(&format!(
                     "LLM batch plan invalid ({plan_err}); regrouping deterministically"
                 ));
-                let diffs: Vec<(String, String)> = unstaged_files
-                    .iter()
-                    .map(|f| Ok((f.path.clone(), raw_diffs[&f.path].clone())))
-                    .collect::<anyhow::Result<_>>()?;
-                let plan = grouping::plan_from_diffs(&diffs);
+                let plan = grouping::plan_from_diffs(&raw_pairs);
                 generator::validate_batch_plan(&plan, &file_hunk_counts)
                     .context("deterministic fallback plan failed validation")?;
                 plan
@@ -229,6 +250,19 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
+        // Redaction Gate, second payload site (issue #155, ADR 0017): the
+        // staged branch's one LLM call sends `staged_diff_json`'s content.
+        // Gate reads the same per-file diffs itself rather than scanning
+        // inside `staged_diff_json` — that fn is shared with the confirm
+        // menu's Re-generate redraft, which stays ungated by design (the
+        // cheap second libgit2 read buys that boundary).
+        if redact == Redact::On {
+            let pairs: Vec<(String, String)> = paths
+                .iter()
+                .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
+                .collect::<anyhow::Result<_>>()?;
+            redact::gate(&pairs)?;
+        }
         // Commit the index exactly as the user staged it — no re-stage
         // (issue #150). The historic `git add` over these paths folded each
         // staged file's full workdir state into the index, silently
@@ -402,8 +436,10 @@ where
 
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
-/// into [`default_run`].
-pub async fn default_workflow(hint: Option<&str>) -> anyhow::Result<()> {
+/// into [`default_run`]. `no_redact` is the CLI's `--no-redact` bool, mapped
+/// to [`Redact::Off`] here — the only production site that may bypass the
+/// Redaction Gate.
+pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Result<()> {
     let resolve = ResolveDeps {
         resolve: Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
             Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
@@ -474,6 +510,7 @@ pub async fn default_workflow(hint: Option<&str>) -> anyhow::Result<()> {
             planner,
             messenger,
             confirm,
+            redact: if no_redact { Redact::Off } else { Redact::On },
         },
     )
     .await

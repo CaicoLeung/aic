@@ -52,8 +52,9 @@ fn use_values() -> clap::builder::PossibleValuesParser {
     name = "aic",
     version,
     about = "An AI-powered Rust CLI for generating git commit messages in bulk.\naic[https://github.com/CaicoLeung/aic]",
-    // `--hint` is Run-scoped and the only top-level user arg; pairing it
-    // with a subcommand must error, not silently drop the directive.
+    // `--hint` and `--no-redact` are Run-scoped, the only top-level user
+    // args; pairing either with a subcommand must error, not silently drop
+    // the intent.
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
@@ -65,6 +66,16 @@ pub struct Cli {
     /// Run-scoped: rejected alongside a subcommand, and rejected when blank.
     #[arg(long, value_parser = hint_value)]
     pub hint: Option<String>,
+
+    /// Skip the secrets Redaction Gate for this Run (issue #155): by default
+    /// `aic` refuses to send a diff whose content looks like a secret (cloud
+    /// keys, tokens, private key blocks) to the LLM, naming the offending
+    /// file and pattern kind. This flag proceeds knowingly, sending the diff
+    /// as-is. One-off CLI intent only; there is deliberately no config field
+    /// — a persisted bypass would silently disable a safety gate for every
+    /// future Run. Run-scoped: rejected alongside a subcommand.
+    #[arg(long)]
+    pub no_redact: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -142,6 +153,28 @@ mod tests {
     fn hint_value_trims_surrounding_whitespace() {
         let cli = Cli::try_parse_from(["aic", "--hint", "  closes #78  "]).unwrap();
         assert_eq!(cli.hint.as_deref(), Some("closes #78"));
+    }
+
+    /// `--no-redact` is Run-scoped like `--hint`: pairing it with a
+    /// subcommand is rejected instead of silently ignored.
+    #[test]
+    fn no_redact_cannot_be_combined_with_a_subcommand() {
+        let err = Cli::try_parse_from(["aic", "--no-redact", "undo"])
+            .err()
+            .expect("--no-redact with subcommand must fail to parse");
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "got: {err}"
+        );
+    }
+
+    /// `--no-redact` parses as a plain flag with no value.
+    #[test]
+    fn no_redact_parses_as_a_bare_flag() {
+        let cli = Cli::try_parse_from(["aic", "--no-redact"]).unwrap();
+        assert!(cli.no_redact);
+        let cli = Cli::try_parse_from(["aic"]).unwrap();
+        assert!(!cli.no_redact);
     }
 
     /// The `use` vocabulary contract: presets first (they win at match
