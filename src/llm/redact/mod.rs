@@ -13,6 +13,19 @@
 //! spirit). The resolve workflow's whole-file payloads are a tracked
 //! follow-up; both paths will share this module.
 
+/// Run policy for this gate (issue #155, ADR 0017), carried on
+/// [`crate::workflow::run::RunDeps`] next to `Confirm`: `On` is the default
+/// refuse-before-send behavior; `Off` is the one-off `--no-redact` override —
+/// the only way a Run's initial payloads skip this scan. Plain bools at call
+/// sites read as noise; the named variants keep every wiring self-documenting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Redact {
+    /// Gate active (default): secret-shaped payloads refuse the Run.
+    On,
+    /// `--no-redact`: send payloads as-is for this Run only.
+    Off,
+}
+
 /// The secret family a [`Finding`] belongs to. `scan` deduplicates per
 /// family (first occurrence supplies the masked preview), so kinds compare
 /// by identity here — [`Kind::label`] renders the user-facing name.

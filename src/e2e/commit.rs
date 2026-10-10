@@ -16,12 +16,12 @@ async fn commit_clean_repo_is_a_noop() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
@@ -51,12 +51,12 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
             display: sink(),
         },
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await
     .expect_err("must abort when user declines resolve");
@@ -90,12 +90,12 @@ async fn commit_run_rebase_state_aborts_with_manual_continuation() {
             display: sink(),
         },
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await
     .expect_err("rebase state must abort without offering resolve");
@@ -154,12 +154,12 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
             display: sink(),
         },
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -207,12 +207,12 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
             display,
         },
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -289,12 +289,12 @@ async fn commit_splits_one_file_across_two_batches() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -364,12 +364,12 @@ async fn commit_splits_two_files_across_two_batches() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -450,12 +450,12 @@ async fn commit_batches_two_files_into_one_commit() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: both files"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -527,12 +527,12 @@ async fn commit_includes_binary_file_in_batch_plan() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: update blob"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(result.is_ok(), "binary batch should succeed: {:?}", result);
@@ -577,12 +577,12 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner,
             messenger: messenger_fixed("chore: update blob"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(result.is_ok(), "batch should succeed: {:?}", result);
@@ -634,12 +634,12 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chmod: make script executable"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -683,12 +683,12 @@ async fn commit_staged_files_in_one_commit() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(), // staged path must NOT plan,
             messenger: messenger_fixed("feat: staged change"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -747,12 +747,12 @@ async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(), // staged path must NOT plan,
             messenger: messenger_fixed("feat: staged hunk only"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -809,12 +809,12 @@ async fn commit_staged_deletion_in_one_commit() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: messenger_fixed("feat: remove tracked file"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -866,12 +866,12 @@ async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: messenger_fixed("feat: mixed staged set"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -943,12 +943,12 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger,
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await
     .expect_err("must abort when a later batch fails");
@@ -1004,13 +1004,13 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: Display::with(buf.clone()),
             // Zero batches over real work — the most degenerate invalid plan.
             planner: planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
             messenger,
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(result.is_ok(), "fallback must complete the run: {result:?}");
@@ -1090,12 +1090,12 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("feat: hook swallows the rest"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -1165,12 +1165,12 @@ async fn commit_splits_one_file_across_three_batches() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -1254,12 +1254,12 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
             messenger: messenger_fixed("feat: same-file disjoint hunks"),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await;
     assert!(
@@ -1307,12 +1307,12 @@ async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await
     .expect_err("secret-shaped unstaged diff must refuse the Run");
@@ -1352,12 +1352,12 @@ async fn commit_run_no_redact_proceeds_past_the_gate() {
     let result = commit_run(
         &git,
         RunDeps {
+            redact: Redact::Off,
             display: sink(),
             planner: planner_fixed(plan_single_batch("tracked.txt", "rotate key")),
             messenger: messenger_fixed("chore: rotate deploy key"),
             confirm: Confirm::Disabled,
         },
-        true,
     )
     .await;
     assert!(
@@ -1390,12 +1390,12 @@ async fn commit_run_refuses_secret_in_staged_diff() {
     let err = commit_run(
         &git,
         RunDeps {
+            redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
             messenger: unreachable_messenger(),
             confirm: Confirm::Disabled,
         },
-        false,
     )
     .await
     .expect_err("secret-shaped staged diff must refuse the Run");
