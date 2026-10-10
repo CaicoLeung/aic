@@ -21,6 +21,7 @@ pub mod decoder;
 pub mod generator;
 pub mod parse;
 pub mod prompt;
+pub mod redact;
 pub mod retry;
 use crate::llm::cli_agent::{CliAgent, CliSpec};
 use crate::llm::parse::{classify_retry, parse_json_response};
