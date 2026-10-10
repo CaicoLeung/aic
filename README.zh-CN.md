@@ -90,6 +90,7 @@ aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下�
 - **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
 - **一键撤销** —— `aic undo` 重置上一次 Run 的提交，全部改动原样回到工作区（未暂存）
 - **Run 指令** —— `aic --hint "breaking change"` 为单次 Run 指定意图（如 `--hint "closes #78"`），影响拆分、类型与措辞
+- **密钥拦截门** —— diff 中出现密钥特征内容（云厂商 key、token、私钥块）时，Run 会在**发送给 LLM 之前**拒绝执行，并指明文件与模式类型；`--no-redact` 可知情放行
 - **实时推理** —— 观看模型思考拆分方案的全过程
 - **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
 - **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）之间切换
@@ -110,6 +111,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 |------|------|
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
 | `aic --hint "<文本>"` | 同上，但为本次 Run 追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
+| `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。 |
 | `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。确认时列明将重置哪些提交 —— 含 Run 之后手动提交的；若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
