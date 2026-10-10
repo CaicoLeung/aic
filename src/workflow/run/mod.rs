@@ -27,6 +27,7 @@ use crate::git::diff;
 use crate::git::diff_json;
 use crate::git::staging;
 use crate::llm::generator;
+use crate::llm::redact;
 use crate::render::cursor;
 use crate::render::display::Display;
 use crate::render::progress;
@@ -59,8 +60,9 @@ pub(crate) struct RunDeps {
 
 /// The Run spine: stage + commit what is staged, or plan + batch-commit what
 /// is unstaged. Assumes a non-conflicted repo — [`default_run`] owns the
-/// conflicted-repo gate.
-pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
+/// conflicted-repo gate. `no_redact` skips the secrets Redaction Gate
+/// (issue #155, ADR 0017) — the `--no-redact` one-off override.
+pub(crate) async fn commit_run(git: &Git, deps: RunDeps, no_redact: bool) -> anyhow::Result<()> {
     let RunDeps {
         display,
         planner,
@@ -114,6 +116,21 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });
+
+        // Redaction Gate, first payload site (issue #155, ADR 0017): the
+        // raw per-file diffs feed every LLM payload of this branch — the
+        // plan envelope above and each batch's Drafted Message input (sliced
+        // from `raw_diffs`) — so gating here once refuses before any Backend
+        // call. The confirmation menu's Re-generate redraft stays ungated by
+        // design: it re-sends content this gate already cleared.
+        if !no_redact {
+            let pairs: Vec<(String, String)> = unstaged_files
+                .iter()
+                .map(|f| Ok((f.path.clone(), raw_diffs[&f.path].clone())))
+                .collect::<anyhow::Result<_>>()?;
+            redact::gate(&pairs)?;
+        }
+
         let result = planner(diff.to_string()).await?;
 
         // An invalid plan is an LLM malfunction, not a user problem: warn and
@@ -229,6 +246,19 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         }
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
+        // Redaction Gate, second payload site (issue #155, ADR 0017): the
+        // staged branch's one LLM call sends `staged_diff_json`'s content.
+        // Gate reads the same per-file diffs itself rather than scanning
+        // inside `staged_diff_json` — that fn is shared with the confirm
+        // menu's Re-generate redraft, which stays ungated by design (the
+        // cheap second libgit2 read buys that boundary).
+        if !no_redact {
+            let pairs: Vec<(String, String)> = paths
+                .iter()
+                .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
+                .collect::<anyhow::Result<_>>()?;
+            redact::gate(&pairs)?;
+        }
         // Commit the index exactly as the user staged it — no re-stage
         // (issue #150). The historic `git add` over these paths folded each
         // staged file's full workdir state into the index, silently
@@ -352,6 +382,7 @@ pub(crate) async fn default_run(
     git: &Git,
     resolve: ResolveDeps,
     commit: RunDeps,
+    no_redact: bool,
 ) -> anyhow::Result<()> {
     let state = git.conflict().state()?;
     if state.is_conflicted() {
@@ -371,7 +402,7 @@ pub(crate) async fn default_run(
             state.label()
         );
     }
-    commit_run(git, commit).await
+    commit_run(git, commit, no_redact).await
 }
 
 /// Run an LLM call behind the live reasoning feed: probe the
@@ -403,7 +434,7 @@ where
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
 /// into [`default_run`].
-pub async fn default_workflow(hint: Option<&str>) -> anyhow::Result<()> {
+pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Result<()> {
     let resolve = ResolveDeps {
         resolve: Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
             Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
@@ -475,6 +506,7 @@ pub async fn default_workflow(hint: Option<&str>) -> anyhow::Result<()> {
             messenger,
             confirm,
         },
+        no_redact,
     )
     .await
 }
