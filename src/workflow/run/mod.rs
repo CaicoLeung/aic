@@ -116,6 +116,14 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps, no_redact: bool) -> any
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let diff = serde_json::json!({ "unstaged_files": files });
+        // (path, raw diff) pairs from the snapshot above — the single
+        // source for the Redaction Gate below and the deterministic
+        // fallback's regrouping, so both consume exactly what the model
+        // sees.
+        let raw_pairs: Vec<(String, String)> = unstaged_files
+            .iter()
+            .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
+            .collect();
 
         // Redaction Gate, first payload site (issue #155, ADR 0017): the
         // raw per-file diffs feed every LLM payload of this branch — the
@@ -124,11 +132,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps, no_redact: bool) -> any
         // call. The confirmation menu's Re-generate redraft stays ungated by
         // design: it re-sends content this gate already cleared.
         if !no_redact {
-            let pairs: Vec<(String, String)> = unstaged_files
-                .iter()
-                .map(|f| Ok((f.path.clone(), raw_diffs[&f.path].clone())))
-                .collect::<anyhow::Result<_>>()?;
-            redact::gate(&pairs)?;
+            redact::gate(&raw_pairs)?;
         }
 
         let result = planner(diff.to_string()).await?;
@@ -145,11 +149,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps, no_redact: bool) -> any
                 display.warn(&format!(
                     "LLM batch plan invalid ({plan_err}); regrouping deterministically"
                 ));
-                let diffs: Vec<(String, String)> = unstaged_files
-                    .iter()
-                    .map(|f| Ok((f.path.clone(), raw_diffs[&f.path].clone())))
-                    .collect::<anyhow::Result<_>>()?;
-                let plan = grouping::plan_from_diffs(&diffs);
+                let plan = grouping::plan_from_diffs(&raw_pairs);
                 generator::validate_batch_plan(&plan, &file_hunk_counts)
                     .context("deterministic fallback plan failed validation")?;
                 plan

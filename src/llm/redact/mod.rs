@@ -13,13 +13,56 @@
 //! spirit). The resolve workflow's whole-file payloads are a tracked
 //! follow-up; both paths will share this module.
 
-/// One detected secret in a scanned payload: the user-facing pattern kind
-/// and a masked preview of the matched text (first 4 chars + `…`). The full
+/// The secret family a [`Finding`] belongs to. `scan` deduplicates per
+/// family (first occurrence supplies the masked preview), so kinds compare
+/// by identity here — [`Kind::label`] renders the user-facing name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// `AKIA`/`ASIA` access key IDs.
+    AwsKeyId,
+    /// `ghp_`… and `github_pat_` tokens.
+    GithubToken,
+    /// `sk-ant-` keys.
+    AnthropicKey,
+    /// `sk-`, `sk-proj-`, `sk-svcacct-` keys.
+    OpenAiKey,
+    /// `AIza` keys.
+    GoogleKey,
+    /// `xox*` tokens.
+    SlackToken,
+    /// `sk_live_`/`rk_live_` keys.
+    StripeSecretKey,
+    /// `glpat-` tokens.
+    GitlabToken,
+    /// PEM `-----BEGIN … PRIVATE KEY-----` blocks.
+    PemPrivateKey,
+}
+
+impl Kind {
+    /// User-facing family label for refusal messages; e2e tests pin these
+    /// exact strings.
+    fn label(self) -> &'static str {
+        match self {
+            Kind::AwsKeyId => "AWS access key ID",
+            Kind::GithubToken => "GitHub token",
+            Kind::AnthropicKey => "Anthropic API key",
+            Kind::OpenAiKey => "OpenAI API key",
+            Kind::GoogleKey => "Google API key",
+            Kind::SlackToken => "Slack token",
+            Kind::StripeSecretKey => "Stripe secret key",
+            Kind::GitlabToken => "GitLab token",
+            Kind::PemPrivateKey => "private key block (PEM)",
+        }
+    }
+}
+
+/// One detected secret in a scanned payload: the secret's family and a
+/// masked preview of the matched text (first 4 chars + `…`). The full
 /// match is never surfaced — reprinting a secret into terminal scrollback
 /// would defeat the gate's purpose.
 pub(crate) struct Finding {
-    /// Pattern-kind label, e.g. `"AWS access key ID"`.
-    pub(crate) kind: &'static str,
+    /// Which family the match belongs to; [`Kind::label`] names it.
+    pub(crate) kind: Kind,
     /// Masked preview, e.g. `"AKIA…"`.
     pub(crate) masked: String,
 }
@@ -39,8 +82,8 @@ enum Tail {
 /// characters. Prefixes are specific enough that word boundaries are not
 /// needed — no benign prose contains `AKIA` + 16 upper-alnum characters.
 struct Pattern {
-    /// User-facing kind label naming this secret family.
-    kind: &'static str,
+    /// Which secret family a match belongs to.
+    kind: Kind,
     /// Literal prefix, case-sensitive.
     prefix: &'static str,
     /// Minimum tail length after the prefix.
@@ -55,127 +98,127 @@ struct Pattern {
 /// (their tails contain `-`, which the `sk-` tail class rejects).
 const PATTERNS: &[Pattern] = &[
     Pattern {
-        kind: "AWS access key ID",
+        kind: Kind::AwsKeyId,
         prefix: "AKIA",
         min_tail: 16,
         tail: Tail::UpperAlnum,
     },
     Pattern {
-        kind: "AWS access key ID",
+        kind: Kind::AwsKeyId,
         prefix: "ASIA",
         min_tail: 16,
         tail: Tail::UpperAlnum,
     },
     Pattern {
-        kind: "GitHub token",
+        kind: Kind::GithubToken,
         prefix: "ghp_",
         min_tail: 36,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "GitHub token",
+        kind: Kind::GithubToken,
         prefix: "gho_",
         min_tail: 36,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "GitHub token",
+        kind: Kind::GithubToken,
         prefix: "ghu_",
         min_tail: 36,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "GitHub token",
+        kind: Kind::GithubToken,
         prefix: "ghs_",
         min_tail: 36,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "GitHub token",
+        kind: Kind::GithubToken,
         prefix: "ghr_",
         min_tail: 36,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "GitHub token",
+        kind: Kind::GithubToken,
         prefix: "github_pat_",
         min_tail: 22,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "Anthropic API key",
+        kind: Kind::AnthropicKey,
         prefix: "sk-ant-",
         min_tail: 20,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "OpenAI API key",
+        kind: Kind::OpenAiKey,
         prefix: "sk-proj-",
         min_tail: 20,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "OpenAI API key",
+        kind: Kind::OpenAiKey,
         prefix: "sk-svcacct-",
         min_tail: 20,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "OpenAI API key",
+        kind: Kind::OpenAiKey,
         prefix: "sk-",
         min_tail: 20,
         tail: Tail::Alnum,
     },
     Pattern {
-        kind: "Google API key",
+        kind: Kind::GoogleKey,
         prefix: "AIza",
         min_tail: 35,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "Slack token",
+        kind: Kind::SlackToken,
         prefix: "xoxb-",
         min_tail: 10,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "Slack token",
+        kind: Kind::SlackToken,
         prefix: "xoxa-",
         min_tail: 10,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "Slack token",
+        kind: Kind::SlackToken,
         prefix: "xoxp-",
         min_tail: 10,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "Slack token",
+        kind: Kind::SlackToken,
         prefix: "xoxr-",
         min_tail: 10,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "Slack token",
+        kind: Kind::SlackToken,
         prefix: "xoxs-",
         min_tail: 10,
         tail: Tail::Token,
     },
     Pattern {
-        kind: "Stripe secret key",
+        kind: Kind::StripeSecretKey,
         prefix: "sk_live_",
         min_tail: 20,
         tail: Tail::Alnum,
     },
     Pattern {
-        kind: "Stripe secret key",
+        kind: Kind::StripeSecretKey,
         prefix: "rk_live_",
         min_tail: 20,
         tail: Tail::Alnum,
     },
     Pattern {
-        kind: "GitLab token",
+        kind: Kind::GitlabToken,
         prefix: "glpat-",
         min_tail: 20,
         tail: Tail::Token,
@@ -253,9 +296,9 @@ pub(crate) fn scan(text: &str) -> Vec<Finding> {
             });
         }
     }
-    if findings.iter().all(|f| f.kind != "private key block (PEM)") && has_pem_block(text) {
+    if !findings.iter().any(|f| f.kind == Kind::PemPrivateKey) && has_pem_block(text) {
         findings.push(Finding {
-            kind: "private key block (PEM)",
+            kind: Kind::PemPrivateKey,
             masked: format!("{PEM_BEGIN}…"),
         });
     }
@@ -295,7 +338,7 @@ pub(crate) fn gate(diff_per_file: &[(String, String)]) -> anyhow::Result<()> {
     for (path, findings) in offending.iter().take(LIST_CAP) {
         let kinds: Vec<String> = findings
             .iter()
-            .map(|f| format!("{} ({})", f.kind, f.masked))
+            .map(|f| format!("{} ({})", f.kind.label(), f.masked))
             .collect();
         msg.push_str(&format!("  {path}: {}\n", kinds.join(", ")));
     }
@@ -381,11 +424,11 @@ mod tests {
         for (kind, text, preview) in cases {
             let findings = scan(text);
             assert!(
-                findings.iter().any(|f| f.kind == *kind),
+                findings.iter().any(|f| f.kind.label() == *kind),
                 "{text:?}: expected {kind:?}, got {:?}",
-                findings.iter().map(|f| f.kind).collect::<Vec<_>>()
+                findings.iter().map(|f| f.kind.label()).collect::<Vec<_>>()
             );
-            let hit = findings.iter().find(|f| f.kind == *kind).unwrap();
+            let hit = findings.iter().find(|f| f.kind.label() == *kind).unwrap();
             assert_eq!(hit.masked, *preview, "{text:?}");
         }
     }
@@ -405,7 +448,7 @@ mod tests {
             assert!(
                 scan(&format!("{header}\nMIIabc=="))
                     .iter()
-                    .any(|f| f.kind == "private key block (PEM)"),
+                    .any(|f| f.kind == Kind::PemPrivateKey),
                 "{header} must be detected"
             );
         }
