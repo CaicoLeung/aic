@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::List) => config::run_list(),
         Some(Commands::Use { provider }) => config::run_use(&provider),
         Some(Commands::Update) => update::run_update(),
-        Some(Commands::Resolve) => resolve::resolve_workflow().await,
+        Some(Commands::Resolve { no_redact }) => resolve::resolve_workflow(no_redact).await,
         Some(Commands::Undo) => undo::run_undo(),
         Some(Commands::Completion) => {
             // Interactive when stdout is a terminal; fall back to $SHELL

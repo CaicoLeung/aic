@@ -90,7 +90,19 @@ pub enum Commands {
     /// Update aic to the latest version
     Update,
     /// Resolve git merge conflicts in the working tree via the LLM
-    Resolve,
+    Resolve {
+        /// Skip the secrets Redaction Gate for this resolve (issue #159):
+        /// by default `aic resolve` refuses to send a conflicted file whose
+        /// content looks like a secret (cloud keys, tokens, private key
+        /// blocks) to the LLM, naming the offending file and pattern kind.
+        /// This flag proceeds knowingly, sending whole-file content as-is.
+        /// One-off CLI intent only; there is deliberately no config field —
+        /// a persisted bypass would silently disable a safety gate for
+        /// every future resolve (ADR 0017 policy, same as the Run's
+        /// top-level `--no-redact`).
+        #[arg(long)]
+        no_redact: bool,
+    },
     /// Undo the last commit Run: reset the repo back to where that Run
     /// started, with all its changes back in the working tree (unstaged)
     Undo,
@@ -175,6 +187,27 @@ mod tests {
         assert!(cli.no_redact);
         let cli = Cli::try_parse_from(["aic"]).unwrap();
         assert!(!cli.no_redact);
+    }
+
+    /// The resolve subcommand carries its own Run-scoped `--no-redact`
+    /// (issue #159): bare flag, off by default, and independent of the
+    /// top-level flag (which stays rejected alongside any subcommand).
+    #[test]
+    fn resolve_no_redact_parses_as_a_bare_flag() {
+        let cli = Cli::try_parse_from(["aic", "resolve", "--no-redact"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Resolve { no_redact: true })
+        ));
+        let cli = Cli::try_parse_from(["aic", "resolve"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Resolve { no_redact: false })
+        ));
+        // The top-level flag keeps its subcommand exclusion: `aic
+        // --no-redact resolve` still fails to parse, so the two escape
+        // hatches cannot be combined confusingly.
+        assert!(Cli::try_parse_from(["aic", "--no-redact", "resolve"]).is_err());
     }
 
     /// The `use` vocabulary contract: presets first (they win at match
