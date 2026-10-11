@@ -136,7 +136,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // call. The confirmation menu's Re-generate redraft stays ungated by
         // design: it re-sends content this gate already cleared.
         if redact == Redact::On {
-            redact::gate(&raw_pairs)?;
+            redact::gate(&raw_pairs, "aic --no-redact")?;
         }
 
         let result = planner(diff.to_string()).await?;
@@ -261,7 +261,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 .iter()
                 .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
                 .collect::<anyhow::Result<_>>()?;
-            redact::gate(&pairs)?;
+            redact::gate(&pairs, "aic --no-redact")?;
         }
         // Commit the index exactly as the user staged it — no re-stage
         // (issue #150). The historic `git add` over these paths folded each
