@@ -440,12 +440,16 @@ where
 /// to [`Redact::Off`] here — the only production site that may bypass the
 /// Redaction Gate.
 pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Result<()> {
+    // The resolve handoff shares the invocation's `no_redact` intent (issue
+    // #159): `aic --no-redact` on a conflicted repo must not re-arm the gate
+    // the user just disarmed — one invocation, one decision.
     let resolve = ResolveDeps {
         resolve: Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
             Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
         }),
         prompt: Box::new(input::prompt_yes_no),
         display: Display::new(),
+        redact: if no_redact { Redact::Off } else { Redact::On },
     };
     // The planner's streaming-capable backend that has not yet produced
     // reasoning is in a cold start, and past the loading grace its loading
