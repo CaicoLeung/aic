@@ -19,6 +19,7 @@ async fn resolve_clean_repo_is_a_noop() {
             resolve: resolver,
             prompt,
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -47,6 +48,7 @@ async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
             resolve: resolver,
             prompt: prompt_queue(vec![]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await
@@ -96,6 +98,7 @@ async fn resolve_full_flow_finalizes_merge() {
             resolve: resolver,
             prompt: prompt_queue(vec![true]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -127,6 +130,7 @@ async fn resolve_partial_approval_keeps_approved_staged() {
             resolve: resolver,
             prompt,
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -168,6 +172,7 @@ async fn resolve_skips_binary_and_stages_text() {
             resolve: resolver,
             prompt: prompt_queue(vec![true]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -212,6 +217,7 @@ async fn resolve_retries_after_markers_then_succeeds() {
             resolve: resolver,
             prompt: prompt_queue(vec![true]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -243,6 +249,7 @@ async fn resolve_gives_up_when_markers_persist() {
             resolve: resolver,
             prompt: prompt_queue(vec![]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await
@@ -283,6 +290,7 @@ async fn resolve_reports_llm_error_when_retry_fails() {
             resolve: resolver,
             prompt: prompt_queue(vec![]),
             display,
+            redact: Redact::On,
         },
     )
     .await
@@ -337,6 +345,7 @@ async fn resolve_offers_finalize_when_all_manual() {
             resolve: resolver,
             prompt: prompt_queue(vec![true]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -396,6 +405,7 @@ async fn resolve_declines_finalize_when_all_manual() {
             resolve: resolver,
             prompt: prompt_queue(vec![false]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -465,6 +475,7 @@ async fn resolve_finalizes_clean(dir: &Path, expected: conflict::RepoState) {
             resolve: resolver,
             prompt: prompt_queue(vec![true]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -557,6 +568,7 @@ async fn resolve_skips_delete_modify_conflict() {
             resolve: resolver,
             prompt: prompt_queue(vec![]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await
@@ -590,6 +602,7 @@ async fn resolve_skips_oversized_and_stages_text() {
             resolve: resolver,
             prompt: prompt_queue(vec![true]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await;
@@ -637,6 +650,7 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
             resolve: resolver,
             prompt: prompt_queue(vec![]),
             display: sink(),
+            redact: Redact::On,
         },
     )
     .await
@@ -685,6 +699,7 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
             resolve: resolver,
             prompt,
             display,
+            redact: Redact::On,
         },
     )
     .await;

@@ -49,6 +49,7 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
             resolve: resolver,
             prompt: prompt_queue(vec![false]),
             display: sink(),
+            redact: Redact::On,
         },
         RunDeps {
             redact: Redact::On,
@@ -88,6 +89,7 @@ async fn commit_run_rebase_state_aborts_with_manual_continuation() {
             // the exhausted queue panics and fails this test loudly.
             prompt: prompt_queue(vec![]),
             display: sink(),
+            redact: Redact::On,
         },
         RunDeps {
             redact: Redact::On,
@@ -152,6 +154,7 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
             resolve: resolver,
             prompt: prompt_queue(vec![true, true]),
             display: sink(),
+            redact: Redact::On,
         },
         RunDeps {
             redact: Redact::On,
@@ -205,6 +208,7 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
             resolve: resolver,
             prompt: prompt_queue(vec![true, false]),
             display,
+            redact: Redact::On,
         },
         RunDeps {
             redact: Redact::On,
