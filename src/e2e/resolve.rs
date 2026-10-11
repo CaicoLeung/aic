@@ -753,3 +753,85 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
         buf.lines()
     );
 }
+
+/// A conflicted file whose content holds a secret-shaped token (AWS key ID)
+/// makes `aic resolve` refuse via the Redaction Gate *before any LLM call*
+/// (issue #159): the resolver stub panics if reached, and the error names
+/// the file, the pattern kind, and the `aic resolve --no-redact` override.
+/// The repo is left untouched — still conflicted, nothing staged.
+#[tokio::test]
+async fn resolve_refuses_secret_in_conflicted_file_before_any_llm_call() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+    std::fs::write(
+        dir.path().join("tracked.txt"),
+        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
+    )
+    .unwrap();
+
+    let git = Git::at(dir.path()).unwrap();
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: unreachable_resolver(),
+            // Empty queue: the per-file apply prompt must never fire — if it
+            // does, the exhausted queue panics and fails this test loudly.
+            prompt: prompt_queue(vec![]),
+            display: sink(),
+            redact: Redact::On,
+        },
+    )
+    .await
+    .expect_err("secret-shaped conflicted file must refuse the resolve");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("tracked.txt"), "must name the file: {msg}");
+    assert!(
+        msg.contains("AWS access key ID"),
+        "must name the kind: {msg}"
+    );
+    assert!(
+        msg.contains("aic resolve --no-redact"),
+        "must name the resolve-scoped override: {msg}"
+    );
+    assert!(
+        !msg.contains("AKIAIOSFODNN7EXAMPLE"),
+        "the full secret must never print: {msg}"
+    );
+    // Refusal leaves the repo exactly as it was: still unmerged, not staged.
+    assert!(is_unmerged(dir.path(), "tracked.txt"));
+    assert!(!is_clean(dir.path()));
+}
+
+/// `aic resolve --no-redact` (`redact = Redact::Off`) skips the gate
+/// knowingly: the same secret-shaped conflicted file resolves and finalizes
+/// normally (issue #159).
+#[tokio::test]
+async fn resolve_no_redact_proceeds_past_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+    std::fs::write(
+        dir.path().join("tracked.txt"),
+        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
+    )
+    .unwrap();
+
+    let git = Git::at(dir.path()).unwrap();
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver_returning("merged\n"),
+            prompt: prompt_queue(vec![true]),
+            display: sink(),
+            redact: Redact::Off,
+        },
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "--no-redact must resolve normally: {:?}",
+        result
+    );
+    assert!(is_clean(dir.path()), "merge must be finalized");
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+}

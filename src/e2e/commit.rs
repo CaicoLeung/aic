@@ -32,6 +32,49 @@ async fn commit_clean_repo_is_a_noop() {
     assert!(is_clean(dir.path()));
 }
 
+/// The conflicted-repo handoff carries the invocation's `--no-redact` intent
+/// (issue #159): a top-level `aic --no-redact` (modeled here as
+/// `ResolveDeps.redact = Off` alongside `RunDeps.redact = On`) flows into
+/// the resolve workflow, whose gate would otherwise re-arm on a
+/// secret-shaped conflicted file. One invocation, one decision.
+#[tokio::test]
+async fn commit_run_no_redact_carries_into_the_resolve_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+    std::fs::write(
+        dir.path().join("tracked.txt"),
+        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
+    )
+    .unwrap();
+
+    let git = Git::at(dir.path()).unwrap();
+    let result = default_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver_returning("merged\n"),
+            // resolve now? → yes, apply tracked.txt? → yes
+            prompt: prompt_queue(vec![true, true]),
+            display: sink(),
+            redact: Redact::Off,
+        },
+        RunDeps {
+            redact: Redact::On,
+            display: sink(),
+            planner: unreachable_planner(),
+            messenger: unreachable_messenger(),
+            confirm: Confirm::Disabled,
+        },
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "handoff must honor the invocation's no-redact intent: {:?}",
+        result
+    );
+    assert!(is_clean(dir.path()), "merge must be finalized");
+    assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+}
+
 /// Default `aic` run auto-detects a conflicted repo and, when the user declines
 /// `resolve now?`, aborts with a clear redirect — never reaching the resolver
 /// or the normal commit flow.
