@@ -260,23 +260,11 @@ fn fold_ranges(hunks: &[usize]) -> String {
     out
 }
 
-/// Truncate to `max` chars in one pass, appending `…` when a `max+1`-th
-/// char existed (avoids walking the string twice — same trick as the
-/// confirm menu's subject truncation).
-fn truncate(s: &str, max: usize) -> String {
-    let mut chars = s.chars();
-    let mut out: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
 // ----------------------------------------------------------------------
 // Production menu
 // ----------------------------------------------------------------------
 
-/// The three menu rows in display order, each bound to its [`ReviewAction`]
+/// The four menu rows in display order, each bound to its [`ReviewAction`]
 /// in one place — the same single-table shape as the confirm menu's
 /// `CONFIRM_ACTIONS`, so reordering rows can never silently desync a label
 /// from its action. Continue leads (cursor 0) so Enter on an unattended
@@ -359,26 +347,6 @@ fn review_menu(batches: &[BatchPlanBatch]) -> anyhow::Result<ReviewChoice> {
             Ok(ReviewChoice::Merge(first, second))
         }
     }
-}
-
-/// One zero-residue `inquire::Select` row: save the cursor, prompt,
-/// restore, and clear everything the prompt drew (the same DECSC/DECRC
-/// contract `confirm_menu` relies on, so the caller's exact `clear_last`
-/// accounting stays correct), mapping Esc / Ctrl-C / closed stdin to
-/// `None`.
-fn select_row(prompt: &str, labels: &[&str], help: &str) -> anyhow::Result<Option<usize>> {
-    use inquire::Select;
-
-    let term = console::Term::stderr();
-    let _ = term.write_str("\x1b7"); // DECSC: save cursor at the prompt's start
-    let choice = Select::new(prompt, labels.to_vec())
-        .with_starting_cursor(0)
-        .with_help_message(help)
-        .raw_prompt();
-    let _ = term.write_str("\x1b8"); // DECRC: back to the prompt's start
-    let _ = term.clear_to_end_of_screen(); // erase the prompt's footprint
-
-    Ok(inquire_opt(choice)?.map(|option| option.index))
 }
 
 #[cfg(test)]

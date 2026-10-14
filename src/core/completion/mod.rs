@@ -15,7 +15,7 @@
 //! workflows.
 
 use crate::core::cli;
-use crate::workflow::confirm::inquire_opt;
+use crate::workflow::input::inquire_opt;
 use clap::CommandFactory;
 use std::path::{Path, PathBuf};
 

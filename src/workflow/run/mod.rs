@@ -32,9 +32,7 @@ use crate::render::cursor;
 use crate::render::display::Display;
 use crate::render::progress;
 use crate::render::reasoning_feed;
-use crate::workflow::confirm::{
-    CommitDeclined, Confirm, confirm_draft, ensure_interactive_terminal,
-};
+use crate::workflow::confirm::{CommitDeclined, Confirm, confirm_draft};
 use crate::workflow::grouping;
 use crate::workflow::input;
 use crate::workflow::resolve::{ResolveDeps, resolve_run};
@@ -519,7 +517,7 @@ pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Re
     // non-interactive stdin makes them unanswerable — and the failure would
     // otherwise surface mid-run, after the first batch is already staged.
     // Refuse to start rather than abort halfway.
-    ensure_interactive_terminal(
+    input::ensure_interactive_terminal(
         confirm_enabled,
         review_enabled,
         std::io::stdin().is_terminal(),
