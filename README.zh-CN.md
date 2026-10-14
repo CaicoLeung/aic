@@ -90,7 +90,7 @@ aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下�
 - **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
 - **一键撤销** —— `aic undo` 重置上一次 Run 的提交，全部改动原样回到工作区（未暂存）
 - **Run 指令** —— `aic --hint "breaking change"` 为单次 Run 指定意图（如 `--hint "closes #78"`），影响拆分、类型与措辞
-- **密钥拦截门** —— diff 中出现密钥特征内容（云厂商 key、token、私钥块）时，Run 会在**发送给 LLM 之前**拒绝执行，并指明文件与模式类型；`--no-redact` 可知情放行
+- **密钥拦截门** —— diff 或冲突文件中出现密钥特征内容（云厂商 key、token、私钥块）时，Run 会在**发送给 LLM 之前**拒绝执行，并指明文件与模式类型；`--no-redact` 可知情放行
 - **实时推理** —— 观看模型思考拆分方案的全过程
 - **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
 - **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）之间切换
@@ -111,9 +111,10 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 |------|------|
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
 | `aic --hint "<文本>"` | 同上，但为本次 Run 追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
-| `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。 |
+| `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。（冲突仓库请用 `aic resolve` 自己的 `--no-redact`。） |
 | `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。确认时列明将重置哪些提交 —— 含 Run 之后手动提交的；若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
+| `aic resolve --no-redact` | 同 `aic resolve`，但跳过密钥拦截门：默认情况下，冲突文件内容含密钥特征内容（云厂商 key、token、私钥块）时会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将整个文件内容原样发送，仅对本次 resolve 生效。 |
 | `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
 | `aic use <name>` | 切换到已通过 `aic setup` 配置过的 provider，或切换到 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）。 |
 | `aic list` | 展示已 resolve 的 config 及每个值的来源。 |
@@ -141,7 +142,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 
 ![aic resolve 提出解决方案并完成 merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
 
-在处于 merge 中的 repo 运行 `aic resolve`。它会读取每个冲突文件，提出不含 marker 的解决方案，展示 diff，并逐文件询问 `apply?`。当没有未 merge 的内容残留时，它会替你执行 merge 的 `--continue`。在冲突 repo 中直接运行 `aic` 也会察觉并提议移交给 resolve。
+在处于 merge 中的 repo 运行 `aic resolve`。它会读取每个冲突文件，提出不含 marker 的解决方案，展示 diff，并逐文件询问 `apply?`。当没有未 merge 的内容残留时，它会替你执行 merge 的 `--continue`。在冲突 repo 中直接运行 `aic` 也会察觉并提议移交给 resolve。冲突文件含密钥特征内容（云厂商 key、token、私钥块）时会在发送给 LLM 之前拒绝——`aic resolve --no-redact` 可知情放行。
 
 ## 贡献
 

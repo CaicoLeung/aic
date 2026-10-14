@@ -17,7 +17,7 @@ A one-off `--hint` directive attached to a single Run, appended as a "User direc
 _Avoid_: prompt override, custom instruction, memo
 
 **Redaction Gate**:
-The refusal check (issue #155, ADR 0017) that scans a Run's *initial* LLM payloads — the Diff JSON envelope and its sliced batch inputs on the unstaged path, the staged single-commit diff on the staged path — for secret-shaped content (structural token patterns and PEM private-key blocks, per the `src/llm/redact/` vocabulary). On a hit the Run refuses before any Backend call, naming each offending file and pattern kind with masked previews; `--no-redact` skips the gate for that Run only (same CLI-only policy as the Run hint). The confirmation menu's Re-generate redraft re-sends already-gated content and is deliberately ungated. The resolve workflow's whole-file payloads are a tracked follow-up that will reuse the same detector.
+The refusal check (issue #155, ADR 0017) that scans a workflow's *initial* LLM payloads for secret-shaped content (structural token patterns and PEM private-key blocks, per the `src/llm/redact/` vocabulary). On the commit Run: the Diff JSON envelope and its sliced batch inputs on the unstaged path, the staged single-commit diff on the staged path. On the resolve workflow (issue #159): every resolvable conflicted file's whole content, read up front and gated once before any Backend call. On a hit the Run refuses, naming each offending file and pattern kind with masked previews; the override is workflow-scoped — `aic --no-redact` for the commit Run, `aic resolve --no-redact` for resolve — skipping the gate for that invocation only (same CLI-only policy as the Run hint; no config field can persist the bypass). The confirmation menu's Re-generate redraft and the resolve loop's marker-retry re-send already-gated content and are deliberately ungated.
 _Avoid_: secret filter, sanitizer, leak protection, privacy mode
 
 **Batch**:
@@ -66,7 +66,7 @@ _Avoid_: diff stats, file summary, stats block
 
 
 **Run module**:
-The module (`src/workflow/run/`) that owns the default commit workflow: `default_run` checks the repo state and routes — mid-Conflict it offers resolve-then-continue via the front door, otherwise it runs `commit_run`, the single-commit / Batch-plan spine (plan → staged Diff JSON → Drafted Message → commit). Deps arrive as two purposeful bundles, `RunDeps` (display, planner, messenger, confirm) and — on the conflicted route — `ResolveDeps`; `src/lib.rs` is the module root and `main.rs` only the thin dispatch (ADR 0015).
+The module (`src/workflow/run/`) that owns the default commit workflow: `default_run` checks the repo state and routes — mid-Conflict it offers resolve-then-continue via the front door, otherwise it runs `commit_run`, the single-commit / Batch-plan spine (plan → staged Diff JSON → Drafted Message → commit). Deps arrive as two purposeful bundles, `RunDeps` (display, planner, messenger, confirm, redact) and — on the conflicted route — `ResolveDeps`; `src/lib.rs` is the module root and `main.rs` only the thin dispatch (ADR 0015).
 _Avoid_: workflow module, engine, orchestrator
 
 **Diff JSON envelope**:
@@ -136,7 +136,7 @@ The module (`src/git/conflict/`, reached as `Git::conflict() -> Conflict<'_>`) t
 _Avoid_: merge module, conflict service
 
 **Resolve module**:
-The module (`src/workflow/resolve/`) that owns the `aic resolve` workflow: `resolve_run` walks the Conflict's files, shows each proposed Resolution's unified diff, applies approvals, and Finalizes — parameterized by one `ResolveDeps` bundle (resolve, prompt, display). `default_run` in the Run module hands its whole `ResolveDeps` over when the user accepts `resolve now?`; the dependency runs one way (run → resolve).
+The module (`src/workflow/resolve/`) that owns the `aic resolve` workflow: `resolve_run` walks the Conflict's files, shows each proposed Resolution's unified diff, applies approvals, and Finalizes — parameterized by one `ResolveDeps` bundle (resolve, prompt, display, redact). `default_run` in the Run module hands its whole `ResolveDeps` over when the user accepts `resolve now?`; the dependency runs one way (run → resolve).
 _Avoid_: resolution module, conflict workflow (the detection/Finalize half lives in the Conflict module)
 
 ### Progress

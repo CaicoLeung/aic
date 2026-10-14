@@ -3,15 +3,17 @@
 //!
 //! Every payload the commit Run sends to a Backend — the batch-plan Diff JSON
 //! envelope, the per-batch Drafted Message diff input, and the staged
-//! single-commit diff — passes this gate first. The detector is a pure
+//! single-commit diff — passes this gate first, as does every whole-file
+//! payload the resolve workflow sends (issue #159: the resolve loop hoists
+//! its reads and gates them before any resolver call). The detector is a pure
 //! function over text: a hardcoded table of structural token patterns plus a
 //! PEM-header check. There is deliberately no entropy scoring and no
 //! `api_key = "…"` assignment heuristic (issue #155's benign-content
 //! contract — base64 blobs and long hashes must pass — rules both out), and
-//! no config field: the escape hatch is the one-off `--no-redact` flag, the
-//! same Run-scoped policy as `--hint` (ADR 0008's single-source-of-truth
-//! spirit). The resolve workflow's whole-file payloads are a tracked
-//! follow-up; both paths will share this module.
+//! no config field: the escape hatch is the one-off `--no-redact` flag
+//! (top-level for the commit Run, on the resolve subcommand for resolve),
+//! the same Run-scoped policy as `--hint` (ADR 0008's
+//! single-source-of-truth spirit).
 
 /// Run policy for this gate (issue #155, ADR 0017), carried on
 /// [`crate::workflow::run::RunDeps`] next to `Confirm`: `On` is the default
@@ -24,6 +26,39 @@ pub(crate) enum Redact {
     On,
     /// `--no-redact`: send payloads as-is for this Run only.
     Off,
+}
+
+impl Redact {
+    /// Map a CLI `--no-redact` bool onto the gate policy: `true` disarms
+    /// for this invocation, `false` (bare invocation) keeps the gate on.
+    /// Every production wiring site resolves through here so the mapping
+    /// exists exactly once (issue #159).
+    pub(crate) fn from_flag(no_redact: bool) -> Self {
+        if no_redact { Redact::Off } else { Redact::On }
+    }
+}
+
+/// The workflow-scoped escape hatch a [`gate`] refusal names, so the user
+/// re-runs the exact command they started with plus its override (issue
+/// #159): the gate is shared, the hint is not. Free-form strings at call
+/// sites would invite typos into a user-facing refusal; the variants render
+/// verbatim via [`std::fmt::Display`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Override {
+    /// `aic --no-redact` — the commit Run's top-level flag.
+    Run,
+    /// `aic resolve --no-redact` — the resolve subcommand's own flag.
+    Resolve,
+}
+
+impl std::fmt::Display for Override {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cmd = match self {
+            Override::Run => "aic --no-redact",
+            Override::Resolve => "aic resolve --no-redact",
+        };
+        f.write_str(cmd)
+    }
 }
 
 /// The secret family a [`Finding`] belongs to. `scan` deduplicates per
@@ -326,15 +361,23 @@ const LIST_CAP: usize = 5;
 
 /// The Redaction Gate: refuse before any LLM call when a payload contains
 /// secret-shaped content. `diff_per_file` is `(path, diff text)` per file —
-/// raw diffs, before any JSON wrapping, so the error names files directly.
-/// Called only on a Run's *initial* payloads (ADR 0017): the confirmation
-/// menu's Re-generate redraft re-sends already-gated content and stays
-/// ungated by design.
+/// raw diffs or whole-file content, before any JSON wrapping, so the error
+/// names files directly. Called only on a workflow's *initial* payloads
+/// (ADR 0017): the commit Run's confirmation-menu Re-generate redraft and
+/// the resolve workflow's marker-retry re-send already-gated content and
+/// stay ungated by design.
+///
+/// `override_hint` is the workflow-scoped command the user can re-run to
+/// bypass ([`Override::Run`] for the commit Run, [`Override::Resolve`] for
+/// resolve) — the gate is shared, the escape hatch is workflow-scoped.
 ///
 /// Returns `Err` naming every offending file and pattern kind (masked
-/// previews, capped at [`LIST_CAP`] files) plus the `--no-redact` override;
-/// `Ok(())` when the payloads are clean.
-pub(crate) fn gate(diff_per_file: &[(String, String)]) -> anyhow::Result<()> {
+/// previews, capped at [`LIST_CAP`] files) plus the override; `Ok(())` when
+/// the payloads are clean.
+pub(crate) fn gate(
+    diff_per_file: &[(String, String)],
+    override_hint: Override,
+) -> anyhow::Result<()> {
     let offending: Vec<(&str, Vec<Finding>)> = diff_per_file
         .iter()
         .filter_map(|(path, diff)| {
@@ -361,7 +404,9 @@ pub(crate) fn gate(diff_per_file: &[(String, String)]) -> anyhow::Result<()> {
             offending.len() - LIST_CAP
         ));
     }
-    msg.push_str("override for this Run only: aic --no-redact");
+    msg.push_str(&format!(
+        "override for this invocation only: {override_hint}"
+    ));
     anyhow::bail!("{msg}")
 }
 
@@ -492,7 +537,7 @@ mod tests {
     }
 
     /// The gate names every offending file with its kinds, masks previews,
-    /// caps the list, and carries the override hint.
+    /// caps the list, and carries the override hint verbatim.
     #[test]
     fn gate_names_files_kinds_and_override() {
         let files = vec![
@@ -506,7 +551,7 @@ mod tests {
                 "-----BEGIN RSA PRIVATE KEY-----".to_string(),
             ),
         ];
-        let err = gate(&files).expect_err("must refuse");
+        let err = gate(&files, Override::Run).expect_err("must refuse");
         let msg = format!("{err:#}");
         assert!(msg.contains("config.toml"), "{msg}");
         assert!(msg.contains("AWS access key ID (AKIA…)"), "{msg}");
@@ -518,8 +563,11 @@ mod tests {
             "full secret must not print: {msg}"
         );
 
-        gate(&[("clean.rs".to_string(), "let x = 1;".to_string())])
-            .expect("clean payload must pass");
+        gate(
+            &[("clean.rs".to_string(), "let x = 1;".to_string())],
+            Override::Run,
+        )
+        .expect("clean payload must pass");
     }
 
     /// Past the list cap the refusal collapses the tail to a count.
@@ -533,7 +581,28 @@ mod tests {
                 )
             })
             .collect();
-        let msg = format!("{:?}", gate(&files).unwrap_err());
+        let msg = format!("{:?}", gate(&files, Override::Resolve).unwrap_err());
         assert!(msg.contains("… and 2 more files"), "{msg}");
+        assert!(
+            msg.contains("aic resolve --no-redact"),
+            "override hint passes through verbatim: {msg}"
+        );
+    }
+
+    /// The CLI bool maps onto the gate policy in exactly one place: bare
+    /// invocations keep the gate on, `--no-redact` disarms it for that
+    /// invocation only (issue #159).
+    #[test]
+    fn redact_from_flag_maps_the_cli_bool() {
+        assert_eq!(Redact::from_flag(false), Redact::On);
+        assert_eq!(Redact::from_flag(true), Redact::Off);
+    }
+
+    /// Each workflow renders its own exact re-run command — the refusal
+    /// must never name the other workflow's flag (issue #159).
+    #[test]
+    fn override_renders_the_workflow_scoped_command() {
+        assert_eq!(Override::Run.to_string(), "aic --no-redact");
+        assert_eq!(Override::Resolve.to_string(), "aic resolve --no-redact");
     }
 }

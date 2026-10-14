@@ -345,6 +345,16 @@ pub fn unreachable_messenger() -> CommitMessenger {
     )
 }
 
+/// Resolver stub that panics if called — same purpose as
+/// [`unreachable_planner`] for the resolve workflow's LLM step, so a gate
+/// test that must refuse before any Backend call fails loudly if the
+/// resolver is reached (issue #159).
+pub fn unreachable_resolver() -> Resolver {
+    Box::new(|_content: String| -> BoxFuture<anyhow::Result<String>> {
+        Box::pin(async { panic!("Resolver reached on a path that must skip the LLM") })
+    })
+}
+
 /// In-memory [`DisplayWrite`] capturing every line the workflow emits. Clones
 /// share the underlying buffer so a test can hand one clone to `Display::with`
 /// and read the lines back from the other. Most tests just want a quiet sink

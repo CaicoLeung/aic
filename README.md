@@ -90,7 +90,7 @@ See [CLI-agent presets](#cli-agent-presets) for the full preset list.
 - **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge
 - **One-command undo** — `aic undo` resets the last Run's commits and returns every change to the working tree, unstaged
 - **Run directives** — `aic --hint "breaking change"` steers grouping, type, and wording for one Run (e.g. `--hint "closes #78"`)
-- **Secrets redaction gate** — a diff containing secret-shaped content (cloud keys, tokens, private key blocks) refuses the Run *before* anything is sent to the LLM, naming the file and pattern kind; `--no-redact` proceeds knowingly
+- **Secrets redaction gate** — a diff or conflicted file containing secret-shaped content (cloud keys, tokens, private key blocks) refuses the Run *before* anything is sent to the LLM, naming the file and pattern kind; `--no-redact` proceeds knowingly
 - **Live reasoning** — watch the model think as it decides the split
 - **Conventional Commits** — messages follow the [v1.0.0 spec](https://www.conventionalcommits.org/)
 - **Interactive setup** — `aic setup` is menu-driven; `aic use` switches between saved provider profiles and CLI agents (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen)
@@ -111,9 +111,10 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 |---------|-------------|
 | `aic` | Commit staged files. If nothing is staged, auto-split all unstaged changes into hunk-level atomic commits. |
 | `aic --hint "<text>"` | Same, with a one-off directive appended to both prompts — e.g. `aic --hint "closes #78"` or `aic --hint "prefer more batches"`. |
-| `aic --no-redact` | Same as `aic`, but skip the secrets redaction gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. |
+| `aic --no-redact` | Same as `aic`, but skip the secrets redaction gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. (Conflicted repo? `aic resolve` takes its own `--no-redact`.) |
 | `aic undo` | Undo the last Run: reset back to where it started, all its changes back in the working tree (unstaged). Confirms exactly which commits will be reset — including any made after the Run — and refuses if history was rewritten since. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
+| `aic resolve --no-redact` | Same as `aic resolve`, but skip the secrets redaction gate: by default a conflicted file whose content contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends whole-file content as-is, for this resolve only. |
 | `aic setup` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. |
 | `aic use <name>` | Switch to a provider already configured via `aic setup`, or to a CLI agent (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen). |
 | `aic list` | Show resolved config and where each value comes from. |
@@ -141,7 +142,7 @@ Full reference: [provider table](#supported-providers) · [CLI-agent presets](#c
 
 ![aic resolve proposes resolutions and finalizes the merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
 
-Run `aic resolve` in a repo mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. When nothing's left unmerged, it runs the merge's `--continue` for you. Plain `aic` in a conflicted repo notices and offers to hand off.
+Run `aic resolve` in a repo mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. When nothing's left unmerged, it runs the merge's `--continue` for you. Plain `aic` in a conflicted repo notices and offers to hand off. A conflicted file with secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM — `aic resolve --no-redact` proceeds knowingly.
 
 ## Contributing
 

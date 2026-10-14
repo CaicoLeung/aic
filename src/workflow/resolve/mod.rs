@@ -17,6 +17,7 @@ use crate::core::types::{BoxFuture, Prompt, Resolver};
 use crate::git::Git;
 use crate::git::conflict;
 use crate::llm::generator;
+use crate::llm::redact::{self, Redact};
 use crate::llm::retry;
 use crate::render::display::Display;
 use crate::render::progress;
@@ -24,11 +25,16 @@ use crate::workflow::input;
 
 /// The resolve workflow's seam bundle. Passed as one unit so callers (the
 /// production wiring and the Run front door's conflicted-repo handoff) stay
-/// at two parameters: the repo and the deps.
+/// at two parameters: the repo and the deps. `redact` mirrors `RunDeps`
+/// (issue #159, ADR 0017): `Redact::On` gates whole-file payloads before
+/// any Backend call; `Redact::Off` is the one-off `--no-redact` override —
+/// set by `aic resolve --no-redact` or carried from a top-level
+/// `aic --no-redact` through the conflicted-repo handoff.
 pub(crate) struct ResolveDeps {
     pub(crate) resolve: Resolver,
     pub(crate) prompt: Prompt,
     pub(crate) display: Display,
+    pub(crate) redact: Redact,
 }
 
 /// The resolve workflow. See the module docs; behavior is specified by ADR 0005
@@ -38,6 +44,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         resolve,
         prompt,
         display,
+        redact,
     } = deps;
 
     let conflict = git.conflict();
@@ -74,19 +81,38 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     // can distinguish structural skips (binary/oversized — user must resolve
     // by hand) from transient failures (LLM error / markers after retry —
     // user can re-run `aic resolve`).
-    let mut plans: Vec<(String, String, String)> = Vec::new();
-    let mut skipped_unresolvable = 0usize;
-    let mut skipped_failed = 0usize;
+    //
+    // Reads are hoisted out of the resolve loop so the Redaction Gate below
+    // scans every resolvable file *before* any Backend call: a secret in the
+    // last file must refuse the Run without earlier files having been sent
+    // (issue #159, ADR 0017). A non-UTF-8 resolvable file therefore also
+    // aborts upfront instead of mid-loop — same error, earlier, and nothing
+    // ungated leaves the machine first.
+    let mut read: Vec<(String, String)> = Vec::new();
     for f in &files {
         if !f.kind.resolvable() {
             crate::git::conflict::skipped(&display, &f.path, f.kind.reason());
-            skipped_unresolvable += 1;
             continue;
         }
         let original_bytes = conflict.read_worktree(&f.path)?;
         let original = String::from_utf8(original_bytes)
             .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
+        read.push((f.path.clone(), original));
+    }
 
+    // Redaction Gate (issue #159, ADR 0017): the resolver sends whole-file
+    // content, so gate the raw per-file payloads once, before the loop. The
+    // marker-retry inside the loop re-sends bytes this gate already cleared
+    // and stays ungated by design — the same boundary as the commit Run's
+    // confirmation-menu Re-generate redraft.
+    if redact == Redact::On {
+        redact::gate(&read, redact::Override::Resolve)?;
+    }
+
+    let skipped_unresolvable = files.len() - read.len();
+    let mut plans: Vec<(String, String, String)> = Vec::new();
+    let mut skipped_failed = 0usize;
+    for (path, original) in read {
         // Per-file resolution on the shared retry module (seam C, ADR-0005).
         // The op folds the resolver's two failure shapes onto `RetryReason`:
         // marker-laden output → `Markers` (retryable), and any underlying LLM
@@ -95,7 +121,6 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         // auto-retry. The spinner label still distinguishes the first attempt
         // from the retry so the live UX matches the old hand-written loop.
         let mut first_attempt = true;
-        let path = f.path.clone();
         // Capture the resolver by reference so the `async move` block copies the
         // `&Resolver` (Copy) on each call instead of moving the owned `Box` —
         // otherwise the closure would be `FnOnce` and `retry` needs `FnMut`.
@@ -128,14 +153,14 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
                 last_reason: crate::llm::retry::RetryReason::Markers,
                 ..
             })) => {
-                crate::git::conflict::skipped(&display, &f.path, "markers remain after retry");
+                crate::git::conflict::skipped(&display, &path, "markers remain after retry");
                 skipped_failed += 1;
                 continue;
             }
             // The LLM call errored (first attempt or retry) and propagated the
             // original error verbatim.
             Err(crate::llm::retry::RetryError::Fatal(err)) => {
-                crate::git::conflict::skipped(&display, &f.path, &format!("LLM error: {err:#}"));
+                crate::git::conflict::skipped(&display, &path, &format!("LLM error: {err:#}"));
                 skipped_failed += 1;
                 continue;
             }
@@ -146,7 +171,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
             ),
         };
 
-        plans.push((f.path.clone(), original, resolved));
+        plans.push((path, original, resolved));
     }
 
     if plans.is_empty() {
@@ -201,8 +226,11 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
 }
 
 /// Production entry point for `aic resolve` — wires the real LLM resolver and
-/// stdin y/n prompt into [`resolve_run`].
-pub async fn resolve_workflow() -> anyhow::Result<()> {
+/// stdin y/n prompt into [`resolve_run`]. `no_redact` is the resolve
+/// subcommand's `--no-redact` bool (issue #159), mapped via
+/// [`Redact::from_flag`] — the only production site that bypasses the
+/// resolve Redaction Gate besides the top-level flag's handoff carry.
+pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
     let resolve: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
@@ -214,6 +242,7 @@ pub async fn resolve_workflow() -> anyhow::Result<()> {
             resolve,
             prompt,
             display: Display::new(),
+            redact: Redact::from_flag(no_redact),
         },
     )
     .await

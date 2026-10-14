@@ -136,7 +136,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // call. The confirmation menu's Re-generate redraft stays ungated by
         // design: it re-sends content this gate already cleared.
         if redact == Redact::On {
-            redact::gate(&raw_pairs)?;
+            redact::gate(&raw_pairs, redact::Override::Run)?;
         }
 
         let result = planner(diff.to_string()).await?;
@@ -261,7 +261,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 .iter()
                 .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
                 .collect::<anyhow::Result<_>>()?;
-            redact::gate(&pairs)?;
+            redact::gate(&pairs, redact::Override::Run)?;
         }
         // Commit the index exactly as the user staged it — no re-stage
         // (issue #150). The historic `git add` over these paths folded each
@@ -437,15 +437,19 @@ where
 /// Production entry point for the default `aic` run — wires the real LLM
 /// resolver, stdin y/n prompt, terminal confirmation menu, and message editor
 /// into [`default_run`]. `no_redact` is the CLI's `--no-redact` bool, mapped
-/// to [`Redact::Off`] here — the only production site that may bypass the
+/// via [`Redact::from_flag`] — the only production site that may bypass the
 /// Redaction Gate.
 pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Result<()> {
+    // The resolve handoff shares the invocation's `no_redact` intent (issue
+    // #159): `aic --no-redact` on a conflicted repo must not re-arm the gate
+    // the user just disarmed — one invocation, one decision.
     let resolve = ResolveDeps {
         resolve: Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
             Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
         }),
         prompt: Box::new(input::prompt_yes_no),
         display: Display::new(),
+        redact: Redact::from_flag(no_redact),
     };
     // The planner's streaming-capable backend that has not yet produced
     // reasoning is in a cold start, and past the loading grace its loading
@@ -510,7 +514,7 @@ pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Re
             planner,
             messenger,
             confirm,
-            redact: if no_redact { Redact::Off } else { Redact::On },
+            redact: Redact::from_flag(no_redact),
         },
     )
     .await
