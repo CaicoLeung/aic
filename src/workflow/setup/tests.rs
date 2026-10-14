@@ -191,23 +191,13 @@ fn provider_label_shows_provider_and_model() {
     assert_eq!(provider_label(&d), "OpenRouter");
 }
 
+/// [`yes_no`] renders the toggle row for both gates: absent (default) reads
+/// "no", an explicit choice reads back verbatim.
 #[test]
-fn confirm_label_defaults_off_and_reflects_choice() {
-    assert_eq!(confirm_label(&draft(None, None, None, None)), "no");
-    let mut d = draft(None, None, None, None);
-    d.confirm_before_commit = Some(true);
-    assert_eq!(confirm_label(&d), "yes");
-    d.confirm_before_commit = Some(false);
-    assert_eq!(confirm_label(&d), "no");
-}
-
-#[test]
-fn review_label_reads_draft() {
-    let mut d = draft(None, None, None, None);
-    d.review_batch_plan = Some(true);
-    assert_eq!(review_label(&d), "yes");
-    d.review_batch_plan = Some(false);
-    assert_eq!(review_label(&d), "no");
+fn yes_no_defaults_off_and_reflects_choice() {
+    assert_eq!(yes_no(None), "no");
+    assert_eq!(yes_no(Some(false)), "no");
+    assert_eq!(yes_no(Some(true)), "yes");
 }
 
 #[test]
@@ -443,49 +433,25 @@ fn finalize_carries_review_batch_plan() {
     assert_eq!(out.review_batch_plan, Some(true));
 }
 
+/// [`toggle_initial`] (both gates share it) prefers the in-session draft
+/// choice, then the existing config's value, else defaults off.
 #[test]
-fn confirm_initial_prefers_draft_then_existing_then_false() {
-    let existing: Option<Config> = Some(Config {
-        backend: None,
-        api_key: None,
-        model: None,
-        base_url: None,
-        confirm_before_commit: Some(true),
-        ..Default::default()
-    });
-
-    // No draft, existing true -> true.
-    let d = draft(Some(Provider::OpenAI), None, None, None);
-    assert!(confirm_initial(&d, &existing));
-
-    // No draft, no existing -> false (default off).
-    assert!(!confirm_initial(&d, &None));
-
-    // Draft choice wins over existing.
-    let mut d = draft(Some(Provider::OpenAI), None, None, None);
-    d.confirm_before_commit = Some(false);
-    assert!(!confirm_initial(&d, &existing));
-    d.confirm_before_commit = Some(true);
-    assert!(confirm_initial(&d, &None));
-}
-
-#[test]
-fn review_initial_prefers_draft_then_existing() {
+fn toggle_initial_prefers_draft_then_existing_then_off() {
     let existing = Some(Config {
-        backend: None,
-        api_key: None,
-        model: None,
-        base_url: None,
-        confirm_before_commit: None,
         review_batch_plan: Some(true),
         ..Default::default()
     });
 
-    let mut d = draft(None, None, None, None);
-    d.review_batch_plan = Some(false);
-    assert!(!review_initial(&d, &existing));
-    d.review_batch_plan = Some(true);
-    assert!(review_initial(&d, &None));
+    // No draft, existing true -> true; no draft, no existing -> off.
+    assert!(toggle_initial(
+        None,
+        existing.as_ref().and_then(|c| c.review_batch_plan)
+    ));
+    assert!(!toggle_initial(None, None));
+
+    // Draft choice wins over existing, either way.
+    assert!(!toggle_initial(Some(false), Some(true)));
+    assert!(toggle_initial(Some(true), None));
 }
 
 #[test]

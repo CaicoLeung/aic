@@ -356,18 +356,10 @@ fn provider_label(draft: &Draft) -> String {
         format!("{} · {model}", p.display())
     }
 }
-/// `Confirm before commit` menu row: yes/no, defaulting to off.
-fn confirm_label(draft: &Draft) -> String {
-    if draft.confirm_before_commit.unwrap_or(false) {
-        "yes".to_string()
-    } else {
-        "no".to_string()
-    }
-}
-
-/// `Review batch plan` menu row: yes/no, defaulting to off.
-fn review_label(draft: &Draft) -> String {
-    if draft.review_batch_plan.unwrap_or(false) {
+/// Menu-row label for an opt-in toggle (both workflow gates default off):
+/// "yes" only when explicitly on.
+fn yes_no(value: Option<bool>) -> String {
+    if value.unwrap_or(false) {
         "yes".to_string()
     } else {
         "no".to_string()
@@ -405,9 +397,12 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
         format!("{ICON_CLI} CLI agent — {}", cli_label(draft)),
         format!(
             "{ICON_CONFIRM} Confirm before commit — {}",
-            confirm_label(draft)
+            yes_no(draft.confirm_before_commit)
         ),
-        format!("{ICON_PENCIL} Review batch plan — {}", review_label(draft)),
+        format!(
+            "{ICON_PENCIL} Review batch plan — {}",
+            yes_no(draft.review_batch_plan)
+        ),
         save_row,
     ];
     match opt_nav("What would you like to configure?", &items, default_idx)? {
@@ -422,99 +417,67 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
         OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
 }
-/// Run the confirmation-toggle sub-flow (a single Yes/No step). Returns `true`
-/// on Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
+/// Run the confirmation-toggle sub-flow (issue #78). Returns `true` on
+/// Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
 fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    match step_confirm_commit(existing, draft)? {
-        Nav::Next | Nav::Back => Ok(false),
-        Nav::Cancel => Ok(true),
-    }
-}
-/// Initial value for the confirmation toggle: the in-session draft choice
-/// first, then the existing config's value, else `false` (default off). Not
-/// provider-dependent, so no `field_initial`-style provider guard is needed.
-fn confirm_initial(draft: &Draft, existing: &Option<Config>) -> bool {
-    draft
-        .confirm_before_commit
-        .or_else(|| existing.as_ref().and_then(|c| c.confirm_before_commit))
-        .unwrap_or(false)
-}
-
-/// Yes/No choice (an arrow-keyed option list) for requiring confirmation
-/// before each commit (issue #78). Unlike the provider-scoped steps, this one
-/// is not provider-dependent: the
-/// initial value is the in-session draft choice, else the existing config's
-/// value, else `false` (the default — behavior unchanged until the user opts
-/// in).
-fn step_confirm_commit(existing: &Option<Config>, draft: &mut Draft) -> Result<Nav> {
-    show_screen("commit confirmation")?;
-    let initial = confirm_initial(draft, existing);
-    // A yes/no option list driven by arrow keys + Enter — never typed input,
-    // so the user keeps their hands off the keyboard.
-    let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
-    let default_idx = if initial { 0 } else { 1 };
-    match opt_nav(
+    let initial = toggle_initial(
+        draft.confirm_before_commit,
+        existing.as_ref().and_then(|c| c.confirm_before_commit),
+    );
+    let nav = step_toggle(
+        "commit confirmation",
         "Require confirmation before each commit?",
-        &items,
-        default_idx,
-    )? {
-        OptNav::Value(0) => {
-            draft.confirm_before_commit = Some(true);
-            Ok(Nav::Next)
-        }
-        OptNav::Value(1) => {
-            draft.confirm_before_commit = Some(false);
-            Ok(Nav::Next)
-        }
-        OptNav::Value(_) => unreachable!("yes/no has exactly two entries"),
-        OptNav::Back => Ok(Nav::Back),
-        OptNav::Cancel => Ok(Nav::Cancel),
-    }
+        initial,
+        draft,
+        |d, v| d.confirm_before_commit = Some(v),
+    )?;
+    Ok(matches!(nav, Nav::Cancel))
 }
 
-/// Run the review-toggle sub-flow (a single Yes/No step). Returns `true`
-/// on Ctrl-C (cancel the whole setup); `false` returns to the menu either
-/// way.
+/// Run the review-toggle sub-flow (issue #157). Same contract as
+/// [`run_confirm_flow`].
 fn run_review_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    match step_review_plan(existing, draft)? {
-        Nav::Next | Nav::Back => Ok(false),
-        Nav::Cancel => Ok(true),
-    }
-}
-
-/// Initial value for the review toggle: the in-session draft choice first,
-/// then the existing config's value, else `false` (default off).
-fn review_initial(draft: &Draft, existing: &Option<Config>) -> bool {
-    draft
-        .review_batch_plan
-        .or_else(|| existing.as_ref().and_then(|c| c.review_batch_plan))
-        .unwrap_or(false)
-}
-
-/// Yes/No choice for showing the Batch Review menu before drafting (issue
-/// #157). Same shape as the confirmation toggle: not provider-dependent,
-/// defaulting to off — behavior unchanged until the user opts in.
-fn step_review_plan(existing: &Option<Config>, draft: &mut Draft) -> Result<Nav> {
-    show_screen("batch review")?;
-    let initial = review_initial(draft, existing);
-    // A yes/no option list driven by arrow keys + Enter — never typed
-    // input, so the user keeps their hands off the keyboard.
-    let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
-    let default_idx = if initial { 0 } else { 1 };
-    match opt_nav(
+    let initial = toggle_initial(
+        draft.review_batch_plan,
+        existing.as_ref().and_then(|c| c.review_batch_plan),
+    );
+    let nav = step_toggle(
+        "batch review",
         "Review the batch plan before drafting?",
-        &items,
-        default_idx,
-    )? {
-        OptNav::Value(0) => {
-            draft.review_batch_plan = Some(true);
+        initial,
+        draft,
+        |d, v| d.review_batch_plan = Some(v),
+    )?;
+    Ok(matches!(nav, Nav::Cancel))
+}
+
+/// Initial value for a toggle step (both gates share it): the in-session
+/// draft choice first, then the existing config's value, else `false`
+/// (default off). Not provider-dependent, so no `field_initial`-style
+/// provider guard is needed.
+fn toggle_initial(draft_val: Option<bool>, existing_val: Option<bool>) -> bool {
+    draft_val.or(existing_val).unwrap_or(false)
+}
+
+/// The shared Yes/No toggle step behind both opt-in workflow gates (issues
+/// #78 and #157): one arrow-keyed option list — never typed input, so the
+/// user keeps their hands off the keyboard — writing the choice back
+/// through `set`. One step serves both gates so the two can't drift apart.
+fn step_toggle(
+    screen: &str,
+    prompt: &str,
+    initial: bool,
+    draft: &mut Draft,
+    set: fn(&mut Draft, bool),
+) -> Result<Nav> {
+    show_screen(screen)?;
+    let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
+    let default_idx = usize::from(!initial);
+    match opt_nav(prompt, &items, default_idx)? {
+        OptNav::Value(i) => {
+            set(draft, i == 0);
             Ok(Nav::Next)
         }
-        OptNav::Value(1) => {
-            draft.review_batch_plan = Some(false);
-            Ok(Nav::Next)
-        }
-        OptNav::Value(_) => unreachable!("yes/no has exactly two entries"),
         OptNav::Back => Ok(Nav::Back),
         OptNav::Cancel => Ok(Nav::Cancel),
     }
