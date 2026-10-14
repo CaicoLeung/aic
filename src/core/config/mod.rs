@@ -207,9 +207,10 @@ pub struct Config {
     /// generate-and-commit behavior.
     pub confirm_before_commit: Option<bool>,
     /// When `true`, `aic` shows the validated batch plan and offers a
-    /// Continue / Merge / Abort menu (Batch Review, issue #157) before any
-    /// Drafted Message is generated — only on the unstaged multi-Batch
-    /// path. Absent (or `false`) keeps the non-interactive default Run.
+    /// Continue / Merge / Undo / Abort menu (Batch Review, issue #157)
+    /// before any Drafted Message is generated — on the unstaged plan path,
+    /// for any plan (a single-Batch plan lists with no Merge row). Absent
+    /// (or `false`) keeps the non-interactive default Run.
     pub review_batch_plan: Option<bool>,
     /// The CLI-agent Backend's fields. Flattened to top-level TOML keys
     /// (`command` / `args` / `timeout_secs`) so the on-disk shape is unchanged

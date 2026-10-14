@@ -4,8 +4,10 @@
 //! review loop that merges Batches until the user continues or aborts. The
 //! menu shows each Batch's files, hunk ranges, and reason; a merge folds two
 //! Batches into one and re-validates the plan as an exact hunk partition
-//! before the menu re-renders. Abort ends the Run before anything is staged
-//! or drafted — the cheapest exit in the whole workflow.
+//! before the menu re-renders; an undo restores the pre-merge plan (the
+//! go-back the commit-confirmation menu pattern calls for). Abort ends the
+//! Run before anything is staged or drafted — the cheapest exit in the
+//! whole workflow.
 //!
 //! `review_plan` borrows the workflow's [`Display`] rather than owning it:
 //! Batch Review is a phase of the commit Run, not a standalone service (same
@@ -18,23 +20,27 @@ use anyhow::Context;
 use crate::llm::generator::{self, BatchPlanBatch, BatchPlanOutput};
 use crate::render::display::Display;
 use crate::render::palette;
-use crate::workflow::confirm::inquire_opt;
+use crate::workflow::input::{select_row, truncate};
 
 /// One decision from the Batch Review menu (issue #157). Continue proceeds
 /// to drafting with the plan as shown; Abort ends the Run with nothing
 /// staged and nothing committed; Merge folds Batches `a` and `b` (0-based)
-/// into one and returns to the menu with the plan re-rendered.
+/// into one and returns to the menu with the plan re-rendered; UndoMerge
+/// restores the plan as it stood before the last merge — without it, a
+/// mistaken merge could only be undone by aborting the whole Run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewChoice {
     Continue,
     Abort,
     Merge(usize, usize),
+    UndoMerge,
 }
 
-/// Erased Batch Review menu: given the current Batches, returns the user's
-/// decision. Boxed for the same reason as the confirm-menu seam — production
-/// wires it to a terminal menu, tests inject a scripted decision sequence.
-pub(crate) type ReviewMenu = Box<dyn Fn(&[BatchPlanBatch]) -> anyhow::Result<ReviewChoice>>;
+/// Erased Batch Review menu: given the current Batches and whether a merge
+/// is undoable, returns the user's decision. Boxed for the same reason as
+/// the confirm-menu seam — production wires it to a terminal menu, tests
+/// inject a scripted decision sequence.
+pub(crate) type ReviewMenu = Box<dyn Fn(&[BatchPlanBatch], bool) -> anyhow::Result<ReviewChoice>>;
 
 /// Opt-in Batch Review (issue #157): the gate plus the menu seam it needs.
 /// [`BatchReview::Disabled`] is the default — no menu, the plan drafts
@@ -68,16 +74,20 @@ impl BatchReview {
 // ----------------------------------------------------------------------
 
 /// Run the Batch Review loop (issue #157): paint the plan, let the user
-/// merge Batches until satisfied, and return the re-validated plan for
-/// drafting. A pass-through when the gate is off — or the plan has fewer
-/// than two Batches (nothing is mergeable, so the menu would be noise).
+/// merge Batches — and undo merges — until satisfied, and return the
+/// re-validated plan for drafting. A pass-through only when the gate is
+/// off; otherwise the menu lists any plan it is given — a single-Batch
+/// plan simply offers Continue / Abort (nothing is mergeable, but the plan
+/// is still shown and abortable before any drafting is paid for).
 ///
 /// Each merge re-runs `validate_batch_plan`: merging two members of a valid
 /// partition is always still a valid partition, so the check is defensive
 /// only — but it guards the future plan-model extensions that will edit
-/// plans in richer ways than a merge. Abort bails with the same clean
-/// wording as the staged single-commit path's decline: nothing has been
-/// staged or drafted, so there is nothing to unwind.
+/// plans in richer ways than a merge. Undo pops the last pre-merge
+/// snapshot, which was valid when it was pushed, so no re-validation is
+/// needed. Abort bails with the same clean wording as the staged
+/// single-commit path's decline: nothing has been staged or drafted, so
+/// there is nothing to unwind.
 pub(crate) fn review_plan(
     mut plan: BatchPlanOutput,
     file_hunk_counts: &[(String, usize)],
@@ -87,13 +97,11 @@ pub(crate) fn review_plan(
     let BatchReview::Interactive { menu } = review else {
         return Ok(plan);
     };
-    if plan.batches.len() < 2 {
-        return Ok(plan);
-    }
+    let mut history: Vec<BatchPlanOutput> = Vec::new();
 
     loop {
         let rows = paint_plan(display, &plan, file_hunk_counts);
-        match menu(&plan.batches)? {
+        match menu(&plan.batches, !history.is_empty())? {
             ReviewChoice::Continue => {
                 display.clear_last(rows);
                 return Ok(plan);
@@ -104,9 +112,17 @@ pub(crate) fn review_plan(
             }
             ReviewChoice::Merge(a, b) => {
                 display.clear_last(rows);
+                let before = plan.clone();
                 merge_batches(&mut plan, a, b)?;
                 generator::validate_batch_plan(&plan, file_hunk_counts)
                     .context("merged batch plan failed validation")?;
+                history.push(before);
+            }
+            ReviewChoice::UndoMerge => {
+                display.clear_last(rows);
+                plan = history
+                    .pop()
+                    .ok_or_else(|| anyhow::anyhow!("no merge to undo"))?;
             }
         }
     }
@@ -273,23 +289,29 @@ fn fold_ranges(hunks: &[usize]) -> String {
 enum ReviewAction {
     Continue,
     Merge,
+    UndoMerge,
     Abort,
 }
 
-const REVIEW_ACTIONS: [(&str, ReviewAction); 3] = [
+const REVIEW_ACTIONS: [(&str, ReviewAction); 4] = [
     ("Continue", ReviewAction::Continue),
     ("Merge two Batches…", ReviewAction::Merge),
+    ("Undo last merge", ReviewAction::UndoMerge),
     ("Abort", ReviewAction::Abort),
 ];
 
-/// The actions offered for a plan of `len` Batches: all three, minus Merge
-/// when fewer than two Batches remain (merging down to one must not strand
-/// the menu — a "Merge" row over a single Batch would trap the second pick
-/// in its distinct-batch re-ask loop forever).
-fn available_actions(len: usize) -> Vec<(&'static str, ReviewAction)> {
+/// The actions offered right now: Merge needs two or more Batches (merging
+/// down to one must not strand the menu — a "Merge" row over a single Batch
+/// would trap the second pick in its distinct-batch re-ask loop forever);
+/// Undo last merge needs a merge to undo. Everything else is always offered.
+fn available_actions(len: usize, can_undo: bool) -> Vec<(&'static str, ReviewAction)> {
     REVIEW_ACTIONS
         .iter()
-        .filter(|(_, action)| len >= 2 || *action != ReviewAction::Merge)
+        .filter(|(_, action)| match action {
+            ReviewAction::Merge => len >= 2,
+            ReviewAction::UndoMerge => can_undo,
+            _ => true,
+        })
         .copied()
         .collect()
 }
@@ -297,9 +319,10 @@ fn available_actions(len: usize) -> Vec<(&'static str, ReviewAction)> {
 /// Production Batch Review menu (issue #157): an `inquire::Select` over the
 /// offered actions; Merge then walks two Batch picks. Esc / Ctrl-C / closed
 /// stdin at any prompt aborts — nothing has been staged yet, so there is
-/// nothing to go back to (same philosophy as the confirm menu).
-fn review_menu(batches: &[BatchPlanBatch]) -> anyhow::Result<ReviewChoice> {
-    let actions = available_actions(batches.len());
+/// nothing to go back to except the undo row (same philosophy as the
+/// confirm menu).
+fn review_menu(batches: &[BatchPlanBatch], can_undo: bool) -> anyhow::Result<ReviewChoice> {
+    let actions = available_actions(batches.len(), can_undo);
     let labels: Vec<&str> = actions.iter().map(|(label, _)| *label).collect();
     let Some(action) = select_row(
         "Review the batch plan",
@@ -313,6 +336,7 @@ fn review_menu(batches: &[BatchPlanBatch]) -> anyhow::Result<ReviewChoice> {
     match action {
         ReviewAction::Continue => Ok(ReviewChoice::Continue),
         ReviewAction::Abort => Ok(ReviewChoice::Abort),
+        ReviewAction::UndoMerge => Ok(ReviewChoice::UndoMerge),
         ReviewAction::Merge => {
             let labels: Vec<String> = batches
                 .iter()
@@ -384,24 +408,16 @@ mod tests {
 
     /// Menu that pops decisions from a queue and panics when exhausted, so
     /// an under-specified test fails loudly (same contract as e2e's
-    /// `menu_queue`).
+    /// `review_queue`).
     fn menu_queue(decisions: Vec<ReviewChoice>) -> ReviewMenu {
         let queue = std::sync::Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::from(
             decisions,
         )));
-        Box::new(move |_batches: &[BatchPlanBatch]| {
+        Box::new(move |_batches: &[BatchPlanBatch], _can_undo: bool| {
             Ok(queue
                 .lock()
                 .pop_front()
                 .expect("batch review menu queue exhausted"))
-        })
-    }
-
-    /// Menu that panics if called — proves the review loop never reaches
-    /// the menu on a skip path.
-    fn unreachable_menu() -> ReviewMenu {
-        Box::new(|_: &[BatchPlanBatch]| -> anyhow::Result<ReviewChoice> {
-            panic!("batch review menu must not be called")
         })
     }
 
@@ -488,34 +504,39 @@ mod tests {
         assert_eq!(fold_ranges(&[]), "");
     }
 
-    /// The gate off, or a plan with fewer than two Batches, never reaches
-    /// the menu — the non-interactive default Run stays non-interactive.
+    /// The gate off never reaches the menu — the non-interactive default
+    /// Run stays non-interactive.
     #[test]
-    fn review_plan_skips_menu_when_disabled_or_single_batch() {
+    fn review_plan_passes_through_when_disabled() {
         let counts = vec![("a.rs".to_string(), 1)];
         let one = BatchPlanOutput {
             batches: vec![batch(vec![change("a.rs", &[1])], None)],
         };
-
-        let out = review_plan(
-            one.clone(),
-            &counts,
-            &quiet_display(),
-            &BatchReview::Disabled,
-        )
-        .unwrap();
+        let out = review_plan(one, &counts, &quiet_display(), &BatchReview::Disabled).unwrap();
         assert_eq!(out.batches.len(), 1);
+    }
 
-        // Interactive gate but a single Batch: still skipped — the menu
-        // stub panics if the loop reaches it.
-        let out = review_plan(
+    /// A single-Batch plan still reaches the menu when the gate is on (the
+    /// plan is listed and abortable before any drafting is paid for) —
+    /// issue #157's "shows the plan" for opted-in users even when nothing
+    /// is mergeable.
+    #[test]
+    fn review_plan_single_batch_still_reaches_the_menu() {
+        let counts = vec![("a.rs".to_string(), 1)];
+        let one = BatchPlanOutput {
+            batches: vec![batch(vec![change("a.rs", &[1])], None)],
+        };
+        let err = review_plan(
             one,
             &counts,
             &quiet_display(),
-            &interactive(unreachable_menu()),
+            &interactive(menu_queue(vec![ReviewChoice::Abort])),
         )
-        .unwrap();
-        assert_eq!(out.batches.len(), 1);
+        .expect_err("the single-Batch menu must honor Abort");
+        assert!(
+            format!("{err:#}").contains("aborted — no commit made"),
+            "expected the clean abort wording, got: {err:#}"
+        );
     }
 
     /// Merge then Continue returns the merged (re-validated) plan and the
@@ -545,6 +566,38 @@ mod tests {
         assert_eq!(out.batches.len(), 1);
         assert_eq!(out.batches[0].changes[0].hunks, vec![1, 2]);
         assert_eq!(out.batches[0].reason.as_deref(), Some("first hunk · rest"));
+        generator::validate_batch_plan(&out, &counts).unwrap();
+    }
+
+    /// Undo restores the plan as it stood before the last merge — the
+    /// go-back the commit-confirmation menu pattern calls for — and the
+    /// restored plan is the exact original, still a valid partition.
+    #[test]
+    fn review_plan_undo_restores_pre_merge_plan() {
+        let counts = vec![("a.rs".to_string(), 2), ("b.rs".to_string(), 1)];
+        let plan = BatchPlanOutput {
+            batches: vec![
+                batch(vec![change("a.rs", &[1])], Some("first hunk")),
+                batch(
+                    vec![change("a.rs", &[2]), change("b.rs", &[1])],
+                    Some("rest"),
+                ),
+            ],
+        };
+        let out = review_plan(
+            plan,
+            &counts,
+            &quiet_display(),
+            &interactive(menu_queue(vec![
+                ReviewChoice::Merge(0, 1),
+                ReviewChoice::UndoMerge,
+                ReviewChoice::Continue,
+            ])),
+        )
+        .unwrap();
+        assert_eq!(out.batches.len(), 2, "undo must restore both Batches");
+        assert_eq!(out.batches[0].reason.as_deref(), Some("first hunk"));
+        assert_eq!(out.batches[1].reason.as_deref(), Some("rest"));
         generator::validate_batch_plan(&out, &counts).unwrap();
     }
 
@@ -580,24 +633,32 @@ mod tests {
     fn review_actions_table_is_self_describing() {
         assert_eq!(REVIEW_ACTIONS[0].0, "Continue");
         assert_eq!(REVIEW_ACTIONS[1].0, "Merge two Batches…");
-        assert_eq!(REVIEW_ACTIONS[2].0, "Abort");
+        assert_eq!(REVIEW_ACTIONS[2].0, "Undo last merge");
+        assert_eq!(REVIEW_ACTIONS[3].0, "Abort");
         let actions: Vec<_> = REVIEW_ACTIONS.iter().map(|(_, a)| *a).collect();
-        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.len(), 4);
         assert!(actions.contains(&ReviewAction::Continue));
         assert!(actions.contains(&ReviewAction::Merge));
+        assert!(actions.contains(&ReviewAction::UndoMerge));
         assert!(actions.contains(&ReviewAction::Abort));
     }
 
     /// Merging down to one Batch must not strand the menu: with fewer than
-    /// two Batches the Merge row disappears (Continue / Abort only), so the
-    /// second-pick re-ask can never trap over a single row.
+    /// two Batches the Merge row disappears, and the Undo row appears only
+    /// once a merge exists — so the second-pick re-ask can never trap over
+    /// a single row, and Undo is never a dead row.
     #[test]
-    fn available_actions_drop_merge_below_two_batches() {
-        assert_eq!(available_actions(2).len(), 3);
-        assert_eq!(available_actions(5).len(), 3);
-        let one = available_actions(1);
+    fn available_actions_filter_merge_and_undo() {
+        assert_eq!(available_actions(2, false).len(), 3);
+        assert_eq!(available_actions(5, false).len(), 3);
+        let one = available_actions(1, false);
         assert_eq!(one.len(), 2);
         assert_eq!(one[0].0, "Continue");
         assert_eq!(one[1].0, "Abort");
+        // A merge exists: the Undo row joins, even over a single Batch.
+        let undone = available_actions(1, true);
+        assert_eq!(undone.len(), 3);
+        assert_eq!(undone[1].0, "Undo last merge");
+        assert_eq!(available_actions(2, true).len(), 4);
     }
 }
