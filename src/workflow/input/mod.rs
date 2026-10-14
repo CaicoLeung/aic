@@ -232,6 +232,14 @@ pub(crate) fn prompt_yes_no(label: &str) -> Result<bool> {
 /// non-terminal stdin — the guard runs before any planning or staging, so
 /// the run fails cleanly instead of aborting after the first batch is
 /// already staged.
+///
+/// Deliberately unconditional once a knob is on: the guard does not peek at
+/// the repo to predict whether a menu would actually appear (Batch Review
+/// only shows on the unstaged plan path, so a staged-only or clean repo
+/// would never reach it). A state-dependent guard would make the failure
+/// flaky for scripted callers — fine while only staged files exist, fatal
+/// the moment one goes unstaged — and anyone enabling an interactive knob
+/// in a non-TTY context has a config bug worth surfacing every run.
 pub(crate) fn ensure_interactive_terminal(
     confirm_enabled: bool,
     review_enabled: bool,

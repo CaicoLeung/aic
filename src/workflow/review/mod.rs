@@ -171,7 +171,7 @@ fn merge_batches(plan: &mut BatchPlanOutput, a: usize, b: usize) -> anyhow::Resu
 /// the loop can erase it with [`Display::clear_last`] when the menu resolves
 /// or re-renders. Every row is truncated to the terminal's text width
 /// ([`Display::text_width`] — the same resolution the commit preview wraps
-/// to; `batch_summary` caps its interior pieces first) so each Batch stays
+/// to) so each Batch stays
 /// on exactly one terminal row and the row count stays exact — a wrapped
 /// row would make `clear_last` under-erase.
 fn paint_plan(
@@ -235,9 +235,9 @@ fn batch_summary(i: usize, batch: &BatchPlanBatch, file_hunk_counts: &[(String, 
     let reason = batch
         .reason
         .as_deref()
-        .map(|r| format!(" — {}", truncate(r, 40)))
+        .map(|r| format!(" — {r}"))
         .unwrap_or_default();
-    format!("#{} {}{}", i + 1, truncate(&files, 64), reason)
+    format!("#{} {files}{reason}", i + 1)
 }
 
 /// One Batch's menu-pick label: `#N files · reason` (no hunk ranges — the
@@ -328,60 +328,74 @@ fn available_actions(len: usize, can_undo: bool) -> Vec<(&'static str, ReviewAct
 }
 
 /// Production Batch Review menu (issue #157): an `inquire::Select` over the
-/// offered actions; Merge then walks two Batch picks. Esc / Ctrl-C / closed
-/// stdin at any prompt aborts — nothing has been staged yet, so there is
-/// nothing to go back to except the undo row (same philosophy as the
-/// confirm menu).
+/// offered actions; Merge then walks two Batch picks. A cancel at the
+/// action menu (Esc / Ctrl-C / closed stdin) aborts — nothing has been
+/// staged, and the menu's only go-back is the undo row (same philosophy as
+/// the confirm menu). A cancel at a merge pick instead backs out to the
+/// action menu: the picks are a sub-dialog of the menu, so cancelling there
+/// means "not this action", not "end the Run" — and nothing is staged yet,
+/// so backing out is always safe.
 fn review_menu(batches: &[BatchPlanBatch], can_undo: bool) -> anyhow::Result<ReviewChoice> {
-    let actions = available_actions(batches.len(), can_undo);
-    let labels: Vec<&str> = actions.iter().map(|(label, _)| *label).collect();
-    let Some(action) = select_row(
-        "Review the batch plan",
-        &labels,
-        "↑/↓ select · Enter confirm · Esc or Ctrl-C aborts",
-    )?
-    .map(|idx| actions[idx].1) else {
-        return Ok(ReviewChoice::Abort);
-    };
+    loop {
+        let actions = available_actions(batches.len(), can_undo);
+        let labels: Vec<&str> = actions.iter().map(|(label, _)| *label).collect();
+        let Some(action) = select_row(
+            "Review the batch plan",
+            &labels,
+            "↑/↓ select · Enter confirm · Esc or Ctrl-C aborts",
+        )?
+        .map(|idx| actions[idx].1) else {
+            return Ok(ReviewChoice::Abort);
+        };
 
-    match action {
-        ReviewAction::Continue => Ok(ReviewChoice::Continue),
-        ReviewAction::Abort => Ok(ReviewChoice::Abort),
-        ReviewAction::UndoMerge => Ok(ReviewChoice::UndoMerge),
-        ReviewAction::Merge => {
-            let labels: Vec<String> = batches
-                .iter()
-                .enumerate()
-                .map(|(i, b)| batch_label(i, b))
-                .collect();
-            let rows: Vec<&str> = labels.iter().map(String::as_str).collect();
-            let Some(first) = select_row(
-                "Merge which Batch first?",
-                &rows,
-                "↑/↓ select · Enter confirm · Esc aborts",
-            )?
-            else {
-                return Ok(ReviewChoice::Abort);
-            };
-            // Re-ask the second pick while it equals the first — a
-            // self-merge is meaningless, and silently skipping it would
-            // read as the menu ignoring the user.
-            let second = loop {
-                let Some(pick) = select_row(
-                    "…and which other Batch?",
-                    &rows,
-                    "↑/↓ select · Enter confirm · Esc aborts",
-                )?
-                else {
-                    return Ok(ReviewChoice::Abort);
-                };
-                if pick != first {
-                    break pick;
+        match action {
+            ReviewAction::Continue => return Ok(ReviewChoice::Continue),
+            ReviewAction::Abort => return Ok(ReviewChoice::Abort),
+            ReviewAction::UndoMerge => return Ok(ReviewChoice::UndoMerge),
+            ReviewAction::Merge => {
+                if let Some((first, second)) = merge_picks(batches)? {
+                    return Ok(ReviewChoice::Merge(first, second));
                 }
-            };
-            Ok(ReviewChoice::Merge(first, second))
+                // A cancelled pick falls through: re-offer the action menu.
+            }
         }
     }
+}
+
+/// The two Batch picks behind "Merge two Batches…". The second pick re-asks
+/// while it equals the first — a self-merge is meaningless, and silently
+/// skipping it would read as the menu ignoring the user. `None` when the
+/// user cancels either pick (Esc / Ctrl-C / closed stdin): the caller
+/// re-offers the action menu rather than aborting the Run.
+fn merge_picks(batches: &[BatchPlanBatch]) -> anyhow::Result<Option<(usize, usize)>> {
+    let labels: Vec<String> = batches
+        .iter()
+        .enumerate()
+        .map(|(i, b)| batch_label(i, b))
+        .collect();
+    let rows: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let Some(first) = select_row(
+        "Merge which Batch first?",
+        &rows,
+        "↑/↓ select · Enter confirm · Esc back",
+    )?
+    else {
+        return Ok(None);
+    };
+    let second = loop {
+        let Some(pick) = select_row(
+            "…and which other Batch?",
+            &rows,
+            "↑/↓ select · Enter confirm · Esc back",
+        )?
+        else {
+            return Ok(None);
+        };
+        if pick != first {
+            break pick;
+        }
+    };
+    Ok(Some((first, second)))
 }
 
 #[cfg(test)]
