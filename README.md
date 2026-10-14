@@ -111,7 +111,7 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 |---------|-------------|
 | `aic` | Commit staged files. If nothing is staged, auto-split all unstaged changes into hunk-level atomic commits. |
 | `aic --hint "<text>"` | Same, with a one-off directive appended to both prompts — e.g. `aic --hint "closes #78"` or `aic --hint "prefer more batches"`. |
-| `aic --no-redact` | Same as `aic`, but skip the secrets redaction gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. |
+| `aic --no-redact` | Same as `aic`, but skip the secrets redaction gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. (Conflicted repo? `aic resolve` takes its own `--no-redact`.) |
 | `aic undo` | Undo the last Run: reset back to where it started, all its changes back in the working tree (unstaged). Confirms exactly which commits will be reset — including any made after the Run — and refuses if history was rewritten since. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
 | `aic resolve --no-redact` | Same as `aic resolve`, but skip the secrets redaction gate: by default a conflicted file whose content contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends whole-file content as-is, for this resolve only. |

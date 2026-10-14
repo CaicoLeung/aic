@@ -73,7 +73,8 @@ pub struct Cli {
     /// file and pattern kind. This flag proceeds knowingly, sending the diff
     /// as-is. One-off CLI intent only; there is deliberately no config field
     /// — a persisted bypass would silently disable a safety gate for every
-    /// future Run. Run-scoped: rejected alongside a subcommand.
+    /// future Run. Run-scoped: rejected alongside a subcommand — resolve
+    /// carries its own override, `aic resolve --no-redact` (issue #159).
     #[arg(long)]
     pub no_redact: bool,
 

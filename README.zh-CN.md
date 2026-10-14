@@ -111,7 +111,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 |------|------|
 | `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
 | `aic --hint "<文本>"` | 同上，但为本次 Run 追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
-| `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。 |
+| `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。（冲突仓库请用 `aic resolve` 自己的 `--no-redact`。） |
 | `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。确认时列明将重置哪些提交 —— 含 Run 之后手动提交的；若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic resolve --no-redact` | 同 `aic resolve`，但跳过密钥拦截门：默认情况下，冲突文件内容含密钥特征内容（云厂商 key、token、私钥块）时会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将整个文件内容原样发送，仅对本次 resolve 生效。 |
