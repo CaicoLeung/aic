@@ -145,6 +145,21 @@ fn seed_draft_carries_confirm_before_commit() {
 }
 
 #[test]
+fn seed_draft_carries_review_batch_plan() {
+    let existing = Some(Config {
+        backend: None,
+        api_key: None,
+        model: None,
+        base_url: None,
+        confirm_before_commit: None,
+        review_batch_plan: Some(true),
+        ..Default::default()
+    });
+    let d = seed_draft(&existing);
+    assert_eq!(d.review_batch_plan, Some(true));
+}
+
+#[test]
 fn provider_label_defaults_to_openai_for_api_backend() {
     // API backend (the default) with no provider chosen shows the OpenAI
     // default + its default model, mirroring `finalize` — never "(not set)"
@@ -184,6 +199,15 @@ fn confirm_label_defaults_off_and_reflects_choice() {
     assert_eq!(confirm_label(&d), "yes");
     d.confirm_before_commit = Some(false);
     assert_eq!(confirm_label(&d), "no");
+}
+
+#[test]
+fn review_label_reads_draft() {
+    let mut d = draft(None, None, None, None);
+    d.review_batch_plan = Some(true);
+    assert_eq!(review_label(&d), "yes");
+    d.review_batch_plan = Some(false);
+    assert_eq!(review_label(&d), "no");
 }
 
 #[test]
@@ -406,6 +430,20 @@ fn finalize_carries_confirm_before_commit() {
 }
 
 #[test]
+fn finalize_carries_review_batch_plan() {
+    // Untouched (None) when the user never visited the step — config stays
+    // absent, so the runtime default remains off.
+    let out = finalize(draft(Some(Provider::OpenAI), None, None, None));
+    assert_eq!(out.review_batch_plan, None);
+
+    // Explicit choice round-trips into the written config.
+    let mut d = draft(Some(Provider::OpenAI), None, None, None);
+    d.review_batch_plan = Some(true);
+    let out = finalize(d);
+    assert_eq!(out.review_batch_plan, Some(true));
+}
+
+#[test]
 fn confirm_initial_prefers_draft_then_existing_then_false() {
     let existing: Option<Config> = Some(Config {
         backend: None,
@@ -429,6 +467,25 @@ fn confirm_initial_prefers_draft_then_existing_then_false() {
     assert!(!confirm_initial(&d, &existing));
     d.confirm_before_commit = Some(true);
     assert!(confirm_initial(&d, &None));
+}
+
+#[test]
+fn review_initial_prefers_draft_then_existing() {
+    let existing = Some(Config {
+        backend: None,
+        api_key: None,
+        model: None,
+        base_url: None,
+        confirm_before_commit: None,
+        review_batch_plan: Some(true),
+        ..Default::default()
+    });
+
+    let mut d = draft(None, None, None, None);
+    d.review_batch_plan = Some(false);
+    assert!(!review_initial(&d, &existing));
+    d.review_batch_plan = Some(true);
+    assert!(review_initial(&d, &None));
 }
 
 #[test]

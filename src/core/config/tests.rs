@@ -31,6 +31,21 @@ fn confirm_before_commit_defaults_off_and_respects_value() {
 }
 
 #[test]
+fn review_batch_plan_defaults_off_and_respects_value() {
+    assert!(!cfg("openai", None, None, None).review_batch_plan());
+    let on = Config {
+        backend: None,
+        api_key: None,
+        model: None,
+        base_url: None,
+        confirm_before_commit: None,
+        review_batch_plan: Some(true),
+        ..Default::default()
+    };
+    assert!(on.review_batch_plan());
+}
+
+#[test]
 fn resolve_field_config_over_default() {
     // Default when nothing is set.
     let (v, s) = resolve_field(None, "def");

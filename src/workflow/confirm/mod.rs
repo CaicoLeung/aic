@@ -104,19 +104,29 @@ impl std::fmt::Display for CommitDeclined {
 
 impl std::error::Error for CommitDeclined {}
 
-/// The pre-commit confirmation requires an interactive stdin: the menu
-/// ([`confirm_menu`]) renders on stderr but reads keys from stdin, so a
-/// non-TTY stdin leaves the menu unanswerable. Returns an error naming the
-/// fix when confirmation is enabled but stdin is not a terminal — the guard
-/// runs before any planning or staging, so the run fails cleanly instead of
-/// aborting after the first batch is already staged (issue #78).
-pub(crate) fn ensure_confirm_terminal(
+/// The interactive menus — Commit confirmation (issue #78) and Batch Review
+/// (issue #157) — require an interactive stdin: they render on stderr but
+/// read keys from stdin, so a non-TTY stdin leaves them unanswerable.
+/// Returns an error naming the fix when any enabled menu knob meets a
+/// non-terminal stdin — the guard runs before any planning or staging, so
+/// the run fails cleanly instead of aborting after the first batch is
+/// already staged.
+pub(crate) fn ensure_interactive_terminal(
     confirm_enabled: bool,
+    review_enabled: bool,
     stdin_tty: bool,
 ) -> anyhow::Result<()> {
-    if confirm_enabled && !stdin_tty {
+    let knobs = [
+        confirm_enabled.then_some("confirm_before_commit"),
+        review_enabled.then_some("review_batch_plan"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" and ");
+    if !knobs.is_empty() && !stdin_tty {
         anyhow::bail!(
-            "confirm_before_commit is enabled but stdin is not a terminal — \
+            "{knobs} enabled but stdin is not a terminal — \
              run `aic` from a terminal, or turn the option off"
         );
     }
@@ -302,17 +312,22 @@ fn message_to_edit(subject: &str, body: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// Confirmation off, or an interactive stdin, always passes; confirmation
-    /// on with a non-TTY stdin fails fast with a message naming the fix —
-    /// before any planning or staging happens.
+    /// Every enabled-menu combination passes on an interactive stdin; any
+    /// enabled knob with a non-TTY stdin fails fast with a message naming
+    /// the knob and the fix — before any planning or staging happens.
     #[test]
-    fn ensure_confirm_terminal_guards_non_tty_stdin() {
-        assert!(ensure_confirm_terminal(false, false).is_ok());
-        assert!(ensure_confirm_terminal(false, true).is_ok());
-        assert!(ensure_confirm_terminal(true, true).is_ok());
+    fn ensure_interactive_terminal_guards_non_tty_stdin() {
+        assert!(ensure_interactive_terminal(false, false, false).is_ok());
+        assert!(ensure_interactive_terminal(true, false, true).is_ok());
+        assert!(ensure_interactive_terminal(true, true, true).is_ok());
 
-        let err = ensure_confirm_terminal(true, false).expect_err("must refuse non-TTY stdin");
+        let err =
+            ensure_interactive_terminal(true, false, false).expect_err("must refuse non-TTY stdin");
         let msg = format!("{err:#}");
+        assert!(
+            msg.contains("confirm_before_commit"),
+            "expected the knob to be named, got: {msg}"
+        );
         assert!(
             msg.contains("stdin is not a terminal"),
             "expected a clear non-TTY error, got: {msg}"
@@ -320,6 +335,20 @@ mod tests {
         assert!(
             msg.contains("run `aic` from a terminal"),
             "expected the fix to be named, got: {msg}"
+        );
+
+        let err =
+            ensure_interactive_terminal(false, true, false).expect_err("must refuse non-TTY stdin");
+        assert!(
+            format!("{err:#}").contains("review_batch_plan"),
+            "expected the review knob to be named, got: {err:#}"
+        );
+
+        let err =
+            ensure_interactive_terminal(true, true, false).expect_err("must refuse non-TTY stdin");
+        assert!(
+            format!("{err:#}").contains("confirm_before_commit and review_batch_plan"),
+            "expected both knobs to be named, got: {err:#}"
         );
     }
 

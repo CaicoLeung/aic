@@ -230,5 +230,6 @@ args = ["run", "--format", "json", "{prompt}"]
 | `args` | Argv 模板，`{prompt}` 会被替换 | `["{prompt}"]` |
 | `timeout_secs` | 每次调用空闲超时（CLI backend） | `240`（流式）/ `600`（批量） |
 | `confirm_before_commit` | 提交前显示审核菜单 | `false` |
+| `review_batch_plan` | 起草前显示批次计划审查菜单（可合并 Batch） | `false` |
 
 </details>

@@ -6,6 +6,7 @@ pub mod confirm;
 pub mod grouping;
 pub mod input;
 pub mod resolve;
+pub mod review;
 pub mod run;
 pub mod setup;
 pub mod undo;

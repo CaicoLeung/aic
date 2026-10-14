@@ -8,7 +8,7 @@
 //!   a validated batch plan over unstaged files with concurrent pre-drafting
 //!   (ADR 0014) and per-batch stage+commit.
 //!
-//! Seams (`planner`, `messenger`, `confirm`, `display`) are bundled in
+//! Seams (`planner`, `messenger`, `confirm`, `review`, `display`) are bundled
 //! [`RunDeps`]; `git` stays a separate parameter because it is the substrate
 //! every phase reads, not a swappable seam. Production wiring lives in
 //! [`default_workflow`]; e2e drives `commit_run`/`default_run` directly with
@@ -32,10 +32,13 @@ use crate::render::cursor;
 use crate::render::display::Display;
 use crate::render::progress;
 use crate::render::reasoning_feed;
-use crate::workflow::confirm::{CommitDeclined, Confirm, confirm_draft, ensure_confirm_terminal};
+use crate::workflow::confirm::{
+    CommitDeclined, Confirm, confirm_draft, ensure_interactive_terminal,
+};
 use crate::workflow::grouping;
 use crate::workflow::input;
 use crate::workflow::resolve::{ResolveDeps, resolve_run};
+use crate::workflow::review::{BatchReview, review_plan};
 use crate::workflow::undo;
 
 /// Cap on concurrent commit-message drafts during a multi-batch Run (ADR 0014).
@@ -47,17 +50,21 @@ use crate::workflow::undo;
 const MAX_CONCURRENT_DRAFTS: usize = 8;
 
 /// The commit Run's seam bundle: display, batch planner, commit messenger,
-/// the opt-in confirmation gate (issue #78), and the Redaction Gate policy
-/// (issue #155, ADR 0017). When confirmation is enabled, every drafted
-/// message is shown (message + body + file list) and its menu must approve it
-/// (Commit) — or Re-generate / Edit it, or Abort — before the commit lands.
-/// `redact` mirrors `confirm` as run policy carried with the seams: `Off` is
-/// the `--no-redact` one-off override.
+/// the opt-in confirmation gate (issue #78), the opt-in Batch Review gate
+/// (issue #157), and the Redaction Gate policy (issue #155, ADR 0017).
+/// When confirmation is enabled, every drafted message is shown (message +
+/// body + file list) and its menu must approve it (Commit) — or
+/// Re-generate / Edit it, or Abort — before the commit lands. When review
+/// is enabled, the validated plan is shown first and its Batches can be
+/// merged before any drafting starts. `redact` mirrors `confirm`/`review`
+/// as run policy carried with the seams: `Off` is the `--no-redact`
+/// one-off override.
 pub(crate) struct RunDeps {
     pub(crate) display: Display,
     pub(crate) planner: BatchPlanner,
     pub(crate) messenger: CommitMessenger,
     pub(crate) confirm: Confirm,
+    pub(crate) review: BatchReview,
     pub(crate) redact: Redact,
 }
 
@@ -71,6 +78,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         planner,
         messenger,
         confirm,
+        review,
         redact,
     } = deps;
 
@@ -159,6 +167,13 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 plan
             }
         };
+
+        // Batch Review (issue #157): the opt-in pre-draft gate — applies to
+        // whichever plan proceeds (the LLM's or the deterministic
+        // fallback's) and merges Batches before any Drafted Message is paid
+        // for. Abort here is the cheapest exit: nothing staged, nothing
+        // drafted.
+        let result = review_plan(result, &file_hunk_counts, &display, &review)?;
 
         let count = result.batches.len();
         // Pre-draft every batch's message concurrently (ADR 0014): the LLM
@@ -489,22 +504,35 @@ pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Re
         },
     );
     let git = Git::at(Path::new("."))?;
-    // Absent/malformed config keeps the default (no confirmation) — same
+    // Absent/malformed config keeps the defaults (no menus) — same
     // tolerance the provider-field resolution uses (config > default).
-    let confirm_enabled = config::Config::load()
-        .ok()
-        .flatten()
+    let config = config::Config::load().ok().flatten();
+    let confirm_enabled = config
+        .as_ref()
         .map(|c| c.confirm_before_commit())
         .unwrap_or(false);
-    // The confirmation menu renders on stderr but reads keys from stdin, so a
-    // non-interactive stdin makes it unanswerable — and the failure would
+    let review_enabled = config
+        .as_ref()
+        .map(|c| c.review_batch_plan())
+        .unwrap_or(false);
+    // The interactive menus render on stderr but read keys from stdin, so a
+    // non-interactive stdin makes them unanswerable — and the failure would
     // otherwise surface mid-run, after the first batch is already staged.
     // Refuse to start rather than abort halfway.
-    ensure_confirm_terminal(confirm_enabled, std::io::stdin().is_terminal())?;
+    ensure_interactive_terminal(
+        confirm_enabled,
+        review_enabled,
+        std::io::stdin().is_terminal(),
+    )?;
     let confirm = if confirm_enabled {
         Confirm::interactive()
     } else {
         Confirm::Disabled
+    };
+    let review = if review_enabled {
+        BatchReview::interactive()
+    } else {
+        BatchReview::Disabled
     };
     default_run(
         &git,
@@ -514,6 +542,7 @@ pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Re
             planner,
             messenger,
             confirm,
+            review,
             redact: Redact::from_flag(no_redact),
         },
     )

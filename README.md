@@ -230,5 +230,6 @@ See [ADR 0010](docs/adr/0010-cli-agent-backend.md) for the backend design and [A
 | `args` | Argv template, `{prompt}` is replaced | `["{prompt}"]` |
 | `timeout_secs` | Per-call idle timeout (CLI backend) | `240` (streaming) / `600` (batch) |
 | `confirm_before_commit` | Show review menu before each commit | `false` |
+| `review_batch_plan` | Show batch-plan review menu (merge Batches) before drafting | `false` |
 
 </details>

@@ -1,6 +1,7 @@
 //! End-to-end tests for the user-facing workflows: the commit Run
 //! (`commit.rs`, `grouping.rs`, `hooks.rs`), the resolve flow (`resolve.rs`,
-//! ADR 0005), and the confirmation menu (`confirm.rs`).
+//! ADR 0005), the confirmation menu (`confirm.rs`), and the Batch Review
+//! gate (`review.rs`).
 //!
 //! These drive the workflow entries directly — `default_run`/`commit_run`
 //! (seams bundled in `RunDeps`) and `resolve_run` (seams in `ResolveDeps`) —
@@ -32,4 +33,5 @@ mod confirm;
 mod grouping;
 mod hooks;
 mod resolve;
+mod review;
 mod undo;

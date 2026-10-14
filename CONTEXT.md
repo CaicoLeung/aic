@@ -44,6 +44,10 @@ _Avoid_: auto-splitting, clustering, chunking
 The reason the engine joined a Block's hunks: `Single` (lone hunk), `Adjacency` (small within-file gap), `SameContext` (shared function/section header), or `SameScope` (shared directory across files). Surfaced as each batch's `reason`.
 _Avoid_: rule, strategy
 
+**Batch Review**:
+An opt-in phase (gated by the `review_batch_plan` config option, issue #157) that interrupts the Run after the batch plan validates and before Batch drafting begins. The plan is listed — each Batch with its files, hunk ranges, and reason — then a menu is offered: **Continue**, **Merge two Batches…**, **Abort**. Merge folds two Batches into one (same-file hunk lists coalesce, reasons join with " · ") and the merged plan is re-validated as an exact hunk partition before the menu re-renders; Continue proceeds to drafting; Abort ends the Run with nothing staged and nothing committed. Applies to whichever plan proceeds — the LLM planner's or the deterministic Block-grouping fallback's — and is skipped when the plan has fewer than two Batches. With `confirm_before_commit` also on, the two gates compose: Batch Review first, then Commit confirmation per Batch.
+_Avoid_: plan shaping, plan editing, pre-draft menu, batch merge menu
+
 **Commit confirmation**:
 An opt-in phase (gated by the `confirm_before_commit` config option) that interrupts the commit path after the Drafted Message is produced and before the commit lands. The full Drafted Message plus the Batch's file list are shown, then a four-option menu is offered: **Commit**, **Re-generate**, **Edit**, **Abort**. Re-generate and Edit loop back to the same menu (re-showing the message); Commit proceeds to commit; Abort ends the Run with nothing further committed. Does not apply to the Finalize step, which uses git's default message.
 _Avoid_: review prompt, pre-commit check, confirmation gate
@@ -66,7 +70,7 @@ _Avoid_: diff stats, file summary, stats block
 
 
 **Run module**:
-The module (`src/workflow/run/`) that owns the default commit workflow: `default_run` checks the repo state and routes — mid-Conflict it offers resolve-then-continue via the front door, otherwise it runs `commit_run`, the single-commit / Batch-plan spine (plan → staged Diff JSON → Drafted Message → commit). Deps arrive as two purposeful bundles, `RunDeps` (display, planner, messenger, confirm, redact) and — on the conflicted route — `ResolveDeps`; `src/lib.rs` is the module root and `main.rs` only the thin dispatch (ADR 0015).
+The module (`src/workflow/run/`) that owns the default commit workflow: `default_run` checks the repo state and routes — mid-Conflict it offers resolve-then-continue via the front door, otherwise it runs `commit_run`, the single-commit / Batch-plan spine (plan → staged Diff JSON → Drafted Message → commit). Deps arrive as two purposeful bundles, `RunDeps` (display, planner, messenger, confirm, review, redact) and — on the conflicted route — `ResolveDeps`; `src/lib.rs` is the module root and `main.rs` only the thin dispatch (ADR 0015).
 _Avoid_: workflow module, engine, orchestrator
 
 **Diff JSON envelope**:
