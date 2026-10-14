@@ -106,7 +106,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     // and stays ungated by design — the same boundary as the commit Run's
     // confirmation-menu Re-generate redraft.
     if redact == Redact::On {
-        redact::gate(&read, "aic resolve --no-redact")?;
+        redact::gate(&read, redact::Override::Resolve)?;
     }
 
     let skipped_unresolvable = files.len() - read.len();
@@ -227,9 +227,9 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
 
 /// Production entry point for `aic resolve` — wires the real LLM resolver and
 /// stdin y/n prompt into [`resolve_run`]. `no_redact` is the resolve
-/// subcommand's `--no-redact` bool (issue #159), mapped to [`Redact::Off`] —
-/// the only production site that bypasses the resolve Redaction Gate besides
-/// the top-level flag's handoff carry.
+/// subcommand's `--no-redact` bool (issue #159), mapped via
+/// [`Redact::from_flag`] — the only production site that bypasses the
+/// resolve Redaction Gate besides the top-level flag's handoff carry.
 pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
     let resolve: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
@@ -242,7 +242,7 @@ pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
             resolve,
             prompt,
             display: Display::new(),
-            redact: if no_redact { Redact::Off } else { Redact::On },
+            redact: Redact::from_flag(no_redact),
         },
     )
     .await

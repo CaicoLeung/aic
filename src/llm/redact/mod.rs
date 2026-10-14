@@ -28,6 +28,39 @@ pub(crate) enum Redact {
     Off,
 }
 
+impl Redact {
+    /// Map a CLI `--no-redact` bool onto the gate policy: `true` disarms
+    /// for this invocation, `false` (bare invocation) keeps the gate on.
+    /// Every production wiring site resolves through here so the mapping
+    /// exists exactly once (issue #159).
+    pub(crate) fn from_flag(no_redact: bool) -> Self {
+        if no_redact { Redact::Off } else { Redact::On }
+    }
+}
+
+/// The workflow-scoped escape hatch a [`gate`] refusal names, so the user
+/// re-runs the exact command they started with plus its override (issue
+/// #159): the gate is shared, the hint is not. Free-form strings at call
+/// sites would invite typos into a user-facing refusal; the variants render
+/// verbatim via [`std::fmt::Display`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Override {
+    /// `aic --no-redact` — the commit Run's top-level flag.
+    Run,
+    /// `aic resolve --no-redact` — the resolve subcommand's own flag.
+    Resolve,
+}
+
+impl std::fmt::Display for Override {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cmd = match self {
+            Override::Run => "aic --no-redact",
+            Override::Resolve => "aic resolve --no-redact",
+        };
+        f.write_str(cmd)
+    }
+}
+
 /// The secret family a [`Finding`] belongs to. `scan` deduplicates per
 /// family (first occurrence supplies the masked preview), so kinds compare
 /// by identity here — [`Kind::label`] renders the user-facing name.
@@ -334,14 +367,17 @@ const LIST_CAP: usize = 5;
 /// the resolve workflow's marker-retry re-send already-gated content and
 /// stay ungated by design.
 ///
-/// `override_hint` is the exact command the user can re-run to bypass
-/// ("aic --no-redact" for the commit Run, "aic resolve --no-redact" for
+/// `override_hint` is the workflow-scoped command the user can re-run to
+/// bypass ([`Override::Run`] for the commit Run, [`Override::Resolve`] for
 /// resolve) — the gate is shared, the escape hatch is workflow-scoped.
 ///
 /// Returns `Err` naming every offending file and pattern kind (masked
 /// previews, capped at [`LIST_CAP`] files) plus the override; `Ok(())` when
 /// the payloads are clean.
-pub(crate) fn gate(diff_per_file: &[(String, String)], override_hint: &str) -> anyhow::Result<()> {
+pub(crate) fn gate(
+    diff_per_file: &[(String, String)],
+    override_hint: Override,
+) -> anyhow::Result<()> {
     let offending: Vec<(&str, Vec<Finding>)> = diff_per_file
         .iter()
         .filter_map(|(path, diff)| {
@@ -515,7 +551,7 @@ mod tests {
                 "-----BEGIN RSA PRIVATE KEY-----".to_string(),
             ),
         ];
-        let err = gate(&files, "aic --no-redact").expect_err("must refuse");
+        let err = gate(&files, Override::Run).expect_err("must refuse");
         let msg = format!("{err:#}");
         assert!(msg.contains("config.toml"), "{msg}");
         assert!(msg.contains("AWS access key ID (AKIA…)"), "{msg}");
@@ -529,7 +565,7 @@ mod tests {
 
         gate(
             &[("clean.rs".to_string(), "let x = 1;".to_string())],
-            "aic --no-redact",
+            Override::Run,
         )
         .expect("clean payload must pass");
     }
@@ -545,11 +581,28 @@ mod tests {
                 )
             })
             .collect();
-        let msg = format!("{:?}", gate(&files, "aic resolve --no-redact").unwrap_err());
+        let msg = format!("{:?}", gate(&files, Override::Resolve).unwrap_err());
         assert!(msg.contains("… and 2 more files"), "{msg}");
         assert!(
             msg.contains("aic resolve --no-redact"),
             "override hint passes through verbatim: {msg}"
         );
+    }
+
+    /// The CLI bool maps onto the gate policy in exactly one place: bare
+    /// invocations keep the gate on, `--no-redact` disarms it for that
+    /// invocation only (issue #159).
+    #[test]
+    fn redact_from_flag_maps_the_cli_bool() {
+        assert_eq!(Redact::from_flag(false), Redact::On);
+        assert_eq!(Redact::from_flag(true), Redact::Off);
+    }
+
+    /// Each workflow renders its own exact re-run command — the refusal
+    /// must never name the other workflow's flag (issue #159).
+    #[test]
+    fn override_renders_the_workflow_scoped_command() {
+        assert_eq!(Override::Run.to_string(), "aic --no-redact");
+        assert_eq!(Override::Resolve.to_string(), "aic resolve --no-redact");
     }
 }
