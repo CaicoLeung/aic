@@ -12,6 +12,7 @@ pub(super) use crate::llm::redact::Redact;
 pub(super) use crate::render::display::{Display, DisplayWrite};
 pub(super) use crate::workflow::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
 pub(super) use crate::workflow::resolve::{ResolveDeps, resolve_run};
+pub(super) use crate::workflow::review::{BatchReview, ReviewChoice, ReviewMenu};
 pub(super) use crate::workflow::run::{RunDeps, commit_run, default_run};
 pub(super) use git2::Repository;
 pub(super) use parking_lot::Mutex;
@@ -291,10 +292,24 @@ pub fn messenger_sequence(messages: &[&str]) -> (CommitMessenger, Arc<Mutex<u32>
 pub fn menu_queue(choices: Vec<ConfirmChoice>) -> ConfirmMenu {
     let q = Arc::new(Mutex::new(VecDeque::from(choices)));
     Box::new(move |_message: &str| {
-        q.lock()
+        Ok(q.lock()
             .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("confirmation menu queue exhausted"))
+            .unwrap_or_else(|| panic!("confirm menu queue exhausted")))
     })
+}
+
+/// Batch Review menu that pops decisions from a queue; panics when
+/// exhausted so an under-specified test fails loudly instead of silently
+/// defaulting (same contract as [`menu_queue`] and [`prompt_queue`]).
+pub fn review_queue(decisions: Vec<ReviewChoice>) -> ReviewMenu {
+    let q = Arc::new(Mutex::new(VecDeque::from(decisions)));
+    Box::new(
+        move |_batches: &[generator::BatchPlanBatch], _can_undo: bool| {
+            Ok(q.lock()
+                .pop_front()
+                .unwrap_or_else(|| panic!("batch review menu queue exhausted")))
+        },
+    )
 }
 
 /// Editor that returns a predetermined (subject, body) on every call —

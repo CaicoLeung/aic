@@ -206,6 +206,12 @@ pub struct Config {
     /// before each commit. Absent (or `false`) keeps the original
     /// generate-and-commit behavior.
     pub confirm_before_commit: Option<bool>,
+    /// When `true`, `aic` shows the validated batch plan and offers a
+    /// Continue / Merge / Undo / Abort menu (Batch Review, issue #157)
+    /// before any Drafted Message is generated — on the unstaged plan path,
+    /// for any plan (a single-Batch plan lists with no Merge row). Absent
+    /// (or `false`) keeps the non-interactive default Run.
+    pub review_batch_plan: Option<bool>,
     /// The CLI-agent Backend's fields. Flattened to top-level TOML keys
     /// (`command` / `args` / `timeout_secs`) so the on-disk shape is unchanged
     /// — ADR 0011 keeps the grouping in `backend_kind`, not in a nested
@@ -266,6 +272,12 @@ impl Config {
     /// Absent or `false` → commit immediately, as before this option existed.
     pub fn confirm_before_commit(&self) -> bool {
         self.confirm_before_commit.unwrap_or(false)
+    }
+    /// Whether the Batch Review menu (issue #157) interrupts the Run
+    /// between plan validation and Batch drafting. Absent or `false` →
+    /// draft immediately, as before this option existed.
+    pub fn review_batch_plan(&self) -> bool {
+        self.review_batch_plan.unwrap_or(false)
     }
 
     /// The CLI-agent `command` value when set (trimmed, non-empty); `None`

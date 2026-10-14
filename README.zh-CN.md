@@ -229,6 +229,7 @@ args = ["run", "--format", "json", "{prompt}"]
 | `command` | CLI 命令（CLI backend） | — |
 | `args` | Argv 模板，`{prompt}` 会被替换 | `["{prompt}"]` |
 | `timeout_secs` | 每次调用空闲超时（CLI backend） | `240`（流式）/ `600`（批量） |
-| `confirm_before_commit` | 提交前显示审核菜单 | `false` |
+| `confirm_before_commit` | 每次提交落库前显示 Commit confirmation 菜单 | `false` |
+| `review_batch_plan` | 起草前显示 Batch Review 菜单（可合并 Batch） | `false` |
 
 </details>

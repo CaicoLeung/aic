@@ -30,6 +30,23 @@ fn confirm_before_commit_defaults_off_and_respects_value() {
     assert!(on.confirm_before_commit());
 }
 
+/// `review_batch_plan` stays off when absent (the default Run stays
+/// non-interactive) and passes an explicit value through.
+#[test]
+fn review_batch_plan_defaults_off_and_respects_value() {
+    assert!(!cfg("openai", None, None, None).review_batch_plan());
+    let on = Config {
+        backend: None,
+        api_key: None,
+        model: None,
+        base_url: None,
+        confirm_before_commit: None,
+        review_batch_plan: Some(true),
+        ..Default::default()
+    };
+    assert!(on.review_batch_plan());
+}
+
 #[test]
 fn resolve_field_config_over_default() {
     // Default when nothing is set.

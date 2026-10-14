@@ -1,11 +1,13 @@
 //! Pre-commit confirmation (issue #78): the opt-in gate that interrupts the
 //! commit path after the message is drafted and before it lands. Owns the
 //! gate itself ([`Confirm`]), the menu/editor seams it drives, the production
-//! terminal menu and `$EDITOR` message editor, the non-TTY-stdin guard, and
-//! the confirm loop that re-generates / re-edits until the user commits or
-//! aborts. [`CommitDeclined`] is the marker error the loop raises on Abort so
-//! the commit workflow can report a clean abort (naming how far a batch run
-//! got) rather than a generic failure.
+//! terminal menu and `$EDITOR` message editor, and the confirm loop that
+//! re-generates / re-edits until the user commits or aborts. The generic
+//! interactive primitives it sits on — the zero-residue Select row, the
+//! inquire cancel mapping, the non-TTY-stdin guard — live in
+//! [`crate::workflow::input`] (ADR 0007). [`CommitDeclined`] is the marker
+//! error the loop raises on Abort so the commit workflow can report a clean
+//! abort (naming how far a batch run got) rather than a generic failure.
 //!
 //! `confirm_draft` borrows the workflow's [`Display`] and [`CommitMessenger`]
 //! rather than owning them: confirmation is a phase of the commit Run, not a
@@ -16,6 +18,7 @@ use crate::core::types::CommitMessenger;
 use crate::git::FileStats;
 use crate::render::display::Display;
 use crate::render::progress;
+use crate::workflow::input::{select_row, truncate};
 use anyhow::Context;
 
 // ----------------------------------------------------------------------
@@ -104,58 +107,6 @@ impl std::fmt::Display for CommitDeclined {
 
 impl std::error::Error for CommitDeclined {}
 
-/// The pre-commit confirmation requires an interactive stdin: the menu
-/// ([`confirm_menu`]) renders on stderr but reads keys from stdin, so a
-/// non-TTY stdin leaves the menu unanswerable. Returns an error naming the
-/// fix when confirmation is enabled but stdin is not a terminal — the guard
-/// runs before any planning or staging, so the run fails cleanly instead of
-/// aborting after the first batch is already staged (issue #78).
-pub(crate) fn ensure_confirm_terminal(
-    confirm_enabled: bool,
-    stdin_tty: bool,
-) -> anyhow::Result<()> {
-    if confirm_enabled && !stdin_tty {
-        anyhow::bail!(
-            "confirm_before_commit is enabled but stdin is not a terminal — \
-             run `aic` from a terminal, or turn the option off"
-        );
-    }
-    Ok(())
-}
-
-// ----------------------------------------------------------------------
-// inquire cancel handling
-// ----------------------------------------------------------------------
-
-/// Whether an inquire error is a graceful user-initiated cancel (Esc,
-/// Ctrl-C, or a closed/EOF stdin) rather than an unexpected I/O failure.
-/// Esc/Ctrl-C are inquire's own cancel variants; a dropped stdin surfaces as
-/// an `IO` error with an `Interrupted`/`UnexpectedEof` kind, so detect those
-/// too and treat them as cancels (matching the setup wizard's handling).
-pub(crate) fn is_graceful_cancel(e: &inquire::InquireError) -> bool {
-    // Esc (OperationCanceled) plus the hard cancels shared with the wizard's
-    // `opt_nav` (Ctrl-C / closed stdin) — see `input::is_io_cancel`.
-    matches!(e, inquire::InquireError::OperationCanceled) || crate::workflow::input::is_io_cancel(e)
-}
-
-/// Map an inquire prompt result to an `Option` (`None` = the user cancelled),
-/// turning any graceful cancel into `None` and every other error into a
-/// "could not read terminal input" error. The single source of the cancel
-/// mapping for callers that collapse Esc / Ctrl-C / closed-stdin into one
-/// "no answer" outcome (the confirm menu and the completion-shell prompt).
-///
-/// The setup wizard's `opt_nav` does **not** use this: it keeps Esc (Back)
-/// distinct from Ctrl-C (Cancel), so it stays a three-way match of its own.
-pub(crate) fn inquire_opt<T>(
-    result: Result<T, inquire::InquireError>,
-) -> anyhow::Result<Option<T>> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if is_graceful_cancel(&e) => Ok(None),
-        Err(e) => Err(e).context("could not read terminal input"),
-    }
-}
-
 // ----------------------------------------------------------------------
 // The confirm loop
 // ----------------------------------------------------------------------
@@ -223,41 +174,22 @@ const CONFIRM_ACTIONS: [(&str, ConfirmChoice); 4] = [
 /// graceful-cancel handling (Ctrl-C is not an error here, same as in
 /// `opt_nav`).
 fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
-    use inquire::Select;
-    use inquire::list_option::ListOption;
-
-    // Truncate to 40 chars in one pass: take 40, then check whether a 41st
-    // existed (avoids walking the string twice).
-    let mut chars = message.chars();
-    let mut subject: String = chars.by_ref().take(40).collect();
-    if chars.next().is_some() {
-        subject.push('…');
-    }
-
+    let subject = truncate(message, 40);
     let labels: Vec<&str> = CONFIRM_ACTIONS.iter().map(|(label, _)| *label).collect();
-
-    // inquire's final frame redraws the menu's full footprint (the answer on
-    // top, the option rows below blanked) plus a trailing blank line. That
-    // residue would break the caller's exact `clear_last(rows)` preview erase,
-    // so restore the cursor to where the menu began and clear everything the
-    // prompt drew before returning. Save/restore is height-independent, so it
-    // stays correct no matter how many rows the menu spanned (Esc/Ctrl-C
-    // paths too) — the zero-residue contract the caller relies on is preserved.
-    let term = console::Term::stderr();
-    let _ = term.write_str("\x1b7"); // DECSC: save cursor at the menu's start
-    let choice = Select::new(&format!("Commit this message?  ({subject})"), labels)
-        .with_starting_cursor(0)
-        .with_help_message("↑/↓ select · Enter confirm · Esc or Ctrl-C aborts")
-        .raw_prompt();
-    let _ = term.write_str("\x1b8"); // DECRC: back to the menu's start
-    let _ = term.clear_to_end_of_screen(); // erase the menu's footprint
-
-    Ok(match inquire_opt(choice)? {
+    // One zero-residue Select row (`input::select_row`): inquire's final
+    // frame would otherwise redraw a footprint that breaks the caller's
+    // exact `clear_last(rows)` preview erase.
+    let Some(index) = select_row(
+        &format!("Commit this message?  ({subject})"),
+        &labels,
+        "↑/↓ select · Enter confirm · Esc or Ctrl-C aborts",
+    )?
+    else {
         // Esc / Ctrl-C / a closed stdin all end the run — there's nothing to
         // go back to once the commit is pending.
-        None => ConfirmChoice::Abort,
-        Some(ListOption { index, .. }) => CONFIRM_ACTIONS[index].1,
-    })
+        return Ok(ConfirmChoice::Abort);
+    };
+    Ok(CONFIRM_ACTIONS[index].1)
 }
 
 /// Production message editor (issue #78): opens the drafted message in the
@@ -301,27 +233,6 @@ fn message_to_edit(subject: &str, body: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Confirmation off, or an interactive stdin, always passes; confirmation
-    /// on with a non-TTY stdin fails fast with a message naming the fix —
-    /// before any planning or staging happens.
-    #[test]
-    fn ensure_confirm_terminal_guards_non_tty_stdin() {
-        assert!(ensure_confirm_terminal(false, false).is_ok());
-        assert!(ensure_confirm_terminal(false, true).is_ok());
-        assert!(ensure_confirm_terminal(true, true).is_ok());
-
-        let err = ensure_confirm_terminal(true, false).expect_err("must refuse non-TTY stdin");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("stdin is not a terminal"),
-            "expected a clear non-TTY error, got: {msg}"
-        );
-        assert!(
-            msg.contains("run `aic` from a terminal"),
-            "expected the fix to be named, got: {msg}"
-        );
-    }
 
     /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
     /// the file path (the `code --wait` case). Verified with a fake editor.

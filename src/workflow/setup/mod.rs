@@ -6,7 +6,8 @@
 //!
 //! The wizard is menu-driven, not a forced linear path: the top level offers
 //! two independent entries — the AI provider (provider + key + base URL +
-//! model) and the pre-commit confirmation toggle — plus `Save & exit`. Generic
+//! model) and the run toggles (confirm before commit, review batch plan) —
+//! plus `Save & exit`. Generic
 //! interactive primitives (single-choice menu, text prompt, IO-cancel
 //! classifier) live in [`crate::workflow::input`].
 //! The sub-flows live in submodules: [`provider`] (AI-provider path),
@@ -36,7 +37,7 @@ pub fn run_setup() -> Result<()> {
         eprintln!("aic setup needs an interactive terminal, but stdin is not a TTY.");
         eprintln!("To configure non-interactively you can either:");
         eprintln!(
-            "  • write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit), or"
+            "  • write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit, review_batch_plan), or"
         );
         eprintln!("  • run `aic setup` in a TTY, or edit the config file directly");
         anyhow::bail!("cannot run interactive setup without a TTY");
@@ -122,6 +123,9 @@ struct Draft {
     /// "not chosen yet" (finalize keeps it unset → config absent → default
     /// off); the wizard default shown to the user is `false`.
     confirm_before_commit: Option<bool>,
+    /// Whether to show the Batch Review menu before drafting (issue #157).
+    /// Same `None` semantics: not chosen → config absent → default off.
+    review_batch_plan: Option<bool>,
     /// External coding-agent CLI fields (ADR 0010), shared with
     /// [`Config::cli`] so the command/args/timeout trio has one owner and is
     /// not redeclared here. When `backend_kind = cli`, aic runs in CLI-backend
@@ -171,6 +175,7 @@ enum MenuChoice {
     Provider,
     CliAgent,
     Confirm,
+    Review,
     Save,
     /// Esc — cancel, but the wizard guard-checks unsaved changes first.
     Esc,
@@ -184,9 +189,10 @@ enum MenuChoice {
 ///
 /// The wizard is menu-driven, not a forced linear path: the top level offers a
 /// Backend selector (which of the API-provider / CLI-agent backends a Run
-/// uses), the AI provider (provider + key + base URL + model), the CLI agent
-/// (command + args + timeout), and the pre-commit confirmation toggle — plus
-/// `Save & exit`. Each entry configures only its own fields and returns to the
+/// uses), the AI provider (provider + key + base URL + model), the CLI
+/// agent (command + args + timeout), and the run toggles (confirm before
+/// commit, review batch plan) — plus `Save & exit`. Each entry configures
+/// only its own fields and returns to the
 /// menu; both backends keep their configured content, so switching the active
 /// Backend never wipes what was entered for the other.
 fn wizard() -> Result<Option<Config>> {
@@ -255,6 +261,12 @@ fn wizard() -> Result<Option<Config>> {
                     return Ok(None); // Ctrl-C on the confirmation toggle
                 }
                 highlight = 3;
+            }
+            MenuChoice::Review => {
+                if run_review_flow(&existing, &mut draft)? {
+                    return Ok(None); // Ctrl-C on the review toggle
+                }
+                highlight = 4;
             }
             MenuChoice::Save => return Ok(Some(finalize::finalize(draft))),
             MenuChoice::Esc => {
@@ -344,9 +356,10 @@ fn provider_label(draft: &Draft) -> String {
         format!("{} · {model}", p.display())
     }
 }
-/// `Confirm before commit` menu row: yes/no, defaulting to off.
-fn confirm_label(draft: &Draft) -> String {
-    if draft.confirm_before_commit.unwrap_or(false) {
+/// Menu-row label for an opt-in toggle (both workflow gates default off):
+/// "yes" only when explicitly on.
+fn yes_no(value: Option<bool>) -> String {
+    if value.unwrap_or(false) {
         "yes".to_string()
     } else {
         "no".to_string()
@@ -384,7 +397,11 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
         format!("{ICON_CLI} CLI agent — {}", cli_label(draft)),
         format!(
             "{ICON_CONFIRM} Confirm before commit — {}",
-            confirm_label(draft)
+            yes_no(draft.confirm_before_commit)
+        ),
+        format!(
+            "{ICON_PENCIL} Review batch plan — {}",
+            yes_no(draft.review_batch_plan)
         ),
         save_row,
     ];
@@ -393,58 +410,82 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
         OptNav::Value(1) => Ok(MenuChoice::Provider),
         OptNav::Value(2) => Ok(MenuChoice::CliAgent),
         OptNav::Value(3) => Ok(MenuChoice::Confirm),
-        OptNav::Value(4) => Ok(MenuChoice::Save),
-        OptNav::Value(_) => unreachable!("menu has exactly five entries"),
+        OptNav::Value(4) => Ok(MenuChoice::Review),
+        OptNav::Value(5) => Ok(MenuChoice::Save),
+        OptNav::Value(_) => unreachable!("menu has exactly six entries"),
         OptNav::Back => Ok(MenuChoice::Esc),
         OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
 }
-/// Run the confirmation-toggle sub-flow (a single Yes/No step). Returns `true`
-/// on Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
+
+/// Run the confirmation-toggle sub-flow (issue #78). Returns `true` on
+/// Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
 fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    match step_confirm_commit(existing, draft)? {
-        Nav::Next | Nav::Back => Ok(false),
-        Nav::Cancel => Ok(true),
-    }
-}
-/// Initial value for the confirmation toggle: the in-session draft choice
-/// first, then the existing config's value, else `false` (default off). Not
-/// provider-dependent, so no `field_initial`-style provider guard is needed.
-fn confirm_initial(draft: &Draft, existing: &Option<Config>) -> bool {
-    draft
-        .confirm_before_commit
-        .or_else(|| existing.as_ref().and_then(|c| c.confirm_before_commit))
-        .unwrap_or(false)
+    step_toggle(
+        "commit confirmation",
+        "Require confirmation before each commit?",
+        toggle_initial(
+            draft.confirm_before_commit,
+            existing.as_ref().and_then(|c| c.confirm_before_commit),
+        ),
+        draft,
+        |d, v| d.confirm_before_commit = Some(v),
+    )
 }
 
-/// Yes/No choice (an arrow-keyed option list) for requiring confirmation
-/// before each commit (issue #78). Unlike the provider-scoped steps, this one
-/// is not provider-dependent: the
-/// initial value is the in-session draft choice, else the existing config's
-/// value, else `false` (the default — behavior unchanged until the user opts
-/// in).
-fn step_confirm_commit(existing: &Option<Config>, draft: &mut Draft) -> Result<Nav> {
-    show_screen("commit confirmation")?;
-    let initial = confirm_initial(draft, existing);
-    // A yes/no option list driven by arrow keys + Enter — never typed input,
-    // so the user keeps their hands off the keyboard.
+/// Run the review-toggle sub-flow (issue #157). Same contract as
+/// [`run_confirm_flow`].
+fn run_review_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
+    step_toggle(
+        "batch review",
+        "Review the batch plan before drafting?",
+        toggle_initial(
+            draft.review_batch_plan,
+            existing.as_ref().and_then(|c| c.review_batch_plan),
+        ),
+        draft,
+        |d, v| d.review_batch_plan = Some(v),
+    )
+}
+
+/// Initial value for a toggle step (both gates share it): the in-session
+/// draft choice first, then the existing config's value, else `false`
+/// (default off). Not provider-dependent, so no `field_initial`-style
+/// provider guard is needed.
+fn toggle_initial(draft_val: Option<bool>, existing_val: Option<bool>) -> bool {
+    draft_val.or(existing_val).unwrap_or(false)
+}
+
+/// The shared Yes/No toggle step behind both opt-in workflow gates (issues
+/// #78 and #157): one arrow-keyed option list — never typed input, so the
+/// user keeps their hands off the keyboard — writing the choice back
+/// through `set`. One step serves both gates so the two can't drift apart.
+/// Returns `true` only on a hard cancel (Ctrl-C / closed stdin, which ends
+/// the whole setup); a made choice and Esc-as-back both return `false` —
+/// every non-cancel path lands back on the menu.
+fn step_toggle(
+    screen: &str,
+    prompt: &str,
+    initial: bool,
+    draft: &mut Draft,
+    set: fn(&mut Draft, bool),
+) -> Result<bool> {
+    show_screen(screen)?;
     let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
-    let default_idx = if initial { 0 } else { 1 };
-    match opt_nav(
-        "Require confirmation before each commit?",
-        &items,
-        default_idx,
-    )? {
+    let default_idx = usize::from(!initial);
+    match opt_nav(prompt, &items, default_idx)? {
         OptNav::Value(0) => {
-            draft.confirm_before_commit = Some(true);
-            Ok(Nav::Next)
+            set(draft, true);
+            Ok(false)
         }
         OptNav::Value(1) => {
-            draft.confirm_before_commit = Some(false);
-            Ok(Nav::Next)
+            set(draft, false);
+            Ok(false)
         }
-        OptNav::Value(_) => unreachable!("yes/no has exactly two entries"),
-        OptNav::Back => Ok(Nav::Back),
-        OptNav::Cancel => Ok(Nav::Cancel),
+        // Same guard style as `step_menu` and `step_mode`: exactly two rows
+        // exist, so any other index is a scripted-seam bug, not a silent "no".
+        OptNav::Value(_) => unreachable!("toggle has exactly two entries"),
+        OptNav::Back => Ok(false),
+        OptNav::Cancel => Ok(true),
     }
 }

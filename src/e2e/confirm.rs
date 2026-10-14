@@ -25,6 +25,7 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
     let err = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(), // staged path must NOT plan,
@@ -75,6 +76,7 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
     let err = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(), // staged path must NOT plan,
@@ -136,6 +138,7 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
     let result = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display,
             planner: unreachable_planner(),
@@ -202,6 +205,7 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
     let result = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display,
             planner: unreachable_planner(),
@@ -268,6 +272,7 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
     let result = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             display: sink(),
             planner: unreachable_planner(),
             messenger,
@@ -309,6 +314,7 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
     let result = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
@@ -354,6 +360,7 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
     let result = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display: sink(),
             planner: unreachable_planner(),
@@ -420,6 +427,7 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     let err = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
@@ -515,6 +523,7 @@ async fn commit_confirm_commits_every_batch() {
     let result = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),
@@ -584,6 +593,7 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
     let result = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display,
             planner: planner_fixed(plan),
@@ -650,6 +660,7 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     let err = commit_run(
         &git,
         RunDeps {
+            review: BatchReview::Disabled,
             redact: Redact::On,
             display: sink(),
             planner: planner_fixed(plan),

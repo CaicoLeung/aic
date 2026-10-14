@@ -17,6 +17,7 @@ pub(super) fn seed_draft(existing: &Option<Config>) -> Draft {
         draft.base_url = c.base_url.clone();
         draft.model = c.model.clone();
         draft.confirm_before_commit = c.confirm_before_commit;
+        draft.review_batch_plan = c.review_batch_plan;
         draft.cli = c.cli.clone();
         draft.known_providers = c.providers.clone();
         // Pre-bank configs (written before the `providers` memory bank) carry
@@ -104,6 +105,7 @@ pub(super) fn finalize(draft: Draft) -> Config {
         model: draft.model,
         base_url: draft.base_url,
         confirm_before_commit: draft.confirm_before_commit,
+        review_batch_plan: draft.review_batch_plan,
         cli,
         providers,
     }
