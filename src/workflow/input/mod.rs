@@ -50,6 +50,7 @@ pub(crate) fn is_io_cancel(e: &InquireError) -> bool {
             )
         )
 }
+
 /// Whether an inquire error is a graceful user-initiated cancel (Esc,
 /// Ctrl-C, or a closed/EOF stdin) rather than an unexpected I/O failure.
 /// Esc/Ctrl-C are inquire's own cancel variants; a dropped stdin surfaces as
@@ -107,6 +108,7 @@ pub(crate) fn opt_nav(prompt: &str, options: &[String], default: usize) -> Resul
         Err(e) => Err(e).context("could not read terminal input"),
     }
 }
+
 /// One zero-residue `inquire::Select` row: save the cursor, prompt, restore,
 /// and clear everything the prompt drew, mapping Esc / Ctrl-C / closed stdin
 /// to `None`. inquire's final frame redraws the menu's full footprint, which
