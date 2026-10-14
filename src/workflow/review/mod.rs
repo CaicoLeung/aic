@@ -135,7 +135,7 @@ pub(crate) fn review_plan(
 /// nothing). Errors on a self-merge or an out-of-range index — both
 /// unreachable through the production menu, which offers only distinct
 /// in-range Batches; the guard keeps scripted seams honest.
-pub(crate) fn merge_batches(plan: &mut BatchPlanOutput, a: usize, b: usize) -> anyhow::Result<()> {
+fn merge_batches(plan: &mut BatchPlanOutput, a: usize, b: usize) -> anyhow::Result<()> {
     if a == b {
         anyhow::bail!("cannot merge batch {} with itself", a + 1);
     }
