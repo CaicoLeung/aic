@@ -417,38 +417,35 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
         OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
 }
+
 /// Run the confirmation-toggle sub-flow (issue #78). Returns `true` on
 /// Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
 fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    let initial = toggle_initial(
-        draft.confirm_before_commit,
-        existing.as_ref().and_then(|c| c.confirm_before_commit),
-    );
-    let nav = step_toggle(
+    step_toggle(
         "commit confirmation",
         "Require confirmation before each commit?",
-        initial,
+        toggle_initial(
+            draft.confirm_before_commit,
+            existing.as_ref().and_then(|c| c.confirm_before_commit),
+        ),
         draft,
         |d, v| d.confirm_before_commit = Some(v),
-    )?;
-    Ok(matches!(nav, Nav::Cancel))
+    )
 }
 
 /// Run the review-toggle sub-flow (issue #157). Same contract as
 /// [`run_confirm_flow`].
 fn run_review_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    let initial = toggle_initial(
-        draft.review_batch_plan,
-        existing.as_ref().and_then(|c| c.review_batch_plan),
-    );
-    let nav = step_toggle(
+    step_toggle(
         "batch review",
         "Review the batch plan before drafting?",
-        initial,
+        toggle_initial(
+            draft.review_batch_plan,
+            existing.as_ref().and_then(|c| c.review_batch_plan),
+        ),
         draft,
         |d, v| d.review_batch_plan = Some(v),
-    )?;
-    Ok(matches!(nav, Nav::Cancel))
+    )
 }
 
 /// Initial value for a toggle step (both gates share it): the in-session
@@ -463,22 +460,32 @@ fn toggle_initial(draft_val: Option<bool>, existing_val: Option<bool>) -> bool {
 /// #78 and #157): one arrow-keyed option list — never typed input, so the
 /// user keeps their hands off the keyboard — writing the choice back
 /// through `set`. One step serves both gates so the two can't drift apart.
+/// Returns `true` only on a hard cancel (Ctrl-C / closed stdin, which ends
+/// the whole setup); a made choice and Esc-as-back both return `false` —
+/// every non-cancel path lands back on the menu.
 fn step_toggle(
     screen: &str,
     prompt: &str,
     initial: bool,
     draft: &mut Draft,
     set: fn(&mut Draft, bool),
-) -> Result<Nav> {
+) -> Result<bool> {
     show_screen(screen)?;
     let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
     let default_idx = usize::from(!initial);
     match opt_nav(prompt, &items, default_idx)? {
-        OptNav::Value(i) => {
-            set(draft, i == 0);
-            Ok(Nav::Next)
+        OptNav::Value(0) => {
+            set(draft, true);
+            Ok(false)
         }
-        OptNav::Back => Ok(Nav::Back),
-        OptNav::Cancel => Ok(Nav::Cancel),
+        OptNav::Value(1) => {
+            set(draft, false);
+            Ok(false)
+        }
+        // Same guard style as `step_menu` and `step_mode`: exactly two rows
+        // exist, so any other index is a scripted-seam bug, not a silent "no".
+        OptNav::Value(_) => unreachable!("toggle has exactly two entries"),
+        OptNav::Back => Ok(false),
+        OptNav::Cancel => Ok(true),
     }
 }
