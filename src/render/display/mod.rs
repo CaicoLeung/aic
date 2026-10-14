@@ -170,8 +170,10 @@ impl Display {
     /// ([`resolve_cols`] — non-TTY fallback + hard cap), minus both margins.
     /// A sub-margin reported width saturates down to `0`, which [`wrap_line`]
     /// treats as "don't wrap" — so a pathologically tiny terminal never
-    /// panics, it just emits the body unwrapped.
-    fn text_width(&self) -> usize {
+    /// panics, it just emits the body unwrapped. `pub(crate)` because the
+    /// Batch Review listing truncates its rows to this same budget — one
+    /// width source keeps every surface's terminal edge in agreement.
+    pub(crate) fn text_width(&self) -> usize {
         resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
     }
 

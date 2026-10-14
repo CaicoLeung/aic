@@ -169,20 +169,28 @@ pub(crate) fn merge_batches(plan: &mut BatchPlanOutput, a: usize, b: usize) -> a
 /// Paint the plan listing — a pending header, one row per Batch — and
 /// return how many rows it occupies (header + Batches + trailing blank) so
 /// the loop can erase it with [`Display::clear_last`] when the menu resolves
-/// or re-renders. Rows are truncated (files at 64 chars, reason at 40) so
-/// each Batch stays on exactly one terminal row and the row count stays
-/// exact.
+/// or re-renders. Every row is truncated to the terminal's text width
+/// ([`Display::text_width`] — the same resolution the commit preview wraps
+/// to; `batch_summary` caps its interior pieces first) so each Batch stays
+/// on exactly one terminal row and the row count stays exact — a wrapped
+/// row would make `clear_last` under-erase.
 fn paint_plan(
     display: &Display,
     plan: &BatchPlanOutput,
     file_hunk_counts: &[(String, usize)],
 ) -> usize {
     let pending = palette::pending();
+    // Row budget for the summary text: `text_width` already nets out both
+    // margins, so only the `? ` marker's 2 columns come off the top.
+    let width = display.text_width().saturating_sub(2);
     display.emit(&format!(
         "{} {}",
         display.styled("?", pending),
         display.styled(
-            &format!("batch plan — {} batches", plan.batches.len()),
+            &truncate(
+                &format!("batch plan — {} batches", plan.batches.len()),
+                width
+            ),
             palette::pending(),
         )
     ));
@@ -190,7 +198,10 @@ fn paint_plan(
         display.emit(&format!(
             "{} {}",
             display.styled("?", palette::pending()),
-            display.styled(&batch_summary(i, batch, file_hunk_counts), palette::muted()),
+            display.styled(
+                &truncate(&batch_summary(i, batch, file_hunk_counts), width),
+                palette::muted(),
+            )
         ));
     }
     display.emit_blank();
@@ -376,6 +387,7 @@ fn review_menu(batches: &[BatchPlanBatch], can_undo: bool) -> anyhow::Result<Rev
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     use crate::llm::generator::BatchChange;
     use crate::render::display::DisplayWrite;
@@ -390,6 +402,18 @@ mod tests {
 
     fn quiet_display() -> Display {
         Display::with(Quiet)
+    }
+
+    /// Capturing sink for row-width assertions: records every emitted line
+    /// (margin included) so a test can check the one-row-per-Batch contract
+    /// the erase accounting depends on.
+    struct Capture(Arc<parking_lot::Mutex<Vec<String>>>);
+
+    impl DisplayWrite for Capture {
+        fn write_line(&self, line: &str) {
+            self.0.lock().push(line.to_string());
+        }
+        fn clear_last(&self, _n: usize) {}
     }
 
     fn change(file: &str, hunks: &[usize]) -> BatchChange {
@@ -502,6 +526,35 @@ mod tests {
         assert_eq!(fold_ranges(&[1, 3, 4, 7]), "1, 3-4, 7");
         assert_eq!(fold_ranges(&[5, 1]), "1, 5", "unsorted input still folds");
         assert_eq!(fold_ranges(&[]), "");
+    }
+
+    /// `paint_plan` truncates header and Batch rows to the terminal's text
+    /// width so a Batch never wraps onto a second terminal row — the erase
+    /// accounting (`clear_last(rows)`) counts exact rows, and a wrapped row
+    /// would leave residue. `Display::with` pins `FALLBACK_COLS`, so the
+    /// budget here is deterministic.
+    #[test]
+    fn paint_plan_truncates_rows_to_the_width_budget() {
+        let lines = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let display = Display::with(Capture(lines.clone()));
+        let counts = vec![("a.rs".to_string(), 3)];
+        let plan = BatchPlanOutput {
+            batches: vec![batch(
+                vec![change(&"very/long/path/".repeat(10), &[1, 2, 3])],
+                Some(&"why ".repeat(20)),
+            )],
+        };
+        assert_eq!(paint_plan(&display, &plan, &counts), 3);
+        let rows = lines.lock().clone();
+        assert_eq!(rows.len(), 3, "header + Batch row + trailing blank");
+        assert_eq!(rows[2], "", "the trailing blank stays bare");
+        assert!(rows[1].ends_with('…'), "the over-budget Batch row is cut");
+        for row in &rows[..2] {
+            assert!(
+                row.chars().count() <= 80,
+                "row must fit one FALLBACK_COLS line: {row}"
+            );
+        }
     }
 
     /// The gate off never reaches the menu — the non-interactive default
