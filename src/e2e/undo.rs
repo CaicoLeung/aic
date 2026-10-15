@@ -367,3 +367,110 @@ async fn partial_run_is_undoable_for_landed_batches() {
     undo::undo_run(&git, &|_| Ok(true)).unwrap();
     assert_eq!(git.head_sha().unwrap(), start);
 }
+
+/// A malformed start anchor (hand edit, truncated write) refuses cleanly —
+/// no reset, no state clear — naming the unreadable anchor, instead of
+/// silently treating it as "nothing to undo" or resetting toward a garbage
+/// revision. The empty-file sibling is refused at read; this pins the
+/// non-empty garbage shape through the ancestry proof.
+#[test]
+fn undo_with_malformed_state_file_refuses_without_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+    let head = git.head_sha().unwrap();
+
+    let state = git.git_dir().join("aic/undo-run");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    std::fs::write(&state, "not-a-commit\n").unwrap();
+
+    let err =
+        undo::undo_run(&git, &|_| Ok(true)).expect_err("a garbage anchor must refuse, not succeed");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("malformed commit id"),
+        "expected the anchor to be named malformed, got: {msg}"
+    );
+
+    assert_eq!(git.head_sha().unwrap(), head, "no reset may happen");
+    assert!(state.exists(), "the state file must be left for inspection");
+}
+
+/// A second Run overwrites the undo anchors, so `aic undo` resets only the
+/// *latest* Run's commits: the first Run's commits stay in history at their
+/// content, and the second Run's changes return unstaged. Undo is
+/// one-Run-deep by design — the reset target is the latest start anchor.
+#[tokio::test]
+async fn undo_after_a_second_run_resets_only_the_latest_run() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let run1_start = run_two_batches(&dir).await;
+
+    let git = Git::at(dir.path()).unwrap();
+    let run2_start = git.head_sha().unwrap();
+
+    // Second Run over both files again — same two-batch shape.
+    std::fs::write(dir.path().join("a.txt"), "one again\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "two again\n").unwrap();
+    let plan = generator::BatchPlanOutput {
+        batches: vec![
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "a.txt".into(),
+                    hunks: vec![1],
+                }],
+                reason: Some("retouch a".into()),
+            },
+            generator::BatchPlanBatch {
+                changes: vec![generator::BatchChange {
+                    file: "b.txt".into(),
+                    hunks: vec![1],
+                }],
+                reason: Some("retouch b".into()),
+            },
+        ],
+    };
+    commit_run(
+        &git,
+        RunDeps {
+            review: BatchReview::Disabled,
+            redact: Redact::On,
+            display: sink(),
+            planner: planner_fixed(plan),
+            messenger: messenger_fixed("feat: stub"),
+            confirm: Confirm::Disabled,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        git.commit_count(&run1_start, "HEAD").unwrap(),
+        4,
+        "both runs' commits are in history before undo"
+    );
+
+    let seen = std::cell::RefCell::new(String::new());
+    undo::undo_run(&git, &|label| {
+        *seen.borrow_mut() = label.to_string();
+        Ok(true)
+    })
+    .unwrap();
+
+    assert_eq!(git.head_sha().unwrap(), run2_start, "HEAD is run 2's start");
+    assert_eq!(
+        git.commit_count(&run1_start, "HEAD").unwrap(),
+        2,
+        "run 1's commits must survive the undo of run 2"
+    );
+    assert_eq!(file_at_ref(dir.path(), "HEAD", "a.txt"), "one\n");
+    let label = seen.into_inner();
+    assert!(
+        label.contains("2 commits from the run will be reset"),
+        "the prompt must count only the latest run's commits, got: {label}"
+    );
+    assert_eq!(
+        status_porcelain(dir.path()).trim_end(),
+        " M a.txt\n M b.txt",
+        "run 2's changes return unstaged at their run-2 content"
+    );
+}
