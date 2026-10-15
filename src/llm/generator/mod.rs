@@ -142,7 +142,7 @@ impl Generator {
         diff: &str,
         hint: Option<&str>,
     ) -> anyhow::Result<CommitOutput> {
-        let p = run_prompts(hint);
+        let p = prompts_for_run(hint);
         LlmConfig::load()?
             .agent(&p.git_message)
             .schema::<CommitOutput>(diff)
@@ -159,7 +159,7 @@ impl Generator {
         on_reasoning: impl FnMut(&str) + Send,
         hint: Option<&str>,
     ) -> anyhow::Result<BatchPlanOutput> {
-        let p = run_prompts(hint);
+        let p = prompts_for_run(hint);
         LlmConfig::load()?
             .agent(&p.batch_plan_prompt)
             .stream_typed_with_reasoning::<BatchPlanOutput>(diff, on_reasoning)
@@ -181,7 +181,7 @@ impl Generator {
 /// into both Run payloads when present; resolve is untouched — a hint is
 /// Run-scoped (issue #154). Shared by both entry points above so the
 /// pass-through lives in one assertable place.
-fn run_prompts(hint: Option<&str>) -> PromptConfig {
+fn prompts_for_run(hint: Option<&str>) -> PromptConfig {
     match hint {
         Some(h) => PromptConfig::default().with_hint(h),
         None => PromptConfig::default(),
@@ -391,7 +391,7 @@ mod tests {
         assert!(plan.batches[0].changes[0].hunks.is_empty());
     }
 
-    /// [`run_prompts`] is the single hint threading both network-bound Run
+    /// [`prompts_for_run`] is the single hint threading both network-bound Run
     /// entry points share — the deepest layer the hint chain reaches that a
     /// test can assert without a backend: `None` keeps every prompt
     /// byte-identical to the default; `Some` appends the directive to both
@@ -399,13 +399,13 @@ mod tests {
     /// issue #154).
     #[test]
     fn run_prompts_threads_hint_into_both_run_prompts_only() {
-        let base = run_prompts(None);
+        let base = prompts_for_run(None);
         let plain = PromptConfig::default();
         assert_eq!(base.git_message, plain.git_message);
         assert_eq!(base.batch_plan_prompt, plain.batch_plan_prompt);
         assert_eq!(base.resolve_prompt, plain.resolve_prompt);
 
-        let hinted = run_prompts(Some("closes #78"));
+        let hinted = prompts_for_run(Some("closes #78"));
         let expected = PromptConfig::default().with_hint("closes #78");
         assert_eq!(hinted.git_message, expected.git_message);
         assert_eq!(hinted.batch_plan_prompt, expected.batch_plan_prompt);
