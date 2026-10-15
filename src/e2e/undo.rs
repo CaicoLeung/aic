@@ -7,15 +7,16 @@ use super::common::*;
 
 use crate::workflow::undo;
 
-/// Drive one full Run (planner + messenger stubs, no confirmation) over a
-/// two-batch plan: hunk 1 of `a.txt` then hunk 1 of `b.txt`, each its own
-/// commit. Returns the Run-start HEAD OID captured before the Run.
-async fn run_two_batches(dir: &tempfile::TempDir) -> String {
+/// Write `a`/`b` as fresh workdir edits, then drive one full Run (planner +
+/// messenger stubs, no confirmation) over the two-batch plan: hunk 1 of
+/// `a.txt` then hunk 1 of `b.txt`, each its own commit. Returns the Run-start
+/// HEAD OID captured before the Run.
+async fn run_two_batches(dir: &tempfile::TempDir, a: &str, b: &str) -> String {
     let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
 
-    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
-    std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+    std::fs::write(dir.path().join("a.txt"), a).unwrap();
+    std::fs::write(dir.path().join("b.txt"), b).unwrap();
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
@@ -60,7 +61,7 @@ async fn run_two_batches(dir: &tempfile::TempDir) -> String {
 async fn undo_resets_run_commits_and_unstages_changes() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let start = run_two_batches(&dir).await;
+    let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 2);
@@ -98,7 +99,7 @@ async fn undo_resets_run_commits_and_unstages_changes() {
 async fn undo_declined_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let start = run_two_batches(&dir).await;
+    let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     let err = undo::undo_run(&git, &|_| Ok(false)).unwrap_err();
@@ -194,7 +195,7 @@ async fn undo_covers_staged_single_commit_run() {
 async fn undo_prompt_discloses_commits_made_after_the_run() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let start = run_two_batches(&dir).await;
+    let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     // The user's own commit after the Run — inside the reset's blast
     // radius (start..HEAD), outside the Run's own commits (start..tip).
@@ -236,7 +237,7 @@ async fn undo_prompt_discloses_commits_made_after_the_run() {
 async fn undo_refuses_when_run_tip_was_rewritten() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let _start = run_two_batches(&dir).await;
+    let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     git.run_git(
@@ -291,7 +292,7 @@ fn undo_without_tip_discloses_unknown_split() {
 async fn undo_refuses_when_history_rewritten_past_start() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let _start = run_two_batches(&dir).await;
+    let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     // Rewind past the Run's commits to the recorded start (the baseline),
@@ -404,45 +405,12 @@ fn undo_with_malformed_state_file_refuses_without_mutation() {
 async fn undo_after_a_second_run_resets_only_the_latest_run() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let run1_start = run_two_batches(&dir).await;
+    let run1_start = run_two_batches(&dir, "one\n", "two\n").await;
+
+    // Second Run over both files again — same two-batch shape, fresh edits.
+    let run2_start = run_two_batches(&dir, "one again\n", "two again\n").await;
 
     let git = Git::at(dir.path()).unwrap();
-    let run2_start = git.head_sha().unwrap();
-
-    // Second Run over both files again — same two-batch shape.
-    std::fs::write(dir.path().join("a.txt"), "one again\n").unwrap();
-    std::fs::write(dir.path().join("b.txt"), "two again\n").unwrap();
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "a.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("retouch a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "b.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("retouch b".into()),
-            },
-        ],
-    };
-    commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub"),
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await
-    .unwrap();
     assert_eq!(
         git.commit_count(&run1_start, "HEAD").unwrap(),
         4,
