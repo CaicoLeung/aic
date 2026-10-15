@@ -142,10 +142,7 @@ impl Generator {
         diff: &str,
         hint: Option<&str>,
     ) -> anyhow::Result<CommitOutput> {
-        let mut p = PromptConfig::default();
-        if let Some(h) = hint {
-            p = p.with_hint(h);
-        }
+        let p = prompts_for_run(hint);
         LlmConfig::load()?
             .agent(&p.git_message)
             .schema::<CommitOutput>(diff)
@@ -162,10 +159,7 @@ impl Generator {
         on_reasoning: impl FnMut(&str) + Send,
         hint: Option<&str>,
     ) -> anyhow::Result<BatchPlanOutput> {
-        let mut p = PromptConfig::default();
-        if let Some(h) = hint {
-            p = p.with_hint(h);
-        }
+        let p = prompts_for_run(hint);
         LlmConfig::load()?
             .agent(&p.batch_plan_prompt)
             .stream_typed_with_reasoning::<BatchPlanOutput>(diff, on_reasoning)
@@ -180,6 +174,17 @@ impl Generator {
         let p = PromptConfig::default().resolve_prompt;
         let raw = LlmConfig::load()?.agent(&p).call(file_content).await?;
         Ok(crate::llm::parse::strip_code_fence(&raw).to_string())
+    }
+}
+
+/// The Run prompt set for one invocation: `--hint`'s directive block rides
+/// into both Run payloads when present; resolve is untouched — a hint is
+/// Run-scoped (issue #154). Shared by both entry points above so the
+/// pass-through lives in one assertable place.
+fn prompts_for_run(hint: Option<&str>) -> PromptConfig {
+    match hint {
+        Some(h) => PromptConfig::default().with_hint(h),
+        None => PromptConfig::default(),
     }
 }
 
@@ -384,5 +389,26 @@ mod tests {
         let plan: BatchPlanOutput = serde_json::from_str(json).unwrap();
         assert!(plan.batches[0].reason.is_none());
         assert!(plan.batches[0].changes[0].hunks.is_empty());
+    }
+
+    /// [`prompts_for_run`] is the single hint threading both network-bound Run
+    /// entry points share — the deepest layer the hint chain reaches that a
+    /// test can assert without a backend: `None` keeps every prompt
+    /// byte-identical to the default; `Some` appends the directive to both
+    /// Run prompts and leaves resolve untouched (a hint is Run-scoped,
+    /// issue #154).
+    #[test]
+    fn run_prompts_threads_hint_into_both_run_prompts_only() {
+        let base = prompts_for_run(None);
+        let plain = PromptConfig::default();
+        assert_eq!(base.git_message, plain.git_message);
+        assert_eq!(base.batch_plan_prompt, plain.batch_plan_prompt);
+        assert_eq!(base.resolve_prompt, plain.resolve_prompt);
+
+        let hinted = prompts_for_run(Some("closes #78"));
+        let expected = PromptConfig::default().with_hint("closes #78");
+        assert_eq!(hinted.git_message, expected.git_message);
+        assert_eq!(hinted.batch_plan_prompt, expected.batch_plan_prompt);
+        assert_eq!(hinted.resolve_prompt, expected.resolve_prompt);
     }
 }

@@ -7,15 +7,16 @@ use super::common::*;
 
 use crate::workflow::undo;
 
-/// Drive one full Run (planner + messenger stubs, no confirmation) over a
-/// two-batch plan: hunk 1 of `a.txt` then hunk 1 of `b.txt`, each its own
-/// commit. Returns the Run-start HEAD OID captured before the Run.
-async fn run_two_batches(dir: &tempfile::TempDir) -> String {
+/// Write `a`/`b` as fresh workdir edits, then drive one full Run (planner +
+/// messenger stubs, no confirmation) over the two-batch plan: hunk 1 of
+/// `a.txt` then hunk 1 of `b.txt`, each its own commit. Returns the Run-start
+/// HEAD OID captured before the Run.
+async fn run_two_batches(dir: &tempfile::TempDir, a: &str, b: &str) -> String {
     let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
 
-    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
-    std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+    std::fs::write(dir.path().join("a.txt"), a).unwrap();
+    std::fs::write(dir.path().join("b.txt"), b).unwrap();
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
@@ -60,7 +61,7 @@ async fn run_two_batches(dir: &tempfile::TempDir) -> String {
 async fn undo_resets_run_commits_and_unstages_changes() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let start = run_two_batches(&dir).await;
+    let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 2);
@@ -98,7 +99,7 @@ async fn undo_resets_run_commits_and_unstages_changes() {
 async fn undo_declined_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let start = run_two_batches(&dir).await;
+    let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     let err = undo::undo_run(&git, &|_| Ok(false)).unwrap_err();
@@ -194,7 +195,7 @@ async fn undo_covers_staged_single_commit_run() {
 async fn undo_prompt_discloses_commits_made_after_the_run() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let start = run_two_batches(&dir).await;
+    let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     // The user's own commit after the Run — inside the reset's blast
     // radius (start..HEAD), outside the Run's own commits (start..tip).
@@ -236,7 +237,7 @@ async fn undo_prompt_discloses_commits_made_after_the_run() {
 async fn undo_refuses_when_run_tip_was_rewritten() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let _start = run_two_batches(&dir).await;
+    let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     git.run_git(
@@ -291,7 +292,7 @@ fn undo_without_tip_discloses_unknown_split() {
 async fn undo_refuses_when_history_rewritten_past_start() {
     let dir = tempfile::tempdir().unwrap();
     gh::init_test_repo(dir.path());
-    let _start = run_two_batches(&dir).await;
+    let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
     // Rewind past the Run's commits to the recorded start (the baseline),
@@ -366,4 +367,78 @@ async fn partial_run_is_undoable_for_landed_batches() {
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 1);
     undo::undo_run(&git, &|_| Ok(true)).unwrap();
     assert_eq!(git.head_sha().unwrap(), start);
+}
+
+/// A malformed start anchor (hand edit, truncated write) refuses cleanly —
+/// no reset, no state clear — naming the unreadable anchor, instead of
+/// silently treating it as "nothing to undo" or resetting toward a garbage
+/// revision. The empty-file sibling is refused at read; this pins the
+/// non-empty garbage shape through the ancestry proof.
+#[test]
+fn undo_with_malformed_state_file_refuses_without_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+    let head = git.head_sha().unwrap();
+
+    let state = git.git_dir().join("aic/undo-run");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    std::fs::write(&state, "not-a-commit\n").unwrap();
+
+    let err =
+        undo::undo_run(&git, &|_| Ok(true)).expect_err("a garbage anchor must refuse, not succeed");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("malformed commit id"),
+        "expected the anchor to be named malformed, got: {msg}"
+    );
+
+    assert_eq!(git.head_sha().unwrap(), head, "no reset may happen");
+    assert!(state.exists(), "the state file must be left for inspection");
+}
+
+/// A second Run overwrites the undo anchors, so `aic undo` resets only the
+/// *latest* Run's commits: the first Run's commits stay in history at their
+/// content, and the second Run's changes return unstaged. Undo is
+/// one-Run-deep by design — the reset target is the latest start anchor.
+#[tokio::test]
+async fn undo_after_a_second_run_resets_only_the_latest_run() {
+    let dir = tempfile::tempdir().unwrap();
+    gh::init_test_repo(dir.path());
+    let run1_start = run_two_batches(&dir, "one\n", "two\n").await;
+
+    // Second Run over both files again — same two-batch shape, fresh edits.
+    let run2_start = run_two_batches(&dir, "one again\n", "two again\n").await;
+
+    let git = Git::at(dir.path()).unwrap();
+    assert_eq!(
+        git.commit_count(&run1_start, "HEAD").unwrap(),
+        4,
+        "both runs' commits are in history before undo"
+    );
+
+    let seen = std::cell::RefCell::new(String::new());
+    undo::undo_run(&git, &|label| {
+        *seen.borrow_mut() = label.to_string();
+        Ok(true)
+    })
+    .unwrap();
+
+    assert_eq!(git.head_sha().unwrap(), run2_start, "HEAD is run 2's start");
+    assert_eq!(
+        git.commit_count(&run1_start, "HEAD").unwrap(),
+        2,
+        "run 1's commits must survive the undo of run 2"
+    );
+    assert_eq!(file_at_ref(dir.path(), "HEAD", "a.txt"), "one\n");
+    let label = seen.into_inner();
+    assert!(
+        label.contains("2 commits from the run will be reset"),
+        "the prompt must count only the latest run's commits, got: {label}"
+    );
+    assert_eq!(
+        status_porcelain(dir.path()).trim_end(),
+        " M a.txt\n M b.txt",
+        "run 2's changes return unstaged at their run-2 content"
+    );
 }
