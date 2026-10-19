@@ -41,7 +41,7 @@ toml = "1"
 # self_update::extract_into, so `aic update` on a shell-installed Unix binary
 # would download the .tar.gz and fail to extract it. See dist-workspace.toml
 # and docs/adr/0002-signed-self-update.md.
-self_update = { version = "1.0.0-rc.6", features = ["signatures", "compression-tar-gz", "archive-zip", "compression-zip-deflate"] }
+self_update = { version = "1.3", features = ["signatures", "compression-tar-gz", "archive-zip", "compression-zip-deflate"] }
 clap_complete = "4.6.8"
 clap_complete_nushell = "4.6.1"
 edit = "0.1"
