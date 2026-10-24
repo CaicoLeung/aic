@@ -2,41 +2,15 @@
 
 > **简体中文:** [README.zh-CN.md](./README.zh-CN.md)
 
-AI commit messages that are **actually atomic** — and work with your existing tools, **no API key needed**.
+aic turns your messy working tree into a series of clean, atomic commits — powered by the AI you already have.
 
 🌐 **Website:** <https://caicoleung.github.io/aic-web/>
 
-[![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml)
-[![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
+[![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml) [![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
 ![aic splits one file's changes into atomic commits](https://vhs.charm.sh/vhs-2lPY6yY1uBpk7fWCgd7ypH.gif)
 
----
-
-## ✨ Hunk-level commits, not file-level
-
-Most AI commit tools treat a **file** as the atomic unit. aic treats a **hunk** — a single contiguous change — as the unit.
-
-Edit one file in three unrelated ways and `aic` produces clean, isolated commits. No manual `git add -p`, no mixed-concern history.
-
-```
-src/auth.rs  (one file, three changes)
-
-  Other tools:  1 commit  "update src/auth.rs"        ❌ mixed concerns
-  aic:          3 commits, one per logical change      ✅
-
-    ├─ hunk 1  →  fix(auth): correct token expiry check
-    ├─ hunk 2  →  feat(auth): add OAuth2 login provider
-    └─ hunk 3  →  style(auth): tidy imports
-```
-
-Run `aic` with **nothing staged** and it auto-detects every unstaged hunk, groups them by concern, and commits each group separately — with the model's reasoning streamed live as it plans the split.
-
-Nothing gets lost or double-committed: every hunk lands in exactly one commit, or the plan is rejected.
-
----
+*Nothing staged, no `git add -p` — three unrelated edits in one file become three clean commits.*
 
 ## Quick Start
 
@@ -50,56 +24,46 @@ aic setup
 
 # 3. Commit — no need to stage, just run aic
 aic
-# → 3 atomic commits from your working tree
 ```
 
 > 💡 **No API key?** Skip the provider setup — use [Claude Code, Codex, pi, opencode, and 7 more CLI agents](#-no-api-key-use-your-ai-agent) instead. aic reuses their auth.
 
 > **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
 
----
+## ✨ Hunk-level commits, not file-level
+
+A **hunk** is one contiguous change inside a file — aic commits each logical change separately, so three edits in one file become three clean commits. Other tools commit the whole file; aic never writes a mixed "update auth.rs" again, and there's no manual `git add -p`.
+
+```text
+src/auth.rs — one file, three changes
+
+  ├─ hunk 1  →  fix(auth): correct token expiry check
+  ├─ hunk 2  →  feat(auth): add OAuth2 login provider
+  └─ hunk 3  →  style(auth): tidy imports
+```
+
+Run `aic` with **nothing staged** and it auto-detects every unstaged hunk, groups them by concern, and commits each group separately — the model's reasoning streams live as it plans the split. Nothing is lost or double-committed: every hunk lands in exactly one commit, or the plan is rejected.
 
 ## 🔑 No API key? Use your AI agent
 
-Already have [Claude Code](https://docs.anthropic.com/claude/docs/claude-code), [OpenAI Codex](https://github.com/openai/codex), [pi](https://pi.dev), or [opencode](https://opencode.ai) installed and authenticated? aic can drive it in **headless mode** — no API key needed.
+Already have [Claude Code](https://docs.anthropic.com/claude/docs/claude-code), [OpenAI Codex](https://github.com/openai/codex), [pi](https://pi.dev), or [opencode](https://opencode.ai) installed and authenticated? aic drives it in **headless mode** and reuses its auth — no API key needed. Also supported: **oh-my-pi** (`omp`), **Gemini** (`gemini`), **Cursor** (`cursor-agent`), **Windsurf** (`devin` — Windsurf was renamed Devin Desktop), **GitHub Copilot** (`copilot`), **Trae** (`traecli`), and **Qwen Code** (`qwen`).
 
-Also supported: **oh-my-pi** (`omp`), **Gemini** (`gemini`), **Cursor** (`cursor-agent`), **Windsurf** (`devin` — Windsurf was renamed Devin Desktop), **GitHub Copilot** (`copilot`), **Trae** (`traecli`), and **Qwen Code** (`qwen`).
-
-```sh
-aic setup    # → select "CLI agent" → pick your tool → done
-```
-
-Or edit `~/.config/aic/config.toml` directly:
-
-```toml
-backend_kind = "cli"
-command = "claude"
-args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
-```
-
-aic sends one prompt and reads the answer — it never runs the agent in tool-use mode. Presets pin explicit flags where needed (codex's read-only sandbox, pi's `--no-tools`); the rest rely on headless print mode, where approval-gated tools can't run without a TTY — so an injected instruction can't touch your working tree. Both backends' fields can coexist in the config; `backend_kind` selects the active one.
-
-See [CLI-agent presets](#cli-agent-presets) for the full preset list.
-
----
+Run `aic setup`, select **CLI agent**, pick your tool — done. aic then sends one prompt and reads the answer: it never runs the agent in tool-use mode, so an injected instruction can't touch your working tree. Every preset's exact flags and ready-to-paste TOML: [CLI-agent presets](#cli-agent-presets).
 
 ## Features
 
-- **Hunk-level splitting** — one file, many concerns? Splits per-hunk into atomic commits, fully non-interactive
-- **Two backends** — API provider (12+ supported) or CLI agent (11 presets: claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen — no API key)
-- **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge
-- **One-command undo** — `aic undo` resets the last Run's commits and returns every change to the working tree, unstaged
-- **Run directives** — `aic --hint "breaking change"` steers grouping, type, and wording for one Run (e.g. `--hint "closes #78"`)
-- **Secrets redaction gate** — a diff or conflicted file containing secret-shaped content (cloud keys, tokens, private key blocks) refuses the Run *before* anything is sent to the LLM, naming the file and pattern kind; `--no-redact` proceeds knowingly
-- **Live reasoning** — watch the model think as it decides the split
-- **Conventional Commits** — messages follow the [v1.0.0 spec](https://www.conventionalcommits.org/)
-- **Interactive setup** — `aic setup` is menu-driven; `aic use` switches between saved provider profiles and CLI agents (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen)
+- **Atomic, hunk-level commits** — one file, three unrelated changes? Three commits — not one mixed "update auth.rs". Fully non-interactive, with the model's reasoning streamed live.
+- **No API key needed** — drive the CLI agent already logged in on your machine (Claude Code, Codex, pi, opencode, and 7 more), or pick any of 12 API providers.
+- **Conventional Commits** — every message follows the [v1.0.0 spec](https://www.conventionalcommits.org/), scoped to the logical change it describes.
+- **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge.
+- **One-command undo** — `aic undo` resets the last Run's commits and returns every change to the working tree, unstaged.
+- **Redaction gate** — secret-shaped content in a diff refuses the Run *before* anything is sent to the LLM; `--no-redact` proceeds knowingly.
 
 ## Installation
 
 | Method | Command |
 |--------|---------|
-| **Binary** (macOS/Linux) | `curl -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh \| sh` |
+| **Binary** (macOS/Linux) | `curl --proto '=https' --tlsv1.2 -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh \| sh` |
 | **Homebrew** | `brew tap CaicoLeung/aic && brew install aic` |
 | **Source** | `git clone … && cargo build --release` → `target/release/aic` |
 
@@ -109,40 +73,27 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 
 | Command | Description |
 |---------|-------------|
-| `aic` | Commit staged files. If nothing is staged, auto-split all unstaged changes into hunk-level atomic commits. |
+| `aic` | Commit what's staged — or, with nothing staged, split every unstaged change into clean atomic commits. |
 | `aic --hint "<text>"` | Same, with a one-off directive appended to both prompts — e.g. `aic --hint "closes #78"` or `aic --hint "prefer more batches"`. |
-| `aic --no-redact` | Same as `aic`, but skip the secrets redaction gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. (Conflicted repo? `aic resolve` takes its own `--no-redact`.) |
-| `aic undo` | Undo the last Run: reset back to where it started, all its changes back in the working tree (unstaged). Confirms exactly which commits will be reset — including any made after the Run — and refuses if history was rewritten since. |
+| `aic undo` | Undo the last Run: reset back to where it started, all its changes back in the working tree (unstaged). Confirms which commits will be reset — including any made after — and refuses if history was rewritten since. |
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
-| `aic resolve --no-redact` | Same as `aic resolve`, but skip the secrets redaction gate: by default a conflicted file whose content contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends whole-file content as-is, for this resolve only. |
-| `aic setup` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. |
-| `aic use <name>` | Switch to a provider already configured via `aic setup`, or to a CLI agent (claude, codex, pi, opencode, omp, gemini, cursor, windsurf, copilot, trae, qwen). |
-| `aic list` | Show resolved config and where each value comes from. |
-| `aic update` | Update to the latest release. |
-| `aic completion` | Install shell completions. |
+| `aic setup` / `aic use <name>` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. `aic use` switches between saved provider profiles and CLI agents. |
+
+Redaction Gate, `--no-redact`, and the remaining commands (`aic list`, `aic update`, `aic completion`): [other commands](#other-commands).
 
 ## Configuration
 
-Config lives at `~/.config/aic/config.toml` — the single source of truth (env vars are **not** read).
+Config lives at `~/.config/aic/config.toml` — the single source of truth (env vars are **not** read). Two backends, toggled by `backend_kind`: an LLM API provider over HTTP, or a local coding-agent CLI. Both field sets can coexist in the file; `backend_kind` selects the active one.
 
-**Two backends**, toggled by `backend_kind`:
-
-| `backend_kind` | What it uses | Key fields |
-|----------------|-------------|------------|
-| `"api"` (default) | An LLM API provider over HTTP | `backend`, `api_key`, `model`, `base_url` |
-| `"cli"` | A local coding-agent CLI | `command`, `args`, `timeout_secs` |
-
-> ⚠️ **Want to review before committing?** Set `confirm_before_commit = true` for a **Commit / Re-generate / Edit / Abort** menu before each commit.
-
-Full reference: [provider table](#supported-providers) · [CLI-agent presets](#cli-agent-presets) · [config fields](#config-fields).
-
----
+Full reference: [supported providers](#supported-providers) · [CLI-agent presets](#cli-agent-presets) · [config fields](#config-fields) · [other commands](#other-commands).
 
 ## Resolving merge conflicts
 
 ![aic resolve proposes resolutions and finalizes the merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
 
-Run `aic resolve` in a repo mid-merge. It reads each conflicted file, proposes a marker-free resolution, shows you the diff, and asks `apply?` per file. When nothing's left unmerged, it runs the merge's `--continue` for you. Plain `aic` in a conflicted repo notices and offers to hand off. A conflicted file with secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM — `aic resolve --no-redact` proceeds knowingly.
+*Mid-merge, `aic resolve` proposes a marker-free resolution per conflicted file — you review the diff, approve each, and it finalizes the merge.*
+
+Run `aic resolve` in a repo mid-merge: it reads each conflicted file, proposes a resolution, shows the diff, asks `apply?` per file, and — once nothing is left unmerged — runs the merge's `--continue` for you. Plain `aic` in a conflicted repo notices and offers to hand off.
 
 ## Contributing
 
@@ -179,6 +130,13 @@ OpenRouter and the OpenAI-compatible provider have no default model — set `mod
 ### CLI-agent presets
 
 Presets with a decodable stdout envelope (claude, codex, pi, opencode, omp) get a decoder — omp reuses pi's, being a pi fork — so aic streams reasoning where the CLI exposes it and cleanly extracts the answer; the rest use plain print mode — stdout IS the answer.
+
+```toml
+# Claude Code — headless print mode, streamed JSON
+backend_kind = "cli"
+command = "claude"
+args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
+```
 
 ```toml
 # OpenAI Codex — exec --json, read-only sandbox
@@ -229,7 +187,17 @@ See [ADR 0010](docs/adr/0010-cli-agent-backend.md) for the backend design and [A
 | `command` | CLI command (CLI backend) | — |
 | `args` | Argv template, `{prompt}` is replaced | `["{prompt}"]` |
 | `timeout_secs` | Per-call idle timeout (CLI backend) | `240` (streaming) / `600` (batch) |
-| `confirm_before_commit` | Show the Commit confirmation menu before each commit lands | `false` |
+| `confirm_before_commit` | Show the Commit confirmation menu (Commit / Re-generate / Edit / Abort) before each commit lands | `false` |
 | `review_batch_plan` | Show the Batch Review menu (merge Batches) before drafting | `false` |
+
+### Other commands
+
+| Command | Description |
+|---------|-------------|
+| `aic --no-redact` | Same as `aic`, but skip the Redaction Gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. (Conflicted repo? `aic resolve` takes its own `--no-redact`.) |
+| `aic resolve --no-redact` | Same as `aic resolve`, but skip the Redaction Gate: by default a conflicted file whose content contains secret-shaped content refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends whole-file content as-is, for this resolve only. |
+| `aic list` | Show resolved config and where each value comes from. |
+| `aic update` | Update to the latest release. |
+| `aic completion` | Install shell completions. |
 
 </details>
