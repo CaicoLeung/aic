@@ -2,41 +2,15 @@
 
 > **English:** [README.md](./README.md)
 
-AI 驱动的 git commit 工具，写出 **真正原子化** 的提交信息 —— 而且可以直接复用你已有的 AI 工具，**无需 API key**。
+aic 把你杂乱的工作区变成一串干净的原子化 commit —— 由你已有的 AI 驱动。
 
 🌐 **官网:** <https://caicoleung.github.io/aic-web/>
 
-[![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml)
-[![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
+[![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml) [![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
 ![aic 把一个文件的改动拆成原子提交](https://vhs.charm.sh/vhs-2lPY6yY1uBpk7fWCgd7ypH.gif)
 
----
-
-## ✨ hunk 级别的提交，而非 file 级别
-
-多数 AI commit 工具把 **file** 当作原子单位。aic 则把 **hunk**（一段连续的代码改动）当作原子单位。
-
-在一个文件里做了三处互不相关的改动，`aic` 会产出干净的原子提交 —— 无需手动 `git add -p`，也不会出现 concern 混杂的历史。
-
-```
-src/auth.rs  （一个文件，三处改动）
-
-  其他工具:  1 个 commit  "update src/auth.rs"        ❌ concern 混杂
-  aic:       3 个 commit，每个对应一处逻辑改动          ✅
-
-    ├─ hunk 1  →  fix(auth): correct token expiry check
-    ├─ hunk 2  →  feat(auth): add OAuth2 login provider
-    └─ hunk 3  →  style(auth): tidy imports
-```
-
-什么都不 stage 直接运行 `aic`，它会自动检测所有未暂存的 hunk，按逻辑 concern 分组，逐组提交 —— 分组时模型的推理过程实时流式输出。
-
-不会丢失或重复提交：每个 hunk 恰好落在一个 commit 中，否则整个 plan 会被拒绝。
-
----
+*无需 stage、无需 `git add -p` —— 一个文件里的三处无关改动，变成三个干净的原子 commit。*
 
 ## 快速上手
 
@@ -50,50 +24,40 @@ aic setup
 
 # 3. 提交 —— 无需手动 stage，直接运行 aic
 aic
-# → 从你的工作区生成 3 个原子提交
 ```
 
 > 💡 **没有 API key？** 跳过 provider 配置 —— 直接使用 [Claude Code、Codex、pi、opencode 以及另外 7 个 CLI agent](#-没有-api-key复用你的-ai-agent)，aic 会复用它们的登录认证。
 
 > **Windows (PowerShell):** `irm https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.ps1 | iex`
 
----
+## ✨ hunk 级别的提交，而非 file 级别
+
+**hunk**（一段连续的代码改动）是 aic 的原子单位 —— 每个逻辑改动单独提交，一个文件里的三处编辑就是三个干净的 commit。其他工具按整个 file 提交；aic 不会再写出 "update auth.rs" 这种 concern 混杂的提交，也无需手动 `git add -p`。
+
+```text
+src/auth.rs —— 一个文件，三处改动
+
+  ├─ hunk 1  →  fix(auth): correct token expiry check
+  ├─ hunk 2  →  feat(auth): add OAuth2 login provider
+  └─ hunk 3  →  style(auth): tidy imports
+```
+
+什么都不 stage 直接运行 `aic`，它会自动检测所有未暂存的 hunk，按逻辑 concern 分组，逐组提交 —— 分组时模型的推理过程实时流式输出。不会丢失或重复提交：每个 hunk 恰好落在一个 commit 中，否则整个 plan 会被拒绝。
 
 ## 🔑 没有 API key？复用你的 AI agent
 
-已经安装并登录了 [Claude Code](https://docs.anthropic.com/claude/docs/claude-code)、[OpenAI Codex](https://github.com/openai/codex)、[pi](https://pi.dev) 或 [opencode](https://opencode.ai)？aic 可以在 **headless 模式** 下驱动它 —— 无需 API key。
+已经安装并登录了 [Claude Code](https://docs.anthropic.com/claude/docs/claude-code)、[OpenAI Codex](https://github.com/openai/codex)、[pi](https://pi.dev) 或 [opencode](https://opencode.ai)？aic 会在 **headless 模式**下驱动它并复用其认证 —— 无需 API key。同样支持：**oh-my-pi**（`omp`）、**Gemini**（`gemini`）、**Cursor**（`cursor-agent`）、**Windsurf**（`devin` —— Windsurf 已更名为 Devin Desktop）、**GitHub Copilot**（`copilot`）、**Trae**（`traecli`）和 **Qwen Code**（`qwen`）。
 
-同样支持：**oh-my-pi**（`omp`）、**Gemini**（`gemini`）、**Cursor**（`cursor-agent`）、**Windsurf**（`devin` —— Windsurf 已更名为 Devin Desktop）、**GitHub Copilot**（`copilot`）、**Trae**（`traecli`）和 **Qwen Code**（`qwen`）。
-
-```sh
-aic setup    # → 选择 "CLI agent" → 选你的工具 → 完成
-```
-
-或者直接编辑 `~/.config/aic/config.toml`：
-
-```toml
-backend_kind = "cli"
-command = "claude"
-args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
-```
-
-aic 只发送一条 prompt 并读取回答 —— 绝不在 tool-use 模式下运行 agent。需要时预设会显式锁定权限（codex 的只读沙箱、pi 的 `--no-tools`）；其余预设依赖无头 print 模式 —— 没有 TTY，需审批的工具无法运行 —— 因此注入的指令无法触碰你的工作区。两个 backend 的字段可以共存于配置文件中；`backend_kind` 决定哪个生效。
-
-其他预设见 [CLI-agent 预设](#cli-agent-预设)。
-
----
+运行 `aic setup`，选择 **CLI agent**，挑你的工具 —— 完成。aic 只发送一条 prompt 并读取回答：绝不在 tool-use 模式下运行 agent，注入的指令无法触碰你的工作区。每个预设的确切 flag 与可直接粘贴的 TOML 见 [CLI-agent 预设](#cli-agent-预设)。
 
 ## 功能特性
 
-- **Hunk 级别拆分** —— 一个文件、多种 concern？按 hunk 拆成多个原子提交，完全非交互
-- **两种 backend** —— API provider（支持 12+ 家）或 CLI agent（11 个预设：claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen —— 无需 API key）
-- **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge
-- **一键撤销** —— `aic undo` 重置上一次 Run 的提交，全部改动原样回到工作区（未暂存）
-- **Run 指令** —— `aic --hint "breaking change"` 为单次 Run 指定意图（如 `--hint "closes #78"`），影响拆分、类型与措辞
-- **密钥拦截门** —— diff 或冲突文件中出现密钥特征内容（云厂商 key、token、私钥块）时，Run 会在**发送给 LLM 之前**拒绝执行，并指明文件与模式类型；`--no-redact` 可知情放行
-- **实时推理** —— 观看模型思考拆分方案的全过程
-- **Conventional Commits** —— message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)
-- **交互式配置** —— `aic setup` 菜单驱动；`aic use` 在已保存的 provider 与 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）之间切换
+- **hunk 级原子提交** —— 一个文件、三处无关改动？三个 commit —— 而不是一个混杂的 "update auth.rs"。全程非交互，模型推理实时流式输出。
+- **无需 API key** —— 直接驱动本机已登录的 CLI agent（Claude Code、Codex、pi、opencode 等共 11 个），也可从 12 家 API provider 中任选。
+- **Conventional Commits** —— 每条 message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)，作用于它所描述的那个逻辑改动。
+- **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge。
+- **一键撤销** —— `aic undo` 重置上一次 Run 的提交，全部改动原样回到工作区（未暂存）。
+- **密钥拦截门** —— diff 中出现密钥特征内容（云厂商 key、token、私钥块）时，Run 会在**发送给 LLM 之前**拒绝执行；`--no-redact` 可知情放行。
 
 ## 安装
 
@@ -109,40 +73,27 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 
 | 命令 | 说明 |
 |------|------|
-| `aic` | 提交已 stage 的文件。若无 stage 内容，自动将所有未暂存改动拆分为 hunk 级别的原子提交。 |
+| `aic` | 提交已 stage 的内容 —— 若无 stage 内容，则把所有未暂存改动拆成干净的原子提交。 |
 | `aic --hint "<文本>"` | 同上，但为本次 Run 追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
-| `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。（冲突仓库请用 `aic resolve` 自己的 `--no-redact`。） |
-| `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。确认时列明将重置哪些提交 —— 含 Run 之后手动提交的；若期间历史被改写则拒绝执行。 |
+| `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。确认时列明将重置哪些提交（含 Run 之后的）；若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
-| `aic resolve --no-redact` | 同 `aic resolve`，但跳过密钥拦截门：默认情况下，冲突文件内容含密钥特征内容（云厂商 key、token、私钥块）时会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将整个文件内容原样发送，仅对本次 resolve 生效。 |
-| `aic setup` | 菜单驱动配置：API provider、CLI agent、或提交前确认。 |
-| `aic use <name>` | 切换到已通过 `aic setup` 配置过的 provider，或切换到 CLI agent（claude、codex、pi、opencode、omp、gemini、cursor、windsurf、copilot、trae、qwen）。 |
-| `aic list` | 展示已 resolve 的 config 及每个值的来源。 |
-| `aic update` | 更新到最新版本。 |
-| `aic completion` | 安装 shell 补全。 |
+| `aic setup` / `aic use <name>` | 菜单驱动配置：API provider、CLI agent、或提交前确认；`aic use` 在已保存的 provider 与 CLI agent 之间切换。 |
+
+密钥拦截门、`--no-redact`，以及其余命令（`aic list`、`aic update`、`aic completion`）：[其他命令](#其他命令)。
 
 ## 配置
 
-配置文件位于 `~/.config/aic/config.toml` —— 唯一真相来源（**不**读取环境变量）。
+配置文件位于 `~/.config/aic/config.toml` —— 唯一真相来源（**不**读取环境变量）。两种 backend 通过 `backend_kind` 切换：经 HTTP 调用的 LLM API provider，或本地 coding-agent CLI。两套字段可在文件中共存；`backend_kind` 决定哪个生效。
 
-**两种 backend**，通过 `backend_kind` 切换：
-
-| `backend_kind` | 使用什么 | 关键字段 |
-|----------------|---------|---------|
-| `"api"`（默认） | 通过 HTTP 调用 LLM API provider | `backend`、`api_key`、`model`、`base_url` |
-| `"cli"` | 本地 coding-agent CLI | `command`、`args`、`timeout_secs` |
-
-> ⚠️ **想在提交前审核？** 设置 `confirm_before_commit = true`，每次提交前弹出 **提交 / 重新生成 / 编辑 / 中止** 菜单。
-
-完整参考：[provider 表](#支持的-provider) · [CLI-agent 预设](#cli-agent-预设) · [配置字段](#配置字段)。
-
----
+完整参考：[支持的 provider](#支持的-provider) · [CLI-agent 预设](#cli-agent-预设) · [配置字段](#配置字段) · [其他命令](#其他命令)。
 
 ## 解决 merge 冲突
 
 ![aic resolve 提出解决方案并完成 merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
 
-在处于 merge 中的 repo 运行 `aic resolve`。它会读取每个冲突文件，提出不含 marker 的解决方案，展示 diff，并逐文件询问 `apply?`。当没有未 merge 的内容残留时，它会替你执行 merge 的 `--continue`。在冲突 repo 中直接运行 `aic` 也会察觉并提议移交给 resolve。冲突文件含密钥特征内容（云厂商 key、token、私钥块）时会在发送给 LLM 之前拒绝——`aic resolve --no-redact` 可知情放行。
+*merge 冲突中，`aic resolve` 逐文件提出不含 marker 的解决方案 —— 你审核 diff、逐个确认，它来完成 merge。*
+
+在处于 merge 中的 repo 运行 `aic resolve`：它读取每个冲突文件、提出解决方案、展示 diff、逐文件询问 `apply?`，当没有未 merge 的内容残留时，替你执行 merge 的 `--continue`。在冲突 repo 中直接运行 `aic` 也会察觉并提议移交给 resolve。
 
 ## 贡献
 
@@ -179,6 +130,13 @@ OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config �
 ### CLI-agent 预设
 
 带可解码 stdout 封装的预设（claude、codex、pi、opencode、omp）配有解码器 —— omp 作为 pi 的复刻直接复用 pi 的解码器 —— aic 能在 CLI 支持的情况下流式输出推理过程并干净地提取回答；其余预设为纯打印模式 —— stdout 即回答。
+
+```toml
+# Claude Code — headless 打印模式，流式 JSON
+backend_kind = "cli"
+command = "claude"
+args = ["-p", "{prompt}", "--output-format", "stream-json", "--include-partial-messages"]
+```
 
 ```toml
 # OpenAI Codex — exec --json，只读沙箱
@@ -231,5 +189,15 @@ args = ["run", "--format", "json", "{prompt}"]
 | `timeout_secs` | 每次调用空闲超时（CLI backend） | `240`（流式）/ `600`（批量） |
 | `confirm_before_commit` | 每次提交落库前显示 Commit confirmation 菜单 | `false` |
 | `review_batch_plan` | 起草前显示 Batch Review 菜单（可合并 Batch） | `false` |
+
+### 其他命令
+
+| 命令 | 说明 |
+|------|------|
+| `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。（冲突仓库请用 `aic resolve` 自己的 `--no-redact`。） |
+| `aic resolve --no-redact` | 同 `aic resolve`，但跳过密钥拦截门：默认情况下，冲突文件内容含密钥特征内容（云厂商 key、token、私钥块）时会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将整个文件内容原样发送，仅对本次 resolve 生效。 |
+| `aic list` | 展示已 resolve 的 config 及每个值的来源。 |
+| `aic update` | 更新到最新版本。 |
+| `aic completion` | 安装 shell 补全。 |
 
 </details>
