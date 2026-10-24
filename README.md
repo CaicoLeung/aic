@@ -57,13 +57,13 @@ Run `aic setup`, select **CLI agent**, pick your tool — done. aic then sends o
 - **Conventional Commits** — every message follows the [v1.0.0 spec](https://www.conventionalcommits.org/), scoped to the logical change it describes.
 - **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge.
 - **One-command undo** — `aic undo` resets the last Run's commits and returns every change to the working tree, unstaged.
-- **Secrets redaction gate** — secret-shaped content in a diff refuses the Run *before* anything is sent to the LLM; `--no-redact` proceeds knowingly.
+- **Redaction gate** — secret-shaped content in a diff refuses the Run *before* anything is sent to the LLM; `--no-redact` proceeds knowingly.
 
 ## Installation
 
 | Method | Command |
 |--------|---------|
-| **Binary** (macOS/Linux) | `curl -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh \| sh` |
+| **Binary** (macOS/Linux) | `curl --proto '=https' --tlsv1.2 -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh \| sh` |
 | **Homebrew** | `brew tap CaicoLeung/aic && brew install aic` |
 | **Source** | `git clone … && cargo build --release` → `target/release/aic` |
 
@@ -79,7 +79,7 @@ Shell completions: `aic completion` (bash, fish, zsh, nushell).
 | `aic resolve` | Resolve git merge conflicts via the LLM. Review each file, then finalize. |
 | `aic setup` / `aic use <name>` | Menu-driven config: API provider, CLI agent, or pre-commit confirmation. `aic use` switches between saved provider profiles and CLI agents. |
 
-Secrets gate, `--no-redact`, and the remaining commands (`aic list`, `aic update`, `aic completion`): [other commands](#other-commands).
+Redaction Gate, `--no-redact`, and the remaining commands (`aic list`, `aic update`, `aic completion`): [other commands](#other-commands).
 
 ## Configuration
 
@@ -194,8 +194,8 @@ See [ADR 0010](docs/adr/0010-cli-agent-backend.md) for the backend design and [A
 
 | Command | Description |
 |---------|-------------|
-| `aic --no-redact` | Same as `aic`, but skip the secrets redaction gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. (Conflicted repo? `aic resolve` takes its own `--no-redact`.) |
-| `aic resolve --no-redact` | Same as `aic resolve`, but skip the secrets redaction gate: by default a conflicted file whose content contains secret-shaped content refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends whole-file content as-is, for this resolve only. |
+| `aic --no-redact` | Same as `aic`, but skip the Redaction Gate: by default a Run whose diff contains secret-shaped content (cloud keys, tokens, private key blocks) refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends the diff as-is, for this Run only. (Conflicted repo? `aic resolve` takes its own `--no-redact`.) |
+| `aic resolve --no-redact` | Same as `aic resolve`, but skip the Redaction Gate: by default a conflicted file whose content contains secret-shaped content refuses before anything is sent to the LLM, naming the offending file and pattern kind. This flag sends whole-file content as-is, for this resolve only. |
 | `aic list` | Show resolved config and where each value comes from. |
 | `aic update` | Update to the latest release. |
 | `aic completion` | Install shell completions. |

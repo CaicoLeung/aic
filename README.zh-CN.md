@@ -63,7 +63,7 @@ src/auth.rs —— 一个文件，三处改动
 
 | 方式 | 命令 |
 |------|------|
-| **二进制**（macOS/Linux） | `curl -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh \| sh` |
+| **二进制**（macOS/Linux） | `curl --proto '=https' --tlsv1.2 -sSfL https://github.com/CaicoLeung/aic/releases/latest/download/aic-installer.sh \| sh` |
 | **Homebrew** | `brew tap CaicoLeung/aic && brew install aic` |
 | **源码编译** | `git clone … && cargo build --release` → `target/release/aic` |
 
