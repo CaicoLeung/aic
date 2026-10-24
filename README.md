@@ -57,7 +57,7 @@ Run `aic setup`, select **CLI agent**, pick your tool — done. aic then sends o
 - **Conventional Commits** — every message follows the [v1.0.0 spec](https://www.conventionalcommits.org/), scoped to the logical change it describes.
 - **Merge conflict resolution** — `aic resolve` proposes per-file resolutions you review, then finalizes the merge.
 - **One-command undo** — `aic undo` resets the last Run's commits and returns every change to the working tree, unstaged.
-- **Secrets redaction gate** — secret-shaped content in a diff (cloud keys, tokens, private key blocks) refuses the Run *before* anything is sent to the LLM; `--no-redact` proceeds knowingly.
+- **Secrets redaction gate** — secret-shaped content in a diff refuses the Run *before* anything is sent to the LLM; `--no-redact` proceeds knowingly.
 
 ## Installation
 
@@ -187,7 +187,7 @@ See [ADR 0010](docs/adr/0010-cli-agent-backend.md) for the backend design and [A
 | `command` | CLI command (CLI backend) | — |
 | `args` | Argv template, `{prompt}` is replaced | `["{prompt}"]` |
 | `timeout_secs` | Per-call idle timeout (CLI backend) | `240` (streaming) / `600` (batch) |
-| `confirm_before_commit` | Show the Commit confirmation menu before each commit lands | `false` |
+| `confirm_before_commit` | Show the Commit confirmation menu (Commit / Re-generate / Edit / Abort) before each commit lands | `false` |
 | `review_batch_plan` | Show the Batch Review menu (merge Batches) before drafting | `false` |
 
 ### Other commands

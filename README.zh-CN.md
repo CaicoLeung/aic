@@ -57,7 +57,7 @@ src/auth.rs —— 一个文件，三处改动
 - **Conventional Commits** —— 每条 message 遵循 [v1.0.0 规范](https://www.conventionalcommits.org/)，作用于它所描述的那个逻辑改动。
 - **Merge 冲突解决** —— `aic resolve` 逐文件给出方案供你审核，然后完成 merge。
 - **一键撤销** —— `aic undo` 重置上一次 Run 的提交，全部改动原样回到工作区（未暂存）。
-- **密钥拦截门** —— diff 中出现密钥特征内容（云厂商 key、token、私钥块）时，Run 会在**发送给 LLM 之前**拒绝执行；`--no-redact` 可知情放行。
+- **密钥拦截门** —— diff 中出现密钥特征内容时，Run 会在**发送给 LLM 之前**拒绝执行；`--no-redact` 可知情放行。
 
 ## 安装
 
@@ -74,7 +74,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 | 命令 | 说明 |
 |------|------|
 | `aic` | 提交已 stage 的内容 —— 若无 stage 内容，则把所有未暂存改动拆成干净的原子提交。 |
-| `aic --hint "<文本>"` | 同上，但为本次 Run 追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
+| `aic --hint "<文本>"` | 同上，但向本次 Run 的两个提示词（batch 计划与提交信息）各追加一条一次性指令 —— 如 `aic --hint "closes #78"` 或 `aic --hint "拆得更细"`。 |
 | `aic undo` | 撤销上一次 Run：重置回 Run 开始前的状态，全部改动回到工作区（未暂存）。确认时列明将重置哪些提交（含 Run 之后的）；若期间历史被改写则拒绝执行。 |
 | `aic resolve` | 通过 LLM 解决 git merge 冲突。逐文件审核后完成 merge。 |
 | `aic setup` / `aic use <name>` | 菜单驱动配置：API provider、CLI agent、或提交前确认；`aic use` 在已保存的 provider 与 CLI agent 之间切换。 |
@@ -187,7 +187,7 @@ args = ["run", "--format", "json", "{prompt}"]
 | `command` | CLI 命令（CLI backend） | — |
 | `args` | Argv 模板，`{prompt}` 会被替换 | `["{prompt}"]` |
 | `timeout_secs` | 每次调用空闲超时（CLI backend） | `240`（流式）/ `600`（批量） |
-| `confirm_before_commit` | 每次提交落库前显示 Commit confirmation 菜单 | `false` |
+| `confirm_before_commit` | 每次提交落库前显示 Commit confirmation 菜单（提交 / 重新生成 / 编辑 / 中止） | `false` |
 | `review_batch_plan` | 起草前显示 Batch Review 菜单（可合并 Batch） | `false` |
 
 ### 其他命令
@@ -195,7 +195,7 @@ args = ["run", "--format", "json", "{prompt}"]
 | 命令 | 说明 |
 |------|------|
 | `aic --no-redact` | 同 `aic`，但跳过密钥拦截门：默认情况下，diff 中含密钥特征内容（云厂商 key、token、私钥块）的 Run 会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将 diff 原样发送，仅对本次 Run 生效。（冲突仓库请用 `aic resolve` 自己的 `--no-redact`。） |
-| `aic resolve --no-redact` | 同 `aic resolve`，但跳过密钥拦截门：默认情况下，冲突文件内容含密钥特征内容（云厂商 key、token、私钥块）时会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将整个文件内容原样发送，仅对本次 resolve 生效。 |
+| `aic resolve --no-redact` | 同 `aic resolve`，但跳过密钥拦截门：默认情况下，冲突文件内容含密钥特征内容时会在发送给 LLM 之前拒绝，并指明文件与模式类型。本 flag 将整个文件内容原样发送，仅对本次 resolve 生效。 |
 | `aic list` | 展示已 resolve 的 config 及每个值的来源。 |
 | `aic update` | 更新到最新版本。 |
 | `aic completion` | 安装 shell 补全。 |
