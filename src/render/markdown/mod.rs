@@ -15,7 +15,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{self as hl, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-use crate::render::layout::{MARGIN, wrap_line, wrap_words};
+use crate::render::layout::{MARGIN, char_display_width, wrap_line, wrap_words};
 
 /// Markdown render kind for one reasoning line. Streaming markdown can't be
 /// fully parsed (the input is partial), so classification is line-local with a
@@ -265,21 +265,19 @@ fn wrap_runs<T: PartialEq + Clone>(
         return vec![render_runs(&flat_runs(segments), &style_of)];
     }
     let words = tokenize_runs(segments);
-    wrap_words(&words, width, |unit: &(char, T)| {
-        crate::render::layout::char_display_width(unit.0)
-    })
-    .into_iter()
-    .map(|row| {
-        let mut chars: Vec<(char, T)> = Vec::new();
-        for (i, slice) in row.iter().enumerate() {
-            if i > 0 {
-                chars.push((' ', plain.clone()));
+    wrap_words(&words, width, |unit: &(char, T)| char_display_width(unit.0))
+        .into_iter()
+        .map(|row| {
+            let mut chars: Vec<(char, T)> = Vec::new();
+            for (i, slice) in row.iter().enumerate() {
+                if i > 0 {
+                    chars.push((' ', plain.clone()));
+                }
+                chars.extend(slice.iter().cloned());
             }
-            chars.extend(slice.iter().cloned());
-        }
-        render_runs(&chars, &style_of)
-    })
-    .collect()
+            render_runs(&chars, &style_of)
+        })
+        .collect()
 }
 
 /// The inline-prose wrapper around [`wrap_runs`]: tags are [`Span`]s, the

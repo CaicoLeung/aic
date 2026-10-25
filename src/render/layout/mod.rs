@@ -111,12 +111,14 @@ pub(crate) fn wrap_words<T>(
             cur_len = 0;
         }
         if cur.is_empty() {
-            // Word starts a new line — hard-break it while the remaining tail
-            // alone exceeds width. Each chunk is the longest prefix of display
-            // width ≤ width (at least one unit, so an unsplittable wide unit
-            // still advances).
+            // Word starts a new line — hard-break it while the remaining
+            // tail alone exceeds width. Each chunk is the longest prefix of
+            // display width ≤ width (at least one unit, so an unsplittable
+            // wide unit still advances). The tail's width is carried
+            // incrementally so the pass stays linear in units.
             let mut idx = 0;
-            while word_width(&w[idx..]) > width {
+            let mut tail = wlen;
+            while tail > width {
                 let mut end = idx;
                 let mut acc = 0usize;
                 while end < w.len() {
@@ -127,13 +129,18 @@ pub(crate) fn wrap_words<T>(
                     acc += ew;
                     end += 1;
                 }
-                let end = if end == idx { idx + 1 } else { end };
+                let (end, emitted) = if end == idx {
+                    (idx + 1, weight(&w[idx]))
+                } else {
+                    (end, acc)
+                };
                 rows.push(vec![&w[idx..end]]);
+                tail -= emitted;
                 idx = end;
             }
             if idx < w.len() {
                 cur.push(&w[idx..]);
-                cur_len = word_width(&w[idx..]);
+                cur_len = tail;
             }
         } else {
             cur.push(&w[..]);
@@ -229,6 +236,9 @@ mod tests {
         assert_eq!(wrap_line("", 4), vec![""]);
     }
 
+    /// Wrapping counts *display* width (`unicode-width`: CJK = 2 columns),
+    /// not chars — the contract both wrap paths inherit from
+    /// [`char_display_width`] so CJK rows stay inside the column budget.
     #[test]
     fn wrap_line_wraps_cjk_by_display_width() {
         // 6 CJK chars occupy 12 display columns; width 4 fits two per row —
@@ -242,6 +252,9 @@ mod tests {
         assert_eq!(wrap_line("abcd ef", 4), vec!["abcd", "ef"]);
     }
 
+    /// A single wide char at width 1 cannot be split: emitted alone, one
+    /// row overflowing by a column — advancing beats dropping the char or
+    /// looping forever.
     #[test]
     fn wrap_line_unsplittable_wide_char_overflows_one_column() {
         // A single wide char at width 1 cannot be split: one row, overflowing
