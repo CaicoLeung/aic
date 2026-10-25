@@ -15,7 +15,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{self as hl, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-use crate::render::layout::{MARGIN, wrap_line, wrap_words};
+use crate::render::layout::{MARGIN, char_display_width, wrap_line, wrap_words};
 
 /// Markdown render kind for one reasoning line. Streaming markdown can't be
 /// fully parsed (the input is partial), so classification is line-local with a
@@ -241,14 +241,15 @@ fn parse_inline(line: &str) -> Vec<(String, Span)> {
     segs
 }
 
-/// Greedy word-wrap of a tagged line to `width` display columns (counted in
-/// `char`s, CJK-safe), re-opening each tag's ANSI at the start of any row that
+/// Greedy word-wrap of a tagged line to `width` display columns (counted via
+/// `layout::char_display_width`, so CJK counts 2), re-opening each tag's ANSI
+/// at the start of any row that
 /// begins mid-tag and letting `console` close it at the row end. Width math
-/// stays on plain `char`s: the break geometry is delegated to
+/// stays on plain chars' display widths: the break geometry is delegated to
 /// [`crate::render::layout::wrap_words`] (shared with [`crate::render::layout::wrap_line`], so
-/// a fix to the greedy/hard-break policy reaches both — ADR 0013), and ANSI is
-/// emitted only by [`render_runs`] *after* the breaks are chosen, so escape
-/// bytes never count toward width.
+/// a fix to the greedy/hard-break/CJK policy reaches both — ADR 0013), and
+/// ANSI is emitted only by [`render_runs`] *after* the breaks are chosen, so
+/// escape bytes never count toward width.
 ///
 /// `style_of` turns a tag into its [`Style`] (or `None` for a plain run); `plain`
 /// is the tag for the single inter-word space a wrap break inserts. The
@@ -264,7 +265,7 @@ fn wrap_runs<T: PartialEq + Clone>(
         return vec![render_runs(&flat_runs(segments), &style_of)];
     }
     let words = tokenize_runs(segments);
-    wrap_words(&words, width)
+    wrap_words(&words, width, |unit: &(char, T)| char_display_width(unit.0))
         .into_iter()
         .map(|row| {
             let mut chars: Vec<(char, T)> = Vec::new();

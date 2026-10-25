@@ -23,11 +23,13 @@ records *why these two* and *why this substrate*.
 
 The reasoning window is a **raw-ANSI in-place painter**, not a TUI framework:
 rows are `Vec<String>` of already-styled text repainted via `console::Term`.
-The load-bearing invariant is that **width math is ANSI-blind** — line length
-is counted in plain `char`s and styling is applied *after* wrap, so escape
-bytes never count toward the visible budget. That geometry is shared with the
-static panel engine through `layout::wrap_line`, so a Markdown wrap path must
-not grow its own divergent width counter.
+The load-bearing invariant is that **width math is ANSI-blind** — width is
+the summed *display* width of plain chars (PR #169: `unicode-width`, CJK and
+fullwidth = 2 columns; previously counted as plain `char`s, which let CJK
+overflow the budget by up to 2×) and styling is applied *after* wrap, so
+escape bytes never count toward the visible budget. That geometry is shared
+with the static panel engine through `layout::wrap_line`, so a Markdown wrap
+path must not grow its own divergent width counter.
 
 ## Decision
 
@@ -57,8 +59,9 @@ flicker-free repaint engine. The Markdown renderer stays a pure
 
 **Wrap geometry stays single-source.** The greedy word-wrap that both the
 plain (`layout::wrap_line`) and the tagged Markdown paths need is now one
-generic core — `layout::wrap_words(words, width) -> rows of word-slices` — so
-a fix to the wrap geometry (CJK width, hard-break policy) reaches both paths.
+generic core — `layout::wrap_words(words, width, weight) -> rows of
+word-slices`, weighted by the single `layout::char_display_width` — so a fix
+to the wrap geometry (CJK width, hard-break policy) reaches both paths.
 `wrap_line` and the Markdown `wrap_runs` are thin collectors over it; the
 ANSI-blind invariant holds because `wrap_words` never sees a style byte.
 
@@ -94,3 +97,8 @@ ANSI-blind invariant holds because `wrap_words` never sees a style byte.
 - Builds on ADR 0010 (CLI-agent backend streams into the same `on_reasoning`
   callback): the Markdown renderer is backend-agnostic — both the API and CLI
   reasoning feeds render identically.
+- **Amended 2026-10-25 (PR #169):** width counting moved from plain char
+  count to display width (`unicode-width`, already in-tree transitively via
+  `console`, now a direct dependency). The substrate is unchanged — raw-ANSI
+  painter, styling after wrap — only the width math inside the single
+  geometry source changed.

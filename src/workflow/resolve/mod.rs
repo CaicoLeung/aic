@@ -250,24 +250,40 @@ pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
 
 /// Unified line diff between two strings for the resolution review (ADR 0005).
 /// Computed in-memory via `similar` so the diff is shown *before* the resolved
-/// content is written to disk — review must precede `git add`.
+/// content is written to disk — review must precede `git add`. Full context
+/// (every equal line shown) and no `\ No newline` hints: this is a reading
+/// view, not a patch to apply. Hunk headers (`@@`) render in the header style
+/// via `review_section`'s fall-through arm.
 fn unified_diff(old: &str, new: &str) -> String {
-    use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(old, new);
-    let mut out = String::new();
-    for op in diff.ops() {
-        for change in diff.iter_changes(op) {
-            let sign = match change.tag() {
-                ChangeTag::Delete => '-',
-                ChangeTag::Insert => '+',
-                ChangeTag::Equal => ' ',
-            };
-            out.push(sign);
-            out.push_str(change.value());
-            if !change.value().ends_with('\n') {
-                out.push('\n');
-            }
-        }
+    use similar::TextDiff;
+    // Full context: a radius of the larger line count always covers any
+    // equal run. Deliberately not `usize::MAX` — similar multiplies the
+    // radius by 2 internally (`group_diff_ops`), which overflows and panics
+    // in debug builds the moment a diff contains a single equal line.
+    let radius = old.lines().count().max(new.lines().count());
+    TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(radius)
+        .missing_newline_hint(false)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unified_diff;
+
+    /// The review diff keeps reading-view semantics on a *partial*
+    /// resolution (equal lines present, the normal LLM-merge case): one
+    /// hunk shows every line of both sides, and the full-context radius
+    /// survives the `Equal` ops such input produces — `usize::MAX` panicked
+    /// in debug builds via similar's internal `radius * 2` (PR #169).
+    #[test]
+    fn unified_diff_shows_full_context_on_partial_overlap() {
+        let old = "fn main() {\n    let x = 1;\n}\n";
+        let new = "fn main() {\n    let x = 2;\n}\n";
+        assert_eq!(
+            unified_diff(old, new),
+            "@@ -1,3 +1,3 @@\n fn main() {\n-    let x = 1;\n+    let x = 2;\n }\n"
+        );
     }
-    out
 }
