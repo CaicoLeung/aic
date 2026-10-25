@@ -64,52 +64,95 @@ fn resolve_rows(rows: usize) -> usize {
     if rows == 0 { FALLBACK_ROWS } else { rows }
 }
 
-/// Greedy word-wrap *geometry*: pack `words` (each a `Vec` of display-width-1
-/// units) into rows of ≤`width`, hard-breaking a word longer than `width` at
-/// the boundary. Returns each row as the sequence of word-slices that compose
-/// it — callers collect (plain text) or style-emit (ANSI) without re-deriving
-/// the breaks. `width` must be ≥ 1; callers short-circuit `0`.
+/// Display width of one `char` in terminal columns: CJK and fullwidth forms
+/// count 2, combining/zero-width marks 0, and everything else 1 (control
+/// chars — which the ANSI-blind invariant already assumes absent — fall back
+/// to 1). `unicode-width` is already in the tree via `console`; this is the
+/// single weight function both wrap paths use, so CJK handling can't drift
+/// between them.
+pub(crate) fn char_display_width(c: char) -> usize {
+    use unicode_width::UnicodeWidthChar as _;
+    c.width().unwrap_or(1)
+}
+
+/// Greedy word-wrap *geometry*: pack `words` (each a `Vec` of units whose
+/// display width is given by `weight`) into rows of ≤`width` display columns,
+/// hard-breaking a word wider than `width` at the boundary. Returns each row as
+/// the sequence of word-slices that compose it — callers collect (plain text)
+/// or style-emit (ANSI) without re-deriving the breaks. `width` must be ≥ 1;
+/// callers short-circuit `0`.
+///
+/// A single unit wider than `width` (possible only when `width == 1` and the
+/// char is CJK/fullwidth) is emitted alone, overflowing by one column — a
+/// char cannot be split, and one overflowing column beats dropping it or
+/// looping forever.
 ///
 /// This is the single wrap-geometry source: [`wrap_line`] (plain `char`
 /// words, for the panel engine) and the Markdown renderer's tagged wrap
 /// (`markdown::wrap_runs`, `(char, tag)` words) share these exact breaks, so a
 /// fix to the greedy/hard-break policy reaches both paths. It never sees a
-/// style byte — width is the element count — which is what keeps styling
-/// applied *after* wrap ANSI-blind (ADR 0013).
-pub(crate) fn wrap_words<T>(words: &[Vec<T>], width: usize) -> Vec<Vec<&[T]>> {
+/// style byte — width is the summed display width of plain chars — which is
+/// what keeps styling applied *after* wrap ANSI-blind (ADR 0013).
+pub(crate) fn wrap_words<T>(
+    words: &[Vec<T>],
+    width: usize,
+    weight: impl Fn(&T) -> usize,
+) -> Vec<Vec<&[T]>> {
     debug_assert!(width > 0, "callers short-circuit width == 0");
+    let word_width = |w: &[T]| w.iter().map(&weight).sum::<usize>();
     let mut rows: Vec<Vec<&[T]>> = Vec::new();
     let mut cur: Vec<&[T]> = Vec::new();
     let mut cur_len = 0usize;
     for w in words {
-        let wlen = w.len();
+        let wlen = word_width(w);
         // If the running line can't accept " <word>", flush it first.
         if !cur.is_empty() && cur_len + 1 + wlen > width {
             rows.push(std::mem::take(&mut cur));
             cur_len = 0;
         }
         if cur.is_empty() {
-            // Word starts a new line — hard-break it if it alone exceeds width.
+            // Word starts a new line — hard-break it while the remaining tail
+            // alone exceeds width. Each chunk is the longest prefix of display
+            // width ≤ width (at least one unit, so an unsplittable wide unit
+            // still advances).
             let mut idx = 0;
-            while wlen - idx > width {
-                rows.push(vec![&w[idx..idx + width]]);
-                idx += width;
+            while word_width(&w[idx..]) > width {
+                let mut end = idx;
+                let mut acc = 0usize;
+                while end < w.len() {
+                    let ew = weight(&w[end]);
+                    if acc + ew > width {
+                        break;
+                    }
+                    acc += ew;
+                    end += 1;
+                }
+                let end = if end == idx { idx + 1 } else { end };
+                rows.push(vec![&w[idx..end]]);
+                idx = end;
             }
-            if idx < wlen {
+            if idx < w.len() {
                 cur.push(&w[idx..]);
-                cur_len = wlen - idx;
+                cur_len = word_width(&w[idx..]);
             }
         } else {
             cur.push(&w[..]);
             cur_len += 1 + wlen;
         }
     }
-    rows.push(cur);
+    // Keep the always-one-row contract (an empty input yields one empty
+    // row) without emitting a phantom trailing empty row when hard-breaking
+    // consumed the whole word exactly.
+    if !cur.is_empty() || rows.is_empty() {
+        rows.push(cur);
+    }
     rows
 }
 
-/// Greedy word-wrap of a single line (no embedded newlines) to `width` display
-/// columns, counted in `char`s (not bytes) so CJK commit bodies wrap correctly.
+/// Greedy word-wrap of a single line (no embedded newlines) to `width`
+/// display columns, counted via [`char_display_width`] (`unicode-width`:
+/// CJK and fullwidth chars count 2, combining marks 0) so CJK commit bodies
+/// wrap at the columns they actually occupy.
 ///
 /// The author's structure is preserved: this only breaks a line *further* —
 /// callers feed it one source line at a time so existing newlines stay as hard
@@ -134,7 +177,7 @@ pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
         .split_whitespace()
         .map(|w| w.chars().collect())
         .collect();
-    wrap_words(&words, width)
+    wrap_words(&words, width, |c: &char| char_display_width(*c))
         .into_iter()
         .map(|row| {
             let mut s = String::new();
@@ -187,11 +230,23 @@ mod tests {
     }
 
     #[test]
-    fn wrap_line_handles_cjk_by_char_count() {
-        // 6 CJK chars at width 4 → two lines of 4 and 2 (not byte-based wrap,
-        // which would wrap every ~1.3 chars and corrupt output).
-        let pieces = wrap_line("你好世界测试", 4);
-        assert_eq!(pieces, vec!["你好世界", "测试"]);
+    fn wrap_line_wraps_cjk_by_display_width() {
+        // 6 CJK chars occupy 12 display columns; width 4 fits two per row —
+        // char-counting wrapped four per row and overflowed the budget.
+        assert_eq!(wrap_line("你好世界测试", 4), vec!["你好", "世界", "测试"]);
+        // A mixed word "a你" is 3 columns: width 2 hard-breaks after `a`.
+        assert_eq!(wrap_line("a你", 2), vec!["a", "你"]);
+        // Two 2-column words at width 4: the separator never fits, two rows.
+        assert_eq!(wrap_line("你好 世界", 4), vec!["你好", "世界"]);
+        // ASCII behavior is unchanged: width counts one per char.
+        assert_eq!(wrap_line("abcd ef", 4), vec!["abcd", "ef"]);
+    }
+
+    #[test]
+    fn wrap_line_unsplittable_wide_char_overflows_one_column() {
+        // A single wide char at width 1 cannot be split: one row, overflowing
+        // by a column — better than dropping the char or looping forever.
+        assert_eq!(wrap_line("你", 1), vec!["你"]);
     }
 
     /// A raw column count resolves to itself up to the hard cap, `0` falls

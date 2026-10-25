@@ -362,10 +362,11 @@ fn wrap_styled_reopens_span_across_wrap_break() {
 }
 
 /// The load-bearing ANSI-blind property (ADR 0013): a bold line wrapped
-/// narrow keeps every row's *visible* width within the budget — the wrap
-/// counted plain chars (via `layout::wrap_words`) and applied styling
-/// after, so escape bytes never inflated a row. This is the direct check
-/// the other wrap tests assert only indirectly.
+/// narrow keeps every row's *visible* display width within the budget — the
+/// wrap counted plain chars' display columns (via `layout::wrap_words` +
+/// `unicode-width`) and applied styling after, so escape bytes never inflated
+/// a row. Width is measured with `console::measure_text_width` (itself
+/// `unicode-width`-backed), so the CJK case asserts real terminal columns.
 #[test]
 fn wrap_runs_visible_width_stays_within_budget() {
     console::set_colors_enabled(true);
@@ -377,12 +378,23 @@ fn wrap_runs_visible_width_stays_within_budget() {
         );
         assert!(!rows.is_empty());
         for r in &rows {
-            let vis = console::strip_ansi_codes(r).chars().count();
+            let vis = console::measure_text_width(&console::strip_ansi_codes(r));
             assert!(
                 vis <= budget,
                 "budget {budget}: visible width {vis} > budget: {r:?}"
             );
         }
+    }
+    // CJK: each char occupies 2 columns, so a 6-char bold phrase is 12 wide —
+    // at budget 8 no row may exceed 4 chars.
+    let rows = wrap_inline(&parse_inline("**粗体一号二号三号"), 8, None);
+    assert!(
+        rows.len() >= 2,
+        "12 columns at budget 8 must wrap: {rows:?}"
+    );
+    for r in &rows {
+        let vis = console::measure_text_width(&console::strip_ansi_codes(r));
+        assert!(vis <= 8, "CJK row overflows: {vis} > 8: {r:?}");
     }
 }
 
