@@ -250,24 +250,15 @@ pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
 
 /// Unified line diff between two strings for the resolution review (ADR 0005).
 /// Computed in-memory via `similar` so the diff is shown *before* the resolved
-/// content is written to disk — review must precede `git add`.
+/// content is written to disk — review must precede `git add`. Full context
+/// (every equal line shown) and no `\ No newline` hints: this is a reading
+/// view, not a patch to apply. Hunk headers (`@@`) render in the header style
+/// via `review_section`'s fall-through arm.
 fn unified_diff(old: &str, new: &str) -> String {
-    use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(old, new);
-    let mut out = String::new();
-    for op in diff.ops() {
-        for change in diff.iter_changes(op) {
-            let sign = match change.tag() {
-                ChangeTag::Delete => '-',
-                ChangeTag::Insert => '+',
-                ChangeTag::Equal => ' ',
-            };
-            out.push(sign);
-            out.push_str(change.value());
-            if !change.value().ends_with('\n') {
-                out.push('\n');
-            }
-        }
-    }
-    out
+    use similar::TextDiff;
+    TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(usize::MAX)
+        .missing_newline_hint(false)
+        .to_string()
 }
