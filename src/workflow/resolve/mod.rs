@@ -256,9 +256,34 @@ pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
 /// via `review_section`'s fall-through arm.
 fn unified_diff(old: &str, new: &str) -> String {
     use similar::TextDiff;
+    // Full context: a radius of the larger line count always covers any
+    // equal run. Deliberately not `usize::MAX` — similar multiplies the
+    // radius by 2 internally (`group_diff_ops`), which overflows and panics
+    // in debug builds the moment a diff contains a single equal line.
+    let radius = old.lines().count().max(new.lines().count());
     TextDiff::from_lines(old, new)
         .unified_diff()
-        .context_radius(usize::MAX)
+        .context_radius(radius)
         .missing_newline_hint(false)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unified_diff;
+
+    /// The review diff keeps reading-view semantics on a *partial*
+    /// resolution (equal lines present, the normal LLM-merge case): one
+    /// hunk shows every line of both sides, and the full-context radius
+    /// survives the `Equal` ops such input produces — `usize::MAX` panicked
+    /// in debug builds via similar's internal `radius * 2` (PR #169).
+    #[test]
+    fn unified_diff_shows_full_context_on_partial_overlap() {
+        let old = "fn main() {\n    let x = 1;\n}\n";
+        let new = "fn main() {\n    let x = 2;\n}\n";
+        assert_eq!(
+            unified_diff(old, new),
+            "@@ -1,3 +1,3 @@\n fn main() {\n-    let x = 1;\n+    let x = 2;\n }\n"
+        );
+    }
 }
