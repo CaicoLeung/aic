@@ -67,6 +67,22 @@ impl Git {
         }
     }
 
+    /// Per-file stats for `paths` in the workdir diff (index → workdir) —
+    /// the unstaged twin of [`Git::staged_stats`], powering the Scan
+    /// summary's aggregate `+A −D` (ADR 0018 redesign).
+    pub fn workdir_stats(&self, paths: &[String]) -> anyhow::Result<Vec<FileStats>> {
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true);
+        opts.show_untracked_content(true);
+        opts.recurse_untracked_dirs(true);
+        let index = self.index()?;
+        let diff = self
+            .repo
+            .diff_index_to_workdir(Some(&index), Some(&mut opts))
+            .context("failed to compute workdir diff")?;
+        Self::stats_from_diff(&diff, paths)
+    }
+
     /// Per-file stats for `paths` in the staged diff (HEAD → index) — exactly
     /// what the next commit would land. Mirrors [`Git::diff`]'s head-less
     /// handling: with no HEAD, every staged path counts as a new file.
@@ -153,7 +169,9 @@ impl Git {
             let Some(i) = delta_path(&delta).and_then(|p| index.get(p).copied()) else {
                 return true;
             };
-            new_flags[i] = delta.status() == git2::Delta::Added;
+            // Untracked files (index→workdir diffs) are content-wise new —
+            // they render as new-file patches everywhere else in the Run.
+            new_flags[i] = matches!(delta.status(), git2::Delta::Added | git2::Delta::Untracked);
             sizes[i] = (delta.old_file().size(), delta.new_file().size());
             removed_flags[i] = delta.status() == git2::Delta::Deleted;
             binary_flags[i] = delta.flags().contains(git2::DiffFlags::BINARY);

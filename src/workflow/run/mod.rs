@@ -98,6 +98,35 @@ pub(crate) fn plural(n: usize, word: &str) -> String {
     }
 }
 
+/// Compact count for delta summaries (`2.1k`, `15k`, `1.2m`) — above a
+/// thousand the exact number no longer earns its columns (ADR 0018
+/// redesign). Below it, the plain number.
+pub(crate) fn compact_count(n: usize) -> String {
+    let unit = |n: usize, divisor: usize, suffix: &str| {
+        let tenths = (n * 10 + divisor / 2) / divisor; // round half up
+        let (whole, frac) = (tenths / 10, tenths % 10);
+        if frac == 0 || whole >= 10 {
+            format!("{whole}{suffix}")
+        } else {
+            format!("{whole}.{frac}{suffix}")
+        }
+    };
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => unit(n, 1_000, "k"),
+        _ => unit(n, 1_000_000, "m"),
+    }
+}
+/// The Scan summary's aggregate text-line delta (` · +12 −3`), summed from
+/// per-file stats (unstaged Runs read the workdir diff, staged Runs the
+/// index). Always present: a zero delta still tells the reader the scan saw
+/// no text-line churn (binary-only or mode-only changes).
+pub(crate) fn delta_suffix(stats: &[crate::git::FileStats]) -> String {
+    let added: usize = stats.iter().map(|s| s.added).sum();
+    let deleted: usize = stats.iter().map(|s| s.deleted).sum();
+    format!(" · +{} −{}", compact_count(added), compact_count(deleted))
+}
+
 pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
     let RunDeps {
         display,
@@ -197,10 +226,16 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             .iter()
             .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
             .collect();
+        let scan_paths: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
+        let scan_delta = delta_suffix(&git.workdir_stats(&scan_paths)?);
         frame.complete(
             &display,
             SCAN,
-            format!("Scanned {}", plural(unstaged_files.len(), "file")),
+            format!(
+                "Scanned {}{}",
+                plural(unstaged_files.len(), "file"),
+                scan_delta
+            ),
         );
 
         // Redaction Gate, first payload site (issue #155, ADR 0017): the
@@ -455,10 +490,16 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         let commit_step = draft_step + 1;
 
         frame.activate(SCAN);
+        let staged_paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
+        let scan_delta = delta_suffix(&git.staged_stats(&staged_paths)?);
         frame.complete(
             &display,
             SCAN,
-            format!("Scanned {}", plural(staged_files.len(), "file")),
+            format!(
+                "Scanned {}{}",
+                plural(staged_files.len(), "file"),
+                scan_delta
+            ),
         );
 
         if let Some(rs) = redact_step {
@@ -877,4 +918,41 @@ pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Re
         },
     )
     .await
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::FileStats;
+
+    /// `compact_count` keeps exact numbers below a thousand and collapses
+    /// above it: one decimal while the whole part is a single digit, no
+    /// decimal once it isn't, `k`→`m` at the next magnitude.
+    #[test]
+    fn compact_count_collapses_only_above_a_thousand() {
+        assert_eq!(compact_count(0), "0");
+        assert_eq!(compact_count(999), "999");
+        assert_eq!(compact_count(1_000), "1k");
+        assert_eq!(compact_count(2_100), "2.1k");
+        assert_eq!(compact_count(9_999), "10k");
+        assert_eq!(compact_count(15_000), "15k");
+        assert_eq!(compact_count(1_234_567), "1.2m");
+    }
+
+    /// `delta_suffix` sums per-file stats into one ` · +A −D` segment and
+    /// stays present at zero (binary-only scans still show the churn pair).
+    #[test]
+    fn delta_suffix_sums_and_survives_zero() {
+        let stats = |a: usize, d: usize| FileStats {
+            path: "x.rs".into(),
+            added: a,
+            deleted: d,
+            new: false,
+            removed: false,
+            binary: false,
+            old_size: 0,
+            new_size: 0,
+        };
+        assert_eq!(delta_suffix(&[stats(3, 1), stats(5, 0)]), " · +8 −1");
+        assert_eq!(delta_suffix(&[]), " · +0 −0");
+    }
 }
