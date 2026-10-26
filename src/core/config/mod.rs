@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use crate::llm::cli_agent::{cli_preset, is_preset};
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, LLM, Provider};
+use crate::render::{oneshot, palette};
 
 /// The CLI-agent Backend's four config fields — a unit (command + argv
 /// template + timeout + stdout encoding) that travels together through
@@ -826,7 +827,8 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
 }
 
 /// `aic list` — print the resolved configuration as the one-shot table
-/// (ADR 0018): margin 2, the key column muted and aligned to the
+/// (ADR 0018): one primary row per line at the shared inset
+/// ([`crate::render::oneshot`]), the key column muted and aligned to the
 /// widest key plus a 2-space gap, values default fg, wording unchanged.
 pub fn run_list() -> Result<()> {
     let config = Config::load()?;
@@ -838,9 +840,12 @@ pub fn run_list() -> Result<()> {
         .unwrap_or(0);
     for (key, value) in rows {
         let pad = " ".repeat(width - key.chars().count() + 2);
-        println!(
-            "  {}{pad}{value}",
-            crate::render::palette::styled_stdout(&key, crate::render::palette::muted())
+        oneshot::out(
+            &format!(
+                "{}{pad}{value}",
+                palette::styled_stdout(&key, palette::muted())
+            ),
+            palette::plain(),
         );
     }
     Ok(())
@@ -979,18 +984,9 @@ pub fn run_use(name: &str) -> Result<()> {
 
     let (line, note) = use_messages(&config);
     config.save()?;
-    println!(
-        "  {}",
-        crate::render::palette::styled_stdout(
-            &format!("✓ {line}"),
-            crate::render::palette::success()
-        )
-    );
+    oneshot::out(&format!("✓ {line}"), palette::success());
     if let Some(note) = note {
-        eprintln!(
-            "  {}",
-            crate::render::palette::styled_stderr(&note, crate::render::palette::muted())
-        );
+        oneshot::err_detail(&note, palette::muted());
     }
     Ok(())
 }
