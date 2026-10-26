@@ -1027,9 +1027,9 @@ fn format_bytes_delta_covers_units_and_signs() {
 }
 
 /// The Σ bar fills the row's remaining width (v3, ADR 0018 amendment 3):
-/// a 30-col terminal affords 6 trailing cells, a 28-col one 4, and a 26-col
-/// one drops the bar entirely (below the 4-cell floor) — the counts and
-/// `· N files` scope never truncate.
+/// a 30-col terminal affords 7 cells, a 28-col one 5, and a 24-col one
+/// drops the bar entirely (below the 4-cell floor) — the counts never
+/// truncate.
 #[test]
 fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
     let stats = |a: usize| {
@@ -1091,7 +1091,8 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
 /// — subject hang included — within the TEXT budget (`text_width`, the
 /// same prose boundary the reasoning feed wraps at), NOT the terminal's
 /// real edge: on a 140-col terminal the bar still ends at the capped
-/// the row (a 103-column Σ row on a 100-col terminal, caught by the PTY
+/// prose edge, never wrapping the row (without the hang in the budget
+/// the row hit 103 columns on a 100-col terminal — caught by the PTY
 /// render harness). Contract: margin (2) + the capped text budget bound
 /// the row.
 #[test]
