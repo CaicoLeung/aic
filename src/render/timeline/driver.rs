@@ -20,13 +20,16 @@
 //!
 //! Step-scoped output routing: [`RunFrame::step_display`] hands out a
 //! [`Display`] whose sink is a [`FrameSink`] on a terminal — every line a
-//! panel emits (a Commit entry, a preview, a warning) is appended to the
-//! frame's rows instead of printed, so nothing can interleave below the
-//! in-place region — or the Run's own shared sink off a terminal, so non-TTY
-//! behavior is byte-identical to the pre-timeline output. Rows emitted while
-//! a step is active ride its live output (ephemeral) and become its durable
-//! rows when the step completes (spec §2.7's "already-landed Commit entries");
-//! rows emitted after completion land directly under that step's summary.
+//! panel emits (a preview, a warning) is appended to the frame's rows
+//! instead of printed, so nothing can interleave below the in-place region
+//! — or the Run's own shared sink off a terminal, so non-TTY behavior is
+//! byte-identical to the pre-timeline output. Rows emitted while a step is
+//! active ride its live output (ephemeral) and become its durable rows when
+//! the step completes; rows emitted after completion land directly under
+//! that step's summary. Unbounded durable content (Commit entries) must NOT
+//! ride the frame — a frame taller than the terminal cannot be repainted —
+//! so it lands via [`RunFrame::flush`] as permanent scrollback: erased
+//! frame, printed rows, frame repainted below (the bounded-frame model).
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -360,6 +363,61 @@ impl RunFrame {
         }
     }
 
+    /// Print rows as **permanent scrollback** below the frame (ADR 0018
+    /// bounded-frame model): `render` builds the rows through a collecting
+    /// [`Display`], then the frame is erased in one clear, the rows are
+    /// written as plain terminal lines (never repainted again), and the
+    /// frame repaints below them. This is the only way durable content
+    /// (Commit entries) lands on a terminal: rows that ride the frame would
+    /// grow it past the terminal height, where whole-frame repaint breaks —
+    /// cursor-up clamps at the screen top and every repaint scrolls a full
+    /// copy into the scrollback.
+    ///
+    /// Off a terminal `render` runs against `display` itself, so non-TTY
+    /// output is byte-identical to painting through the step display.
+    ///
+    /// The painter's absolute-row tracking survives the print by arithmetic,
+    /// not a fresh DSR probe: the clear leaves the cursor on the frame's top
+    /// row, `n` written lines each advance one row, and a line written on
+    /// the bottom margin scrolls instead — so the cursor lands on
+    /// `min(top + n, height)`, exactly the descent [`frame_bytes`] tracks.
+    /// Rows are budgeted to the terminal width by their builders, so no row
+    /// ever wraps to two physical rows.
+    pub fn flush(&self, display: &Display, render: impl FnOnce(&Display)) {
+        let mut st = self.0.lock().unwrap();
+        if st.paint.is_none() {
+            render(display);
+            return;
+        }
+        let width = st.paint_width();
+        let rows: Vec<String> = {
+            let sink = RowSink::default();
+            let collected = Display::framed(sink.clone(), width);
+            render(&collected);
+            sink.lines()
+        };
+        {
+            let p = st.paint.as_mut().expect("checked above");
+            let prev_height = p.prev_height();
+            let bytes = clear_frame_bytes(prev_height, p.cursor_hidden);
+            let _ = p.term.write_str(&bytes);
+            let _ = p.term.flush();
+            p.cursor_hidden = false;
+            // The clear ends on the frame's top row; remember it before
+            // `prev_rows` resets so the post-print cursor row stays exact.
+            let top = p
+                .row
+                .map(|r| r.saturating_sub(prev_height.saturating_sub(1)));
+            p.prev_rows.clear();
+            for row in &rows {
+                let _ = p.term.write_line(row);
+            }
+            let _ = p.term.flush();
+            p.row = top.map(|t| (t + rows.len()).min(p.height));
+        }
+        st.repaint();
+    }
+
     /// Suspend the frame for a full-screen takeover (the message editor,
     /// spec §1.4): one-frame erase, cursor restored. [`Self::resume`]
     /// repaints the whole frame afterwards.
@@ -562,6 +620,33 @@ impl FrameState {
         let _ = p.term.flush();
         p.row = end_row;
         p.prev_rows = rows;
+    }
+}
+
+/// A collecting [`DisplayWrite`] for [`RunFrame::flush`]: a [`Display`]
+/// rendered into it yields the finished rows — styled per stderr's color
+/// capability, full rows exactly as a terminal would receive them — without
+/// touching the terminal. Cheap clone shares the buffer.
+#[derive(Default, Clone)]
+struct RowSink(Arc<Mutex<Vec<String>>>);
+
+impl RowSink {
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl DisplayWrite for RowSink {
+    fn write_line(&self, line: &str) {
+        self.0.lock().unwrap().push(line.to_string());
+    }
+    fn clear_last(&self, n: usize) {
+        let mut buf = self.0.lock().unwrap();
+        let keep = buf.len().saturating_sub(n);
+        buf.truncate(keep);
+    }
+    fn colors_enabled(&self) -> bool {
+        console::colors_enabled_stderr()
     }
 }
 
@@ -780,6 +865,37 @@ mod tests {
         step_display.emit("+2 −2  other.txt");
         f.complete(&display, 1, "Committed 2 batches");
         assert_eq!(f.step(1).durable_rows.len(), 2);
+    }
+
+    /// `flush` off a terminal (the only path unit tests can drive — no
+    /// painter exists) renders straight through the passed display — which
+    /// must be the Run's own sink, never a frame-captured one (the render
+    /// runs under the frame lock; a FrameSink sink would re-enter it).
+    /// Production is safe by construction: `step_display` hands out the
+    /// FrameSink sink only on a terminal, where `flush` ignores the passed
+    /// display. The flushed rows are byte-identical to painting them
+    /// directly, and nothing is retained in any step's live/durable rows.
+    /// The TTY geometry (erase → print below → repaint) is pinned by the
+    /// PTY render-verification harness, not here.
+    #[tokio::test]
+    async fn flush_off_terminal_paints_through_the_display_only() {
+        let (display, rec) = display();
+        let f = frame(&["Scan changes", "Commit batches"]).await;
+        f.complete(&display, 0, "Scanned 2 files");
+        f.flush(&display, |d| {
+            d.emit("[1/2] ✓ a1b2c3d feat: first");
+            d.emit("+1 −1  tracked.txt");
+        });
+        assert_eq!(
+            rec.lines(),
+            vec![
+                "  ✓ Scanned 2 files",
+                "  [1/2] ✓ a1b2c3d feat: first",
+                "  +1 −1  tracked.txt",
+            ]
+        );
+        assert!(f.step(1).live_rows.is_empty());
+        assert!(f.step(1).durable_rows.is_empty());
     }
 
     /// The install guard restores the previous frame on drop, so a nested

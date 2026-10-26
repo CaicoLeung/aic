@@ -594,8 +594,9 @@ async fn generate_and_commit(
     // feed the preview footer — shown only when confirmation is on; landed
     // stats (what it did land) always feed the ✓ line. `display` is the
     // frame's step display (spec §2.7): on a terminal the preview, the
-    // confirmation menu, the Commit entry, and the staging warning all ride
-    // the active step's live rows; off one it is the Run's own sink.
+    // confirmation menu, and the staging warning ride the active step's live
+    // rows, while the Commit entry flushes to permanent scrollback (see
+    // [`RunFrame::flush`]); off a terminal it is the Run's own sink.
     let diff_str = staged_diff_json(git, paths)?;
     let stats = git.staged_stats(paths)?;
     let (message, body, preview_rows) = confirm_draft(
@@ -625,7 +626,14 @@ async fn generate_and_commit(
         undo::record_tip(git)?;
     }
     let landed = git.committed_stats(paths)?;
-    display.commit_line(&hash, &message, body.as_deref(), &prefix, &landed);
+    // The Commit entry lands as permanent scrollback (ADR 0018 bounded
+    // frame): on a terminal `flush` erases the frame, prints the entry, and
+    // repaints the frame below it — entries never ride the frame, so the
+    // frame stays shorter than the terminal and whole-frame repaint never
+    // scrolls. Off a terminal the rows go straight through the step display.
+    frame.flush(display, |d| {
+        d.commit_line(&hash, &message, body.as_deref(), &prefix, &landed)
+    });
     Ok(())
 }
 
