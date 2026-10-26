@@ -409,10 +409,10 @@ pub(crate) fn resolved(display: &Display, path: &str) {
 
 pub(crate) fn skipped(display: &Display, path: &str, reason: &str) {
     display.emit(&format!(
-        "{} skipped: {} ({})",
+        "{} skipped: {} — {}",
         display.styled("\u{26A0}", palette::caution()),
         path,
-        reason,
+        display.styled(reason, palette::muted()),
     ));
 }
 
