@@ -8,6 +8,20 @@ use std::sync::Arc;
 // keep the suite safe to run multi-threaded.
 static COLOR_ENV: Mutex<()> = Mutex::new(());
 
+/// Takes both process-global color-state locks for tests asserting exact
+/// truecolor bytes: `COLOR_ENV` (console's enabled flag, flipped by
+/// `ColorGuard`) and the palette neon toggle — a `set_neon` in a parallel
+/// `palette::tests` test would otherwise reroute accessors mid-assertion.
+fn color_locks() -> (
+    parking_lot::MutexGuard<'static, ()>,
+    parking_lot::MutexGuard<'static, ()>,
+) {
+    (
+        COLOR_ENV.lock(),
+        crate::render::palette::NEON_TOGGLE_LOCK.lock(),
+    )
+}
+
 /// Forces `console` to emit ANSI escapes for the guard's lifetime,
 /// restoring the prior state on drop. `console::Style` only renders
 /// escapes when the global `colors_enabled()` is true; in the test runner
@@ -756,7 +770,7 @@ fn plain_when_colors_disabled() {
 
 #[test]
 fn truecolor_when_colors_enabled() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
@@ -793,7 +807,7 @@ fn truecolor_when_colors_enabled() {
 
 #[test]
 fn fix_type_gets_orange_color() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
@@ -842,7 +856,7 @@ fn scoped_commit_preserves_parens_plain() {
 /// test only pins the display wiring.
 #[test]
 fn each_type_renders_its_palette_color() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     for (type_str, rgb) in [
         ("feat", "21;128;61"),
@@ -870,7 +884,7 @@ fn each_type_renders_its_palette_color() {
 /// read as "uncolored"). Stability/distribution is pinned in `types::tests`.
 #[test]
 fn unrecognized_type_gets_hash_fallback_color() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
@@ -902,7 +916,7 @@ fn unrecognized_type_gets_hash_fallback_color() {
 
 #[test]
 fn no_colon_message_gets_muted_gray() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {

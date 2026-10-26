@@ -112,6 +112,13 @@ const SIGMA_COLOR_NEON: (u8, u8, u8) = (103, 232, 249);
 /// toggle it per-case.
 static NEON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Serializes tests that toggle [`set_neon`] against `display::tests` tests
+/// that assert exact classic truecolor bytes. libtest runs the suite
+/// multi-threaded in one process; without this lock a neon toggle in one
+/// test can reroute palette accessors mid-assertion in a sibling.
+#[cfg(test)]
+pub(crate) static NEON_TOGGLE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Current named-type table (neon or classic).
 fn named_palette() -> &'static [(CommitType, (u8, u8, u8)); 17] {
     if neon() {
@@ -587,6 +594,8 @@ mod tests {
     /// produced `Style` (truecolor ANSI payload differs).
     #[test]
     fn neon_switch_reroutes_every_accessor() {
+        let _neon = NEON_TOGGLE_LOCK.lock();
+        let _reset = NeonReset;
         let payload = |s: &Style| format!("{s:?}");
         let classic_type = payload(&CommitType::color_for("feat"));
         let classic_gray = payload(&neutral_gray());
@@ -603,6 +612,15 @@ mod tests {
         assert_ne!(payload(&sigma_color()), classic_sigma);
         set_neon(false);
         assert_eq!(payload(&CommitType::color_for("feat")), classic_type);
+    }
+
+    /// Restores the classic tables on unwind so a failed assertion in the
+    /// toggle test can't leave neon on for tests that assert classic bytes.
+    struct NeonReset;
+    impl Drop for NeonReset {
+        fn drop(&mut self) {
+            set_neon(false);
+        }
     }
     /// `color_for`'s three-way resolution order, tested at the decision layer
     /// (the rendering bytes are covered by `display::tests`). Named type →
