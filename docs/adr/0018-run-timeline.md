@@ -128,3 +128,22 @@ this amendment records the accepted resolutions.
    tty stdin can enable neon on a pipe; and the query is written to stdin's
    fd, mirroring the DSR probe's convention (read-only fd 0 degrades
    gracefully). None of these surface in normal terminal use.
+
+## Amendment (2026-10-26): the two process-wide render statics
+
+ADR 0012-era "no globals" holds everywhere except two render statics this
+decision introduced; both are load-bearing and documented here as the
+complete exception list:
+
+- `render::timeline::driver::ACTIVE_FRAME` — the installed Run frame, read
+  by `driver::active_frame()` for the reasoning feed and the frame menus.
+  Threading it through the workflow seams instead would force every LLM
+  seam (`Prompt`, `BatchPlanner`, `CommitMessenger`) and the e2e stub
+  factories to carry a render handle they otherwise never touch. Ceiling:
+  if a second concurrent Run ever exists per process, this becomes a
+  per-run registry keyed by task.
+- `render::palette::NEON` + `PROBED` — the one-shot OSC 11 dark-terminal
+  probe result. It must be observed before any styled byte is emitted and
+  is inherently process-wide (one terminal per process). Ceiling: if output
+  were ever redirected per-sink (neon on stderr, classic on a piped
+  stdout), the flag moves into `Theme` alongside `colors`.
