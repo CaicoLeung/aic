@@ -210,9 +210,11 @@ pub(crate) fn prompt_text(
     }
 }
 
-/// Leading glyph for yes/no prompts — Nerd Font nf-md-help, same trade as
-/// the setup icons: renders only on a patched-font terminal.
-const ICON_QUESTION: &str = "\u{f02d6}";
+/// Leading glyph for y/n prompts — the shared `?` ask marker (design spec
+/// §1.1), in `caution` like every interactive ask row.
+fn ask_marker() -> String {
+    crate::render::palette::styled_stderr("?", crate::render::palette::caution())
+}
 
 /// Read a y/n answer from raw stdin (no inquire — this must work when stdin is
 /// a pipe in tests, and the label is written to stderr because `Display` is
@@ -222,7 +224,7 @@ const ICON_QUESTION: &str = "\u{f02d6}";
 /// visible, not memorized.
 pub(crate) fn prompt_yes_no(label: &str) -> Result<bool> {
     use std::io::Write as _;
-    eprint!("{ICON_QUESTION} {label} [Y/n] ");
+    eprint!("{} {label} [Y/n] ", ask_marker());
     io::stderr().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
