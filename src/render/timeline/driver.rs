@@ -313,6 +313,32 @@ impl RunFrame {
         }
     }
 
+    /// Paint step `i`'s failed screen when `result` is an `Err`, then pass
+    /// the result through for `?`. The generic error exit — reason
+    /// `"failed"`, the error chain as the one detail row — shared by every
+    /// fallible call between [`Self::activate`] and the step's outcome
+    /// handling, so no error can leave the step Active with no failed
+    /// screen. Sites with a specific reason (declined, secret-like content,
+    /// …) keep their explicit [`Self::fail`] call.
+    pub fn fail_on_err<T>(
+        &self,
+        display: &Display,
+        i: usize,
+        result: anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        if let Err(e) = &result {
+            self.fail(
+                display,
+                i,
+                Failure {
+                    reason: "failed".into(),
+                    detail: vec![format!("{e:#}")],
+                },
+            );
+        }
+        result
+    }
+
     /// Replace the active step `i`'s live rows wholesale (the reasoning
     /// window's repaint path). No-op off a terminal.
     pub fn live(&self, i: usize, rows: Vec<String>) {

@@ -201,7 +201,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // indices onto the current diff via its internal `committed_hunks`.
         let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
         let mut raw_diffs: HashMap<String, String> = HashMap::new();
-        let files: Vec<serde_json::Value> = unstaged_files
+        let files = unstaged_files
             .iter()
             .map(|f| {
                 let diff = git.diff_workdir(Some(f.path.as_str()))?;
@@ -219,7 +219,8 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 };
                 Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
             })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>();
+        let files = frame.fail_on_err(&display, SCAN, files)?;
         let diff = serde_json::json!({ "unstaged_files": files });
         // (path, raw diff) pairs from the snapshot above — the single
         // source for the Redaction Gate below and the deterministic
@@ -230,7 +231,8 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
             .collect();
         let scan_paths: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_delta = delta_suffix(&git.workdir_stats(&scan_paths)?);
+        let scan_delta =
+            delta_suffix(&frame.fail_on_err(&display, SCAN, git.workdir_stats(&scan_paths))?);
         frame.complete(
             &display,
             SCAN,
@@ -266,20 +268,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         }
 
         frame.activate(plan_step);
-        let result = match planner(diff.to_string()).await {
-            Ok(result) => result,
-            Err(e) => {
-                frame.fail(
-                    &display,
-                    plan_step,
-                    Failure {
-                        reason: "failed".into(),
-                        detail: vec![format!("{e:#}")],
-                    },
-                );
-                return Err(e);
-            }
-        };
+        let result = frame.fail_on_err(&display, plan_step, planner(diff.to_string()).await)?;
         // An invalid plan is an LLM malfunction, not a user problem: warn and
         // regroup deterministically instead of failing the Run. The engine's
         // output is a valid partition by construction (every hunk of real
@@ -338,11 +327,15 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // keeps the messenger's call order (and the test messengers'
         // per-call counters) deterministic. The fixed MAX_CONCURRENT_DRAFTS
         // is the committed per-batch concurrency cap of this program.
-        let batch_diffs: Vec<String> = result
-            .batches
-            .iter()
-            .map(|b| diff_json::plan_batch_diff_json(b, &raw_diffs))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let batch_diffs = frame.fail_on_err(
+            &display,
+            draft_step,
+            result
+                .batches
+                .iter()
+                .map(|b| diff_json::plan_batch_diff_json(b, &raw_diffs))
+                .collect::<anyhow::Result<Vec<_>>>(),
+        )?;
         frame.activate(draft_step);
         let drafts: Vec<anyhow::Result<generator::CommitOutput>> = {
             let futs = batch_diffs.into_iter().enumerate().map(|(i, batch_diff)| {
@@ -513,10 +506,14 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             // inside `staged_diff_json` — that fn is shared with the confirm
             // menu's Re-generate redraft, which stays ungated by design (the
             // cheap second libgit2 read buys that boundary).
-            let pairs: Vec<(String, String)> = paths
-                .iter()
-                .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
-                .collect::<anyhow::Result<_>>()?;
+            let pairs: Vec<(String, String)> = frame.fail_on_err(
+                &display,
+                rs,
+                paths
+                    .iter()
+                    .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
+                    .collect::<anyhow::Result<_>>(),
+            )?;
             if let Err(e) = redact::gate(&pairs, redact::Override::Run) {
                 frame.fail(
                     &display,
@@ -540,21 +537,8 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // diff, stats, and commit below; `Git::commit` commits the index
         // as-is, so unstaged hunks survive for a follow-up Run.
         frame.activate(draft_step);
-        let diff_str = staged_diff_json(git, &paths)?;
-        let draft = match messenger(diff_str.clone()).await {
-            Ok(d) => d,
-            Err(e) => {
-                frame.fail(
-                    &display,
-                    draft_step,
-                    Failure {
-                        reason: "failed".into(),
-                        detail: vec![format!("{e:#}")],
-                    },
-                );
-                return Err(e);
-            }
-        };
+        let diff_str = frame.fail_on_err(&display, draft_step, staged_diff_json(git, &paths))?;
+        let draft = frame.fail_on_err(&display, draft_step, messenger(diff_str.clone()).await)?;
         frame.complete(&display, draft_step, "Drafted message");
 
         frame.activate(commit_step);
