@@ -157,10 +157,6 @@ _Avoid_: step list, task list, progress panel
 The proportional +/− block on a Commit entry's Σ line — a short run of cells colored by the Palette's `added`/`removed` roles in proportion to the entry's added/removed line counts. Aggregates text lines only; binary files never feed the bar (their per-file row shows a byte-size change instead).
 _Avoid_: ratio bar, stats bar, diff meter
 
-**Spine**:
-The muted `│` gutter on every non-marker row of the Run timeline (live output, durable rows, failure details, separator rows), turning `└` on the frame's last row — one continuous rail from the first Step to the last. Marker rows carry their own glyph in the spine column.
-_Avoid_: rail, tree gutter, guide line
-
 **Neon mode**:
 The Palette's dark-terminal variant set: when the OSC 11 probe reports a dark background, every truecolor palette entry switches to a brighter variant clearing WCAG AA Normal (4.5:1) on dark. Classic dual-theme tables remain the fallback for light themes, pipes, `NO_COLOR`, and unresponsive terminals.
 _Avoid_: dark theme, dark mode (overloaded)

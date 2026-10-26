@@ -88,9 +88,9 @@ mechanism.
   interactive menus keep ADR 0007's zero-residue erase and render beneath
   the active Step.
 
-## Amendment (2026-10-26): bounded frame, flushed entries, spine, neon
+## Amendment (2026-10-26): bounded frame, flushed entries, neon
 
-First real-terminal use exposed two structural flaws and four polish gaps;
+First real-terminal use exposed two structural flaws and three polish gaps;
 this amendment records the accepted resolutions.
 
 1. **Ledger duplication on TTY (bug).** `complete()`/`fail()` emitted ledger
@@ -115,12 +115,7 @@ this amendment records the accepted resolutions.
 4. **Scan summary carries the aggregate delta** (`✓ Scanned 3 files ·
    +12 −3`): unstaged Runs sum the workdir diff (new `Git::workdir_stats`),
    staged Runs the index diff. Counts compact above a thousand (`2.1k`).
-5. **Continuous spine.** Non-marker rows (live output, durable rows,
-   failure details, separator rows) carry a muted `│` in the marker column —
-   `└` on the frame's last row — replacing the plain margin, so the eye
-   tracks one rail from Scan to the final batch. Marker rows keep their
-   glyph on the rail.
-6. **Neon palette on dark terminals.** The dual-theme tables compromised
+5. **Neon palette on dark terminals.** The dual-theme tables compromised
    every color to clear 3:1 on both white and dark. An OSC 11 background
    probe (same raw-termios input-safety contract as the DSR probe) runs
    once per process at the head of the Run/resolve workflows; a dark reply
