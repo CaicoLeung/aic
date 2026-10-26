@@ -87,3 +87,43 @@ mechanism.
   the DSR probe, `MARGIN` geometry, and Palette roles are reused as-is;
   interactive menus keep ADR 0007's zero-residue erase and render beneath
   the active Step.
+
+## Amendment (2026-10-26): bounded frame, flushed entries, spine, neon
+
+First real-terminal use exposed two structural flaws and four polish gaps;
+this amendment records the accepted resolutions.
+
+1. **Ledger duplication on TTY (bug).** `complete()`/`fail()` emitted ledger
+   lines through the real stderr `Display` even on a terminal, where the
+   frame already paints them — double lines and cursor drift under
+   `prev_rows`. Fixed: ledger emission is non-TTY only.
+2. **Entries ride the frame (bug).** Commit entries lived in the frame as
+   durable rows, so a 13-batch Run pushed the frame past terminal height —
+   every repaint scrolled a full copy into scrollback. Fixed by **Model A
+   flush**: `RunFrame::flush` erases the frame, prints the entry rows as
+   permanent scrollback below it, then repaints the frame beneath. The frame
+   is bounded by the terminal height again; entries never scroll twice.
+   (Trap: the `Display` handed to `flush` must not be frame-sink-backed —
+   re-entering the painter's mutex deadlocks.)
+3. **Commit entry = one table row per batch.** The subject line carries the
+   whole batch delta (`[n/m] ✓ hash subject · +A −D`); the file-stats
+   footer stretches to the terminal's real edge (`Display::table_width`,
+   raw columns − 4 — the 100-column prose cap applies only to in-frame
+   rows); directories render muted with the basename in emphasis. The
+   commit body is omitted from the entry — `git log` owns the prose; the
+   pre-commit preview still shows it in full.
+4. **Scan summary carries the aggregate delta** (`✓ Scanned 3 files ·
+   +12 −3`): unstaged Runs sum the workdir diff (new `Git::workdir_stats`),
+   staged Runs the index diff. Counts compact above a thousand (`2.1k`).
+5. **Continuous spine.** Non-marker rows (live output, durable rows,
+   failure details, separator rows) carry a muted `│` in the marker column —
+   `└` on the frame's last row — replacing the plain margin, so the eye
+   tracks one rail from Scan to the final batch. Marker rows keep their
+   glyph on the rail.
+6. **Neon palette on dark terminals.** The dual-theme tables compromised
+   every color to clear 3:1 on both white and dark. An OSC 11 background
+   probe (same raw-termios input-safety contract as the DSR probe) runs
+   once per process at the head of the Run/resolve workflows; a dark reply
+   switches every truecolor palette entry to a neon variant clearing WCAG
+   AA Normal (4.5:1) on dark. Light themes, pipes, `NO_COLOR`, and silent
+   terminals keep the classic tables.
