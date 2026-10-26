@@ -133,11 +133,14 @@ impl Git {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             })
             .collect();
         let mut new_flags = vec![false; paths.len()];
         let mut removed_flags = vec![false; paths.len()];
         let mut binary_flags = vec![false; paths.len()];
+        let mut sizes = vec![(0u64, 0u64); paths.len()];
         let mut index: HashMap<&str, usize> = HashMap::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
             index.insert(p.as_str(), i);
@@ -151,6 +154,7 @@ impl Git {
                 return true;
             };
             new_flags[i] = delta.status() == git2::Delta::Added;
+            sizes[i] = (delta.old_file().size(), delta.new_file().size());
             removed_flags[i] = delta.status() == git2::Delta::Deleted;
             binary_flags[i] = delta.flags().contains(git2::DiffFlags::BINARY);
             true
@@ -178,6 +182,8 @@ impl Git {
                 new: new_flags[i],
                 removed: removed_flags[i],
                 binary: binary_flags[i],
+                old_size: sizes[i].0,
+                new_size: sizes[i].1,
                 ..s
             });
         }

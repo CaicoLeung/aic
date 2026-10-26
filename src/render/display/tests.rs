@@ -70,6 +70,8 @@ fn commit_preview_renders_message_body_and_file_list() {
                 new: true,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/main.rs".into(),
@@ -78,6 +80,8 @@ fn commit_preview_renders_message_body_and_file_list() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
@@ -102,7 +106,7 @@ fn commit_preview_renders_message_body_and_file_list() {
     // rows' reserved blank.
     assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
     assert_eq!(got[4], "     +4 −1  src/main.rs");
-    assert_eq!(got[5], "  Σ +16 −4  (2 files)");
+    assert_eq!(got[5], "  Σ ████████░░ +16 −4 · 2 files");
     assert_eq!(got[6], "");
     assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
 }
@@ -124,6 +128,8 @@ fn commit_preview_singleton_file_list_omits_count() {
             new: false,
             removed: false,
             binary: false,
+            old_size: 0,
+            new_size: 0,
         }],
     );
     let got = lines.lock().clone();
@@ -179,6 +185,8 @@ fn commit_preview_truncates_long_file_lists() {
             new: false,
             removed: false,
             binary: false,
+            old_size: 0,
+            new_size: 0,
         })
         .collect();
     let rows = d.commit_preview("feat: big", None, &stats);
@@ -192,7 +200,8 @@ fn commit_preview_truncates_long_file_lists() {
         "the elision line must not repeat the Σ row's (N files) count, got: {got:?}"
     );
     assert!(
-        got.iter().any(|l| l.contains("Σ +10 −0  (10 files)")),
+        got.iter()
+            .any(|l| l.contains("Σ ██████████ +10 −0 · 10 files")),
         "expected a total over all files, got: {got:?}"
     );
     assert!(
@@ -228,6 +237,8 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
                 new: true,
                 removed: false,
                 binary: true,
+                old_size: 0,
+                new_size: 512,
             },
             FileStats {
                 path: "src/old.rs".into(),
@@ -236,6 +247,8 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
                 new: false,
                 removed: true,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -246,13 +259,15 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
     );
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
-    // the counts, not the tag). "(binary)" spans the counts region; the
-    // name pads to align with src/old.rs (10 chars). The deletion-only file
-    // renders no `+0` column (git --stat convention) — its `−12` still ends
-    // where the Σ row's `−12` ends.
-    assert_eq!(got[0], "    (binary)  img.png    [new]");
-    assert_eq!(got[1], "         −12  src/old.rs [del]");
-    assert_eq!(got[2], "  Σ   +0 −12  (2 files)");
+    // the line counts, not the tag) and shows its full blob size as the
+    // byte delta (`+512 B`). `(binary) +512 B` (15 chars) spans the widened
+    // counts region; the name pads to align with src/old.rs (10 chars). The
+    // deletion-only file renders no `+0` column (git --stat convention) —
+    // its `−12` right-aligns to the region like every text row. The Σ bar
+    // is deletion-only → all `░` cells.
+    assert_eq!(got[0], "    (binary) +512 B  img.png    [new]");
+    assert_eq!(got[1], "                −12  src/old.rs [del]");
+    assert_eq!(got[2], "  Σ ░░░░░░░░░░ +0 −12 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -276,6 +291,8 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "b.rs".into(),
@@ -284,6 +301,8 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -300,7 +319,7 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
     // `(2 files)` label starts.
     assert_eq!(got[0], "     +5     a.rs");
     assert_eq!(got[1], "     +5     b.rs");
-    assert_eq!(got[2], "  Σ +10 −0  (2 files)");
+    assert_eq!(got[2], "  Σ ██████████ +10 −0 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -323,6 +342,8 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
                 new: true,
                 removed: false,
                 binary: true,
+                old_size: 0,
+                new_size: 2048,
             },
             FileStats {
                 path: "data.bin".into(),
@@ -331,6 +352,8 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
                 new: false,
                 removed: false,
                 binary: true,
+                old_size: 4096,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -340,13 +363,14 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
         },
     );
     let got = lines.lock().clone();
-    // New binary keeps `[new]`; non-new binary carries no tag. The counts
-    // region widens to fit `(binary)` (8 > the `+0`/`−0` base region of 7),
-    // so the Σ row gains a leading pad and its `(2 files)` label lands in
-    // the same column as the filenames above.
-    assert_eq!(got[0], "    (binary)  img.png  [new]");
-    assert_eq!(got[1], "    (binary)  data.bin");
-    assert_eq!(got[2], "  Σ    +0 −0  (2 files)");
+    // New binary keeps `[new]` and shows its full size (`+2.0 KB`); the
+    // deleted binary shows a negative delta (`−4.0 KB`). The counts region
+    // widens to fit the 16-char binary labels, so the filename column
+    // aligns across both rows. T = 0 (all-binary) → the Σ bar is omitted
+    // entirely: `Σ +0 −0 · 2 files`.
+    assert_eq!(got[0], "    (binary) +2.0 KB  img.png  [new]");
+    assert_eq!(got[1], "    (binary) −4.0 KB  data.bin");
+    assert_eq!(got[2], "  Σ +0 −0 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -371,6 +395,8 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
                 new: false,
                 removed: false,
                 binary: true,
+                old_size: 1024,
+                new_size: 13312,
             },
             FileStats {
                 path: "a.rs".into(),
@@ -379,6 +405,8 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -388,14 +416,16 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
         },
     );
     let got = lines.lock().clone();
-    // base region (Σ 2 + `+1` 2 + gap 1 + `−0` 2 = 7) widens to 8 for
-    // `(binary)`; the text row and Σ row each carry one leading pad, so
-    // all three rows' counts end at the same column and the filenames
-    // start at the same column. The text row's zero-deletion column renders
-    // blank but keeps its width, so `a.rs` still lands under `x.bin`.
-    assert_eq!(got[0], "    (binary)  x.bin");
-    assert_eq!(got[1], "       +1     a.rs");
-    assert_eq!(got[2], "  Σ    +1 −0  (2 files)");
+    // base region (`+1` 2 + gap 1 + `−0` 2 = 5) widens to 17 for
+    // `(binary) +12.0 KB`; the text row carries the lead pad, so both rows'
+    // counts end at the same column and the filenames start at the same
+    // column. The text row's zero-deletion column renders blank but keeps
+    // its width, so `a.rs` still lands under `x.bin`. Byte churn stays
+    // per-file: the Σ bar/counts are text-lines-only (single-sign → full
+    // `█` bar).
+    assert_eq!(got[0], "    (binary) +12.0 KB  x.bin");
+    assert_eq!(got[1], "                +1     a.rs");
+    assert_eq!(got[2], "  Σ ██████████ +1 −0 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -420,6 +450,8 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "a.rs".into(),
@@ -428,6 +460,8 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
                 new: true,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -468,6 +502,8 @@ fn commit_line_renders_file_stats_footer() {
             new: true,
             removed: false,
             binary: false,
+            old_size: 0,
+            new_size: 0,
         }],
     );
     let got = lines.lock().clone();
@@ -506,6 +542,8 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/b.rs".into(),
@@ -514,13 +552,15 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
                 new: true,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
     let got = lines.lock().clone();
     assert!(
         got.iter().any(|l| {
-            l.contains("Σ") && l.contains("+8") && l.contains("−1") && l.contains("(2 files)")
+            l.contains("Σ") && l.contains("+8") && l.contains("−1") && l.contains("· 2 files")
         }),
         "multi-file landed commit must show the Σ total row, got: {got:?}"
     );
@@ -556,6 +596,8 @@ fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             }],
         );
         let got = lines.lock().clone();
@@ -613,6 +655,8 @@ fn commit_footer_wide_counts_grow_left_not_right() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/render/display/tests.rs".into(),
@@ -621,6 +665,8 @@ fn commit_footer_wide_counts_grow_left_not_right() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
@@ -634,7 +680,7 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     );
     assert_eq!(got[1], "         +64 −51  src/render/display/mod.rs");
     assert_eq!(got[2], "         +88 −33  src/render/display/tests.rs");
-    assert_eq!(got[3], "      Σ +152 −84  (2 files)");
+    assert_eq!(got[3], "      Σ ██████░░░░ +152 −84 · 2 files");
 }
 
 /// The Σ total row hangs under the `✓` marker — exactly `sigma_col` (2)
@@ -661,6 +707,8 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/b.rs".into(),
@@ -669,6 +717,8 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
@@ -680,7 +730,7 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing");
     assert_eq!(got[1], "          +3 −1   src/a.rs");
     assert_eq!(got[2], "          +5      src/b.rs");
-    assert_eq!(got[3], "        Σ +8 −1   (2 files)");
+    assert_eq!(got[3], "        Σ █████████░ +8 −1 · 2 files");
 }
 
 #[test]
@@ -875,4 +925,96 @@ fn no_colon_message_gets_muted_gray() {
         joined.contains("107;114;128"),
         "no-colon message should be muted gray: {joined:?}"
     );
+}
+
+/// Diff bar cell split (v2, spec §3): `add = round(cells · A / T)`, deletes
+/// take the rest; single-sign diffs get the full bar; `T == 0` (all-binary)
+/// and an empty budget return `(0, 0)` — the caller omits the bar.
+#[test]
+fn ratio_bar_splits_cells_with_delete_taking_the_remainder() {
+    // 12/(12+3) = 0.8 → 8 add cells (the spec's own worked example).
+    assert_eq!(ratio_bar(12, 3, 10), (8, 2));
+    // Single-sign: full bar in one color.
+    assert_eq!(ratio_bar(10, 0, 10), (10, 0));
+    assert_eq!(ratio_bar(0, 12, 10), (0, 10));
+    // All-binary: no text churn, no bar.
+    assert_eq!(ratio_bar(0, 0, 10), (0, 0));
+    // Half-away rounding, delete side takes the remainder — never 11 cells.
+    assert_eq!(ratio_bar(1, 1, 10), (5, 5));
+    assert_eq!(ratio_bar(1, 3, 10), (3, 7));
+    assert_eq!(ratio_bar(2, 1, 9), (6, 3));
+    // Degenerate budget.
+    assert_eq!(ratio_bar(5, 5, 0), (0, 0));
+}
+
+/// Byte-size delta formatting (v2, spec §3): sign always present (`−` is
+/// U+2212, matching the `−M` counts convention); `< 1024` renders whole
+/// bytes, else one decimal of the fitting KB/MB/GB unit (÷1024 steps).
+#[test]
+fn format_bytes_delta_covers_units_and_signs() {
+    assert_eq!(format_bytes_delta(0, 0), "+0 B");
+    assert_eq!(format_bytes_delta(0, 512), "+512 B");
+    assert_eq!(format_bytes_delta(600, 100), "−500 B");
+    assert_eq!(format_bytes_delta(0, 1024), "+1.0 KB");
+    assert_eq!(format_bytes_delta(0, 12595), "+12.3 KB");
+    assert_eq!(format_bytes_delta(46080, 0), "−45.0 KB");
+    assert_eq!(format_bytes_delta(0, 3 * 1024 * 1024), "+3.0 MB");
+    assert_eq!(format_bytes_delta(5 * 1024 * 1024 * 1024, 0), "−5.0 GB");
+    // New binary → full size (old = 0); deleted → negative of the old size.
+    assert_eq!(format_bytes_delta(0, 200), "+200 B");
+    assert_eq!(format_bytes_delta(200, 0), "−200 B");
+}
+
+/// The Σ bar shrinks before it disappears on narrow terminals (v2, spec §3):
+/// a 30-col terminal affords 6 cells, a 26-col one the 4-cell floor, and a
+/// 24-col one drops the bar entirely — the counts and `· N files` scope
+/// never truncate.
+#[test]
+fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
+    let stats = |a: usize| {
+        vec![
+            FileStats {
+                path: "a.rs".into(),
+                added: a,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+                old_size: 0,
+                new_size: 0,
+            },
+            FileStats {
+                path: "b.rs".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+                old_size: 0,
+                new_size: 512,
+            },
+        ]
+    };
+    for (cols, want_bar) in [(30, " ██████ "), (28, " ████ "), (24, " ")] {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            cols,
+        );
+        d.emit_file_stats(
+            &stats(10),
+            &SubjectOffsets {
+                tick: 0,
+                hash: 0,
+                message: 2,
+            },
+        );
+        let got = lines.lock().clone();
+        let sigma = got.last().expect("Σ row present");
+        let want = format!("  Σ{want_bar}+10 −0 · 2 files");
+        assert_eq!(sigma.trim_end(), want, "cols {cols}: {got:?}");
+    }
 }

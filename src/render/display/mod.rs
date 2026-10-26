@@ -367,10 +367,13 @@ impl Display {
     /// as a blank column (`git diff --stat` never shows zeros); the Σ total
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
     /// `−M`, muted filenames, a green-bold `[new]` / red-bold `[del]` tag,
-    /// and a bold-cyan `Σ +X −Y` total row when more than one file. Binary
-    /// files render `(binary)` right-aligned in the counts region, which
-    /// widens to fit the label when any shown file is binary; a binary file
-    /// that is new or removed keeps its `[new]`/`[del]` tag.
+    /// and a bold-cyan `Σ <bar> +X −Y · N files` total row when more than one
+    /// file (Commit entry v2, spec §3: the Diff bar — `█` addition / `░`
+    /// deletion cells over text line counts only, shrinking then omitted on
+    /// narrow terminals). Binary files render `(binary) <byte-delta>`
+    /// right-aligned in the counts region, which widens to fit the widest
+    /// such label when any shown file is binary; a binary file that is new
+    /// or removed keeps its `[new]`/`[del]` tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
     /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
@@ -453,20 +456,24 @@ impl Display {
         } else {
             0
         };
-        // The counts region must also fit the `(binary)` label when any shown
-        // file is binary — otherwise `(binary)` (8 chars) overflows a narrower
-        // region and the binary rows drift out of line with the Σ total row.
-        // The extra width becomes leading pad (`lead`) on the text rows and
-        // the Σ row, so all three row kinds — text file, binary file, Σ total
-        // — occupy the same `counts_region` and the filename column lands at
-        // one column across every row.
-        let binary_label = "(binary)".chars().count();
-        let base_region = plus_width + sep + minus_width;
-        let counts_region = if shown_stats.iter().any(|s| s.binary) {
-            base_region.max(binary_label)
-        } else {
-            base_region
+        // Binary rows carry the byte-size delta label `(binary) +12.3 KB`
+        // (Commit entry v2, spec §3) — the counts region widens to the
+        // widest binary label and the lead pad keeps the name column
+        // aligned across text, binary, and Σ rows.
+        let binary_label = |s: &FileStats| {
+            if s.binary {
+                format!("(binary) {}", format_bytes_delta(s.old_size, s.new_size))
+            } else {
+                String::new()
+            }
         };
+        let base_region = plus_width + sep + minus_width;
+        let counts_region = shown_stats
+            .iter()
+            .map(|s| binary_label(s).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(base_region);
         let lead = " ".repeat(counts_region - base_region);
         // Fixed 2-column gutter between the counts block and the names.
         let name_gap: usize = 2;
@@ -540,11 +547,19 @@ impl Display {
             // at zero (git's own summary line does), and the width math
             // already sizes to the totals, so geometry is unchanged.
             let counts = if s.binary {
-                let pad = counts_region - binary_label;
+                let label = binary_label(s);
+                let pad = counts_region - label.chars().count();
+                let delta = format_bytes_delta(s.old_size, s.new_size);
+                let delta_style = if delta.starts_with('−') {
+                    red.clone()
+                } else {
+                    green.clone()
+                };
                 format!(
-                    "{}{}",
+                    "{}{} {}",
                     " ".repeat(pad),
-                    self.styled("(binary)", gray.clone())
+                    self.styled("(binary)", gray.clone()),
+                    self.styled(&delta, delta_style)
                 )
             } else {
                 let plus = if s.added > 0 {
@@ -602,26 +617,54 @@ impl Display {
         if stats.len() > 1 {
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
-            // `Σ` sits in its own column (padded to the column width, like
-            // the file rows' blank) in cyan-600 — harmonizing with the green
-            // `+N` additions while staying distinct from the red `−M`; the
-            // totals right-align into the same `+N` / `−M` columns above.
-            let sigma_text = format!(
-                "{}{}",
-                self.styled("Σ", sigma_color().bold()),
-                " ".repeat(sigma_cell.saturating_sub(1)),
-            );
+            // Commit entry v2 (spec §3): the Σ row is its own shape —
+            // `Σ <bar> +A −D · N files` — with the Diff bar between the
+            // glyph and the counts, so the totals no longer column-align
+            // under the per-file counts (accepted by the spec). `Σ` stays in
+            // cyan-600 bold, harmonizing with the green `+N` additions while
+            // staying distinct from the red `−M`.
+            let scope = format!("· {} files", stats.len());
+            // The bar spends 10 cells when the text width affords it,
+            // shrinks first (floor 4 cells — narrow terminals), then is
+            // omitted; the counts never truncate. Binary files contribute 0
+            // to the text-line totals, so they never skew the ratio; an
+            // all-binary footer (T = 0) omits the bar (`ratio_bar` → (0,0)).
+            const BAR_CELLS: usize = 10;
+            const MIN_BAR_CELLS: usize = 4;
+            let fixed = sigma_cell
+                + plus.chars().count()
+                + 1
+                + minus.chars().count()
+                + 1
+                + scope.chars().count();
+            let budget = self.text_width().saturating_sub(fixed + 2);
+            let cells = BAR_CELLS.min(budget);
+            let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
+                ratio_bar(total_added, total_deleted, cells)
+            } else {
+                (0, 0)
+            };
+            let bar = if add_cells + del_cells > 0 {
+                format!(
+                    " {}{}",
+                    self.styled(&"█".repeat(add_cells), green.clone()),
+                    self.styled(&"░".repeat(del_cells), red.clone())
+                )
+            } else {
+                String::new()
+            };
             let sigma_pad = " ".repeat(start.saturating_sub(sigma_cell));
             self.emit(&format!(
-                "{sigma_pad}{sigma_text}{lead}{}{gap}{}",
-                fmt_columns(&plus, &minus),
-                self.styled(&format!("({} files)", stats.len()), gray.clone()),
+                "{sigma_pad}{}{bar} {} {} {}",
+                self.styled("Σ", sigma_color().bold()),
+                self.styled(&plus, green.clone()),
+                self.styled(&minus, red.clone()),
+                self.styled(&scope, gray.clone()),
             ));
             rows += 1;
         }
         rows
     }
-
     /// Pre-commit confirmation preview (issue #78): the exact message that
     /// would be committed, framed as *pending* so it can't be mistaken for the
     /// ✓ lines of already-landed batches — a yellow `?` marker on the header
@@ -722,6 +765,48 @@ struct SubjectOffsets {
     /// Column of the subject's message text — the body hang and the
     /// footer's name pin.
     message: usize,
+}
+
+/// The Diff bar cell split (Commit entry v2, spec §3): `add_cells =
+/// round(cells · A / T)` over **text line counts only** (callers pass text
+/// totals; binary churn never feeds the bar), `T = A + D`. `T == 0`
+/// (all-binary) returns `(0, 0)` — the caller omits the bar. A single-sign
+/// diff returns the full bar in one color. Rounding can never overflow the
+/// budget: the delete side takes whatever is left. Pure.
+pub fn ratio_bar(added: usize, deleted: usize, cells: usize) -> (usize, usize) {
+    let total = added + deleted;
+    if total == 0 || cells == 0 {
+        return (0, 0);
+    }
+    let add = ((added as f64 / total as f64) * cells as f64).round() as usize;
+    let add = add.min(cells);
+    (add, cells - add)
+}
+
+/// Format a blob-size delta for a binary per-file row (spec §3): sign
+/// always present (`+`/`−` — U+2212, matching the `−M` counts convention);
+/// `< 1024` renders whole bytes (`+512 B`), else one decimal of the fitting
+/// KB/MB/GB unit (÷1024 steps). Pure, byte-exact-testable.
+pub fn format_bytes_delta(old: u64, new: u64) -> String {
+    let delta = new as i64 - old as i64;
+    let sign = if delta < 0 { '−' } else { '+' };
+    let abs = delta.unsigned_abs();
+    let body = if abs < 1024 {
+        format!("{abs} B")
+    } else {
+        let kb = abs as f64 / 1024.0;
+        if kb < 1024.0 {
+            format!("{kb:.1} KB")
+        } else {
+            let mb = kb / 1024.0;
+            if mb < 1024.0 {
+                format!("{mb:.1} MB")
+            } else {
+                format!("{:.1} GB", mb / 1024.0)
+            }
+        }
+    };
+    format!("{sign}{body}")
 }
 
 #[cfg(test)]
