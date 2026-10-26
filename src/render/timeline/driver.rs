@@ -110,6 +110,10 @@ struct Painter {
     term: Term,
     /// Frame row width (display columns) for the pure builders.
     width: usize,
+    /// The terminal's raw column count, uncapped — [`Self::width`] carries
+    /// the 100-column prose cap for frame rows, while flushed table rows
+    /// ([`RunFrame::flush`]) budget to the real edge (ADR 0018 redesign).
+    raw_width: usize,
     /// Terminal height, for the bottom-margin scroll path.
     height: usize,
     /// The DSR-probed absolute cursor row at frame start (`None` → the
@@ -151,9 +155,11 @@ impl RunFrame {
             let sizing = tokio::task::spawn_blocking(cursor::reasoning_window_rows)
                 .await
                 .unwrap_or_else(|_| WindowSizing::fallback());
+            let raw_width = term.size().1 as usize;
             Some(Painter {
                 term,
                 width: terminal_width(),
+                raw_width,
                 height: crate::render::layout::terminal_height(),
                 row: sizing.cursor_row,
                 prev_rows: Vec::new(),
@@ -389,7 +395,10 @@ impl RunFrame {
             render(display);
             return;
         }
-        let width = st.paint_width();
+        let width = st
+            .paint
+            .as_ref()
+            .map_or_else(terminal_width, |p| p.raw_width);
         let rows: Vec<String> = {
             let sink = RowSink::default();
             let collected = Display::framed(sink.clone(), width);

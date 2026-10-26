@@ -256,6 +256,7 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
@@ -310,6 +311,7 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
@@ -361,6 +363,7 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // New binary keeps `[new]` and shows its full size (`+2.0 KB`); the
@@ -414,6 +417,7 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // base region (`+1` 2 + gap 1 + `−0` 2 = 5) widens to 17 for
@@ -469,6 +473,7 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
@@ -493,7 +498,6 @@ fn commit_line_renders_file_stats_footer() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        None,
         "[1/3]",
         &[FileStats {
             path: "src/auth.rs".into(),
@@ -532,7 +536,6 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        None,
         "[1/2]",
         &[
             FileStats {
@@ -566,18 +569,18 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
     );
 }
 
-/// Three hang anchors on the landed ✓ line, pinned with and without a
-/// `[n/m] ` batch prefix (staged / single-commit Runs) so the hangs track
-/// the real subject prefix rather than a frozen column: the body under the
-/// subject's message start, the footer's file rows under the commit ID,
-/// and the Σ total under the `✓` marker. Columns are derived from the
-/// emitted subject line itself (char-counted — the ✓ marker is multi-byte,
-/// so a byte offset would overcount), so the asserts stay honest if the
-/// prefix format changes. A single file keeps the footer Σ-less; the
-/// Σ-under-✓ anchor is pinned on the preview twin above and the Σ-row
-/// geometry tests below.
+/// The footer's file rows hang under the commit ID while the subject line
+/// carries the whole entry delta, pinned with and without a `[n/m] ` batch
+/// prefix (staged / single-commit Runs) so the hang tracks the real subject
+/// prefix rather than a frozen column. Columns are derived from the emitted
+/// subject line itself (char-counted — the ✓ marker is multi-byte, so a
+/// byte offset would overcount), so the asserts stay honest if the prefix
+/// format changes. The commit body is NOT part of the entry (ADR 0018
+/// redesign): exactly two rows — subject + file row. A single file keeps
+/// the footer Σ-less; the Σ-under-✓ anchor is pinned on the preview twin
+/// above and the Σ-row geometry tests below.
 #[test]
-fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
+fn commit_footer_hangs_under_subject_hash_and_carries_delta() {
     for prefix in ["[1/2]", ""] {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with(Buf {
@@ -587,7 +590,6 @@ fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
         d.commit_line(
             "abc1234",
             "feat: add thing",
-            Some("body line"),
             prefix,
             &[FileStats {
                 path: "src/a.rs".into(),
@@ -610,14 +612,18 @@ fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
         let msg_col = cols("feat: add thing");
         let hash_col = cols("abc1234");
         assert_eq!(
-            got[1],
-            format!("{}body line", " ".repeat(msg_col)),
-            "body must hang under the message start (prefix {prefix:?}): {got:?}"
+            got.len(),
+            2,
+            "entry = subject row + file row, no body (prefix {prefix:?}): {got:?}"
+        );
+        assert!(
+            got[0].ends_with("· +1 −0"),
+            "subject carries the text-line delta (prefix {prefix:?}): {got:?}"
         );
         // Counts (`+1`, region 2) anchor at the hash; the gap to the name
         // fills the rest of the hash→message span (uniform across rows).
         assert_eq!(
-            got[2],
+            got[1],
             format!(
                 "{}+1{}src/a.rs",
                 " ".repeat(hash_col),
@@ -645,7 +651,6 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     d.commit_line(
         "0875db3",
         "fix(display): align footer",
-        None,
         "[1/1]",
         &[
             FileStats {
@@ -676,7 +681,7 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     // (16), names pin at 16.
     assert_eq!(
         got[0],
-        "  [1/1] \u{2713} 0875db3 fix(display): align footer"
+        "  [1/1] \u{2713} 0875db3 fix(display): align footer · +152 −84"
     );
     assert_eq!(got[1], "         +64 −51  src/render/display/mod.rs");
     assert_eq!(got[2], "         +88 −33  src/render/display/tests.rs");
@@ -697,7 +702,6 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        None,
         "[1/2]",
         &[
             FileStats {
@@ -727,7 +731,7 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     // 16. Region 5 (`+8 −1` sized): block starts at the hash (8), ends 13,
     // names pin at the message (16) — a 3-col gap — and the Σ glyph hugs
     // the block's left edge at 6, exactly under the ✓.
-    assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing");
+    assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing · +8 −1");
     assert_eq!(got[1], "          +3 −1   src/a.rs");
     assert_eq!(got[2], "          +5      src/b.rs");
     assert_eq!(got[3], "        Σ █████████░ +8 −1 · 2 files");
@@ -740,20 +744,14 @@ fn plain_when_colors_disabled() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line(
-        "abc1234",
-        "feat: add thing",
-        Some("body line"),
-        "[1/3]",
-        &[],
-    );
+    d.commit_line("abc1234", "feat: add thing", "[1/3]", &[]);
     let got = lines.lock().clone();
     // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
     // Type prefix "feat" is present, followed by ": add thing". Subject
-    // carries the 2-col left margin; the body hangs under the subject's
-    // message start — `[1/3] ✓ abc1234 ` = 16 cols past the margin.
+    // carries the 2-col left margin; empty stats → no delta segment, and
+    // the entry is a single row (the body is omitted — ADR 0018 redesign).
+    assert_eq!(got.len(), 1);
     assert_eq!(got[0], "  [1/3] \u{2713} abc1234 feat: add thing");
-    assert_eq!(got[1], "                  body line");
 }
 
 #[test]
@@ -765,13 +763,7 @@ fn truecolor_when_colors_enabled() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line(
-        "abc1234",
-        "feat: add thing",
-        Some("body line"),
-        "[1/3]",
-        &[],
-    );
+    d.commit_line("abc1234", "feat: add thing", "[1/3]", &[]);
     let joined = lines.lock().join("\n");
     // hash #d97706 (bold), feat type green #15803d (bold), description bold
     // default fg, body + prefix muted gray #6b7280.
@@ -808,7 +800,7 @@ fn fix_type_gets_orange_color() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
+    d.commit_line("def5678", "fix(auth): correct token check", "", &[]);
     let joined = lines.lock().join("\n");
     // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
     // readability — see types::NAMED_PALETTE).
@@ -835,7 +827,7 @@ fn scoped_commit_preserves_parens_plain() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
+    d.commit_line("def5678", "fix(auth): correct token check", "", &[]);
     let got = lines.lock().clone();
     // Exact visible text — catches the dropped-paren regression directly.
     // Subject carries a 2-col left margin.
@@ -863,7 +855,7 @@ fn each_type_renders_its_palette_color() {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("hash000", &format!("{type_str}: msg"), None, "", &[]);
+        d.commit_line("hash000", &format!("{type_str}: msg"), "", &[]);
         let joined = lines.lock().join("\n");
         assert!(
             joined.contains(rgb),
@@ -885,7 +877,7 @@ fn unrecognized_type_gets_hash_fallback_color() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("ghi9012", "blob: thing in progress", None, "", &[]);
+    d.commit_line("ghi9012", "blob: thing in progress", "", &[]);
     let joined = lines.lock().join("\n");
     assert!(
         !joined.contains("107;114;128"),
@@ -917,7 +909,7 @@ fn no_colon_message_gets_muted_gray() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("jkl3456", "no colon message", None, "", &[]);
+    d.commit_line("jkl3456", "no colon message", "", &[]);
     let joined = lines.lock().join("\n");
     // No-colon messages have no type token to color → muted gray #6b7280
     // (darkened from the old #9ca3af for white-bg readability).
@@ -1011,6 +1003,7 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
                 hash: 0,
                 message: 2,
             },
+            d.text_width(),
         );
         let got = lines.lock().clone();
         let sigma = got.last().expect("Σ row present");

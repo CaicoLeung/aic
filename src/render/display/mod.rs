@@ -199,64 +199,78 @@ impl Display {
         resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
     }
 
+    /// Full terminal-width budget for the Commit entry table (ADR 0018
+    /// redesign): unlike [`Self::text_width`] the 100-column prose cap does
+    /// NOT apply — the Σ Diff bar and the file-name column stretch to the
+    /// terminal's real edge. Rows built to this budget never wrap when
+    /// flushed below the frame: `emit` adds the 2-col margin on top of it,
+    /// leaving [`RIGHT_MARGIN`] slack.
+    fn table_width(&self) -> usize {
+        let cols = if self.cols == 0 {
+            FALLBACK_COLS
+        } else {
+            self.cols
+        };
+        cols.saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
+    }
+
     // ------------------------------------------------------------------
     // Public rendering entry points
     // ------------------------------------------------------------------
 
-    /// Commit-completion line — shown after each commit.
+    /// Commit entry table row (ADR 0018 redesign) — one row per landed
+    /// batch, flushed to permanent scrollback below the Run timeline frame.
     ///
     /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
     /// pass `""` for single-commit or staged workflows.
     ///
-    /// Layout (ADR: commit-line readability): the whole block is inset by
-    /// [`LEFT_MARGIN`] so it isn't flush with the terminal edge. The subject
-    /// is a single title line and is **never wrapped** (overflow preferable to
-    /// truncation/re-flow). The body hangs to the column where the subject's
-    /// message text starts (see [`Self::subject_offsets`]); the file-stats
+    /// Layout: the subject line is a single full-width title row —
+    /// `[prefix] ✓ <hash> <styled subject> · +A −D` — never wrapped
+    /// (overflow preferable to truncation/re-flow), carrying the batch's
+    /// whole text-line delta. The commit **body is omitted**: `git log`
+    /// owns the prose; the pre-commit preview ([`Self::commit_preview`])
+    /// still shows it in full before the commit lands. The file-stats
     /// footer hangs shallower — file rows under the commit ID, the Σ total
-    /// under the `✓` marker — so the footer reads as keyed to the ref line
-    /// while the body reads as the message's own continuation. Blank body
-    /// lines stay blank.
-    ///
-    /// `stats` render as the file-stats footer ([`Display::emit_file_stats`]) —
-    /// the landed twin of the preview's footer, so the confirmed draft and the
-    /// completed line show the same file information.
-    pub fn commit_line(
-        &self,
-        hash: &str,
-        message: &str,
-        body: Option<&str>,
-        prefix: &str,
-        stats: &[FileStats],
-    ) {
-        // Muted gray for prefix/body/scope — read from the single-source
-        // palette so it can't drift from the WCAG-guarded value.
+    /// under the `✓` marker — so the footer reads as keyed to the ref
+    /// line. `stats` render on the full [`Self::table_width`] budget.
+    pub fn commit_line(&self, hash: &str, message: &str, prefix: &str, stats: &[FileStats]) {
+        // Muted gray for prefix — read from the single-source palette so it
+        // can't drift from the WCAG-guarded value.
         let gray = neutral_gray();
 
-        // Main line: [prefix] ✓ <hash> <message>
+        // Main line: [prefix] ✓ <hash> <message> · +A −D — one full-width
+        // table row per landed batch (ADR 0018 redesign). The body is
+        // deliberately omitted: `git log` owns the prose, the entry owns the
+        // delta. Commit ID: amber #d97706, bold so the short token qualifies
+        // as WCAG AA Large (3:1) on both themes.
         let check = self.styled("\u{2713}", palette::success());
-        // Commit ID: amber #d97706, bold so the short token qualifies as WCAG
-        // AA Large (3:1) on both themes — the old #f3b340 read at ~1.9:1 on
-        // white. Bold is also the right visual weight for a ref.
         let hash_styled = self.styled(hash, commit_id_color().bold());
         let pre = if prefix.is_empty() {
             String::new()
         } else {
             format!("{} ", self.styled(prefix, gray.clone()))
         };
-        // Subject: margin only, never wrapped (title line).
+        let total_added: usize = stats.iter().map(|s| s.added).sum();
+        let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
+        let delta = if total_added + total_deleted > 0 {
+            format!(
+                " {} {} {}",
+                self.styled("·", gray.clone()),
+                self.styled(&format!("+{total_added}"), palette::added()),
+                self.styled(&format!("−{total_deleted}"), palette::removed())
+            )
+        } else {
+            String::new()
+        };
         self.emit(&format!(
-            "{pre}{check} {hash_styled} {}",
+            "{pre}{check} {hash_styled} {}{delta}",
             self.styled_subject(message)
         ));
 
-        // Body hangs under the message start; footer block anchors at the
-        // hash with names pinned to the message start.
+        // File rows + Σ anchor at the hash with names pinned to the message
+        // start, on the full-width table budget.
         let subject = Self::subject_offsets(prefix, hash);
-        if let Some(b) = body {
-            self.emit_body(b, subject.message);
-        }
-        self.emit_file_stats(stats, &subject);
+        self.emit_file_stats(stats, &subject, self.table_width());
     }
 
     /// Subject-prefix geometry, as [`SubjectOffsets`]: with no prefix
@@ -366,7 +380,7 @@ impl Display {
     /// wide, hugging the block's left edge). A zero per-file count renders
     /// as a blank column (`git diff --stat` never shows zeros); the Σ total
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
-    /// `−M`, muted filenames, a green-bold `[new]` / red-bold `[del]` tag,
+    /// `−M`, muted directories with emphasized basenames, a green-bold `[new]` / red-bold `[del]` tag,
     /// and a bold-cyan `Σ <bar> +X −Y · N files` total row when more than one
     /// file (Commit entry v2, spec §3: the Diff bar — `█` addition / `░`
     /// deletion cells over text line counts only, shrinking then omitted on
@@ -376,7 +390,10 @@ impl Display {
     /// or removed keeps its `[new]`/`[del]` tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
-    /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
+    /// (`+` green, `-` red); directories use [`neutral_gray`] like body text
+    /// while basenames take `emphasis` (ADR 0018 redesign). The caller's
+    /// `width` is the row budget: full terminal width for landed Commit
+    /// entries, the 100-column prose cap for the in-frame preview.
     /// Widths use the codebase's char-count model (same as [`wrap_line`]), so
     /// the grid holds exactly for ASCII paths and approximately for CJK ones.
     /// Column widths come from the shown files only. A filename wider than
@@ -386,7 +403,12 @@ impl Display {
     /// matching [`wrap_line`]'s `width == 0` convention. The
     /// [`FILE_STATS_CAP`] bounds height. Returns the rows emitted, for the
     /// preview's erase accounting.
-    fn emit_file_stats(&self, stats: &[FileStats], subject: &SubjectOffsets) -> usize {
+    fn emit_file_stats(
+        &self,
+        stats: &[FileStats],
+        subject: &SubjectOffsets,
+        width: usize,
+    ) -> usize {
         if stats.is_empty() {
             return 0;
         }
@@ -502,7 +524,7 @@ impl Display {
         } else {
             0
         };
-        let name_cap = self.text_width().saturating_sub(name_col + tag_col);
+        let name_cap = width.saturating_sub(name_col + tag_col);
         let align = name_cap > 0;
         let name_width = if align {
             shown_stats
@@ -575,12 +597,25 @@ impl Display {
                 format!("{lead}{}", fmt_columns(&plus, &minus))
             };
             // Name column: truncated with `…` when wider than the cap,
-            // padded to the grid width otherwise.
+            // padded to the grid width otherwise. Coloring (ADR 0018
+            // redesign): the directory stays muted gray while the basename
+            // takes `emphasis` — the eye finds the file, the path stays
+            // quiet. Truncation first, coloring after, so the `…` rides the
+            // basename's style; colors-off renders the same plain text as
+            // before.
             let mut name = s.path.clone();
             if align && name.chars().count() > name_width {
                 let keep = name_width.saturating_sub(1);
                 name = format!("{}…", name.chars().take(keep).collect::<String>());
             }
+            let styled_name = match name.rfind('/') {
+                Some(i) => format!(
+                    "{}{}",
+                    self.styled(&name[..=i], gray.clone()),
+                    self.styled(&name[i + 1..], palette::emphasis())
+                ),
+                None => self.styled(&name, palette::emphasis()),
+            };
             let name_pad = name_width.saturating_sub(name.chars().count());
             let tag = if s.new {
                 self.styled(" [new]", new_tag.clone())
@@ -593,8 +628,7 @@ impl Display {
             // plain spaces, so it is safe with ANSI styling enabled too.
             self.emit(
                 format!(
-                    "{start_pad}{counts}{gap}{}{}{}",
-                    self.styled(&name, gray.clone()),
+                    "{start_pad}{counts}{gap}{styled_name}{}{}",
                     " ".repeat(name_pad),
                     tag
                 )
@@ -637,7 +671,7 @@ impl Display {
                 + minus.chars().count()
                 + 1
                 + scope.chars().count();
-            let budget = self.text_width().saturating_sub(fixed + 2);
+            let budget = width.saturating_sub(fixed + 2);
             let cells = BAR_CELLS.min(budget);
             let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
                 ratio_bar(total_added, total_deleted, cells)
@@ -707,7 +741,7 @@ impl Display {
         if let Some(b) = body {
             rows += self.emit_body(b, PREVIEW_OFFSETS.message);
         }
-        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS);
+        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS, self.text_width());
         self.emit_blank();
         rows + 1
     }

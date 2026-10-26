@@ -632,7 +632,7 @@ async fn generate_and_commit(
     // frame stays shorter than the terminal and whole-frame repaint never
     // scrolls. Off a terminal the rows go straight through the step display.
     frame.flush(display, |d| {
-        d.commit_line(&hash, &message, body.as_deref(), &prefix, &landed)
+        d.commit_line(&hash, &message, &prefix, &landed)
     });
     Ok(())
 }
