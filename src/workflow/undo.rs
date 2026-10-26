@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use crate::git::Git;
+use crate::render::{oneshot, palette};
 use crate::workflow::input;
 
 /// The undo state file, relative to the repo's git dir: the HEAD OID captured
@@ -144,15 +145,9 @@ pub(crate) fn undo_run(
         anyhow::bail!("the last aic run made no commits — nothing to undo (stale state cleared)");
     }
 
-    println!(
-        "  {}",
-        crate::render::palette::styled_stdout("· aic run found", crate::render::palette::muted())
-    );
+    oneshot::out("· aic run found", palette::muted());
     for row in scope_rows(run, after, tip.is_some()) {
-        println!(
-            "    {}",
-            crate::render::palette::styled_stdout(&row, crate::render::palette::muted())
-        );
+        oneshot::out_detail(&row, palette::muted());
     }
     let approved = prompt("undo this aic run?")?;
     if !approved {
@@ -162,17 +157,14 @@ pub(crate) fn undo_run(
     git.reset_mixed(&start)
         .with_context(|| "failed to reset back to the last aic run's start")?;
     clear_state(git).with_context(|| "undone, but the undo state files could not be removed")?;
-    println!(
-        "  {}",
-        crate::render::palette::styled_stdout(
-            &format!(
-                "✓ undone — HEAD reset to {} · {} {} dropped",
-                &start[..7],
-                run + after,
-                commits(run + after),
-            ),
-            crate::render::palette::success()
-        )
+    oneshot::out(
+        &format!(
+            "✓ undone — HEAD reset to {} · {} {} dropped",
+            &start[..7],
+            run + after,
+            commits(run + after),
+        ),
+        palette::success(),
     );
     Ok(())
 }
