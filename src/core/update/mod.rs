@@ -1,3 +1,4 @@
+use crate::render::{oneshot, palette};
 use anyhow::Result;
 use self_update::cargo_crate_version;
 
@@ -88,13 +89,7 @@ pub fn run_update() -> Result<()> {
         // `VersionStatus` is `#[non_exhaustive]`; any future variant is reported generically.
         _ => format!("Update completed · {old}"),
     };
-    println!(
-        "  {}",
-        crate::render::palette::styled_stdout(
-            &format!("✓ {line}"),
-            crate::render::palette::success()
-        )
-    );
+    oneshot::out(&format!("✓ {line}"), palette::success());
     Ok(())
 }
 
