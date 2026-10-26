@@ -459,6 +459,9 @@ fn finalize_summary(state: RepoState) -> String {
 /// [`Redact::from_flag`] — the only production site that bypasses the
 /// resolve Redaction Gate besides the top-level flag's handoff carry.
 pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
+    // Neon palette on dark terminals (ADR 0018 redesign) — same contract as
+    // the default Run: probe once, before any styled output.
+    crate::render::palette::init_terminal_theme();
     let resolve: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });

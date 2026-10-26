@@ -51,6 +51,112 @@ const FALLBACK_PALETTE: [(u8, u8, u8); 6] = [
     (59, 130, 246), // blue-500    #3b82f6
 ];
 
+// ----------------------------------------------------------------------
+// Neon mode — dark-terminal variants (ADR 0018 redesign).
+//
+// The classic tables above are a compromise: every entry must clear 3:1 on
+// BOTH white and dark backgrounds, which drags the whole palette toward
+// mid-luminance "mud". When the OSC 11 probe (see `cursor`) confirms a dark
+// background, these brighter variants take over — same hues at the 400
+// shade, clearing WCAG AA Normal (4.5:1) on dark, impossible on white.
+// Classic stays the fallback for light themes, unresponsive terminals, and
+// non-TTY runs.
+// ----------------------------------------------------------------------
+
+/// Dark-terminal twin of [`NAMED_PALETTE`] (Tailwind 400 shades). Order and
+/// length mirror the classic table; the guard tests iterate both.
+const NAMED_PALETTE_NEON: [(CommitType, (u8, u8, u8)); 17] = [
+    (CommitType::Feat, (74, 222, 128)),        // green-400   #4ade80
+    (CommitType::Improvement, (52, 211, 153)), // emerald-400 #34d399
+    (CommitType::Fix, (251, 146, 60)),         // orange-400  #fb923c
+    (CommitType::Perf, (248, 113, 113)),       // red-400     #f87171
+    (CommitType::Hotfix, (251, 113, 133)),     // rose-400    #fb7185
+    (CommitType::Revert, (232, 121, 249)),     // fuchsia-400 #e879f9
+    (CommitType::Docs, (96, 165, 250)),        // blue-400    #60a5fa
+    (CommitType::Deps, (56, 189, 248)),        // sky-400     #38bdf8
+    (CommitType::Style, (167, 139, 250)),      // violet-400  #a78bfa
+    (CommitType::Ci, (129, 140, 248)),         // indigo-400  #818cf8
+    (CommitType::Refactor, (34, 211, 238)),    // cyan-400    #22d3ee
+    (CommitType::Chore, (45, 212, 191)),       // teal-400    #2dd4bf
+    (CommitType::Build, (250, 204, 21)),       // yellow-400  #facc15
+    (CommitType::Release, (163, 230, 53)),     // lime-400    #a3e635
+    (CommitType::Security, (251, 191, 36)),    // amber-400   #fbbf24
+    (CommitType::Test, (244, 114, 182)),       // pink-400    #f472b6
+    (CommitType::Wip, (148, 163, 184)),        // slate-400   #94a3b8
+];
+
+/// Dark-terminal twin of [`FALLBACK_PALETTE`]. Collisions with named neon
+/// entries are acceptable under the same rule as the classic tables.
+const FALLBACK_PALETTE_NEON: [(u8, u8, u8); 6] = [
+    (45, 212, 191),  // teal-400    #2dd4bf
+    (192, 132, 252), // purple-400  #c084fc
+    (251, 146, 60),  // orange-400  #fb923c
+    (34, 211, 238),  // cyan-400    #22d3ee
+    (216, 180, 254), // purple-300  #d8b4fe
+    (96, 165, 250),  // blue-400    #60a5fa
+];
+
+/// Dark-terminal [`NEUTRAL_GRAY`] (slate-300 `#cbd5e1`) — the muted gray is
+/// the color most at risk of sinking into a dark background.
+const NEUTRAL_GRAY_NEON: (u8, u8, u8) = (203, 213, 225);
+
+/// Dark-terminal [`COMMIT_ID_COLOR`] (amber-500 `#f59e0b`).
+const COMMIT_ID_COLOR_NEON: (u8, u8, u8) = (245, 158, 11);
+
+/// Dark-terminal [`SIGMA_COLOR`] (cyan-300 `#67e8f9`) — a step lighter than
+/// the neon refactor cyan so the Σ row still reads as its own thing.
+const SIGMA_COLOR_NEON: (u8, u8, u8) = (103, 232, 249);
+
+/// Whether neon (dark-terminal) variants are active. Set once at startup by
+/// [`init_terminal_theme`]; `AtomicBool` rather than `OnceLock` so tests can
+/// toggle it per-case.
+static NEON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Current named-type table (neon or classic).
+fn named_palette() -> &'static [(CommitType, (u8, u8, u8)); 17] {
+    if neon() {
+        &NAMED_PALETTE_NEON
+    } else {
+        &NAMED_PALETTE
+    }
+}
+
+/// Current fallback table (neon or classic).
+fn fallback_palette() -> &'static [(u8, u8, u8); 6] {
+    if neon() {
+        &FALLBACK_PALETTE_NEON
+    } else {
+        &FALLBACK_PALETTE
+    }
+}
+
+/// Whether neon variants are active.
+pub fn neon() -> bool {
+    NEON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force neon mode on/off. The probe ([`init_terminal_theme`]) and tests are
+/// the only callers.
+pub fn set_neon(on: bool) {
+    NEON.store(on, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Probe the terminal background (OSC 11) and switch to neon variants when
+/// it is dark. Called once at startup, before any styled output: probing
+/// only when stderr is a TTY with colors enabled — a pipe, `NO_COLOR`, or an
+/// unresponsive terminal keeps the classic dual-theme tables. Blocking tty
+/// I/O under a raw-termios guard; the query and drain are bounded at ~400 ms
+/// total.
+pub fn init_terminal_theme() {
+    static PROBED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if PROBED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if console::colors_enabled_stderr() && crate::render::cursor::background_is_dark() {
+        set_neon(true);
+    }
+}
+
 /// Neutral gray (`#6b7280`, slate-500) for empty / unparseable type tokens
 /// (no-colon messages) and for muted body/scope text in `display`. Chosen to
 /// clear 3:1 on both themes (~4.7:1 on white, ~3.9:1 on dark) so even the
@@ -175,21 +281,33 @@ pub fn emphasis() -> Style {
 /// so renderers can never drift from the contrast-guarded value — call this
 /// instead of re-typing the RGB literal.
 pub fn neutral_gray() -> Style {
-    rgb_style(NEUTRAL_GRAY)
+    rgb_style(if neon() {
+        NEUTRAL_GRAY_NEON
+    } else {
+        NEUTRAL_GRAY
+    })
 }
 
 /// Amber [`Style`] for the commit-id token. Reads the single-source
 /// [`COMMIT_ID_COLOR`]; the caller bolds it so the short ref qualifies as
 /// WCAG AA Large.
 pub fn commit_id_color() -> Style {
-    rgb_style(COMMIT_ID_COLOR)
+    rgb_style(if neon() {
+        COMMIT_ID_COLOR_NEON
+    } else {
+        COMMIT_ID_COLOR
+    })
 }
 
 /// Cyan [`Style`] for the Σ total-row glyph. Reads the single-source
 /// [`SIGMA_COLOR`]; the caller bolds it so the glyph qualifies as WCAG AA
 /// Large.
 pub fn sigma_color() -> Style {
-    rgb_style(SIGMA_COLOR)
+    rgb_style(if neon() {
+        SIGMA_COLOR_NEON
+    } else {
+        SIGMA_COLOR
+    })
 }
 
 impl CommitType {
@@ -199,7 +317,7 @@ impl CommitType {
     /// go through [`CommitType::color_for`], which layers the empty-token and
     /// unrecognized-name resolution on top.
     fn color(self) -> Style {
-        let rgb = NAMED_PALETTE
+        let rgb = named_palette()
             .iter()
             .find(|(t, _)| *t == self)
             .map(|(_, rgb)| *rgb)
@@ -227,7 +345,7 @@ impl CommitType {
         if trimmed.is_empty() {
             return neutral_gray();
         }
-        rgb_style(FALLBACK_PALETTE[fallback_palette_index(trimmed)])
+        rgb_style(fallback_palette()[fallback_palette_index(trimmed)])
     }
 }
 
@@ -422,6 +540,70 @@ mod tests {
         );
     }
 
+    /// The neon tables must clear WCAG AA **Normal** (4.5:1) on a common
+    /// dark background — the point of neon mode: with the background known
+    /// dark, the palette stops compromising and every token (even unbolded
+    /// counts and body gray) is comfortably readable.
+    #[test]
+    fn neon_colors_pass_wcag_aa_normal_on_dark() {
+        const DARK: (u8, u8, u8) = (13, 17, 23);
+        const AA_NORMAL: f64 = 4.5;
+
+        let mut checked = 0usize;
+        for (name, rgb) in NAMED_PALETTE_NEON
+            .iter()
+            .map(|(t, c)| (format!("{t:?}"), *c))
+            .chain(
+                FALLBACK_PALETTE_NEON
+                    .iter()
+                    .map(|c| ("fallback".into(), *c)),
+            )
+            .chain(
+                [
+                    ("neutral_gray", NEUTRAL_GRAY_NEON),
+                    ("commit_id", COMMIT_ID_COLOR_NEON),
+                    ("sigma", SIGMA_COLOR_NEON),
+                ]
+                .map(|(n, c)| (n.to_string(), c)),
+            )
+        {
+            let ratio = contrast(rgb, DARK);
+            assert!(
+                ratio >= AA_NORMAL,
+                "neon {name} {rgb:?} fails 4.5:1 on dark: {ratio:.2}"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            NAMED_PALETTE_NEON.len() + FALLBACK_PALETTE_NEON.len() + 3,
+            "guard must cover every neon entry"
+        );
+    }
+
+    /// Neon mode is a runtime switch over the same accessors: `color_for`,
+    /// `neutral_gray`, `commit_id_color`, and `sigma_color` must all route
+    /// through the active table, and the toggle must be visible in the
+    /// produced `Style` (truecolor ANSI payload differs).
+    #[test]
+    fn neon_switch_reroutes_every_accessor() {
+        let payload = |s: &Style| format!("{s:?}");
+        let classic_type = payload(&CommitType::color_for("feat"));
+        let classic_gray = payload(&neutral_gray());
+        let classic_id = payload(&commit_id_color());
+        let classic_sigma = payload(&sigma_color());
+        set_neon(true);
+        assert_ne!(
+            payload(&CommitType::color_for("feat")),
+            classic_type,
+            "color_for must read the neon table"
+        );
+        assert_ne!(payload(&neutral_gray()), classic_gray);
+        assert_ne!(payload(&commit_id_color()), classic_id);
+        assert_ne!(payload(&sigma_color()), classic_sigma);
+        set_neon(false);
+        assert_eq!(payload(&CommitType::color_for("feat")), classic_type);
+    }
     /// `color_for`'s three-way resolution order, tested at the decision layer
     /// (the rendering bytes are covered by `display::tests`). Named type →
     /// short-circuits before the hash; empty → neutral gray path; non-empty
