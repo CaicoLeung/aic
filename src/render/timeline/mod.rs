@@ -26,6 +26,8 @@ use crate::render::layout::{MARGIN, char_display_width};
 use crate::render::palette;
 
 pub(crate) mod driver;
+#[cfg(test)]
+mod tests;
 
 /// Marker column geometry: the step marker sits at column 2 (past the shared
 /// [`MARGIN`]), sub-rows and live-output content at column 4 (spec §1.3).
@@ -291,39 +293,71 @@ fn failure_detail_rows(step: &Step, width: usize, theme: &Theme) -> Vec<String> 
 
 /// The whole visible frame (spec §2.1, the one layout rule): completed step
 /// lines oldest-first (tight), the active step line, its live output, one
-/// blank separator (only if pending steps exist), pending step lines. A
-/// durable row block under a completed step keeps one blank row after it
-/// before the next step line (spec §1.3). A failed step ends the frame —
+/// separator row (only if pending steps exist), pending step lines. A
+/// durable row block under a completed step keeps one separator row after
+/// it before the next step line (spec §1.3). A failed step ends the frame —
 /// every later step is absent, never rendered as pending.
+///
+/// Non-marker rows carry the spine gutter in the marker column (spec §1.1):
+/// `│` while rows continue below, `└` on the frame's last row.
 pub fn timeline_frame(steps: &[Step], width: usize, theme: &Theme) -> Vec<String> {
-    let mut rows = Vec::new();
+    // (row, is_marker): marker rows keep their `✓`/`✗`/… glyph in the spine
+    // column; every other row gets the spine gutter spliced in below.
+    let mut rows: Vec<(String, bool)> = Vec::new();
     for (i, step) in steps.iter().enumerate() {
         match step.state {
-            StepState::Pending => rows.push(step_line(step, width, theme)),
+            StepState::Pending => rows.push((step_line(step, width, theme), true)),
             StepState::Active => {
-                rows.push(step_line(step, width, theme));
-                rows.extend(step.live_rows.iter().cloned());
+                rows.push((step_line(step, width, theme), true));
+                step.live_rows
+                    .iter()
+                    .for_each(|r| rows.push((r.clone(), false)));
                 let pending_below = steps[i + 1..].iter().any(|s| s.state == StepState::Pending);
                 if pending_below {
-                    rows.push(String::new());
+                    rows.push((String::new(), false));
                 }
             }
             StepState::Completed => {
-                rows.push(step_line(step, width, theme));
+                rows.push((step_line(step, width, theme), true));
                 let before = rows.len();
-                rows.extend(step.durable_rows.iter().cloned());
+                step.durable_rows
+                    .iter()
+                    .for_each(|r| rows.push((r.clone(), false)));
                 if rows.len() > before && i + 1 < steps.len() {
-                    rows.push(String::new());
+                    rows.push((String::new(), false));
                 }
             }
             StepState::Failed => {
-                rows.push(step_line(step, width, theme));
-                rows.extend(failure_detail_rows(step, width, theme));
-                return rows;
+                rows.push((step_line(step, width, theme), true));
+                failure_detail_rows(step, width, theme)
+                    .into_iter()
+                    .for_each(|r| rows.push((r, false)));
+                break;
             }
         }
     }
-    rows
+    // The spine (spec §1.1): non-marker rows carry the gutter in the marker
+    // column — `│` while the timeline continues below, `└` when the frame's
+    // last row ends the spine. The gutter replaces the row's two-column
+    // MARGIN prefix, so content columns are unchanged; rows that arrive
+    // neither empty nor MARGIN-prefixed (custom styled prefixes) are left
+    // as-is rather than mangled.
+    let last = rows.len().saturating_sub(1);
+    rows.into_iter()
+        .enumerate()
+        .map(|(r, (row, is_marker))| {
+            if is_marker {
+                return row;
+            }
+            let glyph = if r == last { "└" } else { "│" };
+            let spine = theme.paint(glyph, Some(palette::muted()));
+            match row.strip_prefix("  ") {
+                Some(rest) => format!("{spine} {rest}"),
+                None if row.is_empty() => spine,
+                None => row,
+            }
+        })
+        .collect()
 }
 
 /// The body of one `[i/N]` sub-row (spec §2.6/§2.8): an in-flight label

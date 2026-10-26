@@ -105,8 +105,8 @@ fn timeline_frame_composes_completed_active_blank_pending() {
         vec![
             "  ✓ Scanned 14 files",
             "  ⠋ Plan batches",
-            "    │ ## Splitting decode changes",
-            "",
+            "│   │ ## Splitting decode changes",
+            "│",
             "  · Draft messages",
             "  · Commit batches",
         ]
@@ -120,7 +120,7 @@ fn timeline_frame_omits_separator_without_pending_steps() {
     scan.live_rows = vec!["    live".into()];
     assert_eq!(
         timeline_frame(&[scan], W, &THEME),
-        vec!["  ⠋ Scan changes", "    live"]
+        vec!["  ⠋ Scan changes", "└   live"]
     );
 }
 
@@ -150,9 +150,9 @@ fn timeline_frame_failed_step_hides_all_later_steps() {
         vec![
             "  ✓ Scanned 14 files",
             "  ✗ Redaction gate — secret-like content detected",
-            "    src/render/config.rs: hunk 2 looks like an API key; use --no-redact to bypass",
-            "    row 2",
-            "    row 3",
+            "│   src/render/config.rs: hunk 2 looks like an API key; use --no-redact to bypass",
+            "│   row 2",
+            "└   row 3",
         ]
     );
 }
@@ -172,14 +172,14 @@ fn timeline_frame_durable_block_gets_one_blank_before_next_step() {
         timeline_frame(&[commit.clone(), tail], W, &THEME),
         vec![
             "  ✓ Committed 1 batch",
-            "    ✓ a1b2c3d feat: thing",
-            "",
+            "│   ✓ a1b2c3d feat: thing",
+            "│",
             "  · Nothing",
         ]
     );
     assert_eq!(
         timeline_frame(&[commit], W, &THEME),
-        vec!["  ✓ Committed 1 batch", "    ✓ a1b2c3d feat: thing"]
+        vec!["  ✓ Committed 1 batch", "└   ✓ a1b2c3d feat: thing"]
     );
 }
 
