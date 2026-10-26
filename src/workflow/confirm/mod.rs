@@ -37,11 +37,10 @@ pub(crate) enum ConfirmChoice {
     Abort,
 }
 
-/// Erased confirmation menu: given the drafted subject, returns the user's
-/// choice. Boxed for the same reason as the resolver seam — production wires
-/// it to a terminal menu (issue #78), tests inject a scripted choice
-/// sequence.
-pub(crate) type ConfirmMenu = Box<dyn Fn(&str) -> anyhow::Result<ConfirmChoice>>;
+/// Erased confirmation menu: returns the user's choice. Boxed for the same
+/// reason as the resolver seam — production wires it to a terminal menu
+/// (issue #78), tests inject a scripted choice sequence.
+pub(crate) type ConfirmMenu = Box<dyn Fn() -> anyhow::Result<ConfirmChoice>>;
 
 /// Erased message editor: takes the current (subject, body) and returns the
 /// edited (subject, body) — the prior values unchanged when the user cancels
@@ -139,7 +138,7 @@ pub(crate) async fn confirm_draft(
 
     loop {
         let rows = display.commit_preview(&message, body.as_deref(), stats);
-        match menu(&message)? {
+        match menu()? {
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
@@ -188,11 +187,11 @@ const CONFIRM_ACTIONS: [(&str, ConfirmChoice); 4] = [
 ];
 
 /// Production confirmation menu (issue #78): the four actions as timeline
-/// frame rows under the active step's preview (spec §2.7) — `›` cursor, raw
+/// frame rows under the active step's preview (ADR 0018) — `›` cursor, raw
 /// key input, zero-residue by construction. Esc and Ctrl-C both abort —
 /// there is nothing to go back to once the commit is pending (same mapping
 /// as the inquire row this replaces off-frame).
-fn confirm_menu(_message: &str) -> anyhow::Result<ConfirmChoice> {
+fn confirm_menu() -> anyhow::Result<ConfirmChoice> {
     let labels: Vec<&str> = CONFIRM_ACTIONS.iter().map(|(label, _)| *label).collect();
     let Some(index) = select_in_frame(
         "Commit this message?",

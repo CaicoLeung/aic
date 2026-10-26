@@ -291,7 +291,7 @@ pub fn messenger_sequence(messages: &[&str]) -> (CommitMessenger, Arc<Mutex<u32>
 /// under-specified test fails loudly instead of silently defaulting.
 pub fn menu_queue(choices: Vec<ConfirmChoice>) -> ConfirmMenu {
     let q = Arc::new(Mutex::new(VecDeque::from(choices)));
-    Box::new(move |_message: &str| {
+    Box::new(move || {
         Ok(q.lock()
             .pop_front()
             .unwrap_or_else(|| panic!("confirm menu queue exhausted")))
