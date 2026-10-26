@@ -16,6 +16,7 @@
 //! the menu-row helpers were lifted here once the second production menu
 //! made the duplication visible.
 
+use crate::render::layout::MARGIN;
 use anyhow::{Context, Result};
 use inquire::list_option::ListOption;
 use inquire::validator::Validation;
@@ -247,7 +248,7 @@ fn ask_marker() -> String {
 /// visible, not memorized.
 pub(crate) fn prompt_yes_no(label: &str) -> Result<bool> {
     use std::io::Write as _;
-    eprint!("{} {label} [Y/n] ", ask_marker());
+    eprint!("{MARGIN}{} {label} [Y/n] ", ask_marker());
     io::stderr().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
