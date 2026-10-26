@@ -662,7 +662,7 @@ impl Display {
             // shrinks first (floor 4 cells — narrow terminals), then is
             // omitted; the counts never truncate. Binary files contribute 0
             // to the text-line totals, so they never skew the ratio; an
-            // all-binary footer (T = 0) omits the bar (`ratio_bar` → (0,0)).
+            // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
             const BAR_CELLS: usize = 10;
             const MIN_BAR_CELLS: usize = 4;
             let fixed = sigma_cell
@@ -674,7 +674,7 @@ impl Display {
             let budget = width.saturating_sub(fixed + 2);
             let cells = BAR_CELLS.min(budget);
             let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
-                ratio_bar(total_added, total_deleted, cells)
+                diff_bar(total_added, total_deleted, cells)
             } else {
                 (0, 0)
             };
@@ -801,13 +801,13 @@ struct SubjectOffsets {
     message: usize,
 }
 
-/// The Diff bar cell split (Commit entry v2, spec §3): `add_cells =
+/// The Diff bar cell split (Commit entry v2, ADR 0018): `add_cells =
 /// round(cells · A / T)` over **text line counts only** (callers pass text
 /// totals; binary churn never feeds the bar), `T = A + D`. `T == 0`
 /// (all-binary) returns `(0, 0)` — the caller omits the bar. A single-sign
 /// diff returns the full bar in one color. Rounding can never overflow the
 /// budget: the delete side takes whatever is left. Pure.
-pub fn ratio_bar(added: usize, deleted: usize, cells: usize) -> (usize, usize) {
+fn diff_bar(added: usize, deleted: usize, cells: usize) -> (usize, usize) {
     let total = added + deleted;
     if total == 0 || cells == 0 {
         return (0, 0);
@@ -817,11 +817,11 @@ pub fn ratio_bar(added: usize, deleted: usize, cells: usize) -> (usize, usize) {
     (add, cells - add)
 }
 
-/// Format a blob-size delta for a binary per-file row (spec §3): sign
+/// Format a blob-size delta for a binary per-file row (ADR 0018): sign
 /// always present (`+`/`−` — U+2212, matching the `−M` counts convention);
 /// `< 1024` renders whole bytes (`+512 B`), else one decimal of the fitting
 /// KB/MB/GB unit (÷1024 steps). Pure, byte-exact-testable.
-pub fn format_bytes_delta(old: u64, new: u64) -> String {
+fn format_bytes_delta(old: u64, new: u64) -> String {
     let delta = new as i64 - old as i64;
     let sign = if delta < 0 { '−' } else { '+' };
     let abs = delta.unsigned_abs();

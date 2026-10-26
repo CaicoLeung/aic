@@ -933,27 +933,27 @@ fn no_colon_message_gets_muted_gray() {
     );
 }
 
-/// Diff bar cell split (v2, spec §3): `add = round(cells · A / T)`, deletes
+/// Diff bar cell split (v2, ADR 0018): `add = round(cells · A / T)`, deletes
 /// take the rest; single-sign diffs get the full bar; `T == 0` (all-binary)
 /// and an empty budget return `(0, 0)` — the caller omits the bar.
 #[test]
-fn ratio_bar_splits_cells_with_delete_taking_the_remainder() {
+fn diff_bar_splits_cells_with_delete_taking_the_remainder() {
     // 12/(12+3) = 0.8 → 8 add cells (the spec's own worked example).
-    assert_eq!(ratio_bar(12, 3, 10), (8, 2));
+    assert_eq!(diff_bar(12, 3, 10), (8, 2));
     // Single-sign: full bar in one color.
-    assert_eq!(ratio_bar(10, 0, 10), (10, 0));
-    assert_eq!(ratio_bar(0, 12, 10), (0, 10));
+    assert_eq!(diff_bar(10, 0, 10), (10, 0));
+    assert_eq!(diff_bar(0, 12, 10), (0, 10));
     // All-binary: no text churn, no bar.
-    assert_eq!(ratio_bar(0, 0, 10), (0, 0));
+    assert_eq!(diff_bar(0, 0, 10), (0, 0));
     // Half-away rounding, delete side takes the remainder — never 11 cells.
-    assert_eq!(ratio_bar(1, 1, 10), (5, 5));
-    assert_eq!(ratio_bar(1, 3, 10), (3, 7));
-    assert_eq!(ratio_bar(2, 1, 9), (6, 3));
+    assert_eq!(diff_bar(1, 1, 10), (5, 5));
+    assert_eq!(diff_bar(1, 3, 10), (3, 7));
+    assert_eq!(diff_bar(2, 1, 9), (6, 3));
     // Degenerate budget.
-    assert_eq!(ratio_bar(5, 5, 0), (0, 0));
+    assert_eq!(diff_bar(5, 5, 0), (0, 0));
 }
 
-/// Byte-size delta formatting (v2, spec §3): sign always present (`−` is
+/// Byte-size delta formatting (v2, ADR 0018): sign always present (`−` is
 /// U+2212, matching the `−M` counts convention); `< 1024` renders whole
 /// bytes, else one decimal of the fitting KB/MB/GB unit (÷1024 steps).
 #[test]
