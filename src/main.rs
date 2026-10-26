@@ -6,6 +6,7 @@
 use aic::core::cli::Commands;
 use aic::{
     core::{cli, completion, config, update},
+    render::{oneshot, palette},
     workflow::{resolve, run, setup, undo},
 };
 use clap::Parser;
@@ -23,8 +24,13 @@ async fn main() -> anyhow::Result<()> {
     // paths coincide or the old file is absent. A notice prints only when a
     // file is actually moved; a failure is logged, never blocks the run.
     match config::Config::migrate_location() {
-        Ok(notices) => notices.iter().for_each(|n| eprintln!("aic: {n}")),
-        Err(e) => eprintln!("aic: config location migration skipped: {e:#}"),
+        Ok(notices) => notices
+            .iter()
+            .for_each(|n| oneshot::err(&format!("aic: {n}"), palette::plain())),
+        Err(e) => oneshot::err(
+            &format!("aic: config location migration skipped: {e:#}"),
+            palette::plain(),
+        ),
     }
 
     // Auto-migrate a stale CLI-agent config to the current preset shape before
@@ -35,8 +41,13 @@ async fn main() -> anyhow::Result<()> {
     // the file rewrite is transparent; a migration failure is logged but
     // never blocks the run (the user can still run `aic setup` to refresh).
     match config::Config::migrate_if_stale() {
-        Ok(notices) => notices.iter().for_each(|n| eprintln!("aic: {n}")),
-        Err(e) => eprintln!("aic: config migration skipped: {e:#}"),
+        Ok(notices) => notices
+            .iter()
+            .for_each(|n| oneshot::err(&format!("aic: {n}"), palette::plain())),
+        Err(e) => oneshot::err(
+            &format!("aic: config migration skipped: {e:#}"),
+            palette::plain(),
+        ),
     }
 
     match cli.command {
