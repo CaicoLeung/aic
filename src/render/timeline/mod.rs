@@ -176,7 +176,9 @@ impl Step {
         }
     }
 
-    /// An active step with the given label.
+    /// An active step with the given label (test construction; production
+    /// code flips `state` via the driver).
+    #[cfg(test)]
     pub fn active(label: impl Into<String>) -> Self {
         Self {
             state: StepState::Active,
