@@ -55,7 +55,7 @@ mechanism.
    shrinks while the timeline is visible (terminal height minus timeline
    height).
 5. **Draft Step replaces the drafting bars.** One Step, per-Batch sub-rows
-   `[i/N]` (loading → ✓); the sub-rows are erased when the Step completes
+   (⠋ → ✓); the sub-rows are erased when the Step completes
    and the summary line carries the count. This supersedes ADR 0014's
    `[i/N]` MultiProgress *presentation* only — the concurrency itself is
    untouched. Draft calls get no reasoning window: streaming is not plumbed
@@ -147,3 +147,56 @@ complete exception list:
   is inherently process-wide (one terminal per process). Ceiling: if output
   were ever redirected per-sink (neon on stderr, classic on a piped
   stdout), the flag moves into `Theme` alongside `colors`.
+
+## Amendment (2026-10-27): chronological collapse + full-bleed Diff bar
+
+Second real-terminal pass surfaced a chronology flaw and a proportion flaw;
+this amendment records both resolutions.
+
+1. **Chronological collapse (the tail-order fix).** Model A flush left every
+   Commit entry above the whole frame, so at Run end the screen's tail was
+   the Step block and the entries — the record of what the Run *did* — sat
+   "at the top", reading backwards. The frame must stay the bottom-most
+   repaintable region, so entries below a live frame are physically
+   impossible mid-Run; the only fix is to stop letting completed Steps occupy
+   the frame at all. `complete()` now **peels**: the finished block (✓ line
+   + durable rows, one blank after a durable block) prints to permanent
+   scrollback through the same painter as `flush` (extracted as
+   `FrameState::flush_rows`), and the frame repaints below holding only the
+   active and pending Steps (`Step::peeled`). History now reads in happening
+   order — Scan/Plan/Draft ✓ lines, then each Commit entry as it landed,
+   then `✓ Committed N batches` as the tail — which is exactly the non-TTY
+   ledger's order. Consequences:
+   - A step-scoped emit (the plan-fallback caution row) must ride the step's
+     live rows *before* `complete()`; a row emitted after the peel lands on a
+     step the frame no longer renders. The one such call site was reordered.
+   - Failed screens stay as the final in-place frame — nothing follows a
+     failed step, so peeling would change nothing.
+   - Ceiling: a late live row on a sub-row-owned step (a rare staging
+     warning on the Commit step) drops at peel; route to durable rows if one
+     ever matters.
+2. **Commit-step live sub-rows.** Each landed batch reveals a
+   `✓ hash subject` sub-row on the active Commit step (the existing
+   `sub_row` geometry, same as the Draft step's) so the in-frame echo of
+   already-landed batches survives while their full entries live above.
+   Erases at step completion; single-batch Runs skip it.
+3. **Full-bleed Diff bar.** The Σ row is now `Σ +A −D <bar>`: counts
+   first, then the bar filling every remaining cell — replacing the fixed
+   10-cell chunk between Σ and the counts. Floor 4 cells then omitted;
+   counts never truncate; T = 0 (all-binary) still omits the bar.
+
+   Second-pass revisions (same day):
+   - **No `[i/N]` numbering anywhere.** Entry rows and sub-rows dropped
+     their batch prefixes — every row of a Run hangs on the same columns
+     (tick 0, hash 2, message `hash+3`), so the entries read as one
+     aligned table instead of shifting per batch width. Sub-rows land in
+     happening order by slot; the Draft step's duration rows keep their
+     shape.
+   - **No `· N files` scope on Σ.** The bar trails the counts directly.
+   - **The bar's right edge is the TEXT boundary, not the terminal.**
+     `table_width` (terminal real edge) is deleted; `commit_line` renders
+     its footer on `text_width` — the same capped prose boundary the
+     reasoning feed wraps at. A 140-col terminal still ends the bar where
+     text ends, so every Run surface shares one right edge. The budget
+     includes the Σ row's subject hang (found by the PTY harness: without
+     it the row hit 103 columns on a 100-col terminal and wrapped).

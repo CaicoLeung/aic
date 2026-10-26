@@ -61,7 +61,7 @@ A Commit-confirmation menu action that lets the user modify the full Drafted Mes
 _Avoid_: message tweak, inline edit (overloaded), editor step
 
 **Commit entry**:
-The rendered record for one Batch — the pending Commit preview (the `?`-marked draft) or the landed table row. The landed entry is flushed to permanent scrollback below the live frame (`RunFrame::flush`): the subject line carries the whole batch delta (`[n/m] ✓ hash subject · +A −D`), and the File stats footer stretches to the terminal's real edge. The commit body is omitted from the landed entry — `git log` owns the prose; the preview still shows it in full.
+The rendered record for one Batch — the pending Commit preview (the `?`-marked draft) or the landed table row. The landed entry is flushed to permanent scrollback as its batch lands: under the Steps already completed, above the live frame (chronological collapse), so entries read in happening order with `✓ Committed N batches` last. The subject line carries the whole batch delta (`✓ hash subject · +A −D`) — no `[n/m]` numbering, so every entry of a Run hangs on the same columns — and the File stats footer ends at the shared text boundary (the same capped width the Run's prose wraps at), not the terminal's real edge. The commit body is omitted from the landed entry — `git log` owns the prose; the preview still shows it in full.
 _Avoid_: commit card, entry, item
 
 **File stats footer**:
@@ -150,11 +150,11 @@ One user-visible unit of the Run timeline — the row a flow paints for each par
 _Avoid_: phase, stage (overloaded — see Batch staging), progress
 
 **Run timeline**:
-The upfront Step list a flow paints before doing any work and keeps updating in place until it ends. The whole timeline stays in the scrollback when the flow ends; Commit entries land under their Step. Both the commit Run and the resolve flow paint one; which one appears is decided by the Conflict gate before anything is drawn.
+The upfront Step list a flow paints before doing any work. Completed Steps peel to permanent scrollback the moment they finish (chronological collapse); the live frame keeps updating in place holding only the active and pending Steps. At flow end every Step line and every Commit entry sit in the scrollback in happening order — the flow's last Step is the tail. Both the commit Run and the resolve flow paint one; which one appears is decided by the Conflict gate before anything is drawn.
 _Avoid_: step list, task list, progress panel
 
 **Diff bar**:
-The proportional +/− block on a Commit entry's Σ line — a short run of cells colored by the Palette's `added`/`removed` roles in proportion to the entry's added/removed line counts. Aggregates text lines only; binary files never feed the bar (their per-file row shows a byte-size change instead).
+The proportional +/− block on a Commit entry's Σ line — it trails the `+A −D` counts (no file count) and fills every remaining cell up to the shared text boundary (the capped width the Run's prose and reasoning wrap at — not the terminal's real edge), colored by the Palette's `added`/`removed` roles in proportion to the entry's added/removed line counts (floor 4 cells, omitted on narrower terminals). Aggregates text lines only; binary files never feed the bar (their per-file row shows a byte-size change instead).
 _Avoid_: ratio bar, stats bar, diff meter
 
 **Neon mode**:
