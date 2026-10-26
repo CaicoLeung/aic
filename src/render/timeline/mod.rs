@@ -169,6 +169,10 @@ pub struct Step {
     pub live_rows: Vec<String>,
     /// Rows that persist under a completed step's summary line (pre-styled).
     pub durable_rows: Vec<String>,
+    /// The completed step's block has been peeled to permanent scrollback
+    /// (chronological collapse, ADR 0018 amendment 3): the frame no longer
+    /// renders it — its ✓ block lives above the frame as plain history.
+    pub peeled: bool,
     /// The failure record once the step failed.
     pub failure: Option<Failure>,
 }
@@ -184,6 +188,7 @@ impl Step {
             active_elapsed: None,
             live_rows: Vec::new(),
             durable_rows: Vec::new(),
+            peeled: false,
             failure: None,
         }
     }
@@ -348,6 +353,9 @@ fn failure_detail_rows(step: &Step, theme: &Theme) -> Vec<String> {
 pub fn timeline_frame(steps: &[Step], theme: &Theme) -> Vec<String> {
     let mut rows = Vec::new();
     for (i, step) in steps.iter().enumerate() {
+        if step.peeled {
+            continue;
+        }
         match step.state {
             StepState::Pending => rows.push(step_line(step, theme)),
             StepState::Active => {
