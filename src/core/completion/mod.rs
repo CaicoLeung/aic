@@ -15,6 +15,7 @@
 //! workflows.
 
 use crate::core::cli;
+use crate::render::{oneshot, palette};
 use crate::workflow::input::inquire_opt;
 use clap::CommandFactory;
 use std::path::{Path, PathBuf};
@@ -199,27 +200,23 @@ pub fn install_completion(shell: Shell) -> anyhow::Result<()> {
         .and_then(|exe| homebrew_prefix_from(&exe));
 
     let target = install_completion_impl(shell, &home, brew_prefix.as_deref())?;
-    eprintln!(
-        "  {}",
-        crate::render::palette::styled_stderr(
-            &format!("✓ completion installed for {}", shell.name()),
-            crate::render::palette::success()
-        )
+    oneshot::err(
+        &format!("✓ completion installed for {}", shell.name()),
+        palette::success(),
     );
-    eprintln!(
-        "  {}",
-        crate::render::palette::styled_stderr(
-            &target.path.display().to_string(),
-            crate::render::palette::muted()
-        )
-    );
+    oneshot::err_detail(&target.path.display().to_string(), palette::muted());
     if target.autoloaded {
-        eprintln!(
-            "Reload your shell (e.g. `exec {0}`) and Tab completion will be active.",
-            shell.name()
+        oneshot::err_detail(
+            &format!(
+                "Reload your shell (e.g. `exec {}`) and Tab completion will be active.",
+                shell.name()
+            ),
+            palette::muted(),
         );
     } else if let Some(hint) = shell.follow_up(&target.path) {
-        eprintln!("{hint}");
+        for line in hint.lines() {
+            oneshot::err_detail(line, palette::muted());
+        }
     }
     Ok(())
 }
