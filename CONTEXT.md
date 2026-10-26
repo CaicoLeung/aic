@@ -145,6 +145,18 @@ _Avoid_: resolution module, conflict workflow (the detection/Finalize half lives
 
 ### Progress
 
+**Run Step**:
+One user-visible unit of the Run timeline — the row a flow paints for each part of its progress (the commit Run's Scan / Redact / Plan / Review / Draft / Commit; the resolve flow's Detect / Redact / Resolve / Review / Finalize). A Step's on-screen lifecycle is pending → active (streaming its live output beneath its row) → completed (collapsed to one summary line) or failed (marked with the error, which stays). The set of Steps is fixed per flow and all shown from the start; counts and per-Batch sub-rows are revealed as the flow discovers them.
+_Avoid_: phase, stage (overloaded — see Batch staging), progress
+
+**Run timeline**:
+The upfront Step list a flow paints before doing any work and keeps updating in place until it ends. The whole timeline stays in the scrollback when the flow ends; Commit entries land under their Step. Both the commit Run and the resolve flow paint one; which one appears is decided by the Conflict gate before anything is drawn.
+_Avoid_: step list, task list, progress panel
+
+**Diff bar**:
+The proportional +/− block on a Commit entry's Σ line — a short run of cells colored by the Palette's `added`/`removed` roles in proportion to the entry's added/removed line counts. Aggregates text lines only; binary files never feed the bar (their per-file row shows a byte-size change instead).
+_Avoid_: ratio bar, stats bar, diff meter
+
 **Palette**:
 The module (`src/render/palette/`) where every color decision lives: the WCAG-guarded named/fallback palettes keyed by Commit Type (`CommitType::color_for` is defined here, next to the data), the single-source neutral-gray/commit-id/sigma accessors, and the terminal-16 role functions (`success`, `pending`, `caution`, `added`, `removed`, `hint`, …) that replaced ~30 ad-hoc `Style::new()` chains across the commit panel and resolve UI. Renderers call roles, never hand-roll styles.
 _Avoid_: color utils, theme
