@@ -179,7 +179,13 @@ this amendment records both resolutions.
    `✓ hash subject` sub-row on the active Commit step (the existing
    `sub_row` geometry, same as the Draft step's) so the in-frame echo of
    already-landed batches survives while their full entries live above.
-   Erases at step completion; single-batch Runs skip it.
+   Erases at step completion; single-batch Runs skip it. Sub-row text
+   clamps to the terminal's raw width (`…` marks the cut, CJK
+   display-width-aware, duration suffix kept inside the budget): sub-row
+   text is the one frame content with no builder-side budget — commit
+   subjects are prompt-capped at 72 chars but nothing validates that —
+   and a wrapped live row would desync the painter's
+   one-physical-row-per-row arithmetic on every later tick.
 3. **Full-bleed Diff bar.** The Σ row is now `Σ +A −D <bar>`: counts
    first, then the bar filling every remaining cell — replacing the fixed
    10-cell chunk between Σ and the counts. Floor 4 cells then omitted;

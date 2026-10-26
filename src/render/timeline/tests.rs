@@ -200,12 +200,13 @@ fn timeline_frame_durable_block_gets_one_blank_before_next_step() {
 
 /// Sub-rows sit at column 4 with no `[i/N]` numbering — every row of the
 /// step shares one shape; a done sub-row keeps its duration only past 1 s
-/// (ADR 0018).
+/// (ADR 0018). Width 80 fits all of these unchanged.
 #[test]
 fn sub_row_shows_done_duration() {
     assert_eq!(
         sub_row(
             &SubBody::InFlight("Generating commit message".into()),
+            80,
             &THEME
         ),
         "    ⠋ Generating commit message"
@@ -213,6 +214,7 @@ fn sub_row_shows_done_duration() {
     assert_eq!(
         sub_row(
             &SubBody::Done(String::new(), Some(Duration::from_millis(6200))),
+            80,
             &THEME
         ),
         "    ✓ 6.2s"
@@ -220,6 +222,7 @@ fn sub_row_shows_done_duration() {
     assert_eq!(
         sub_row(
             &SubBody::Done(String::new(), Some(Duration::from_millis(400))),
+            80,
             &THEME
         ),
         "    ✓"
@@ -230,6 +233,7 @@ fn sub_row_shows_done_duration() {
                 "src/render/progress.rs".into(),
                 Some(Duration::from_millis(18100))
             ),
+            80,
             &THEME
         ),
         "    ✓ src/render/progress.rs · 18.1s"
@@ -237,10 +241,43 @@ fn sub_row_shows_done_duration() {
     assert_eq!(
         sub_row(
             &SubBody::InFlight("Retrying docs/adr/0018.md".into()),
+            80,
             &THEME
         ),
         "    ⠋ Retrying docs/adr/0018.md"
     );
+}
+
+/// A live sub-row clamps its text to the terminal width (`…` marking the
+/// cut, duration suffix kept inside the budget): sub-row text is the one
+/// frame content with no builder-side budget — commit subjects are
+/// prompt-capped at 72 chars but nothing validates that — and a row that
+/// wraps to two physical rows desyncs the painter's whole-frame repaint
+/// on every later tick.
+#[test]
+fn sub_row_clamps_long_done_text_to_the_terminal_width() {
+    let subject = "f".repeat(60);
+    let row = sub_row(
+        &SubBody::Done(
+            format!("abc1234 {subject}"),
+            Some(Duration::from_millis(6200)),
+        ),
+        40,
+        &THEME,
+    );
+    // Budget 27 (40 − inset 6 − ` · 6.2s` 7): `abc1234 ` + 18 f's + `…`;
+    // the whole row is exactly 40 columns.
+    assert_eq!(row, format!("    ✓ abc1234 {}… · 6.2s", "f".repeat(18)));
+}
+
+/// CJK labels count two columns per char — the clamp keeps whole chars
+/// and never splits a fullwidth glyph across the budget.
+#[test]
+fn sub_row_clamps_cjk_labels_by_display_width() {
+    let label = "重".repeat(30);
+    let row = sub_row(&SubBody::InFlight(label), 20, &THEME);
+    // Budget 14 (20 − 6): six fullwidth chars (12) + `…` = 13 columns.
+    assert_eq!(row, format!("    ⠋ {}…", "重".repeat(6)));
 }
 
 /// A bare menu: `› ` on the selected option, two-space indent on the rest;

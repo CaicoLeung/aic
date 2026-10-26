@@ -398,26 +398,81 @@ pub enum SubBody {
 /// One live sub-row at column 4 (ADR 0018): an in-flight label or a done
 /// row. No `[i/N]` numbering — rows land in happening order and every row
 /// of the step shares one shape: `⠋ Generating commit message` /
-/// `✓ 6.2s` / `✓ a1b2c3d feat: first`.
-pub fn sub_row(body: &SubBody, theme: &Theme) -> String {
+/// `✓ 6.2s` / `✓ a1b2c3d feat: first`. Text clamps to `width` (the
+/// terminal's raw column count; `…` marks the cut) so a live row can
+/// never wrap to two physical rows: sub-row text is the one frame content
+/// with no builder-side budget (commit subjects are prompt-capped at 72
+/// chars but nothing validates that), and the painter's whole-frame
+/// repaint assumes one physical row per row.
+pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
     let mut segs = vec![seg(MARGIN), seg(SUB_INDENT)];
     match body {
         SubBody::InFlight(label) => {
             segs.push(styled("⠋ ", palette::pending()));
-            segs.push(styled(label.clone(), palette::pending()));
+            // Inset (4) + `⠋ ` (2) precede the label.
+            segs.push(styled(
+                clamp_to_width(label, width.saturating_sub(6)),
+                palette::pending(),
+            ));
         }
         SubBody::Done(text, duration) => {
             segs.push(styled("✓", palette::success()));
+            let dur = duration.as_ref().and_then(|d| format_duration(*d));
+            // The duration suffix (joiner + `6.2s`) rides the row after the
+            // text, so it spends into the text's budget first — a clamped
+            // subject must not push its own duration past the edge.
+            let suffix = match &dur {
+                Some(d) => (if text.is_empty() { 1 } else { 3 }) + display_width(d),
+                None => 0,
+            };
+            // Inset (4) + `✓` (1) + the text's leading space (1).
+            let text = clamp_to_width(text, width.saturating_sub(6 + suffix));
             if !text.is_empty() {
                 segs.push(seg(format!(" {text}")));
             }
-            if let Some(d) = duration.as_ref().and_then(|d| format_duration(*d)) {
+            if let Some(d) = dur {
                 let joiner = if text.is_empty() { " " } else { " · " };
                 segs.push(styled(format!("{joiner}{d}"), palette::neutral_gray()));
             }
         }
     }
     render(&segs, theme)
+}
+
+/// Display width of a plain (ANSI-free) string in terminal columns —
+/// [`char_display_width`] summed, the same single weight function the wrap
+/// paths use. Pure.
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_display_width).sum()
+}
+
+/// `text` clamped to `budget` display columns, `…` marking the cut — the
+/// file-name column's truncation convention. Keeps whole chars: a
+/// CJK/fullwidth char that would cross the budget is dropped, never split.
+/// Pure. `budget == 0` yields the empty string; the row's fixed chrome
+/// (inset + marker, 6 columns) is not the clamp's to remove — a terminal
+/// narrower than the timeline's own chrome is not a target.
+fn clamp_to_width(text: &str, budget: usize) -> String {
+    if budget == 0 || display_width(text) <= budget {
+        return if budget == 0 {
+            String::new()
+        } else {
+            text.to_string()
+        };
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        // +1 reserves the ellipsis's column for the cut that is coming.
+        let w = char_display_width(c);
+        if used + w + 1 > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// A bare options menu (the commit-confirm four: Commit / Re-generate /

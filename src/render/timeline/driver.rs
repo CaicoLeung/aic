@@ -352,11 +352,19 @@ impl RunFrame {
     pub fn set_sub_row(&self, i: StepIdx, index: usize, body: &SubBody) {
         let mut st = self.0.lock().unwrap();
         let theme = st.theme();
+        // The raw terminal width — the budget a live row must fit.
+        // `sub_row` clamps its text to it, so no sub-row ever wraps to two
+        // physical rows (a wrapped live row would desync the painter's
+        // whole-frame repaint on every later tick).
+        let width = st
+            .paint
+            .as_ref()
+            .map_or_else(terminal_width, |p| p.raw_width);
         let slots = &mut st.subs[i.0];
         while slots.len() < index {
             slots.push(None);
         }
-        let row = sub_row(body, &theme);
+        let row = sub_row(body, width, &theme);
         slots[index - 1] = Some(row);
         st.steps[i.0].live_rows = slots.iter().flatten().cloned().collect();
         st.repaint();
