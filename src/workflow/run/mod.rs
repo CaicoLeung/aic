@@ -32,6 +32,7 @@ use crate::llm::generator;
 use crate::llm::redact::{self, Redact};
 use crate::render::cursor;
 use crate::render::display::Display;
+use crate::render::display::counts_geometry;
 use crate::render::markdown::LoadingNotice;
 use crate::render::markdown::loading_rows;
 use crate::render::progress;
@@ -173,8 +174,8 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
             .collect();
         let scan_paths: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_delta =
-            delta_suffix(&frame.fail_on_err(&display, SCAN, git.workdir_stats(&scan_paths))?);
+        let scan_stats = frame.fail_on_err(&display, SCAN, git.workdir_stats(&scan_paths))?;
+        let scan_delta = delta_suffix(&scan_stats);
         frame.complete(
             &display,
             SCAN,
@@ -184,6 +185,11 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 scan_delta
             ),
         );
+        // Run-wide counts-grid width: every Commit entry footer of this Run
+        // floors its `+N`/`−M` region with this value — computed over the
+        // WHOLE unstaged diff up front — so per-batch digit counts can't
+        // drift the flushed table's columns.
+        let region = counts_geometry(&scan_stats).region;
 
         // Redaction Gate, first payload site (issue #155, ADR 0017): the
         // raw per-file diffs feed every LLM payload of this branch — the
@@ -343,6 +349,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                         undo_start: undo_start.clone(),
                         sub: (count > 1).then_some(i + 1),
                         draft,
+                        region,
                     },
                     &messenger,
                     &confirm,
@@ -428,8 +435,8 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
 
         frame.activate(SCAN);
         let staged_paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_delta =
-            delta_suffix(&frame.fail_on_err(&display, SCAN, git.staged_stats(&staged_paths))?);
+        let scan_stats = frame.fail_on_err(&display, SCAN, git.staged_stats(&staged_paths))?;
+        let scan_delta = delta_suffix(&scan_stats);
         frame.complete(
             &display,
             SCAN,
@@ -439,6 +446,10 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 scan_delta
             ),
         );
+        // Run-wide counts-grid width (see the unstaged branch): the staged
+        // branch lands one entry, so the floor equals its own geometry —
+        // kept for symmetry with the shared `commit_line` contract.
+        let region = counts_geometry(&scan_stats).region;
 
         if let Some(rs) = redact_step {
             frame.activate(rs);
@@ -491,6 +502,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 undo_start: undo_start.clone(),
                 sub: None,
                 draft,
+                region,
             },
             &messenger,
             &confirm,
@@ -532,6 +544,10 @@ struct DraftedCommit {
     /// step (ADR 0018 amendment 3) — the in-frame echo of the entry that
     /// just flushed above it, appended in landing order.
     sub: Option<usize>,
+    /// Run-wide counts-grid width ([`counts_geometry`] over the Run's whole
+    /// diff): floors this entry's footer region so every entry of a
+    /// multi-batch Run shares identical `+N`/`−M` columns.
+    region: usize,
     draft: generator::CommitOutput,
 }
 
@@ -547,6 +563,7 @@ async fn generate_and_commit(
     let DraftedCommit {
         undo_start,
         sub,
+        region,
         draft,
     } = drafted;
     // The first draft was produced up front by the caller (the unstaged
@@ -594,7 +611,7 @@ async fn generate_and_commit(
     // repaints the frame below it — entries never ride the frame, so the
     // frame stays shorter than the terminal and whole-frame repaint never
     // scrolls. Off a terminal the rows go straight through the step display.
-    frame.flush(display, |d| d.commit_line(&hash, &message, &landed));
+    frame.flush(display, |d| d.commit_line(&hash, &message, &landed, region));
     if let Some(index) = sub
         && let Some(step) = frame.active_index()
     {
