@@ -376,7 +376,7 @@ pub fn timeline_frame(steps: &[Step], theme: &Theme) -> Vec<String> {
     rows
 }
 
-/// The body of one `[i/N]` sub-row (ADR 0018): an in-flight label
+/// The body of one live sub-row (ADR 0018): an in-flight label
 /// (`⠋ Generating commit message`) or a done row (`✓ [text] [· duration]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubBody {
@@ -387,23 +387,12 @@ pub enum SubBody {
     Done(String, Option<Duration>),
 }
 
-/// One `[i/N]` sub-row at column 4 (ADR 0018): the prefix pads to the width
-/// of `[N/N]` for the run's final N so every sub-row of the run aligns.
-/// `[1/3] ⠋ Generating commit message` / `[2/3] ✓ 6.2s` /
-/// `[1/3] ✓ src/render/progress.rs · 18.1s`.
-pub fn sub_row(index: usize, total: usize, body: &SubBody, theme: &Theme) -> String {
-    let prefix = format!("[{index}/{total}]");
-    let full = format!("[{total}/{total}]");
-    let padded = format!(
-        "{}{} ",
-        prefix,
-        " ".repeat(full.chars().count() - prefix.chars().count())
-    );
-    let mut segs = vec![
-        seg(MARGIN),
-        seg(SUB_INDENT),
-        styled(padded, palette::neutral_gray()),
-    ];
+/// One live sub-row at column 4 (ADR 0018): an in-flight label or a done
+/// row. No `[i/N]` numbering — rows land in happening order and every row
+/// of the step shares one shape: `⠋ Generating commit message` /
+/// `✓ 6.2s` / `✓ a1b2c3d feat: first`.
+pub fn sub_row(body: &SubBody, theme: &Theme) -> String {
+    let mut segs = vec![seg(MARGIN), seg(SUB_INDENT)];
     match body {
         SubBody::InFlight(label) => {
             segs.push(styled("⠋ ", palette::pending()));

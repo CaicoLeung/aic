@@ -198,58 +198,48 @@ fn timeline_frame_durable_block_gets_one_blank_before_next_step() {
     );
 }
 
-/// Sub-rows sit at column 4; the `[i/N]` prefix pads to `[N/N]` width; a done
-/// sub-row keeps its duration only past 1 s (ADR 0018).
+/// Sub-rows sit at column 4 with no `[i/N]` numbering — every row of the
+/// step shares one shape; a done sub-row keeps its duration only past 1 s
+/// (ADR 0018).
 #[test]
-fn sub_row_pads_prefix_and_shows_done_duration() {
+fn sub_row_shows_done_duration() {
     assert_eq!(
         sub_row(
-            1,
-            3,
             &SubBody::InFlight("Generating commit message".into()),
             &THEME
         ),
-        "    [1/3] ⠋ Generating commit message"
+        "    ⠋ Generating commit message"
     );
     assert_eq!(
         sub_row(
-            2,
-            3,
             &SubBody::Done(String::new(), Some(Duration::from_millis(6200))),
             &THEME
         ),
-        "    [2/3] ✓ 6.2s"
+        "    ✓ 6.2s"
     );
     assert_eq!(
         sub_row(
-            2,
-            3,
             &SubBody::Done(String::new(), Some(Duration::from_millis(400))),
             &THEME
         ),
-        "    [2/3] ✓"
+        "    ✓"
     );
     assert_eq!(
         sub_row(
-            1,
-            3,
             &SubBody::Done(
                 "src/render/progress.rs".into(),
                 Some(Duration::from_millis(18100))
             ),
             &THEME
         ),
-        "    [1/3] ✓ src/render/progress.rs · 18.1s"
+        "    ✓ src/render/progress.rs · 18.1s"
     );
-    // Two-digit totals keep single-digit indices aligned.
     assert_eq!(
         sub_row(
-            3,
-            12,
             &SubBody::InFlight("Retrying docs/adr/0018.md".into()),
             &THEME
         ),
-        "    [3/12]  ⠋ Retrying docs/adr/0018.md"
+        "    ⠋ Retrying docs/adr/0018.md"
     );
 }
 

@@ -227,6 +227,15 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             }
         };
         let count = result.batches.len();
+        // The caution row must ride the step's live rows BEFORE completion:
+        // under chronological collapse (ADR 0018 amendment 3) `complete`
+        // peels the finished block to scrollback at once, so a row emitted
+        // after it would land on a step the frame no longer renders.
+        if let Some(err) = &fallback_err {
+            frame.step_display(&display).warn(&format!(
+                "LLM batch plan invalid ({err}); regrouping deterministically"
+            ));
+        }
         frame.complete(
             &display,
             plan_step,
@@ -235,11 +244,6 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 None => format!("Planned {}", plural(count, "batch")),
             },
         );
-        if let Some(err) = fallback_err {
-            frame.step_display(&display).warn(&format!(
-                "LLM batch plan invalid ({err}); regrouping deterministically"
-            ));
-        }
 
         // Batch Review (issue #157): the opt-in pre-draft gate — applies to
         // whichever plan proceeds (the LLM's or the deterministic
@@ -260,7 +264,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // staged diff; the two diverge only under a pre-commit hook that
         // rewrites bytes — irrelevant to a commit message — and the
         // confirmation Re-generate action still redrafts against the staged
-        // diff. Each concurrent draft reveals its own `[i/N]` sub-row as it
+        // diff. Each concurrent draft reveals its own sub-row as it
         // starts and flips it to a `✓` on finish (ADR 0018); all sub-rows
         // erase together at step completion. Order-preserving `buffered`
         // keeps the messenger's call order (and the test messengers'
@@ -284,7 +288,6 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                     frame.set_sub_row(
                         draft_step,
                         i + 1,
-                        count,
                         &SubBody::InFlight("Generating commit message".to_string()),
                     );
                     let started = Instant::now();
@@ -292,7 +295,6 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                     frame.set_sub_row(
                         draft_step,
                         i + 1,
-                        count,
                         &SubBody::Done(String::new(), Some(started.elapsed())),
                     );
                     outcome
@@ -313,7 +315,6 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         let step_display = frame.step_display(&display);
         let mut staging = staging::Staging::new();
         for (i, (batch, draft)) in result.batches.iter().zip(drafts).enumerate() {
-            let prefix = format!("[{}/{}]", i + 1, count);
             frame.set_label(
                 commit_step,
                 format!("Committing batch {} of {count}", i + 1),
@@ -340,7 +341,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                     &frame,
                     DraftedCommit {
                         undo_start: undo_start.clone(),
-                        prefix,
+                        sub: (count > 1).then_some(i + 1),
                         draft,
                     },
                     &messenger,
@@ -488,7 +489,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             &frame,
             DraftedCommit {
                 undo_start: undo_start.clone(),
-                prefix: String::new(),
+                sub: None,
                 draft,
             },
             &messenger,
@@ -526,8 +527,11 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
 /// signature stays under clippy's argument budget as it accretes state.
 struct DraftedCommit {
     undo_start: Option<String>,
-    /// The Commit entry's `[i/N]` prefix (empty on the single-commit path).
-    prefix: String,
+    /// 1-based batch index on a multi-batch Run (None single-commit): each
+    /// landed batch reveals its `✓ hash subject` live sub-row on the Commit
+    /// step (ADR 0018 amendment 3) — the in-frame echo of the entry that
+    /// just flushed above it, appended in landing order.
+    sub: Option<usize>,
     draft: generator::CommitOutput,
 }
 
@@ -542,7 +546,7 @@ async fn generate_and_commit(
 ) -> anyhow::Result<()> {
     let DraftedCommit {
         undo_start,
-        prefix,
+        sub,
         draft,
     } = drafted;
     // The first draft was produced up front by the caller (the unstaged
@@ -590,9 +594,17 @@ async fn generate_and_commit(
     // repaints the frame below it — entries never ride the frame, so the
     // frame stays shorter than the terminal and whole-frame repaint never
     // scrolls. Off a terminal the rows go straight through the step display.
-    frame.flush(display, |d| {
-        d.commit_line(&hash, &message, &prefix, &landed)
-    });
+    frame.flush(display, |d| d.commit_line(&hash, &message, &landed));
+    if let Some(index) = sub
+        && let Some(step) = frame.active_index()
+    {
+        let subject = message.lines().next().unwrap_or_default();
+        frame.set_sub_row(
+            step,
+            index,
+            &SubBody::Done(format!("{hash} {subject}"), None),
+        );
+    }
     Ok(())
 }
 

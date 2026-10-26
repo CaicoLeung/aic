@@ -204,7 +204,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
             } else {
                 format!("Resolving {path}")
             };
-            frame.set_sub_row(resolve_step, idx, resolvable, &SubBody::InFlight(label));
+            frame.set_sub_row(resolve_step, idx, &SubBody::InFlight(label));
             // `.to_string()` (not `.clone()`) because `original` is borrowed
             // by the closure, so the bare name is a `&String` whose
             // `.clone()` would copy the reference rather than the content.
@@ -230,7 +230,6 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
                 frame.set_sub_row(
                     resolve_step,
                     idx,
-                    resolvable,
                     &SubBody::Done(text, Some(started.elapsed())),
                 );
                 content

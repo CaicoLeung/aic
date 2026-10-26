@@ -214,35 +214,30 @@ impl Display {
     /// Commit entry table row (ADR 0018 redesign) — one row per landed
     /// batch, flushed to permanent scrollback below the Run timeline frame.
     ///
-    /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
-    /// pass `""` for single-commit or staged workflows.
-    ///
     /// Layout: the subject line is a single full-width title row —
-    /// `[prefix] ✓ <hash> <styled subject> · +A −D` — never wrapped
-    /// (overflow preferable to truncation/re-flow), carrying the batch's
-    /// whole text-line delta. The commit **body is omitted**: `git log`
-    /// owns the prose; the pre-commit preview ([`Self::commit_preview`])
-    /// still shows it in full before the commit lands. The file-stats
-    /// footer hangs shallower — file rows under the commit ID, the Σ total
-    /// under the `✓` marker — so the footer reads as keyed to the ref
-    /// line. `stats` render on the full [`Self::table_width`] budget.
-    pub fn commit_line(&self, hash: &str, message: &str, prefix: &str, stats: &[FileStats]) {
-        // Muted gray for prefix — read from the single-source palette so it
-        // can't drift from the WCAG-guarded value.
+    /// `✓ <hash> <styled subject> · +A −D` — never wrapped (overflow
+    /// preferable to truncation/re-flow), carrying the batch's whole
+    /// text-line delta. The commit **body is omitted**: `git log` owns
+    /// the prose; the pre-commit preview ([`Self::commit_preview`]) still
+    /// shows it in full before the commit lands. The file-stats footer
+    /// hangs shallower — file rows under the commit ID, the Σ total under
+    /// the `✓` marker — so the footer reads as keyed to the ref line.
+    /// `stats` render on the [`Self::text_width`] budget: the same prose
+    /// boundary every other Run surface wraps at, so the Σ Diff bar's
+    /// right edge is where text ends, not the terminal's real edge.
+    pub fn commit_line(&self, hash: &str, message: &str, stats: &[FileStats]) {
+        // Muted gray shared by the delta joiner — read from the
+        // single-source palette so it can't drift from the WCAG-guarded
+        // value.
         let gray = neutral_gray();
 
-        // Main line: [prefix] ✓ <hash> <message> · +A −D — one full-width
-        // table row per landed batch (ADR 0018 redesign). The body is
-        // deliberately omitted: `git log` owns the prose, the entry owns the
-        // delta. Commit ID: amber #d97706, bold so the short token qualifies
-        // as WCAG AA Large (3:1) on both themes.
+        // Main line: ✓ <hash> <message> · +A −D — one full-width table row
+        // per landed batch (ADR 0018 redesign). The body is deliberately
+        // omitted: `git log` owns the prose, the entry owns the delta.
+        // Commit ID: amber #d97706, bold so the short token qualifies as
+        // WCAG AA Large (3:1) on both themes.
         let check = self.styled("\u{2713}", palette::success());
         let hash_styled = self.styled(hash, commit_id_color().bold());
-        let pre = if prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", self.styled(prefix, gray.clone()))
-        };
         let total_added: usize = stats.iter().map(|s| s.added).sum();
         let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
         let delta = if total_added + total_deleted > 0 {
@@ -256,34 +251,25 @@ impl Display {
             String::new()
         };
         self.emit(&format!(
-            "{pre}{check} {hash_styled} {}{delta}",
+            "{check} {hash_styled} {}{delta}",
             self.styled_subject(message)
         ));
 
         // File rows + Σ anchor at the hash with names pinned to the message
-        // start, on the full-width table budget.
-        let subject = Self::subject_offsets(prefix, hash);
-        self.emit_file_stats(stats, &subject, self.table_width());
+        // start, on the shared text budget.
+        let subject = Self::subject_offsets(hash);
+        self.emit_file_stats(stats, &subject, self.text_width());
     }
 
-    /// Subject-prefix geometry, as [`SubjectOffsets`]: with no prefix
-    /// (`""`, single-commit / staged Runs) the marker sits at column 0,
-    /// the hash at 2, the message at 10; each `[n/m] ` prefix shifts all
-    /// three. A Run with ≥10 batches widens the prefix mid-run (`[9/9]` →
-    /// `[10/9]`) and the hangs shift with it — accepted: rare, and
-    /// tracking the real subject start beats freezing a stale column.
-    /// Pure, so the geometry is unit-testable without a sink.
-    fn subject_offsets(prefix: &str, hash: &str) -> SubjectOffsets {
-        // Optional `[n/m] ` prefix, then "✓ " — marker and space.
-        let tick = if prefix.is_empty() {
-            0
-        } else {
-            prefix.chars().count() + 1
-        };
+    /// Subject-prefix geometry, as [`SubjectOffsets`]: the marker sits at
+    /// column 0, the hash at 2, the message at `2 + hash + 1`. Every entry
+    /// of a Run shares it — no per-batch prefix — so all rows hang on the
+    /// same columns. Pure, so the geometry is unit-testable without a sink.
+    fn subject_offsets(hash: &str) -> SubjectOffsets {
         SubjectOffsets {
-            tick,
-            hash: tick + 2,
-            message: tick + 2 + hash.chars().count() + 1,
+            tick: 0,
+            hash: 2,
+            message: 2 + hash.chars().count() + 1,
         }
     }
 

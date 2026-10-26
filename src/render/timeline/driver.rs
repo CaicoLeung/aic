@@ -330,14 +330,14 @@ impl RunFrame {
         self.live(i, Vec::new());
     }
 
-    pub fn set_sub_row(&self, i: StepIdx, index: usize, total: usize, body: &SubBody) {
+    pub fn set_sub_row(&self, i: StepIdx, index: usize, body: &SubBody) {
         let mut st = self.0.lock().unwrap();
         let theme = st.theme();
         let slots = &mut st.subs[i.0];
-        if slots.len() != total {
-            slots.resize_with(total, || None);
+        while slots.len() < index {
+            slots.push(None);
         }
-        let row = sub_row(index, total, body, &theme);
+        let row = sub_row(body, &theme);
         slots[index - 1] = Some(row);
         st.steps[i.0].live_rows = slots.iter().flatten().cloned().collect();
         st.repaint();
@@ -828,21 +828,19 @@ mod tests {
         f.set_sub_row(
             StepIdx(1),
             1,
-            3,
             &SubBody::InFlight("Generating commit message".into()),
         );
         f.set_sub_row(
             StepIdx(1),
             3,
-            3,
             &SubBody::InFlight("Generating commit message".into()),
         );
         let live = f.step(StepIdx(1)).live_rows;
         assert_eq!(live.len(), 2, "only started drafts are revealed");
-        assert!(live[0].contains("[1/3]"), "rows keep index order: {live:?}");
-        assert!(live[1].contains("[3/3]"), "rows keep index order: {live:?}");
-        // A finish flips its own row only; the other stays in flight.
-        f.set_sub_row(StepIdx(1), 3, 3, &SubBody::Done(String::new(), None));
+        // Out-of-order finishes never reorder rows: the slot that finished
+        // flips to ✓ in place, the not-yet-started middle slot stays absent.
+        assert!(live[0].contains('⠋'), "rows keep slot order: {live:?}");
+        f.set_sub_row(StepIdx(1), 3, &SubBody::Done(String::new(), None));
         assert_eq!(f.step(StepIdx(1)).live_rows.len(), 2);
         assert!(f.step(StepIdx(1)).live_rows[1].contains('✓'));
         f.complete(&display, StepIdx(1), "Drafted 3 messages");
@@ -870,7 +868,7 @@ mod tests {
         assert_eq!(f.step(StepIdx::FIRST).durable_rows.len(), 1);
         // While active: live, then durable at completion.
         f.activate(StepIdx(1));
-        step_display.emit("[1/2] ✓ a1b2c3d feat: first");
+        step_display.emit("✓ a1b2c3d feat: first");
         step_display.emit("+1 −1  tracked.txt");
         assert_eq!(f.step(StepIdx(1)).live_rows.len(), 2);
         step_display.clear_last(1);
@@ -900,14 +898,14 @@ mod tests {
         let f = frame(&["Scan changes", "Commit batches"]).await;
         f.complete(&display, StepIdx::FIRST, "Scanned 2 files");
         f.flush(&display, |d| {
-            d.emit("[1/2] ✓ a1b2c3d feat: first");
+            d.emit("✓ a1b2c3d feat: first");
             d.emit("+1 −1  tracked.txt");
         });
         assert_eq!(
             rec.lines(),
             vec![
                 "  ✓ Scanned 2 files",
-                "  [1/2] ✓ a1b2c3d feat: first",
+                "  ✓ a1b2c3d feat: first",
                 "  +1 −1  tracked.txt",
             ]
         );

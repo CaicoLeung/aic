@@ -523,7 +523,6 @@ fn commit_line_renders_file_stats_footer() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        "[1/3]",
         &[FileStats {
             path: "src/auth.rs".into(),
             added: 7,
@@ -561,7 +560,6 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        "[1/2]",
         &[
             FileStats {
                 path: "src/a.rs".into(),
@@ -785,14 +783,14 @@ fn plain_when_colors_disabled() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line("abc1234", "feat: add thing", "[1/3]", &[]);
+    d.commit_line("abc1234", "feat: add thing", &[]);
     let got = lines.lock().clone();
-    // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
-    // Type prefix "feat" is present, followed by ": add thing". Subject
-    // carries the 2-col left margin; empty stats → no delta segment, and
-    // the entry is a single row (the body is omitted — ADR 0018 redesign).
+    // No ANSI escapes. Type prefix "feat" is present, followed by
+    // ": add thing". Subject carries the 2-col left margin; empty stats →
+    // no delta segment, and the entry is a single row (the body is
+    // omitted — ADR 0018 redesign).
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0], "  [1/3] \u{2713} abc1234 feat: add thing");
+    assert_eq!(got[0], "  \u{2713} abc1234 feat: add thing");
 }
 
 #[test]
@@ -804,10 +802,10 @@ fn truecolor_when_colors_enabled() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("abc1234", "feat: add thing", "[1/3]", &[]);
+    d.commit_line("abc1234", "feat: add thing", &[]);
     let joined = lines.lock().join("\n");
-    // hash #d97706 (bold), feat type green #15803d (bold), description bold
-    // default fg, body + prefix muted gray #6b7280.
+    // hash #d97706 (bold), feat type green #15803d (bold), description
+    // bold default fg.
     assert!(
         joined.contains("217;119;6"),
         "hash amber color missing: {joined:?}"
@@ -824,12 +822,6 @@ fn truecolor_when_colors_enabled() {
         !joined.contains("255;255;255"),
         "subject must not use hardcoded white: {joined:?}"
     );
-    assert!(
-        joined.contains("107;114;128"),
-        "muted gray color missing: {joined:?}"
-    );
-    // [n/m] prefix text survives styling (format kept, not "n.").
-    assert!(joined.contains("[1/3]"), "prefix text missing: {joined:?}");
 }
 
 #[test]
@@ -841,7 +833,7 @@ fn fix_type_gets_orange_color() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", "", &[]);
+    d.commit_line("def5678", "fix(auth): correct token check", &[]);
     let joined = lines.lock().join("\n");
     // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
     // readability — see types::NAMED_PALETTE).
@@ -868,7 +860,7 @@ fn scoped_commit_preserves_parens_plain() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", "", &[]);
+    d.commit_line("def5678", "fix(auth): correct token check", &[]);
     let got = lines.lock().clone();
     // Exact visible text — catches the dropped-paren regression directly.
     // Subject carries a 2-col left margin.
@@ -896,7 +888,7 @@ fn each_type_renders_its_palette_color() {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("hash000", &format!("{type_str}: msg"), "", &[]);
+        d.commit_line("hash000", &format!("{type_str}: msg"), &[]);
         let joined = lines.lock().join("\n");
         assert!(
             joined.contains(rgb),
@@ -918,7 +910,7 @@ fn unrecognized_type_gets_hash_fallback_color() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("ghi9012", "blob: thing in progress", "", &[]);
+    d.commit_line("ghi9012", "blob: thing in progress", &[]);
     let joined = lines.lock().join("\n");
     assert!(
         !joined.contains("107;114;128"),
@@ -950,7 +942,7 @@ fn no_colon_message_gets_muted_gray() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("jkl3456", "no colon message", "", &[]);
+    d.commit_line("jkl3456", "no colon message", &[]);
     let joined = lines.lock().join("\n");
     // No-colon messages have no type token to color → muted gray #6b7280
     // (darkened from the old #9ca3af for white-bg readability).
