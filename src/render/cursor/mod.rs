@@ -692,7 +692,7 @@ mod tests {
 /// claim — the input-safety contract (never consume pending input, never
 /// leak a late reply) is exercised end to end, not just the pure parse.
 #[cfg(all(unix, test))]
-mod pty_tests {
+pub(crate) mod pty_tests {
     use super::*;
     use std::os::fd::RawFd;
     use std::time::{Duration, Instant};
@@ -712,7 +712,7 @@ mod pty_tests {
         PreWrite(&'static [u8]),
     }
 
-    fn open_pty() -> (RawFd, RawFd) {
+    pub(crate) fn open_pty() -> (RawFd, RawFd) {
         let mut master = 0;
         let mut slave = 0;
         let rc = unsafe {

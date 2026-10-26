@@ -950,3 +950,155 @@ mod tests {
         outer.complete(&display().0, 0, "Scanned 1 file");
     }
 }
+
+/// End-to-end [`RunFrame::flush` geometry over a real PTY — the one piece of
+/// the timeline the pure builder tests cannot see (they run off a terminal,
+/// where `flush` degrades to a plain emit). A forked child paints a frame
+/// onto the pty as its stdio and flushes one entry row through it; the
+/// parent replays DSR replies, captures the master side, and asserts the
+/// erase → entry → repaint sequence.
+#[cfg(all(unix, test))]
+mod pty_tests {
+    use super::*;
+    use crate::render::cursor::pty_tests::open_pty;
+
+    /// `flush` on a terminal must (1) erase the painted frame in one
+    /// sequence, (2) print the flushed entry rows exactly once, and (3)
+    /// repaint the frame below them — the cursor arithmetic that keeps
+    /// `prev_rows` and the screen in lockstep. A regression in the erase or
+    /// repaint order shows up as the entry row duplicated or the step
+    /// summaries never reappearing after it.
+    ///
+    /// Fork discipline: unlike `cursor::pty_tests` (libc-only children),
+    /// this child allocates — it builds a single-thread tokio runtime and
+    /// paints real rows. // ponytail: fork-with-allocation can deadlock on
+    /// a foreign malloc lock held at the fork instant; if that ever bites,
+    /// move the child into a dedicated spawned test binary.
+    #[test]
+    fn flush_erases_prints_entry_and_repaints_on_a_tty() {
+        let (master, slave) = open_pty();
+        // 30×100 geometry: room for the frame below the row-12 DSR reply.
+        let ws = libc::winsize {
+            ws_row: 30,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(unsafe { libc::ioctl(slave, libc::TIOCSWINSZ, &ws) }, 0);
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe {
+                libc::dup2(slave, 0);
+                libc::dup2(slave, 1);
+                libc::dup2(slave, 2);
+                if slave > 2 {
+                    libc::close(slave);
+                }
+                libc::close(master);
+            }
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("child runtime");
+            runtime.block_on(async {
+                let frame = RunFrame::new(vec!["Scan".into(), "Plan".into()]).await;
+                let display = Display::new();
+                frame.activate(0);
+                frame.live(0, vec!["scan live".into()]);
+                frame.complete(&display, 0, "Scanned 2 files");
+                frame.activate(1);
+                frame.live(1, vec!["plan live".into()]);
+                frame.flush(&display, |d| d.emit("  PTYFLUSH-ENTRY row"));
+                frame.complete(&display, 1, "Planned 2 batches");
+            });
+            let msg = b"\nPTYFLUSH-DONE\n";
+            unsafe {
+                libc::write(2, msg.as_ptr().cast(), msg.len());
+                libc::_exit(0);
+            }
+        }
+
+        // Parent: fake terminal — answer every DSR query with row 12 (the
+        // probe's canonical path; row ≤ height so it is kept), keep reading
+        // the master until the child exits, then drain what is left.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut capture: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 4096];
+        let mut replied = 0usize;
+        let mut exited = false;
+        while !exited {
+            let mut status = 0;
+            let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            assert!(r >= 0, "waitpid failed");
+            let mut pfd = libc::pollfd {
+                fd: master,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            while unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
+                let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                capture.extend_from_slice(&buf[..n as usize]);
+            }
+            // Answer each DSR query exactly once, promptly (a reply after
+            // the probe's raw window closes echoes as garbage).
+            let queries = capture.windows(4).filter(|w| *w == b"\x1b[6n").count();
+            while replied < queries {
+                let reply = b"\x1b[12;1R";
+                unsafe { libc::write(master, reply.as_ptr().cast(), reply.len()) };
+                replied += 1;
+            }
+            if r == pid {
+                assert!(
+                    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                    "child drive failed: {status}"
+                );
+                exited = true;
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child did not exit in 10s — flush deadlocked?"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+
+        let text = String::from_utf8_lossy(&capture);
+        assert!(
+            text.contains("PTYFLUSH-DONE"),
+            "child never finished its drive"
+        );
+        assert_eq!(
+            text.matches("PTYFLUSH-ENTRY").count(),
+            1,
+            "flushed entry row must print exactly once, not duplicate"
+        );
+        assert!(
+            text.contains("\x1b[2K"),
+            "flush must erase the painted frame (CLR_LINE bytes)"
+        );
+        let first_summary = text
+            .find("Scanned 2 files")
+            .expect("frame painted pre-flush");
+        let entry_at = text.find("PTYFLUSH-ENTRY").expect("entry row printed");
+        let last_summary = text
+            .rfind("Scanned 2 files")
+            .expect("frame repainted post-flush");
+        assert!(
+            first_summary < entry_at,
+            "frame must be painted before the flush"
+        );
+        assert!(
+            last_summary > entry_at,
+            "frame must repaint below the flushed entry row"
+        );
+    }
+}
