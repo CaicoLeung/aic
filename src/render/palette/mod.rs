@@ -231,6 +231,35 @@ impl CommitType {
     }
 }
 
+// ----------------------------------------------------------------------
+// One-shot command lines
+//
+// The one-shot commands (`use`, `list`, `update`, `undo`, `completion`, and
+// `setup`'s save line — design spec §4.4) print through `println!` /
+// `eprintln!`, off the `Display` seam, so they style their marker glyphs
+// and detail rows through these standalone probes instead.
+// ----------------------------------------------------------------------
+
+/// Style `text` for a one-shot line printed to stdout: plain when stdout
+/// colors are disabled (pipe, `NO_COLOR`). Same contract as
+/// [`Display::styled`](crate::render::display::Display), scoped to stdout.
+pub fn styled_stdout(text: &str, s: Style) -> String {
+    if console::colors_enabled() {
+        s.apply_to(text).to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// The stderr sibling of [`styled_stdout`] (the `completion` result lines).
+pub fn styled_stderr(text: &str, s: Style) -> String {
+    if console::colors_enabled_stderr() {
+        s.apply_to(text).to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
