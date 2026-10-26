@@ -936,7 +936,7 @@ fn use_messages(config: &Config) -> (String, Option<String>) {
                 .cli
                 .active_command()
                 .expect("apply_use's preset arm always sets a command");
-            (format!("Switched to CLI agent {command}."), None)
+            (format!("Switched to CLI agent {command}"), None)
         }
         _ => {
             let normalized = config
@@ -950,11 +950,11 @@ fn use_messages(config: &Config) -> (String, Option<String>) {
                 .unwrap_or(false);
             let note = (!had_key).then(|| {
                 format!(
-                    "note: {normalized} has no saved API key — run `aic setup` to add one if \
-                     it's needed"
+                    "{normalized} has no saved API key — run `aic setup` to add one if it's \
+                     needed"
                 )
             });
-            (format!("Switched to {normalized}."), note)
+            (format!("Switched to {normalized}"), note)
         }
     }
 }
@@ -979,9 +979,18 @@ pub fn run_use(name: &str) -> Result<()> {
 
     let (line, note) = use_messages(&config);
     config.save()?;
-    println!("{line}");
+    println!(
+        "  {}",
+        crate::render::palette::styled_stdout(
+            &format!("✓ {line}"),
+            crate::render::palette::success()
+        )
+    );
     if let Some(note) = note {
-        eprintln!("{note}");
+        eprintln!(
+            "  {}",
+            crate::render::palette::styled_stderr(&note, crate::render::palette::muted())
+        );
     }
     Ok(())
 }

@@ -440,7 +440,7 @@ fn apply_use_preset_match_is_case_insensitive() {
 fn use_messages_cli_arm_names_agent_and_skips_api_key_note() {
     let out = super::apply_use(cfg("openai", Some("sk"), None, None), "claude").unwrap();
     let (line, note) = super::use_messages(&out);
-    assert_eq!(line, "Switched to CLI agent claude.");
+    assert_eq!(line, "Switched to CLI agent claude");
     assert!(note.is_none(), "CLI arm must not print the API-key note");
 }
 
@@ -457,7 +457,7 @@ fn use_messages_provider_arm_notes_only_a_missing_key() {
     ));
     let out = super::apply_use(keyed, "anthropic").unwrap();
     let (line, note) = super::use_messages(&out);
-    assert_eq!(line, "Switched to anthropic.");
+    assert_eq!(line, "Switched to anthropic");
     assert!(note.is_none());
 
     let mut keyless = cfg("openai", Some("sk"), None, None);
@@ -466,7 +466,7 @@ fn use_messages_provider_arm_notes_only_a_missing_key() {
         .push(ProviderProfile::new("anthropic", None, None, None));
     let out = super::apply_use(keyless, "anthropic").unwrap();
     let (line, note) = super::use_messages(&out);
-    assert_eq!(line, "Switched to anthropic.");
+    assert_eq!(line, "Switched to anthropic");
     let note = note.expect("keyless profile must produce the note");
     assert!(note.contains("no saved API key"), "got: {note}");
 }
