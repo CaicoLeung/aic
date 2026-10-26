@@ -200,3 +200,20 @@ this amendment records both resolutions.
      text ends, so every Run surface shares one right edge. The budget
      includes the Σ row's subject hang (found by the PTY harness: without
      it the row hit 103 columns on a 100-col terminal and wrapped).
+
+   Third-pass revisions (same day):
+   - **No delta suffix on the entry subject.** `✓ hash subject · +A −D`
+     dropped its tail — the footer's per-file counts and Σ row own the
+     numbers, `git log` owns the prose. The subject is a title row only.
+   - **Run-wide counts region.** Each entry's footer no longer sizes its
+     `+N`/`−M` grid to its own batch: `counts_geometry` (pure, in
+     `render::display`) computes the region once over the Run's WHOLE
+     diff at Scan, and every entry floors its footer with it — so a
+     1-digit batch beside a 3-digit sibling keeps identical columns
+     (counts, names, and the Σ bar start all line up across entries).
+     The σ column is reserved in every footer — blank on file rows,
+     drawn on Σ rows — including single-file entries, whose block now
+     anchors at the same column as multi-file siblings (the anchor clamp
+     is unconditional; a per-Σ-row clamp drifted single-file entries one
+     column left). The pre-commit preview keeps its own (unfloored)
+     geometry: it renders alone and is erased on confirm.
