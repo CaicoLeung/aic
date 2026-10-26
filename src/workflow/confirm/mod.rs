@@ -17,8 +17,8 @@
 use crate::core::types::CommitMessenger;
 use crate::git::FileStats;
 use crate::render::display::Display;
-use crate::render::progress;
-use crate::workflow::input::{select_row, truncate};
+use crate::render::timeline::driver::RunFrame;
+use crate::workflow::input::select_in_frame;
 use anyhow::Context;
 
 // ----------------------------------------------------------------------
@@ -113,8 +113,13 @@ impl std::error::Error for CommitDeclined {}
 
 /// Run the confirmation loop for a drafted message. Returns the confirmed
 /// (message, body, preview_rows) after the user approves or edits it. The
-/// preview is shown after each edit/regeneration, and each preview is erased
-/// before being replaced so superseded drafts never accumulate on screen.
+/// preview renders through `display` — the frame's step display, so on a
+/// terminal it is the active step's live output (spec §2.7) and each
+/// replacement erases its predecessor in one frame; off a terminal it is
+/// the Run's own sink, byte-identical to the pre-timeline output. The
+/// Re-generate wait paints as one live note row (`⠋ Re-generating commit
+/// message`); the Edit launch suspends the whole frame for the editor and
+/// repaints it afterwards (spec §1.4).
 pub(crate) async fn confirm_draft(
     draft: (String, Option<String>),
     stats: &[FileStats],
@@ -122,6 +127,7 @@ pub(crate) async fn confirm_draft(
     confirm: &Confirm,
     messenger: &CommitMessenger,
     diff: String,
+    frame: Option<&RunFrame>,
 ) -> anyhow::Result<(String, Option<String>, usize)> {
     let (mut message, mut body) = draft;
 
@@ -137,15 +143,30 @@ pub(crate) async fn confirm_draft(
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
-                let result =
-                    progress::with_spinner("Re-generating commit message", messenger(diff.clone()))
-                        .await?;
+                if let Some(f) = frame {
+                    f.live_note("Re-generating commit message");
+                }
+                let result = messenger(diff.clone()).await?;
+                if let Some(f) = frame {
+                    f.clear_live_note();
+                }
                 message = result.message;
                 body = result.body;
             }
             ConfirmChoice::Edit => {
                 display.clear_last(rows);
-                (message, body) = editor(&message, body.as_deref())?;
+                // The editor owns the terminal: the whole frame erases in
+                // one frame first and repaints with the menu state restored
+                // on exit (spec §1.4) — the timeline never scrolls away
+                // mid-edit.
+                if let Some(f) = frame {
+                    f.suspend();
+                }
+                let edited = editor(&message, body.as_deref());
+                if let Some(f) = frame {
+                    f.resume();
+                }
+                (message, body) = edited?;
             }
             ConfirmChoice::Abort => return Err(CommitDeclined.into()),
         }
@@ -166,23 +187,19 @@ const CONFIRM_ACTIONS: [(&str, ConfirmChoice); 4] = [
     ("Abort", ConfirmChoice::Abort),
 ];
 
-/// Production confirmation menu (issue #78): an `inquire::Select` over the
-/// four actions, matching the setup wizard's arrow-key UI. The drafted
-/// subject rides in the prompt so the menu is self-describing even if the
-/// preview above scrolled away. Esc and Ctrl-C both abort — there is nothing
-/// to go back to once the commit is pending — matching the wizard's
-/// graceful-cancel handling (Ctrl-C is not an error here, same as in
-/// `opt_nav`).
-fn confirm_menu(message: &str) -> anyhow::Result<ConfirmChoice> {
-    let subject = truncate(message, 40);
+/// Production confirmation menu (issue #78): the four actions as timeline
+/// frame rows under the active step's preview (spec §2.7) — `›` cursor, raw
+/// key input, zero-residue by construction. Esc and Ctrl-C both abort —
+/// there is nothing to go back to once the commit is pending (same mapping
+/// as the inquire row this replaces off-frame).
+fn confirm_menu(_message: &str) -> anyhow::Result<ConfirmChoice> {
     let labels: Vec<&str> = CONFIRM_ACTIONS.iter().map(|(label, _)| *label).collect();
-    // One zero-residue Select row (`input::select_row`): inquire's final
-    // frame would otherwise redraw a footprint that breaks the caller's
-    // exact `clear_last(rows)` preview erase.
-    let Some(index) = select_row(
-        &format!("Commit this message?  ({subject})"),
+    let Some(index) = select_in_frame(
+        "Commit this message?",
         &labels,
+        0,
         "↑/↓ select · Enter confirm · Esc or Ctrl-C aborts",
+        false,
     )?
     else {
         // Esc / Ctrl-C / a closed stdin all end the run — there's nothing to

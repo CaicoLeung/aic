@@ -34,4 +34,5 @@ mod grouping;
 mod hooks;
 mod resolve;
 mod review;
+mod timeline;
 mod undo;

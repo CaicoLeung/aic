@@ -138,6 +138,29 @@ pub(crate) fn select_row(
     Ok(inquire_opt(choice)?.map(|option| option.index))
 }
 
+/// One interactive menu rendered as timeline frame rows (ADR 0018): the
+/// options with the `›` cursor paint as live rows under the active step —
+/// below whatever preview or listing already sits there — and arrow keys /
+/// Enter pick. Zero-residue by construction: closing the menu is just a
+/// shorter frame. `ask_row` also renders the prompt as a `?` row above the
+/// options (the merge-pick sub-dialogs); the self-describing menus (confirm
+/// four, review actions) pass `false`. Falls back to the inquire
+/// [`select_row`] when no frame is painting (no active Run, non-TTY stderr),
+/// preserving the pre-timeline behavior for those callers.
+pub(crate) fn select_in_frame(
+    prompt: &str,
+    options: &[&str],
+    selected: usize,
+    help: &str,
+    ask_row: bool,
+) -> Result<Option<usize>> {
+    let ask = if ask_row { Some(prompt) } else { None };
+    match crate::render::timeline::driver::frame_menu(ask, options, selected) {
+        Some(outcome) => Ok(outcome),
+        None => select_row(prompt, options, help),
+    }
+}
+
 /// Truncate to `max` chars in one pass, appending `…` when a `max+1`-th
 /// char existed (avoids walking the string twice). Shared by the confirm
 /// menu's subject and the Batch Review listing/labels so every truncated row
