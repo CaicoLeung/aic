@@ -114,13 +114,13 @@ impl Display {
         Self::with_cols(out, FALLBACK_COLS)
     }
 
-    /// Injectable constructor with an explicit terminal column count. Used by
-    /// tests to drive wrap behavior deterministically without probing the real
-    /// terminal; prod keeps [`Display::new`]. `cols == 0` is treated as
+    /// Injectable constructor with an explicit terminal column count. Used
+    /// by tests to drive wrap behavior deterministically without probing the
+    /// real terminal, and by the timeline driver as the frame-capture
+    /// constructor (its rows must wrap to the frame's width, not the probed
+    /// terminal's); prod keeps [`Display::new`]. `cols == 0` is treated as
     /// "unknown" and resolved to [`FALLBACK_COLS`] inside [`Display::text_width`].
-    /// Private: only the two prod constructors above and the inline test module
-    /// call it, and both reach private items — no reason to widen the API.
-    fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
+    pub(crate) fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
         let colors = out.colors_enabled();
         Self {
             out: Arc::new(out),
@@ -140,13 +140,6 @@ impl Display {
             colors: self.colors,
             cols: self.cols,
         }
-    }
-
-    /// A [`Display`] over a caller-owned sink with an explicit column count
-    /// — the frame-capture constructor the timeline driver uses (its rows
-    /// must wrap to the frame's width, not the probed terminal's).
-    pub(crate) fn framed(out: impl DisplayWrite + 'static, cols: usize) -> Self {
-        Self::with_cols(out, cols)
     }
 
     // ------------------------------------------------------------------

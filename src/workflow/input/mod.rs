@@ -155,7 +155,7 @@ pub(crate) fn select_in_frame(
     ask_row: bool,
 ) -> Result<Option<usize>> {
     let ask = if ask_row { Some(prompt) } else { None };
-    match crate::render::timeline::driver::frame_menu(ask, options, selected) {
+    match crate::render::timeline::driver::frame_menu(ask, options, selected, help) {
         Some(outcome) => Ok(outcome),
         None => select_row(prompt, options, help),
     }

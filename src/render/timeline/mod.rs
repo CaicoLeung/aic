@@ -58,20 +58,20 @@ fn styled(text: impl Into<String>, style: Style) -> Seg {
     }
 }
 
-/// Styling policy for the row builders: `colors == false` (non-TTY, NO_COLOR)
-/// renders plain text, matching [`Display::styled`](crate::render::display::Display)'s
+/// Styling policy + row-width budget for the row builders — the pair every
+/// builder needs, bundled so call sites carry one value instead of a
+/// clumping `(width, &Theme)`. `colors == false` (non-TTY, NO_COLOR) renders
+/// plain text, matching [`Display::styled`](crate::render::display::Display)'s
 /// contract on the panel engine.
 pub struct Theme {
     /// Whether ANSI styling is emitted at all.
     pub colors: bool,
+    /// Row width budget (display columns) — the whole row including the
+    /// leading [`MARGIN`].
+    pub width: usize,
 }
 
 impl Theme {
-    /// A colors-off theme — the non-TTY / test default.
-    pub fn plain() -> Self {
-        Self { colors: false }
-    }
-
     fn paint(&self, text: &str, style: Option<Style>) -> String {
         match style {
             Some(s) if self.colors => s.apply_to(text).to_string(),
@@ -80,18 +80,18 @@ impl Theme {
     }
 }
 
-/// Render segments into one row, truncated (never wrapped) at `width` display
-/// columns — the budget for the whole row including the leading [`MARGIN`].
+/// Render segments into one row, truncated (never wrapped) at the theme's
+/// width budget — for the whole row including the leading [`MARGIN`].
 /// Empty segments emit nothing (a styled empty string would embed stray
 /// escape pairs mid-row), so no trailing spaces are ever produced.
-fn render(segs: &[Seg], width: usize, theme: &Theme) -> String {
+fn render(segs: &[Seg], theme: &Theme) -> String {
     let mut out = String::new();
     let mut used = 0;
     for s in segs {
-        if used >= width {
+        if used >= theme.width {
             break;
         }
-        let budget = width - used;
+        let budget = theme.width - used;
         let mut piece = String::new();
         let mut w = 0;
         for c in s.text.chars() {
@@ -135,10 +135,22 @@ pub struct Failure {
     pub detail: Vec<String>,
 }
 
+impl Failure {
+    /// A failure whose one detail row is the whole error chain — the shape
+    /// behind every generic error exit (`reason: "failed"`) and the
+    /// Redaction Gate refusals.
+    pub fn from_error(reason: impl Into<String>, e: &anyhow::Error) -> Self {
+        Self {
+            reason: reason.into(),
+            detail: vec![format!("{e:#}")],
+        }
+    }
+}
+
 /// One Run Step of the timeline (CONTEXT.md: Run Step). `live_rows` are the
 /// active step's pre-styled live output (reasoning-window gutter rows,
 /// sub-rows, menus); `durable_rows` persist under a completed step's summary
-/// line (Commit entries, resolve verdicts, fallback notices — spec §2.1).
+/// line (Commit entries, resolve verdicts, fallback notices — ADR 0018).
 #[derive(Debug, Clone)]
 pub struct Step {
     /// Skeleton label, shown from frame one (`Scan changes`, `Plan batches`).
@@ -187,7 +199,42 @@ impl Step {
     }
 }
 
-/// Duration formatting rule (spec §1.4): shown only when a step took ≥ 1 s,
+/// Index of one Run Step in the timeline skeleton. Newtyped so a sub-row
+/// number or a row count can never be passed where a Step goes — every
+/// [`RunFrame`](driver::RunFrame) method that addresses a Step takes this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StepIdx(pub(crate) usize);
+
+impl StepIdx {
+    /// The always-first step (Scan / Detect) of every skeleton.
+    pub(crate) const FIRST: Self = Self(0);
+}
+
+/// Allocates [`StepIdx`] values in display order for a skeleton whose
+/// conditional steps are decided one at a time — the shared shape of the
+/// commit Run's and the resolve flow's skeleton bookkeeping, so the label
+/// list and the index bookkeeping cannot drift apart in shape.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StepIx(usize);
+
+impl StepIx {
+    /// Start allocating after the caller's [`StepIdx::FIRST`] step.
+    pub(crate) const AFTER_FIRST: Self = Self(1);
+
+    /// The next step index.
+    pub(crate) fn take(&mut self) -> StepIdx {
+        let i = StepIdx(self.0);
+        self.0 += 1;
+        i
+    }
+
+    /// The next index only when the conditional step runs.
+    pub(crate) fn take_if(&mut self, on: bool) -> Option<StepIdx> {
+        on.then(|| self.take())
+    }
+}
+
+/// Duration formatting rule (ADR 0018): shown only when a step took ≥ 1 s,
 /// one decimal (`6.4s`); sub-second steps show no duration.
 pub fn format_duration(d: Duration) -> Option<String> {
     if d < Duration::from_secs(1) {
@@ -223,7 +270,7 @@ fn completed_text(step: &Step) -> String {
 ///   detail in `neutral_gray`;
 /// - completed — `✓` success marker, default-fg summary, `neutral_gray` detail;
 /// - failed — `✗` failure marker + `label — reason` headline in `failure`.
-pub fn step_line(step: &Step, width: usize, theme: &Theme) -> String {
+pub fn step_line(step: &Step, theme: &Theme) -> String {
     let mut segs = vec![seg(MARGIN)];
     match step.state {
         StepState::Pending => {
@@ -263,13 +310,13 @@ pub fn step_line(step: &Step, width: usize, theme: &Theme) -> String {
             segs.push(styled(headline, palette::failure()));
         }
     }
-    render(&segs, width, theme)
+    render(&segs, theme)
 }
 
-/// The failed step's detail rows under the headline (spec §2.9): first line
+/// The failed step's detail rows under the headline (ADR 0018): first line
 /// in `failure`, subsequent lines muted remediation, capped to 3 rows,
 /// truncated never wrapped.
-fn failure_detail_rows(step: &Step, width: usize, theme: &Theme) -> Vec<String> {
+fn failure_detail_rows(step: &Step, theme: &Theme) -> Vec<String> {
     let Some(failure) = step.failure.as_ref() else {
         return Vec::new();
     };
@@ -286,26 +333,25 @@ fn failure_detail_rows(step: &Step, width: usize, theme: &Theme) -> Vec<String> 
             };
             render(
                 &[seg(MARGIN), seg(SUB_INDENT), styled(line.clone(), style)],
-                width,
                 theme,
             )
         })
         .collect()
 }
 
-/// The whole visible frame (spec §2.1, the one layout rule): completed step
+/// The whole visible frame (ADR 0018, the one layout rule): completed step
 /// lines oldest-first (tight), the active step line, its live output, one
 /// blank separator (only if pending steps exist), pending step lines. A
 /// durable row block under a completed step keeps one blank row after it
-/// before the next step line (spec §1.3). A failed step ends the frame —
+/// before the next step line (ADR 0018). A failed step ends the frame —
 /// every later step is absent, never rendered as pending.
-pub fn timeline_frame(steps: &[Step], width: usize, theme: &Theme) -> Vec<String> {
+pub fn timeline_frame(steps: &[Step], theme: &Theme) -> Vec<String> {
     let mut rows = Vec::new();
     for (i, step) in steps.iter().enumerate() {
         match step.state {
-            StepState::Pending => rows.push(step_line(step, width, theme)),
+            StepState::Pending => rows.push(step_line(step, theme)),
             StepState::Active => {
-                rows.push(step_line(step, width, theme));
+                rows.push(step_line(step, theme));
                 rows.extend(step.live_rows.iter().cloned());
                 let pending_below = steps[i + 1..].iter().any(|s| s.state == StepState::Pending);
                 if pending_below {
@@ -313,7 +359,7 @@ pub fn timeline_frame(steps: &[Step], width: usize, theme: &Theme) -> Vec<String
                 }
             }
             StepState::Completed => {
-                rows.push(step_line(step, width, theme));
+                rows.push(step_line(step, theme));
                 let before = rows.len();
                 rows.extend(step.durable_rows.iter().cloned());
                 if rows.len() > before && i + 1 < steps.len() {
@@ -321,8 +367,8 @@ pub fn timeline_frame(steps: &[Step], width: usize, theme: &Theme) -> Vec<String
                 }
             }
             StepState::Failed => {
-                rows.push(step_line(step, width, theme));
-                rows.extend(failure_detail_rows(step, width, theme));
+                rows.push(step_line(step, theme));
+                rows.extend(failure_detail_rows(step, theme));
                 return rows;
             }
         }
@@ -374,21 +420,16 @@ pub fn sub_row(index: usize, total: usize, body: &SubBody, theme: &Theme) -> Str
             }
         }
     }
-    render(&segs, width, theme)
+    render(&segs, theme)
 }
 
 /// A bare options menu (the commit-confirm four: Commit / Re-generate /
 /// Edit / Abort; the review trio: Continue / Merge… / Abort): `› ` marks the
-/// selected option (spec §1.1 — replaces inquire's own cursor); other
+/// selected option (ADR 0018 — replaces inquire's own cursor); other
 /// options indent 2 past it. Returns the rows plus the index of the row the
 /// `›` cursor sits on, so key handling can move it without re-deriving
 /// geometry.
-pub fn menu_rows(
-    options: &[&str],
-    selected: usize,
-    width: usize,
-    theme: &Theme,
-) -> (Vec<String>, usize) {
+pub fn menu_rows(options: &[&str], selected: usize, theme: &Theme) -> (Vec<String>, usize) {
     let rows = options
         .iter()
         .enumerate()
@@ -401,22 +442,17 @@ pub fn menu_rows(
                         styled("› ", palette::emphasis()),
                         seg(*opt),
                     ],
-                    width,
                     theme,
                 )
             } else {
-                render(
-                    &[seg(MARGIN), seg(SUB_INDENT), seg("  "), seg(*opt)],
-                    width,
-                    theme,
-                )
+                render(&[seg(MARGIN), seg(SUB_INDENT), seg("  "), seg(*opt)], theme)
             }
         })
         .collect();
     (rows, selected.min(options.len().saturating_sub(1)))
 }
 
-/// The Batch Review menu frame rows (spec §2.5): a `?` ask headline, the plan
+/// The Batch Review menu frame rows (ADR 0018): a `?` ask headline, the plan
 /// listing (`#i <entry>`), then the options menu with the `›` cursor.
 /// Returns rows plus the cursor row index (into the returned rows).
 pub fn review_menu_rows(
@@ -424,7 +460,6 @@ pub fn review_menu_rows(
     entries: &[String],
     options: &[&str],
     selected: usize,
-    width: usize,
     theme: &Theme,
 ) -> (Vec<String>, usize) {
     let mut rows = vec![render(
@@ -434,7 +469,6 @@ pub fn review_menu_rows(
             styled("? ", palette::caution()),
             styled(headline, palette::caution()),
         ],
-        width,
         theme,
     )];
     for e in entries {
@@ -445,18 +479,17 @@ pub fn review_menu_rows(
                 seg("  "),
                 styled(e.clone(), palette::neutral_gray()),
             ],
-            width,
             theme,
         ));
     }
-    let (menu, cursor) = menu_rows(options, selected, width, theme);
+    let (menu, cursor) = menu_rows(options, selected, theme);
     rows.extend(menu);
     (rows, 1 + entries.len() + cursor)
 }
 
-/// A one-row interactive ask (y/n prompts, spec §2.8): `? ` + question in
+/// A one-row interactive ask (y/n prompts, ADR 0018): `? ` + question in
 /// `caution`, at the sub-row column.
-pub fn ask_row(question: &str, width: usize, theme: &Theme) -> String {
+pub fn ask_row(question: &str, theme: &Theme) -> String {
     render(
         &[
             seg(MARGIN),
@@ -464,14 +497,13 @@ pub fn ask_row(question: &str, width: usize, theme: &Theme) -> String {
             styled("? ", palette::caution()),
             styled(question, palette::caution()),
         ],
-        width,
         theme,
     )
 }
 
-/// One transient live note row under the active step (spec §2.7's Re-generate
+/// One transient live note row under the active step (ADR 0018's Re-generate
 /// loop): margin + sub-row indent + spinner glyph + label in `pending`.
-pub fn note_row(label: &str, width: usize, theme: &Theme) -> String {
+pub fn note_row(label: &str, theme: &Theme) -> String {
     render(
         &[
             seg(MARGIN),
@@ -479,12 +511,11 @@ pub fn note_row(label: &str, width: usize, theme: &Theme) -> String {
             styled("⠋ ", palette::pending()),
             styled(label.to_string(), palette::pending()),
         ],
-        width,
         theme,
     )
 }
 
-/// The non-TTY ledger lines for one step (spec §5): pending and active steps
+/// The non-TTY ledger lines for one step (ADR 0018): pending and active steps
 /// never print; a completed step appends its plain `✓` summary (same strings
 /// as the styled path, no styling); a failed step appends `✗` headline plus
 /// its detail lines (capped like the TTY path). Commit entries and other
@@ -531,4 +562,69 @@ pub fn window_height_budget(
 ) -> usize {
     let rows = max_rows.min(terminal_height.saturating_sub(timeline_fixed_rows + 2));
     if rows < MIN_WINDOW_ROWS { 0 } else { rows }
+}
+
+// ----------------------------------------------------------------------
+// Step-summary formatting — the shared vocabulary of every step's `✓`
+// headline (counts, plurals, deltas). Lives with the timeline so both
+// flows (run, resolve) and the Review gate import one source.
+// ----------------------------------------------------------------------
+
+/// `"{n} {word}"` with English pluralization — the ledger's step summaries
+/// (`✓ Scanned 1 file`, `✓ Planned 2 batches`).
+pub(crate) fn plural(n: usize, word: &str) -> String {
+    let plural = if word.ends_with("ch") || word.ends_with("sh") || word.ends_with(['s', 'x', 'z'])
+    {
+        format!("{word}es")
+    } else {
+        format!("{word}s")
+    };
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {plural}")
+    }
+}
+
+/// Compact count for delta summaries (`2.1k`, `15k`, `1.2m`) — above a
+/// thousand the exact number no longer earns its columns (ADR 0018
+/// redesign). Below it, the plain number.
+fn compact_count(n: usize) -> String {
+    let unit = |n: usize, divisor: usize, suffix: &str| {
+        let tenths = (n * 10 + divisor / 2) / divisor; // round half up
+        let (whole, frac) = (tenths / 10, tenths % 10);
+        if frac == 0 || whole >= 10 {
+            format!("{whole}{suffix}")
+        } else {
+            format!("{whole}.{frac}{suffix}")
+        }
+    };
+    match n {
+        0..=999 => n.to_string(),
+        // 999_950+ rounds up to 1000k — roll into `m` instead of "1000k".
+        // (The `m` arm has the same wart at ~1e9 lines; unreachable, left.)
+        1_000..=999_999 if n >= 999_950 => unit(n, 1_000_000, "m"),
+        1_000..=999_999 => unit(n, 1_000, "k"),
+        _ => unit(n, 1_000_000, "m"),
+    }
+}
+
+/// The Scan summary's aggregate text-line delta (` · +12 −3`), summed from
+/// per-file stats (unstaged Runs read the workdir diff, staged Runs the
+/// index). Always present: a zero delta still tells the reader the scan saw
+/// no text-line churn (binary-only or mode-only changes).
+pub(crate) fn delta_suffix(stats: &[crate::git::FileStats]) -> String {
+    let added: usize = stats.iter().map(|s| s.added).sum();
+    let deleted: usize = stats.iter().map(|s| s.deleted).sum();
+    format!(" · +{} −{}", compact_count(added), compact_count(deleted))
+}
+
+/// One muted help row under a frame menu's options — the key hints the
+/// inquire fallback shows via `with_help_message`, so the frame path keeps
+/// parity (`↑/↓ select · Enter confirm · Esc or Ctrl-C aborts`).
+pub(crate) fn help_row(help: &str, theme: &Theme) -> String {
+    render(
+        &[seg(MARGIN), seg(SUB_INDENT), styled(help, palette::muted())],
+        theme,
+    )
 }

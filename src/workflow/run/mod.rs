@@ -37,7 +37,7 @@ use crate::render::markdown::loading_rows;
 use crate::render::progress;
 use crate::render::reasoning_feed;
 use crate::render::timeline::driver::{self, RunFrame};
-use crate::render::timeline::{Failure, SubBody};
+use crate::render::timeline::{Failure, StepIdx, StepIx, SubBody, delta_suffix, plural};
 use crate::workflow::confirm::{CommitDeclined, Confirm, confirm_draft};
 use crate::workflow::grouping;
 use crate::workflow::input;
@@ -78,58 +78,10 @@ pub(crate) struct RunDeps {
 /// Redaction Gate (issue #155, ADR 0017) — the `--no-redact` one-off override.
 ///
 /// Both paths paint the Run timeline (ADR 0018): the step skeleton up front
-/// (config-conditional steps included exactly when they will run, spec
-/// §2.2/§2.3), the whole frame repainting on a terminal, the plain ledger
-/// appending off one. The frame starts only after the status check confirms
-/// there is work — `nothing to commit` still renders alone, with no timeline.
-/// `"{n} {word}"` with English pluralization — the ledger's step summaries
-/// (`✓ Scanned 1 file`, `✓ Planned 2 batches`).
-pub(crate) fn plural(n: usize, word: &str) -> String {
-    let plural = if word.ends_with("ch") || word.ends_with("sh") || word.ends_with(['s', 'x', 'z'])
-    {
-        format!("{word}es")
-    } else {
-        format!("{word}s")
-    };
-    if n == 1 {
-        format!("{n} {word}")
-    } else {
-        format!("{n} {plural}")
-    }
-}
-
-/// Compact count for delta summaries (`2.1k`, `15k`, `1.2m`) — above a
-/// thousand the exact number no longer earns its columns (ADR 0018
-/// redesign). Below it, the plain number.
-pub(crate) fn compact_count(n: usize) -> String {
-    let unit = |n: usize, divisor: usize, suffix: &str| {
-        let tenths = (n * 10 + divisor / 2) / divisor; // round half up
-        let (whole, frac) = (tenths / 10, tenths % 10);
-        if frac == 0 || whole >= 10 {
-            format!("{whole}{suffix}")
-        } else {
-            format!("{whole}.{frac}{suffix}")
-        }
-    };
-    match n {
-        0..=999 => n.to_string(),
-        // 999_950+ rounds up to 1000k — roll into `m` instead of "1000k".
-        // (The `m` arm has the same wart at ~1e9 lines; unreachable, left.)
-        1_000..=999_999 if n >= 999_950 => unit(n, 1_000_000, "m"),
-        1_000..=999_999 => unit(n, 1_000, "k"),
-        _ => unit(n, 1_000_000, "m"),
-    }
-}
-/// The Scan summary's aggregate text-line delta (` · +12 −3`), summed from
-/// per-file stats (unstaged Runs read the workdir diff, staged Runs the
-/// index). Always present: a zero delta still tells the reader the scan saw
-/// no text-line churn (binary-only or mode-only changes).
-pub(crate) fn delta_suffix(stats: &[crate::git::FileStats]) -> String {
-    let added: usize = stats.iter().map(|s| s.added).sum();
-    let deleted: usize = stats.iter().map(|s| s.deleted).sum();
-    format!(" · +{} −{}", compact_count(added), compact_count(deleted))
-}
-
+/// (config-conditional steps included exactly when they will run), the
+/// whole frame repainting on a terminal, the plain ledger appending off
+/// one. The frame starts only after the status check confirms there is
+/// work — `nothing to commit` still renders alone, with no timeline.
 pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
     let RunDeps {
         display,
@@ -173,23 +125,13 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         labels.push("Commit batches".into());
         let frame = RunFrame::new(labels).await;
         let _frame_guard = driver::install(frame.clone());
-        const SCAN: usize = 0;
-        let mut ix = 1;
-        let redact_step = redact_on.then(|| {
-            let s = ix;
-            ix += 1;
-            s
-        });
-        let plan_step = ix;
-        ix += 1;
-        let review_step = review_on.then(|| {
-            let s = ix;
-            ix += 1;
-            s
-        });
-        let draft_step = ix;
-        ix += 1;
-        let commit_step = ix;
+        const SCAN: StepIdx = StepIdx::FIRST;
+        let mut ix = StepIx::AFTER_FIRST;
+        let redact_step = ix.take_if(redact_on);
+        let plan_step = ix.take();
+        let review_step = ix.take_if(review_on);
+        let draft_step = ix.take();
+        let commit_step = ix.take();
 
         frame.activate(SCAN);
         // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
@@ -250,17 +192,14 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // call. The confirmation menu's Re-generate redraft stays ungated by
         // design: it re-sends content this gate already cleared. A refusal
         // is the step's failed screen: the headline names the gate, the
-        // detail row carries the full files + patterns refusal (spec §2.9).
+        // detail row carries the full files + patterns refusal (ADR 0018).
         if let Some(rs) = redact_step {
             frame.activate(rs);
             if let Err(e) = redact::gate(&raw_pairs, redact::Override::Run) {
                 frame.fail(
                     &display,
                     rs,
-                    Failure {
-                        reason: "secret-like content detected".into(),
-                        detail: vec![format!("{e:#}")],
-                    },
+                    Failure::from_error("secret-like content detected", &e),
                 );
                 return Err(e);
             }
@@ -480,14 +419,16 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         labels.push("Commit".into());
         let frame = RunFrame::new(labels).await;
         let _frame_guard = driver::install(frame.clone());
-        const SCAN: usize = 0;
-        let redact_step = redact_on.then_some(1);
-        let draft_step = usize::from(redact_on) + 1;
-        let commit_step = draft_step + 1;
+        const SCAN: StepIdx = StepIdx::FIRST;
+        let mut ix = StepIx::AFTER_FIRST;
+        let redact_step = ix.take_if(redact_on);
+        let draft_step = ix.take();
+        let commit_step = ix.take();
 
         frame.activate(SCAN);
         let staged_paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_delta = delta_suffix(&git.staged_stats(&staged_paths)?);
+        let scan_delta =
+            delta_suffix(&frame.fail_on_err(&display, SCAN, git.staged_stats(&staged_paths))?);
         frame.complete(
             &display,
             SCAN,
@@ -518,10 +459,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 frame.fail(
                     &display,
                     rs,
-                    Failure {
-                        reason: "secret-like content detected".into(),
-                        detail: vec![format!("{e:#}")],
-                    },
+                    Failure::from_error("secret-like content detected", &e),
                 );
                 return Err(e);
             }
@@ -573,14 +511,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 anyhow::bail!("aborted — no commit made");
             }
             Err(e) => {
-                frame.fail(
-                    &display,
-                    commit_step,
-                    Failure {
-                        reason: "failed".into(),
-                        detail: vec![format!("{e:#}")],
-                    },
-                );
+                frame.fail(&display, commit_step, Failure::from_error("failed", &e));
                 return Err(e);
             }
         }
@@ -731,9 +662,9 @@ where
         let step = frame.active_index();
         let mut sink = FrameReasoningSink {
             frame: frame.clone(),
-            step: step.unwrap_or(0),
+            step: step.unwrap_or(StepIdx::FIRST),
             label,
-            feed_width: frame.width().saturating_sub(6).max(20),
+            feed_width: frame.theme().width.saturating_sub(6).max(20),
         };
         return reasoning_feed::run(
             &mut sink,
@@ -764,7 +695,7 @@ where
 /// flip takes it from there.
 struct FrameReasoningSink {
     frame: RunFrame,
-    step: usize,
+    step: StepIdx,
     label: &'static str,
     feed_width: usize,
 }
@@ -909,43 +840,4 @@ pub async fn default_workflow(hint: Option<&str>, no_redact: bool) -> anyhow::Re
         },
     )
     .await
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::git::FileStats;
-
-    /// `compact_count` keeps exact numbers below a thousand and collapses
-    /// above it: one decimal while the whole part is a single digit, no
-    /// decimal once it isn't, `k`→`m` at the next magnitude.
-    #[test]
-    fn compact_count_collapses_only_above_a_thousand() {
-        assert_eq!(compact_count(0), "0");
-        assert_eq!(compact_count(999), "999");
-        assert_eq!(compact_count(1_000), "1k");
-        assert_eq!(compact_count(2_100), "2.1k");
-        assert_eq!(compact_count(9_999), "10k");
-        assert_eq!(compact_count(15_000), "15k");
-        assert_eq!(compact_count(999_949), "999k");
-        assert_eq!(compact_count(999_950), "1m");
-        assert_eq!(compact_count(999_999), "1m");
-    }
-
-    /// `delta_suffix` sums per-file stats into one ` · +A −D` segment and
-    /// stays present at zero (binary-only scans still show the churn pair).
-    #[test]
-    fn delta_suffix_sums_and_survives_zero() {
-        let stats = |a: usize, d: usize| FileStats {
-            path: "x.rs".into(),
-            added: a,
-            deleted: d,
-            new: false,
-            removed: false,
-            binary: false,
-            old_size: 0,
-            new_size: 0,
-        };
-        assert_eq!(delta_suffix(&[stats(3, 1), stats(5, 0)]), " · +8 −1");
-        assert_eq!(delta_suffix(&[]), " · +0 −0");
-    }
 }

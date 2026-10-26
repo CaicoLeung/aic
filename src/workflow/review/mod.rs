@@ -20,8 +20,8 @@ use anyhow::Context;
 use crate::llm::generator::{self, BatchPlanBatch, BatchPlanOutput};
 use crate::render::display::Display;
 use crate::render::palette;
-use crate::render::timeline::Failure;
 use crate::render::timeline::driver::RunFrame;
+use crate::render::timeline::{Failure, StepIdx, plural};
 use crate::workflow::input::{select_in_frame, truncate};
 
 /// One decision from the Batch Review menu (issue #157). Continue proceeds
@@ -103,7 +103,7 @@ pub(crate) fn review_plan(
     display: &Display,
     review: &BatchReview,
     frame: &RunFrame,
-    step: usize,
+    step: StepIdx,
 ) -> anyhow::Result<BatchPlanOutput> {
     let BatchReview::Interactive { menu } = review else {
         return Ok(plan);
@@ -119,15 +119,9 @@ pub(crate) fn review_plan(
                 step_display.clear_last(rows);
                 let n = plan.batches.len();
                 let summary = if merges > 0 {
-                    format!(
-                        "Plan approved · {} · {merges} merged",
-                        crate::workflow::run::plural(n, "batch")
-                    )
+                    format!("Plan approved · {} · {merges} merged", plural(n, "batch"))
                 } else {
-                    format!(
-                        "Plan approved · {}",
-                        crate::workflow::run::plural(n, "batch")
-                    )
+                    format!("Plan approved · {}", plural(n, "batch"))
                 };
                 frame.complete(display, step, summary);
                 return Ok(plan);
@@ -635,7 +629,7 @@ mod tests {
             &quiet_display(),
             &BatchReview::Disabled,
             &frame(),
-            0,
+            StepIdx::FIRST,
         )
         .unwrap();
         assert_eq!(out.batches.len(), 1);
@@ -657,7 +651,7 @@ mod tests {
             &quiet_display(),
             &interactive(menu_queue(vec![ReviewChoice::Abort])),
             &frame(),
-            0,
+            StepIdx::FIRST,
         )
         .expect_err("the single-Batch menu must honor Abort");
         assert!(
@@ -689,7 +683,7 @@ mod tests {
                 ReviewChoice::Continue,
             ])),
             &frame(),
-            0,
+            StepIdx::FIRST,
         )
         .unwrap();
         assert_eq!(out.batches.len(), 1);
@@ -723,7 +717,7 @@ mod tests {
                 ReviewChoice::Continue,
             ])),
             &frame(),
-            0,
+            StepIdx::FIRST,
         )
         .unwrap();
         assert_eq!(out.batches.len(), 2, "undo must restore both Batches");
@@ -749,7 +743,7 @@ mod tests {
             &quiet_display(),
             &interactive(menu_queue(vec![ReviewChoice::Abort])),
             &frame(),
-            0,
+            StepIdx::FIRST,
         )
         .expect_err("abort must end the Run");
         let msg = format!("{err:#}");

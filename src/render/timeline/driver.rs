@@ -42,8 +42,8 @@ use crate::render::layout::terminal_width;
 use crate::render::progress::{SPINNER_TICK, clear_frame_bytes, frame_bytes};
 use crate::render::timeline::note_row;
 use crate::render::timeline::{
-    Failure, Step, StepState, SubBody, Theme, menu_rows, plain_step_lines, sub_row, timeline_frame,
-    window_height_budget,
+    Failure, Step, StepIdx, StepState, SubBody, Theme, help_row, menu_rows, plain_step_lines,
+    sub_row, timeline_frame, window_height_budget,
 };
 
 /// The process-global frame slot. The production interactive menus (commit
@@ -210,62 +210,47 @@ impl RunFrame {
         self.0.lock().unwrap().paint.is_some()
     }
 
-    /// The frame's row width (the pure builders' budget).
-    pub fn width(&self) -> usize {
-        let st = self.0.lock().unwrap();
-        st.paint.as_ref().map_or_else(terminal_width, |p| p.width)
-    }
-
-    /// The frame's styling policy.
+    /// The frame's styling policy + row-width budget.
     pub fn theme(&self) -> Theme {
-        Theme {
-            colors: self
-                .0
-                .lock()
-                .unwrap()
-                .paint
-                .as_ref()
-                .is_some_and(|p| p.colors),
-        }
+        self.0.lock().unwrap().theme()
     }
 
     /// Flip step `i` to active and start its clock.
-    pub fn activate(&self, i: usize) {
+    pub fn activate(&self, i: StepIdx) {
         let mut st = self.0.lock().unwrap();
-        st.starts[i] = Some(Instant::now());
+        st.starts[i.0] = Some(Instant::now());
         st.menu_total = Duration::ZERO;
         st.menu_pause = None;
-        st.steps[i].state = StepState::Active;
+        st.steps[i.0].state = StepState::Active;
         st.repaint();
     }
 
     /// Replace the (active) step's label — the live commit cursor
-    /// `⠋ Committing batch 2 of 3` (spec §2.7).
-    pub fn set_label(&self, i: usize, label: impl Into<String>) {
+    /// `⠋ Committing batch 2 of 3` (ADR 0018).
+    pub fn set_label(&self, i: StepIdx, label: impl Into<String>) {
         let mut st = self.0.lock().unwrap();
-        st.steps[i].label = label.into();
+        st.steps[i.0].label = label.into();
         st.repaint();
     }
 
     /// Complete step `i` with `summary`: its live output (sub-rows, preview,
     /// reasoning window, already-landed entries) collapses to the `✓` line in
     /// one frame — except rows emitted while it was active, which persist as
-    /// its durable block (spec §2.1). The plain ledger line is emitted ONLY
+    /// its durable block (ADR 0018). The plain ledger line is emitted ONLY
     /// off a terminal: on a TTY the frame already shows the summary in place,
     /// and printing it again below the frame would both duplicate the line
     /// and push the cursor out from under the painter's `prev_rows` geometry,
     /// desyncing every later whole-frame repaint.
-    pub fn complete(&self, display: &Display, i: usize, summary: impl Into<String>) {
+    pub fn complete(&self, display: &Display, i: StepIdx, summary: impl Into<String>) {
         let (lines, ledger) = {
             let mut st = self.0.lock().unwrap();
             let duration = st.step_elapsed(i);
             // A step with draft sub-rows owns its live rows wholly (the
             // compacted sub-row slots) — they erase; any other live rows
-            // (Commit entries, warnings emitted while active) are the
-            // durable record (spec §2.1/§2.7).
-            let has_subs = !st.subs[i].is_empty();
-            st.subs[i].clear();
-            let step = &mut st.steps[i];
+            // (warnings emitted while active) are the durable record.
+            let has_subs = !st.subs[i.0].is_empty();
+            st.subs[i.0].clear();
+            let step = &mut st.steps[i.0];
             step.state = StepState::Completed;
             step.summary = Some(summary.into());
             step.duration = Some(duration);
@@ -276,7 +261,7 @@ impl RunFrame {
             }
             st.repaint();
             (
-                plain_step_lines(&st.steps[i]),
+                plain_step_lines(&st.steps[i.0]),
                 st.paint.is_none(), // ledger only off a terminal
             )
         };
@@ -288,21 +273,21 @@ impl RunFrame {
     }
 
     /// Fail step `i`: `✗` headline + detail rows persist; every later step
-    /// is absent from the frame (spec §2.9). Off a terminal the headline and
+    /// is absent from the frame (ADR 0018). Off a terminal the headline and
     /// details append to the ledger; on a terminal the frame shows them in
     /// place (a second emit below the frame would duplicate the block and
     /// desync the repaint geometry — see [`Self::complete`]). Nothing erases
     /// on failure.
-    pub fn fail(&self, display: &Display, i: usize, failure: Failure) {
+    pub fn fail(&self, display: &Display, i: StepIdx, failure: Failure) {
         let (lines, ledger) = {
             let mut st = self.0.lock().unwrap();
-            st.steps[i].state = StepState::Failed;
-            st.steps[i].failure = Some(failure);
-            st.steps[i].live_rows.clear();
-            st.steps[i].active_elapsed = None;
+            st.steps[i.0].state = StepState::Failed;
+            st.steps[i.0].failure = Some(failure);
+            st.steps[i.0].live_rows.clear();
+            st.steps[i.0].active_elapsed = None;
             st.repaint();
             (
-                plain_step_lines(&st.steps[i]),
+                plain_step_lines(&st.steps[i.0]),
                 st.paint.is_none(), // ledger only off a terminal
             )
         };
@@ -323,50 +308,38 @@ impl RunFrame {
     pub fn fail_on_err<T>(
         &self,
         display: &Display,
-        i: usize,
+        i: StepIdx,
         result: anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         if let Err(e) = &result {
-            self.fail(
-                display,
-                i,
-                Failure {
-                    reason: "failed".into(),
-                    detail: vec![format!("{e:#}")],
-                },
-            );
+            self.fail(display, i, Failure::from_error("failed", e));
         }
         result
     }
 
     /// Replace the active step `i`'s live rows wholesale (the reasoning
     /// window's repaint path). No-op off a terminal.
-    pub fn live(&self, i: usize, rows: Vec<String>) {
+    pub fn live(&self, i: StepIdx, rows: Vec<String>) {
         let mut st = self.0.lock().unwrap();
-        st.steps[i].live_rows = rows;
+        st.steps[i.0].live_rows = rows;
         st.repaint();
     }
 
     /// Erase the active step `i`'s live rows in one frame.
-    pub fn clear_live(&self, i: usize) {
+    pub fn clear_live(&self, i: StepIdx) {
         self.live(i, Vec::new());
     }
 
-    /// Set draft sub-row `index` (1-based) of `total` for step `i`
-    /// (spec §2.6): revealed as drafts start, flips to its done form on
-    /// completion. The step's live rows are the compacted slots in index
-    /// order, so an out-of-order finish can't reorder the rows.
-    pub fn set_sub_row(&self, i: usize, index: usize, total: usize, body: &SubBody) {
+    pub fn set_sub_row(&self, i: StepIdx, index: usize, total: usize, body: &SubBody) {
         let mut st = self.0.lock().unwrap();
-        let width = st.paint_width();
         let theme = st.theme();
-        let slots = &mut st.subs[i];
+        let slots = &mut st.subs[i.0];
         if slots.len() != total {
             slots.resize_with(total, || None);
         }
-        let row = sub_row(index, total, body, width, &theme);
+        let row = sub_row(index, total, body, &theme);
         slots[index - 1] = Some(row);
-        st.steps[i].live_rows = slots.iter().flatten().cloned().collect();
+        st.steps[i.0].live_rows = slots.iter().flatten().cloned().collect();
         st.repaint();
     }
 
@@ -380,17 +353,17 @@ impl RunFrame {
             return;
         };
         let theme = st.theme();
-        let row = note_row(label, st.paint_width(), &theme);
-        st.steps[active].live_rows = vec![row];
+        let row = note_row(label, &theme);
+        st.steps[active.0].live_rows = vec![row];
         st.repaint();
     }
 
     /// Erase the active step's live-note row (the Re-generate wait ends and
-    /// the preview repaints over it, spec §2.7).
+    /// the preview repaints over it, ADR 0018).
     pub fn clear_live_note(&self) {
         let mut st = self.0.lock().unwrap();
         if let Some(a) = st.active_index() {
-            st.steps[a].live_rows.clear();
+            st.steps[a.0].live_rows.clear();
             st.repaint();
         }
     }
@@ -427,7 +400,7 @@ impl RunFrame {
             .map_or_else(terminal_width, |p| p.raw_width);
         let rows: Vec<String> = {
             let sink = RowSink::default();
-            let collected = Display::framed(sink.clone(), width);
+            let collected = Display::with_cols(sink.clone(), width);
             render(&collected);
             sink.lines()
         };
@@ -492,42 +465,42 @@ impl RunFrame {
     }
 
     /// The active step's index (menus render as its live rows).
-    pub fn active_index(&self) -> Option<usize> {
+    pub fn active_index(&self) -> Option<StepIdx> {
         self.0.lock().unwrap().active_index()
     }
 
     /// Current live-row count of step `i` — the menu renderer's append base.
-    pub fn live_len(&self, i: usize) -> usize {
-        self.0.lock().unwrap().steps[i].live_rows.len()
+    pub fn live_len(&self, i: StepIdx) -> usize {
+        self.0.lock().unwrap().steps[i.0].live_rows.len()
     }
 
     /// Truncate step `i`'s live rows to `len`, then append `rows` — the menu
     /// cursor's in-place redraw.
-    pub fn replace_live_tail(&self, i: usize, len: usize, rows: Vec<String>) {
+    pub fn replace_live_tail(&self, i: StepIdx, len: usize, rows: Vec<String>) {
         let mut st = self.0.lock().unwrap();
-        st.steps[i].live_rows.truncate(len);
-        st.steps[i].live_rows.extend(rows);
+        st.steps[i.0].live_rows.truncate(len);
+        st.steps[i.0].live_rows.extend(rows);
         st.repaint();
     }
 
     /// Drop steps `i..` from the skeleton: the resolve flow's blocked
     /// Finalize — when any file was rejected or skipped, the timeline ends
     /// at Review with the hand-off rows, and the never-run Finalize step is
-    /// absent from the frame entirely (spec §2.8), not rendered as pending.
-    pub fn truncate_steps(&self, i: usize) {
+    /// absent from the frame entirely (ADR 0018), not rendered as pending.
+    pub fn truncate_steps(&self, i: StepIdx) {
         let mut st = self.0.lock().unwrap();
-        st.steps.truncate(i);
+        st.steps.truncate(i.0);
         st.repaint();
     }
 
     /// Truncate step `i`'s live rows back to `len` (the menu closing).
-    pub fn truncate_live(&self, i: usize, len: usize) {
+    pub fn truncate_live(&self, i: StepIdx, len: usize) {
         let mut st = self.0.lock().unwrap();
-        st.steps[i].live_rows.truncate(len);
+        st.steps[i.0].live_rows.truncate(len);
         st.repaint();
     }
 
-    /// The reasoning window's height budget for the active step (spec §2.4):
+    /// The reasoning window's height budget for the active step (ADR 0018):
     /// `min(DSR max_rows, terminal_height − timeline_fixed_rows − 2)`,
     /// suppressed below [`MIN_WINDOW_ROWS`](crate::render::timeline::MIN_WINDOW_ROWS).
     pub fn window_budget(&self) -> usize {
@@ -547,7 +520,7 @@ impl RunFrame {
     pub fn step_display(&self, base: &Display) -> Display {
         let st = self.0.lock().unwrap();
         match st.paint.as_ref() {
-            Some(p) => Display::framed(
+            Some(p) => Display::with_cols(
                 FrameSink {
                     frame: Self(Arc::clone(&self.0)),
                 },
@@ -558,50 +531,51 @@ impl RunFrame {
     }
 
     #[cfg(test)]
-    pub fn step(&self, i: usize) -> Step {
-        self.0.lock().unwrap().steps[i].clone()
+    pub fn step(&self, i: StepIdx) -> Step {
+        self.0.lock().unwrap().steps[i.0].clone()
     }
 }
 
 impl FrameState {
-    fn active_index(&self) -> Option<usize> {
-        self.steps.iter().position(|s| s.state == StepState::Active)
+    fn active_index(&self) -> Option<StepIdx> {
+        self.steps
+            .iter()
+            .position(|s| s.state == StepState::Active)
+            .map(StepIdx)
     }
 
     /// The step a step-scoped sink row belongs to: the active one, else the
     /// most recent completed one.
-    fn sink_step(&self) -> usize {
+    fn sink_step(&self) -> StepIdx {
         self.active_index().unwrap_or_else(|| {
             self.steps
                 .iter()
                 .rposition(|s| s.state == StepState::Completed)
-                .unwrap_or(0)
+                .map(StepIdx)
+                .unwrap_or(StepIdx::FIRST)
         })
     }
 
     /// That step's rows: live while it is active (erased/promoted at
-    /// completion), durable once completed (spec §2.7's caution rows).
-    fn sink_rows_mut(&mut self, idx: usize) -> &mut Vec<String> {
-        if self.steps[idx].state == StepState::Active {
-            &mut self.steps[idx].live_rows
+    /// completion), durable once completed (ADR 0018's caution rows).
+    fn sink_rows_mut(&mut self, idx: StepIdx) -> &mut Vec<String> {
+        if self.steps[idx.0].state == StepState::Active {
+            &mut self.steps[idx.0].live_rows
         } else {
-            &mut self.steps[idx].durable_rows
+            &mut self.steps[idx.0].durable_rows
         }
-    }
-
-    fn paint_width(&self) -> usize {
-        self.paint.as_ref().map_or_else(terminal_width, |p| p.width)
     }
 
     fn theme(&self) -> Theme {
         Theme {
             colors: self.paint.as_ref().is_some_and(|p| p.colors),
+            width: self.paint.as_ref().map_or_else(terminal_width, |p| p.width),
         }
     }
 
     /// The active step's elapsed, excluding time spent at menus.
-    fn step_elapsed(&self, i: usize) -> Duration {
-        let Some(start) = self.starts[i] else {
+    fn step_elapsed(&self, i: StepIdx) -> Duration {
+        let Some(start) = self.starts[i.0] else {
             return Duration::ZERO;
         };
         let paused = self.menu_total + self.menu_pause.map(|t| t.elapsed()).unwrap_or_default();
@@ -609,32 +583,33 @@ impl FrameState {
     }
 
     /// Every fixed row of the frame (all step rows, the separator, durable
-    /// rows) — the reasoning window's budget input (spec §2.4).
+    /// rows) — the reasoning window's budget input (ADR 0018).
     fn fixed_rows(&self) -> usize {
-        let width = self.paint_width();
         let theme = self.theme();
         let mut steps = self.steps.clone();
         if let Some(a) = steps.iter().position(|s| s.state == StepState::Active) {
             steps[a].live_rows.clear();
         }
-        timeline_frame(&steps, width, &theme).len()
+        timeline_frame(&steps, &theme).len()
     }
 
     /// Whole-frame repaint: bake the elapsed into active step lines, build
     /// the pure frame, animate the spinner glyph, write the bytes. Identical
     /// frames are skipped (a paused menu tick writes nothing).
     fn repaint(&mut self) {
-        let (width, colors) = match self.paint.as_ref() {
-            Some(p) => (p.width, p.colors),
+        let theme = match self.paint.as_ref() {
+            Some(p) => Theme {
+                colors: p.colors,
+                width: p.width,
+            },
             None => return,
         };
         for i in 0..self.steps.len() {
             if self.steps[i].state == StepState::Active {
-                self.steps[i].active_elapsed = Some(self.step_elapsed(i));
+                self.steps[i].active_elapsed = Some(self.step_elapsed(StepIdx(i)));
             }
         }
-        let theme = Theme { colors };
-        let mut rows = timeline_frame(&self.steps, width, &theme);
+        let mut rows = timeline_frame(&self.steps, &theme);
         let glyph = GLYPHS[self.glyph % GLYPHS.len()];
         for row in &mut rows {
             if row.contains(GLYPHS[0]) {
@@ -727,12 +702,13 @@ impl DisplayWrite for FrameSink {
 /// closed stdin. The outer `None` means "no frame is painting" (no active
 /// Run, or non-TTY stderr): the caller falls back to the inquire row. The
 /// optional `ask` renders one `?` row above the options (the merge-pick
-/// prompts); the frame menus otherwise sit under their own self-describing
-/// content.
+/// prompts) and `help` one muted hints row beneath them, so the frame path
+/// keeps the inquire fallback's discoverability.
 pub(crate) fn frame_menu(
     ask: Option<&str>,
     options: &[&str],
     selected: usize,
+    help: &str,
 ) -> Option<Option<usize>> {
     let frame = active_frame()?;
     if !frame.is_tty() {
@@ -741,19 +717,21 @@ pub(crate) fn frame_menu(
     let step = frame.active_index()?;
     frame.menu_open();
     let base = frame.live_len(step);
-    let width = frame.width();
     let theme = frame.theme();
     let mut ask_rows = Vec::new();
     if let Some(q) = ask {
-        ask_rows.push(crate::render::timeline::ask_row(q, width, &theme));
+        ask_rows.push(crate::render::timeline::ask_row(q, &theme));
     }
+    // The key hints ride under the options — the same text the inquire
+    // fallback shows as its help message, so both paths stay discoverable.
+    let help = help_row(help, &theme);
     let mut sel = selected.min(options.len().saturating_sub(1));
     let term = Term::stderr();
     let outcome = loop {
-        let (rows, _) = menu_rows(options, sel, width, &theme);
+        let (rows, _) = menu_rows(options, sel, &theme);
         let mut all = ask_rows.clone();
         all.extend(rows);
-        frame.replace_live_tail(step, base, all);
+        all.push(help.clone());
         match term.read_key() {
             Ok(console::Key::ArrowUp) if !options.is_empty() => {
                 sel = (sel + options.len() - 1) % options.len();
@@ -810,19 +788,19 @@ mod tests {
         RunFrame::new(labels.iter().map(|s| s.to_string()).collect()).await
     }
 
-    /// The non-TTY ledger (spec §5): only completed and failed steps print,
+    /// The non-TTY ledger (ADR 0018): only completed and failed steps print,
     /// one plain line each — pending and active steps never do.
     #[tokio::test]
     async fn ledger_prints_only_terminal_steps() {
         let (display, rec) = display();
         let f = frame(&["Scan changes", "Plan batches", "Commit batches"]).await;
-        f.activate(0);
+        f.activate(StepIdx::FIRST);
         assert!(rec.lines().is_empty(), "an active step must not print");
-        f.complete(&display, 0, "Scanned 2 files");
-        f.complete(&display, 2, "Committed 1 batch");
+        f.complete(&display, StepIdx::FIRST, "Scanned 2 files");
+        f.complete(&display, StepIdx(2), "Committed 1 batch");
         f.fail(
             &display,
-            1,
+            StepIdx(1),
             Failure {
                 reason: "secret-like content detected".into(),
                 detail: vec!["src/config.rs: hunk 2 looks like an API key".into()],
@@ -839,36 +817,36 @@ mod tests {
         );
     }
 
-    /// Draft sub-row accounting (spec §2.6): slots are revealed as drafts
+    /// Draft sub-row accounting (ADR 0018): slots are revealed as drafts
     /// start (out-of-order finishes never reorder rows), and ALL sub-rows
     /// erase at step completion — the completed step keeps no live rows.
     #[tokio::test]
     async fn draft_sub_rows_reveal_and_erase_together() {
         let (display, _rec) = display();
         let f = frame(&["Plan batches", "Draft messages"]).await;
-        f.activate(1);
+        f.activate(StepIdx(1));
         f.set_sub_row(
-            1,
+            StepIdx(1),
             1,
             3,
             &SubBody::InFlight("Generating commit message".into()),
         );
         f.set_sub_row(
-            1,
+            StepIdx(1),
             3,
             3,
             &SubBody::InFlight("Generating commit message".into()),
         );
-        let live = f.step(1).live_rows;
+        let live = f.step(StepIdx(1)).live_rows;
         assert_eq!(live.len(), 2, "only started drafts are revealed");
         assert!(live[0].contains("[1/3]"), "rows keep index order: {live:?}");
         assert!(live[1].contains("[3/3]"), "rows keep index order: {live:?}");
         // A finish flips its own row only; the other stays in flight.
-        f.set_sub_row(1, 3, 3, &SubBody::Done(String::new(), None));
-        assert_eq!(f.step(1).live_rows.len(), 2);
-        assert!(f.step(1).live_rows[1].contains('✓'));
-        f.complete(&display, 1, "Drafted 3 messages");
-        let step = f.step(1);
+        f.set_sub_row(StepIdx(1), 3, 3, &SubBody::Done(String::new(), None));
+        assert_eq!(f.step(StepIdx(1)).live_rows.len(), 2);
+        assert!(f.step(StepIdx(1)).live_rows[1].contains('✓'));
+        f.complete(&display, StepIdx(1), "Drafted 3 messages");
+        let step = f.step(StepIdx(1));
         assert!(
             step.live_rows.is_empty(),
             "completion erases every sub-row in one frame"
@@ -878,28 +856,32 @@ mod tests {
 
     /// Rows emitted through the frame-capturing sink (the step Display on a
     /// terminal) while a step is active ride its live rows and become its
-    /// durable block at completion (spec §2.7's already-landed Commit
+    /// durable block at completion (ADR 0018's already-landed Commit
     /// entries); after completion they land directly under the summary (the
     /// fallback caution row); `clear_last` pops them exactly.
     #[tokio::test]
     async fn step_display_rows_become_durable_at_completion() {
         let (display, _rec) = display();
         let f = frame(&["Plan batches", "Commit batches"]).await;
-        f.complete(&display, 0, "Planned 2 batches");
-        let step_display = Display::framed(FrameSink { frame: f.clone() }, 80);
+        f.complete(&display, StepIdx::FIRST, "Planned 2 batches");
+        let step_display = Display::with_cols(FrameSink { frame: f.clone() }, 80);
         // After completion: durable under the completed step.
         step_display.emit("⚠ LLM plan invalid; regrouping");
-        assert_eq!(f.step(0).durable_rows.len(), 1);
+        assert_eq!(f.step(StepIdx::FIRST).durable_rows.len(), 1);
         // While active: live, then durable at completion.
-        f.activate(1);
+        f.activate(StepIdx(1));
         step_display.emit("[1/2] ✓ a1b2c3d feat: first");
         step_display.emit("+1 −1  tracked.txt");
-        assert_eq!(f.step(1).live_rows.len(), 2);
+        assert_eq!(f.step(StepIdx(1)).live_rows.len(), 2);
         step_display.clear_last(1);
-        assert_eq!(f.step(1).live_rows.len(), 1, "clear_last pops live rows");
+        assert_eq!(
+            f.step(StepIdx(1)).live_rows.len(),
+            1,
+            "clear_last pops live rows"
+        );
         step_display.emit("+2 −2  other.txt");
-        f.complete(&display, 1, "Committed 2 batches");
-        assert_eq!(f.step(1).durable_rows.len(), 2);
+        f.complete(&display, StepIdx(1), "Committed 2 batches");
+        assert_eq!(f.step(StepIdx(1)).durable_rows.len(), 2);
     }
 
     /// `flush` off a terminal (the only path unit tests can drive — no
@@ -916,7 +898,7 @@ mod tests {
     async fn flush_off_terminal_paints_through_the_display_only() {
         let (display, rec) = display();
         let f = frame(&["Scan changes", "Commit batches"]).await;
-        f.complete(&display, 0, "Scanned 2 files");
+        f.complete(&display, StepIdx::FIRST, "Scanned 2 files");
         f.flush(&display, |d| {
             d.emit("[1/2] ✓ a1b2c3d feat: first");
             d.emit("+1 −1  tracked.txt");
@@ -929,8 +911,8 @@ mod tests {
                 "  +1 −1  tracked.txt",
             ]
         );
-        assert!(f.step(1).live_rows.is_empty());
-        assert!(f.step(1).durable_rows.is_empty());
+        assert!(f.step(StepIdx(1)).live_rows.is_empty());
+        assert!(f.step(StepIdx(1)).durable_rows.is_empty());
     }
 
     /// The install guard restores the previous frame on drop, so a nested
@@ -947,7 +929,7 @@ mod tests {
         drop(guard_inner);
         assert!(active_frame().is_some());
         drop(guard_outer);
-        outer.complete(&display().0, 0, "Scanned 1 file");
+        outer.complete(&display().0, StepIdx::FIRST, "Scanned 1 file");
     }
 }
 
@@ -1005,13 +987,13 @@ mod pty_tests {
             runtime.block_on(async {
                 let frame = RunFrame::new(vec!["Scan".into(), "Plan".into()]).await;
                 let display = Display::new();
-                frame.activate(0);
-                frame.live(0, vec!["scan live".into()]);
-                frame.complete(&display, 0, "Scanned 2 files");
-                frame.activate(1);
-                frame.live(1, vec!["plan live".into()]);
+                frame.activate(StepIdx::FIRST);
+                frame.live(StepIdx::FIRST, vec!["scan live".into()]);
+                frame.complete(&display, StepIdx::FIRST, "Scanned 2 files");
+                frame.activate(StepIdx(1));
+                frame.live(StepIdx(1), vec!["plan live".into()]);
                 frame.flush(&display, |d| d.emit("  PTYFLUSH-ENTRY row"));
-                frame.complete(&display, 1, "Planned 2 batches");
+                frame.complete(&display, StepIdx(1), "Planned 2 batches");
             });
             let msg = b"\nPTYFLUSH-DONE\n";
             unsafe {

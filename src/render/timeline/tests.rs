@@ -1,48 +1,62 @@
 use super::*;
+use crate::git::FileStats;
 
-/// Byte-exact tests run colors-off (the [`Theme::plain`] default), matching
-/// the house style of the `display`/`progress` suites — the styled paths are
-/// the same segment lists with escapes applied.
+/// Byte-exact tests run colors-off, matching the house style of the
+/// `display`/`progress` suites — the styled paths are the same segment
+/// lists with escapes applied.
 const W: usize = 100;
-const THEME: Theme = Theme { colors: false };
+
+/// The shared colors-off theme at the suite's default width budget.
+const THEME: Theme = Theme {
+    colors: false,
+    width: W,
+};
+
+/// A colors-off theme at a specific width budget (the truncation tests).
+fn theme(w: usize) -> Theme {
+    Theme {
+        colors: false,
+        width: w,
+    }
+}
 
 /// Pending marker + label are both muted — colors-off, so the byte contract
-/// is the row's plain geometry: `  · <label>` (spec §2.3 first frame).
+/// is the row's plain geometry: `  · <label>` (ADR 0018 first frame).
 #[test]
 fn step_line_pending_is_middle_dot_and_label() {
     let s = Step::pending("Redaction gate");
-    assert_eq!(step_line(&s, W, &THEME), "  · Redaction gate");
+    assert_eq!(step_line(&s, &THEME), "  · Redaction gate");
 }
 
 /// Active marker is the first braille glyph; the live elapsed counter joins
-/// the label as `· <n>s` integer seconds (spec §2.4).
+/// the label as `· <n>s` integer seconds (ADR 0018).
 #[test]
 fn step_line_active_carries_spinner_and_elapsed() {
     let mut s = Step::active("Plan batches");
-    assert_eq!(step_line(&s, W, &THEME), "  ⠋ Plan batches");
+    assert_eq!(step_line(&s, &THEME), "  ⠋ Plan batches");
     s.active_elapsed = Some(Duration::from_secs(12));
-    assert_eq!(step_line(&s, W, &THEME), "  ⠋ Plan batches · 12s");
+    assert_eq!(step_line(&s, &THEME), "  ⠋ Plan batches · 12s");
 }
 
 /// Completed marker is `✓`; the summary replaces the label; a duration ≥ 1 s
-/// appends ` · 6.4s`; sub-second durations show nothing (spec §1.4).
+/// appends ` · 6.4s`; sub-second durations show nothing (ADR 0018).
 #[test]
 fn step_line_completed_shows_summary_and_duration_rule() {
     let mut s = Step::pending("Plan batches");
     s.state = StepState::Completed;
     s.summary = Some("Planned 3 batches".into());
     s.duration = Some(Duration::from_millis(6400));
-    assert_eq!(step_line(&s, W, &THEME), "  ✓ Planned 3 batches · 6.4s");
+    assert_eq!(step_line(&s, &THEME), "  ✓ Planned 3 batches · 6.4s");
 
     s.duration = Some(Duration::from_millis(900));
-    assert_eq!(step_line(&s, W, &THEME), "  ✓ Planned 3 batches");
+    assert_eq!(step_line(&s, &THEME), "  ✓ Planned 3 batches");
 
     s.summary = None;
     s.duration = None;
-    assert_eq!(step_line(&s, W, &THEME), "  ✓ Plan batches");
+    assert_eq!(step_line(&s, &THEME), "  ✓ Plan batches");
 }
 
-/// Failed marker is `✗`; the reason joins the label after ` — ` (spec §2.9).
+/// Failed marker is `✗`; the reason joins the label after ` — ` (ADR 0018).
 #[test]
 fn step_line_failed_joins_reason_after_em_dash() {
     let mut s = Step::pending("Commit batches");
@@ -73,21 +87,22 @@ fn format_duration_one_decimal_only_past_one_second() {
 }
 
 /// Rows truncate at the width budget, never wrap, and never carry trailing
-/// spaces (spec §1.3) — the truncation cuts mid-content with no padding.
+/// spaces (ADR 0018) — the truncation cuts mid-content with no padding.
 #[test]
 fn step_line_truncates_at_width_without_trailing_spaces() {
     let s = Step::pending("Redaction gate");
-    assert_eq!(step_line(&s, 10, &THEME), "  · Redact");
+    assert_eq!(step_line(&s, &theme(10)), "  · Redact");
     // Exact fit: no trailing pad.
     assert_eq!(
-        step_line(&s, "  · Redaction gate".len(), &THEME),
+        step_line(&s, &theme("  · Redaction gate".len())),
         "  · Redaction gate"
     );
     // CJK labels count 2 columns per char (unicode-width).
     let cjk = Step::pending("冲突检测");
-    assert_eq!(step_line(&cjk, 10, &THEME), "  · 冲突检"); // 2 + 2 + 3 CJK (6 cols) = 10
+    assert_eq!(step_line(&cjk, &theme(10)), "  · 冲突检"); // 2 + 2 + 3 CJK (6 cols) = 10
 }
-/// The one layout rule (spec §2.1/§2.3): completed tight, active + live
+
+/// The one layout rule (ADR 0018): completed tight, active + live
 /// output, one blank separator only when pending steps exist, then pending.
 #[test]
 fn timeline_frame_composes_completed_active_blank_pending() {
@@ -101,7 +116,7 @@ fn timeline_frame_composes_completed_active_blank_pending() {
     let draft = Step::pending("Draft messages");
     let commit = Step::pending("Commit batches");
     assert_eq!(
-        timeline_frame(&[scan, plan, draft, commit], W, &THEME),
+        timeline_frame(&[scan, plan, draft, commit], &THEME),
         vec![
             "  ✓ Scanned 14 files",
             "  ⠋ Plan batches",
@@ -119,14 +134,14 @@ fn timeline_frame_omits_separator_without_pending_steps() {
     let mut scan = Step::active("Scan changes");
     scan.live_rows = vec!["    live".into()];
     assert_eq!(
-        timeline_frame(&[scan], W, &THEME),
+        timeline_frame(&[scan], &THEME),
         vec!["  ⠋ Scan changes", "    live"]
     );
 }
 
 /// A failed step ends the frame: `✗` headline, up to 3 detail rows (first
 /// error, rest remediation), and every later step is absent — never rendered
-/// as pending (spec §2.1/§2.9).
+/// as pending (ADR 0018).
 #[test]
 fn timeline_frame_failed_step_hides_all_later_steps() {
     let mut scan = Step::pending("Scan changes");
@@ -146,7 +161,7 @@ fn timeline_frame_failed_step_hides_all_later_steps() {
     });
     let plan = Step::pending("Plan batches");
     assert_eq!(
-        timeline_frame(&[scan, gate, plan], W, &THEME),
+        timeline_frame(&[scan, gate, plan], &THEME),
         vec![
             "  ✓ Scanned 14 files",
             "  ✗ Redaction gate — secret-like content detected",
@@ -169,7 +184,7 @@ fn timeline_frame_durable_block_gets_one_blank_before_next_step() {
 
     let tail = Step::pending("Nothing");
     assert_eq!(
-        timeline_frame(&[commit.clone(), tail], W, &THEME),
+        timeline_frame(&[commit.clone(), tail], &THEME),
         vec![
             "  ✓ Committed 1 batch",
             "    ✓ a1b2c3d feat: thing",
@@ -178,13 +193,13 @@ fn timeline_frame_durable_block_gets_one_blank_before_next_step() {
         ]
     );
     assert_eq!(
-        timeline_frame(&[commit], W, &THEME),
+        timeline_frame(&[commit], &THEME),
         vec!["  ✓ Committed 1 batch", "    ✓ a1b2c3d feat: thing"]
     );
 }
 
 /// Sub-rows sit at column 4; the `[i/N]` prefix pads to `[N/N]` width; a done
-/// sub-row keeps its duration only past 1 s (spec §2.6/§2.8).
+/// sub-row keeps its duration only past 1 s (ADR 0018).
 #[test]
 fn sub_row_pads_prefix_and_shows_done_duration() {
     assert_eq!(
@@ -192,7 +207,6 @@ fn sub_row_pads_prefix_and_shows_done_duration() {
             1,
             3,
             &SubBody::InFlight("Generating commit message".into()),
-            W,
             &THEME
         ),
         "    [1/3] ⠋ Generating commit message"
@@ -202,7 +216,6 @@ fn sub_row_pads_prefix_and_shows_done_duration() {
             2,
             3,
             &SubBody::Done(String::new(), Some(Duration::from_millis(6200))),
-            W,
             &THEME
         ),
         "    [2/3] ✓ 6.2s"
@@ -212,7 +225,6 @@ fn sub_row_pads_prefix_and_shows_done_duration() {
             2,
             3,
             &SubBody::Done(String::new(), Some(Duration::from_millis(400))),
-            W,
             &THEME
         ),
         "    [2/3] ✓"
@@ -225,7 +237,6 @@ fn sub_row_pads_prefix_and_shows_done_duration() {
                 "src/render/progress.rs".into(),
                 Some(Duration::from_millis(18100))
             ),
-            W,
             &THEME
         ),
         "    [1/3] ✓ src/render/progress.rs · 18.1s"
@@ -236,7 +247,6 @@ fn sub_row_pads_prefix_and_shows_done_duration() {
             3,
             12,
             &SubBody::InFlight("Retrying docs/adr/0018.md".into()),
-            W,
             &THEME
         ),
         "    [3/12]  ⠋ Retrying docs/adr/0018.md"
@@ -244,10 +254,10 @@ fn sub_row_pads_prefix_and_shows_done_duration() {
 }
 
 /// A bare menu: `› ` on the selected option, two-space indent on the rest;
-/// the returned index points at the cursor row (spec §1.1/§2.5).
+/// the returned index points at the cursor row (ADR 0018).
 #[test]
 fn menu_rows_cursor_marks_selected_option() {
-    let (rows, cursor) = menu_rows(&["Commit", "Re-generate", "Edit", "Abort"], 0, W, &THEME);
+    let (rows, cursor) = menu_rows(&["Commit", "Re-generate", "Edit", "Abort"], 0, &THEME);
     assert_eq!(cursor, 0);
     assert_eq!(
         rows,
@@ -258,7 +268,7 @@ fn menu_rows_cursor_marks_selected_option() {
             "      Abort",
         ]
     );
-    let (rows, cursor) = menu_rows(&["Continue", "Merge two batches…", "Abort"], 1, W, &THEME);
+    let (rows, cursor) = menu_rows(&["Continue", "Merge two batches…", "Abort"], 1, &THEME);
     assert_eq!(cursor, 1);
     assert_eq!(
         rows,
@@ -279,7 +289,6 @@ fn review_menu_rows_compose_ask_listing_and_menu() {
         &entries,
         &["Continue", "Abort"],
         0,
-        W,
         &THEME,
     );
     assert_eq!(cursor, 3, "ask + 2 entries + first option");
@@ -295,16 +304,27 @@ fn review_menu_rows_compose_ask_listing_and_menu() {
     );
 }
 
-/// The one-row y/n ask: `? ` + question, at the sub-row column (spec §2.8).
+/// The one-row y/n ask: `? ` + question, at the sub-row column (ADR 0018).
 #[test]
 fn ask_row_is_question_marker_and_text() {
     assert_eq!(
-        ask_row("resolve now? [Y/n]", W, &THEME),
+        ask_row("resolve now? [Y/n]", &THEME),
         "    ? resolve now? [Y/n]"
     );
 }
 
-/// The non-TTY ledger (spec §5): pending/active never print; completed
+/// The frame menu's help row: muted key hints at the sub-row column, so the
+/// frame path shows the same text the inquire fallback carries as its help
+/// message.
+#[test]
+fn help_row_is_muted_hints_at_sub_indent() {
+    assert_eq!(
+        help_row("↑/↓ select · Enter confirm · Esc or Ctrl-C aborts", &THEME),
+        "    ↑/↓ select · Enter confirm · Esc or Ctrl-C aborts"
+    );
+}
+
+/// The non-TTY ledger (ADR 0018): pending/active never print; completed
 /// prints the same summary string as the styled path; failed prints headline
 /// plus detail, capped at 3.
 #[test]
@@ -348,4 +368,38 @@ fn window_height_budget_caps_and_suppresses_below_three() {
     // Degenerate: saturation keeps it 0, never a panic or underflow.
     assert_eq!(window_height_budget(12, 2, 10), 0);
     assert_eq!(window_height_budget(40, 100, 0), 40);
+}
+
+/// `compact_count` keeps exact numbers below a thousand and collapses
+/// above it: one decimal while the whole part is a single digit, no
+/// decimal once it isn't, `k`→`m` at the next magnitude.
+#[test]
+fn compact_count_collapses_only_above_a_thousand() {
+    assert_eq!(compact_count(0), "0");
+    assert_eq!(compact_count(999), "999");
+    assert_eq!(compact_count(1_000), "1k");
+    assert_eq!(compact_count(2_100), "2.1k");
+    assert_eq!(compact_count(9_999), "10k");
+    assert_eq!(compact_count(15_000), "15k");
+    assert_eq!(compact_count(999_949), "999k");
+    assert_eq!(compact_count(999_950), "1m");
+    assert_eq!(compact_count(999_999), "1m");
+}
+
+/// `delta_suffix` sums per-file stats into one ` · +A −D` segment and
+/// stays present at zero (binary-only scans still show the churn pair).
+#[test]
+fn delta_suffix_sums_and_survives_zero() {
+    let stats = |a: usize, d: usize| FileStats {
+        path: "x.rs".into(),
+        added: a,
+        deleted: d,
+        new: false,
+        removed: false,
+        binary: false,
+        old_size: 0,
+        new_size: 0,
+    };
+    assert_eq!(delta_suffix(&[stats(3, 1), stats(5, 0)]), " · +8 −1");
+    assert_eq!(delta_suffix(&[]), " · +0 −0");
 }
