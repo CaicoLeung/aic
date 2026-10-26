@@ -76,9 +76,12 @@ async fn undo_resets_run_commits_and_unstages_changes() {
     .unwrap();
     assert_eq!(git.head_sha().unwrap(), start, "HEAD must be pre-Run");
     let label = seen.into_inner();
+    assert_eq!(label, "undo this aic run?");
     assert!(
-        label.contains("2 commits from the run will be reset"),
-        "tip-known, no-post-run wording must pin plural-safe phrasing, got: {label}"
+        undo::scope_rows(2, 0, true)
+            .iter()
+            .any(|r| r.contains("2 commits from the run will be reset")),
+        "tip-known, no-post-run wording must pin plural-safe phrasing"
     );
     let status = git.status().unwrap();
     let unstaged: Vec<_> = status.iter().filter(|f| !f.staged).collect();
@@ -213,11 +216,15 @@ async fn undo_prompt_discloses_commits_made_after_the_run() {
     .unwrap();
 
     let label = seen.into_inner();
+    // The ask row is the short spec §4.4 label; the scope facts print as
+    // muted detail rows above it (asserted via the pure fn).
+    assert_eq!(label, "undo this aic run?");
+    let rows = undo::scope_rows(2, 1, true);
     assert!(
-        label.contains("3 commits will be reset")
-            && label.contains("2 commits from the run")
-            && label.contains("1 commit made after it"),
-        "prompt must disclose the split, got: {label}"
+        rows.iter().any(|r| r.contains("3 commits will be reset")
+            && r.contains("2 commits from the run")
+            && r.contains("1 commit made after it")),
+        "scope must disclose the split, got: {rows:?}"
     );
     assert_eq!(git.head_sha().unwrap(), start);
     assert!(
@@ -277,10 +284,14 @@ fn undo_without_tip_discloses_unknown_split() {
     .unwrap();
 
     let label = seen.into_inner();
+    assert_eq!(label, "undo this aic run?");
+    let rows = undo::scope_rows(1, 0, false);
     assert!(
-        label.contains("1 commit since the run started will be reset")
-            && label.contains("run tip unknown"),
-        "must disclose the unknown split, got: {label}"
+        rows.iter().any(
+            |r| r.contains("1 commit since the run started will be reset")
+                && r.contains("run tip unknown")
+        ),
+        "must disclose the unknown split, got: {rows:?}"
     );
     assert_eq!(git.head_sha().unwrap(), start);
 }
@@ -432,9 +443,12 @@ async fn undo_after_a_second_run_resets_only_the_latest_run() {
     );
     assert_eq!(file_at_ref(dir.path(), "HEAD", "a.txt"), "one\n");
     let label = seen.into_inner();
+    assert_eq!(label, "undo this aic run?");
     assert!(
-        label.contains("2 commits from the run will be reset"),
-        "the prompt must count only the latest run's commits, got: {label}"
+        undo::scope_rows(2, 0, true)
+            .iter()
+            .any(|r| r.contains("2 commits from the run will be reset")),
+        "the scope must count only the latest run's commits"
     );
     assert_eq!(
         status_porcelain(dir.path()).trim_end(),
