@@ -10,17 +10,19 @@
 //! door (`crate::workflow::run::default_run`) hands off here on a conflicted repo.
 
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::Context;
 
 use crate::core::types::{BoxFuture, Prompt, Resolver};
 use crate::git::Git;
-use crate::git::conflict;
+use crate::git::conflict::{self, RepoState};
 use crate::llm::generator;
 use crate::llm::redact::{self, Redact};
 use crate::llm::retry;
 use crate::render::display::Display;
-use crate::render::progress;
+use crate::render::timeline::driver::{self, RunFrame};
+use crate::render::timeline::{Failure, StepIdx, StepIx, SubBody, ask_row, plural};
 use crate::workflow::input;
 
 /// The resolve workflow's seam bundle. Passed as one unit so callers (the
@@ -37,8 +39,17 @@ pub(crate) struct ResolveDeps {
     pub(crate) redact: Redact,
 }
 
-/// The resolve workflow. See the module docs; behavior is specified by ADR 0005
-/// and pinned by `e2e/resolve.rs` plus the auto-detect tests in `e2e/commit.rs`.
+/// The resolve workflow. See the module docs; behavior is specified by ADR
+/// 0005, pinned by `e2e/resolve.rs` plus the auto-detect tests in
+/// `e2e/commit.rs`.
+///
+/// Both entries (`aic resolve` and the mid-Run handoff) paint the resolve
+/// timeline (ADR 0018): Detect → (Redaction Gate) → Resolve files → Review
+/// resolutions → Finalize, with the per-file resolve sub-rows and the review
+/// diffs as ephemeral live output and the review verdicts as durable rows.
+/// The early exits — clean repo, rebase/am refusal, the all-resolved
+/// finalize offer — render alone, with no timeline. Off a terminal the same
+/// steps append the plain ledger (ADR 0018).
 pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<()> {
     let ResolveDeps {
         resolve,
@@ -72,15 +83,49 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         return Ok(());
     }
 
-    crate::git::conflict::conflict_detected(&display, state, files.len());
-    crate::git::conflict::conflicted_summary(&display, &files);
+    // Step skeleton (ADR 0018): Detect, the Redaction Gate (iff
+    // `--no-redact` did not turn it off), Resolve, Review, Finalize.
+    let redact_on = redact == Redact::On;
+    let mut labels: Vec<String> = vec!["Detect conflicts".into()];
+    if redact_on {
+        labels.push("Redaction gate".into());
+    }
+    labels.push("Resolve files".into());
+    labels.push("Review resolutions".into());
+    labels.push("Finalize".into());
+    let frame = RunFrame::new(labels).await;
+    let _frame_guard = driver::install(frame.clone());
+    const DETECT: StepIdx = StepIdx::FIRST;
+    let mut ix = StepIx::AFTER_FIRST;
+    let redact_step = ix.take_if(redact_on);
+    let resolve_step = ix.take();
+    let review_step = ix.take();
+    let finalize_step = ix.take();
+
+    // Detect: the ⚠ header and the per-file conflict summary are durable
+    // records — a conflict set taller than the terminal must never ride the
+    // frame (ADR 0018 bounded frame), so they flush to permanent scrollback
+    // before the step completes. Off a terminal `flush` prints straight
+    // through the run's display, byte-identical to the step display.
+    frame.activate(DETECT);
+    let step_display = frame.step_display(&display);
+    frame.flush(&display, |d| {
+        crate::git::conflict::conflict_detected(d, state, files.len());
+        crate::git::conflict::conflicted_summary(d, &files);
+    });
+    frame.complete(
+        &display,
+        DETECT,
+        format!("Detected {}", plural(files.len(), "conflict")),
+    );
 
     // Per-file resolution. `plans` carries (path, original, resolved) so the
-    // review diff can be built without re-reading disk. Track why each
-    // non-approved file didn't make it into `plans` so the hand-off message
-    // can distinguish structural skips (binary/oversized — user must resolve
-    // by hand) from transient failures (LLM error / markers after retry —
-    // user can re-run `aic resolve`).
+    // review diff can be built without re-reading disk. `skipped` carries
+    // (path, reason) for every file that will not reach review — structural
+    // skips (binary/oversized — user must resolve by hand) and transient
+    // failures (LLM error / markers after retry — user can re-run
+    // `aic resolve`) — surfaced as caution rows in the Review step (spec
+    // §2.8) instead of printing mid-Resolve.
     //
     // Reads are hoisted out of the resolve loop so the Redaction Gate below
     // scans every resolvable file *before* any Backend call: a secret in the
@@ -89,54 +134,83 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     // aborts upfront instead of mid-loop — same error, earlier, and nothing
     // ungated leaves the machine first.
     let mut read: Vec<(String, String)> = Vec::new();
+    let mut skipped: Vec<(String, String)> = Vec::new();
     for f in &files {
         if !f.kind.resolvable() {
-            crate::git::conflict::skipped(&display, &f.path, f.kind.reason());
+            skipped.push((f.path.clone(), f.kind.reason().to_string()));
             continue;
         }
-        let original_bytes = conflict.read_worktree(&f.path)?;
-        let original = String::from_utf8(original_bytes)
-            .with_context(|| format!("{} is not valid UTF-8 (should be Content)", f.path))?;
-        read.push((f.path.clone(), original));
+        match read_original(&conflict, &f.path) {
+            Ok(original) => read.push((f.path.clone(), original)),
+            Err(e) => {
+                frame.fail(&display, DETECT, Failure::from_error("failed", &e));
+                return Err(e);
+            }
+        }
     }
 
     // Redaction Gate (issue #159, ADR 0017): the resolver sends whole-file
     // content, so gate the raw per-file payloads once, before the loop. The
     // marker-retry inside the loop re-sends bytes this gate already cleared
     // and stays ungated by design — the same boundary as the commit Run's
-    // confirmation-menu Re-generate redraft.
-    if redact == Redact::On {
-        redact::gate(&read, redact::Override::Resolve)?;
+    // confirmation-menu Re-generate redraft. A refusal is the step's failed
+    // screen (ADR 0018).
+    if let Some(rs) = redact_step {
+        frame.activate(rs);
+        if let Err(e) = redact::gate(&read, redact::Override::Resolve) {
+            frame.fail(
+                &display,
+                rs,
+                Failure::from_error("secret-like content detected", &e),
+            );
+            return Err(e);
+        }
+        frame.complete(&display, rs, "Redaction gate · clean");
     }
 
-    let skipped_unresolvable = files.len() - read.len();
+    // Resolve files (ADR 0018): one `[i/N]` sub-row per resolvable file —
+    // in-flight while the LLM works (`Retrying {path}` on the marker-retry
+    // attempt), `✓ {path} · dur` (with a `(retry)` note) when it lands.
+    // Files the LLM can't resolve leave no durable row here; they surface in
+    // the step summary (`N skipped`) and as Review caution rows.
+    let resolvable = read.len();
+    frame.activate(resolve_step);
     let mut plans: Vec<(String, String, String)> = Vec::new();
-    let mut skipped_failed = 0usize;
-    for (path, original) in read {
+    for (i, (path, original)) in read.into_iter().enumerate() {
+        let idx = i + 1;
+        frame.set_label(
+            resolve_step,
+            format!("Resolving files · {idx} of {resolvable}"),
+        );
+        let started = Instant::now();
         // Per-file resolution on the shared retry module (seam C, ADR-0005).
         // The op folds the resolver's two failure shapes onto `RetryReason`:
-        // marker-laden output → `Markers` (retryable), and any underlying LLM
-        // error → `Fatal` (propagates immediately, never retried). Clean
-        // output is `Ok`. `RetryPolicy::once()` is the budget-1 / no-backoff
-        // auto-retry. The spinner label still distinguishes the first attempt
-        // from the retry so the live UX matches the old hand-written loop.
+        // marker-laden output → `Markers` (retryable), and any underlying
+        // LLM error → `Fatal` (propagates immediately, never retried).
+        // Clean output is `Ok`. `RetryPolicy::once()` is the budget-1 /
+        // no-backoff auto-retry. The sub-row label distinguishes the first
+        // attempt from the retry; `first_attempt` also records (after the
+        // match) whether the retry ran, for the done row's `(retry)` note.
         let mut first_attempt = true;
-        // Capture the resolver by reference so the `async move` block copies the
-        // `&Resolver` (Copy) on each call instead of moving the owned `Box` —
-        // otherwise the closure would be `FnOnce` and `retry` needs `FnMut`.
+        // Capture the resolver by reference so the `async move` block copies
+        // the `&Resolver` (Copy) on each call instead of moving the owned
+        // `Box` — otherwise the closure would be `FnOnce` and `retry` needs
+        // `FnMut`.
         let resolve_ref = &resolve;
         let op = || {
-            let label = if std::mem::replace(&mut first_attempt, false) {
-                format!("Resolving {path}")
-            } else {
+            let retrying = !std::mem::replace(&mut first_attempt, false);
+            let label = if retrying {
                 format!("Retrying {path}")
+            } else {
+                format!("Resolving {path}")
             };
-            // `.to_string()` (not `.clone()`) because `original` is borrowed by
-            // the closure, so the bare name is a `&String` whose `.clone()` would
-            // copy the reference rather than the content.
+            frame.set_sub_row(resolve_step, idx, resolvable, &SubBody::InFlight(label));
+            // `.to_string()` (not `.clone()`) because `original` is borrowed
+            // by the closure, so the bare name is a `&String` whose
+            // `.clone()` would copy the reference rather than the content.
             let content = original.to_string();
             async move {
-                match progress::with_spinner(&label, resolve_ref(content)).await {
+                match resolve_ref(content).await {
                     Ok(resolved) if !conflict::has_conflict_markers(&resolved) => Ok(resolved),
                     Ok(_markers) => Err(retry::RetryReason::Markers),
                     Err(err) => Err(retry::RetryReason::Fatal(err)),
@@ -146,22 +220,34 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         let resolved = match crate::llm::retry::retry(op, crate::llm::retry::RetryPolicy::once())
             .await
         {
-            Ok(content) => content,
+            Ok(content) => {
+                // `first_attempt` went false iff the marker-retry ran.
+                let text = if first_attempt {
+                    path.clone()
+                } else {
+                    format!("{path} (retry)")
+                };
+                frame.set_sub_row(
+                    resolve_step,
+                    idx,
+                    resolvable,
+                    &SubBody::Done(text, Some(started.elapsed())),
+                );
+                content
+            }
             // Budget spent with markers still present — the file can't be
             // resolved; soft-skip it for a re-run.
             Err(crate::llm::retry::RetryError::Exhausted(crate::llm::retry::RetryExhausted {
                 last_reason: crate::llm::retry::RetryReason::Markers,
                 ..
             })) => {
-                crate::git::conflict::skipped(&display, &path, "markers remain after retry");
-                skipped_failed += 1;
+                skipped.push((path, "markers remain after retry".to_string()));
                 continue;
             }
-            // The LLM call errored (first attempt or retry) and propagated the
-            // original error verbatim.
+            // The LLM call errored (first attempt or retry) and propagated
+            // the original error verbatim.
             Err(crate::llm::retry::RetryError::Fatal(err)) => {
-                crate::git::conflict::skipped(&display, &path, &format!("LLM error: {err:#}"));
-                skipped_failed += 1;
+                skipped.push((path, format!("LLM error: {err:#}")));
                 continue;
             }
             // The op only ever yields Ok / Markers / Fatal, so an exhausted
@@ -175,28 +261,101 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     }
 
     if plans.is_empty() {
+        // Nothing reached review — the failed screen names the step, and the
+        // skipped files ride as its detail rows (ADR 0018) so the user
+        // still sees why every file was refused.
+        let mut detail: Vec<String> = skipped
+            .iter()
+            .map(|(path, reason)| format!("skipped: {path} — {reason}"))
+            .collect();
+        detail.push("resolve the conflicts manually".to_string());
+        frame.fail(
+            &display,
+            resolve_step,
+            Failure {
+                reason: "no files could be resolved".into(),
+                detail,
+            },
+        );
         anyhow::bail!("no files could be resolved; resolve the conflicts manually");
     }
 
-    // Per-file review + sticky approval, interleaved: each file's diff is
-    // rendered immediately before its `apply` prompt, so the diff on screen
-    // is always the one being asked about. Review still precedes the disk
-    // write — the diff is in-memory (`unified_diff`), and `write_worktree`
-    // only happens after approval (ADR 0005).
+    let skipped_unresolvable = files.len() - resolvable;
+    let skipped_failed = skipped.len() - skipped_unresolvable;
+    let mut summary = format!("Resolved {} of {resolvable}", plans.len());
+    if !skipped.is_empty() {
+        summary.push_str(&format!(" · {} skipped", skipped.len()));
+    }
+    frame.complete(&display, resolve_step, summary);
+
+    // Review resolutions: each file's diff + ask is ephemeral live output;
+    // the verdict is durable (it records a worktree mutation) and flushes
+    // to permanent scrollback as it lands — one row per file can exceed the
+    // terminal on a tall conflict set, exactly what the bounded-frame model
+    // exists for. Review still precedes the disk write — the diff is
+    // in-memory (`unified_diff`), and `write_worktree` only happens after
+    // approval (ADR 0005).
+    frame.activate(review_step);
+    if !skipped.is_empty() {
+        // Caution rows for every file that never reached review — durable
+        // too, flushed as one block before the verdicts start landing.
+        frame.flush(&display, |d| {
+            for (path, reason) in &skipped {
+                crate::git::conflict::skipped(d, path, reason);
+            }
+        });
+    }
     let mut approved = 0usize;
     let mut rejected = 0usize;
-    for (path, original, resolved) in &plans {
-        crate::git::conflict::review_section(&display, path, &unified_diff(original, resolved));
-        if prompt(&format!("apply {path}?"))? {
-            conflict.write_worktree(path, resolved)?;
-            git.add(&[path.as_str()])?;
-            crate::git::conflict::resolved(&display, path);
+    for (i, (path, original, resolved)) in plans.iter().enumerate() {
+        frame.set_label(
+            review_step,
+            format!("Reviewing resolutions · {} of {}", i + 1, plans.len()),
+        );
+        crate::git::conflict::review_section(
+            &step_display,
+            path,
+            &unified_diff(original, resolved),
+        );
+        let question = format!("apply {path}? [Y/n]");
+        let apply = if frame.is_tty() {
+            frame_ask(&frame, review_step, &question)
+        } else {
+            prompt(&question)?
+        };
+        // The diff + ask were transient; earlier verdicts already flushed,
+        // so the live block is empty again.
+        frame.clear_live(review_step);
+        if let Err(e) = if apply {
+            conflict
+                .write_worktree(path, resolved)
+                .and_then(|()| git.add(&[path.as_str()]))
+        } else {
+            Ok(())
+        } {
+            frame.fail(&display, review_step, Failure::from_error("failed", &e));
+            return Err(e);
+        }
+        let verdict = if apply {
+            crate::git::conflict::resolved
+        } else {
+            crate::git::conflict::rejected
+        };
+        frame.flush(&display, |d| verdict(d, path));
+        if apply {
             approved += 1;
         } else {
-            crate::git::conflict::rejected(&display, path);
             rejected += 1;
         }
     }
+    let mut summary = format!(
+        "Reviewed {} · {approved} applied",
+        plural(plans.len(), "file")
+    );
+    if rejected > 0 {
+        summary.push_str(&format!(" · {rejected} rejected"));
+    }
+    frame.complete(&display, review_step, summary);
 
     // Finalize is all-or-nothing: git's `--continue` blocks on any unmerged
     // path regardless (ADR 0005), so a single remaining blocker stops it.
@@ -207,13 +366,20 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     //   - skipped_unresolvable binary / oversized / delete-modify — aic can't
     // Equivalent to the old `files.len() - approved == 0` test (every file
     // lands in exactly one of: skipped_unresolvable, skipped_failed, plans).
+    // With any blocker the Finalize step never runs: it is dropped from the
+    // frame (ADR 0018) and the hand-off rows ride under the Review summary.
     let needs_manual = rejected + skipped_failed + skipped_unresolvable;
     if needs_manual == 0 {
-        conflict.finalize(state)?;
-        crate::git::conflict::finalize_done(&display, state);
+        frame.activate(finalize_step);
+        if let Err(e) = conflict.finalize(state) {
+            frame.fail(&display, finalize_step, Failure::from_error("failed", &e));
+            return Err(e);
+        }
+        frame.complete(&display, finalize_step, finalize_summary(state));
     } else {
+        frame.truncate_steps(finalize_step);
         crate::git::conflict::handoff(
-            &display,
+            &step_display,
             approved,
             rejected,
             skipped_failed,
@@ -225,12 +391,62 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     Ok(())
 }
 
+/// Read one resolvable conflicted file's worktree bytes as UTF-8 content.
+/// Split out of the Detect loop so the failure arm (the step's failed
+/// screen + the propagated error) stays one `match` instead of a nested
+/// `?` chain.
+fn read_original(conflict: &conflict::Conflict<'_>, path: &str) -> anyhow::Result<String> {
+    let bytes = conflict.read_worktree(path)?;
+    String::from_utf8(bytes)
+        .with_context(|| format!("{path} is not valid UTF-8 (should be Content)"))
+}
+
+/// The per-file apply ask as a frame row (ADR 0018): `? apply {path}?`
+/// under the active Review step's diff, answered with raw y/n keys — Enter
+/// = yes, the same default as `prompt_yes_no`; Esc / Ctrl-C / anything
+/// else = no (a worktree mutation must never auto-approve on a stray key).
+/// The ask's wall time is excluded from the step's duration (the menu
+/// clock pause).
+fn frame_ask(frame: &RunFrame, step: StepIdx, question: &str) -> bool {
+    frame.menu_open();
+    let row = ask_row(question, &frame.theme());
+    let base = frame.live_len(step);
+    frame.replace_live_tail(step, base, vec![row]);
+    let term = console::Term::stderr();
+    let answer = loop {
+        match term.read_key() {
+            Ok(console::Key::Enter) | Ok(console::Key::Char('y')) => break true,
+            Ok(console::Key::Char('n')) => break false,
+            // Esc / Ctrl-C / a read failure (closed stdin) all decline.
+            Ok(console::Key::Escape) | Ok(console::Key::Char('\u{3}')) | Err(_) => break false,
+            Ok(_) => {}
+        }
+    };
+    frame.truncate_live(step, base);
+    frame.menu_close();
+    answer
+}
+
+/// The Finalize step's completion summary (ADR 0018, open item 9): the
+/// operation being finalized, from `RepoState` — `Finalized merge commit`
+/// for a merge, `Finalized cherry-pick` / `Finalized revert` otherwise.
+fn finalize_summary(state: RepoState) -> String {
+    if state == RepoState::Merge {
+        "Finalized merge commit".to_string()
+    } else {
+        format!("Finalized {}", state.label())
+    }
+}
+
 /// Production entry point for `aic resolve` — wires the real LLM resolver and
 /// stdin y/n prompt into [`resolve_run`]. `no_redact` is the resolve
 /// subcommand's `--no-redact` bool (issue #159), mapped via
 /// [`Redact::from_flag`] — the only production site that bypasses the
 /// resolve Redaction Gate besides the top-level flag's handoff carry.
 pub async fn resolve_workflow(no_redact: bool) -> anyhow::Result<()> {
+    // Neon palette on dark terminals (ADR 0018 redesign) — same contract as
+    // the default Run: probe once, before any styled output.
+    crate::render::palette::init_terminal_theme();
     let resolve: Resolver = Box::new(|content: String| -> BoxFuture<anyhow::Result<String>> {
         Box::pin(async move { generator::Generator::resolve_conflict(&content).await })
     });
@@ -270,7 +486,23 @@ fn unified_diff(old: &str, new: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::unified_diff;
+    use super::{RepoState, finalize_summary, unified_diff};
+
+    /// The Finalize summary names the operation from `RepoState` (ADR 0018,
+    /// open item 9): "merge commit" for a merge, the bare label otherwise —
+    /// the sequencer states share their single-shot labels.
+    #[test]
+    fn finalize_summary_names_the_operation() {
+        assert_eq!(finalize_summary(RepoState::Merge), "Finalized merge commit");
+        assert_eq!(
+            finalize_summary(RepoState::CherryPick),
+            "Finalized cherry-pick"
+        );
+        assert_eq!(
+            finalize_summary(RepoState::RevertSequence),
+            "Finalized revert"
+        );
+    }
 
     /// The review diff keeps reading-view semantics on a *partial*
     /// resolution (equal lines present, the normal LLM-merge case): one

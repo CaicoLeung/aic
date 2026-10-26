@@ -187,7 +187,9 @@ pub(crate) fn install_completion_impl(
 }
 
 /// Installs `shell`'s completion to its conventional location and prints the
-/// result, plus any follow-up the user needs.
+/// one-shot result (ADR 0018): a `✓` result line naming the shell
+/// with the install path as a muted detail row beneath, plus any follow-up
+/// the user needs.
 pub fn install_completion(shell: Shell) -> anyhow::Result<()> {
     let home = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("could not determine your home directory"))?;
@@ -198,9 +200,18 @@ pub fn install_completion(shell: Shell) -> anyhow::Result<()> {
 
     let target = install_completion_impl(shell, &home, brew_prefix.as_deref())?;
     eprintln!(
-        "Installed {0} completion to: {1}",
-        shell.name(),
-        target.path.display()
+        "  {}",
+        crate::render::palette::styled_stderr(
+            &format!("✓ completion installed for {}", shell.name()),
+            crate::render::palette::success()
+        )
+    );
+    eprintln!(
+        "  {}",
+        crate::render::palette::styled_stderr(
+            &target.path.display().to_string(),
+            crate::render::palette::muted()
+        )
     );
     if target.autoloaded {
         eprintln!(

@@ -96,8 +96,13 @@ pub(crate) fn inquire_opt<T>(result: Result<T, InquireError>) -> anyhow::Result<
 /// fixed in inquire 0.8 — but it is deliberately not used, because narrowing
 /// is still wanted on these short lists.
 pub(crate) fn opt_nav(prompt: &str, options: &[String], default: usize) -> Result<OptNav> {
+    // The `›` menu cursor (ADR 0018) — the one marker inquire's
+    // default `>` is swapped for; everything else keeps inquire's rendering.
+    let render = inquire::ui::RenderConfig::default_colored()
+        .with_highlighted_option_prefix(inquire::ui::Styled::new("›"));
     match Select::new(prompt, options.to_vec())
         .with_starting_cursor(default)
+        .with_render_config(render)
         .raw_prompt()
     {
         Ok(ListOption { index, .. }) => Ok(OptNav::Value(index)),
@@ -131,6 +136,29 @@ pub(crate) fn select_row(
     let _ = term.clear_to_end_of_screen(); // erase the prompt's footprint
 
     Ok(inquire_opt(choice)?.map(|option| option.index))
+}
+
+/// One interactive menu rendered as timeline frame rows (ADR 0018): the
+/// options with the `›` cursor paint as live rows under the active step —
+/// below whatever preview or listing already sits there — and arrow keys /
+/// Enter pick. Zero-residue by construction: closing the menu is just a
+/// shorter frame. `ask_row` also renders the prompt as a `?` row above the
+/// options (the merge-pick sub-dialogs); the self-describing menus (confirm
+/// four, review actions) pass `false`. Falls back to the inquire
+/// [`select_row`] when no frame is painting (no active Run, non-TTY stderr),
+/// preserving the pre-timeline behavior for those callers.
+pub(crate) fn select_in_frame(
+    prompt: &str,
+    options: &[&str],
+    selected: usize,
+    help: &str,
+    ask_row: bool,
+) -> Result<Option<usize>> {
+    let ask = if ask_row { Some(prompt) } else { None };
+    match crate::render::timeline::driver::frame_menu(ask, options, selected, help) {
+        Some(outcome) => Ok(outcome),
+        None => select_row(prompt, options, help),
+    }
 }
 
 /// Truncate to `max` chars in one pass, appending `…` when a `max+1`-th
@@ -205,9 +233,11 @@ pub(crate) fn prompt_text(
     }
 }
 
-/// Leading glyph for yes/no prompts — Nerd Font nf-md-help, same trade as
-/// the setup icons: renders only on a patched-font terminal.
-const ICON_QUESTION: &str = "\u{f02d6}";
+/// Leading glyph for y/n prompts — the shared `?` ask marker (design spec
+/// §1.1), in `caution` like every interactive ask row.
+fn ask_marker() -> String {
+    crate::render::palette::styled_stderr("?", crate::render::palette::caution())
+}
 
 /// Read a y/n answer from raw stdin (no inquire — this must work when stdin is
 /// a pipe in tests, and the label is written to stderr because `Display` is
@@ -217,7 +247,7 @@ const ICON_QUESTION: &str = "\u{f02d6}";
 /// visible, not memorized.
 pub(crate) fn prompt_yes_no(label: &str) -> Result<bool> {
     use std::io::Write as _;
-    eprint!("{ICON_QUESTION} {label} [Y/n] ");
+    eprint!("{} {label} [Y/n] ", ask_marker());
     io::stderr().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;

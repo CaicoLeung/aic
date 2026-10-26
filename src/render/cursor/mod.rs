@@ -403,6 +403,186 @@ fn parse_dsr(resp: &[u8]) -> Option<usize> {
     (row > 0).then_some(row)
 }
 
+// ----------------------------------------------------------------------
+// OSC 11 background probe — feeds the palette's neon mode (ADR 0018
+// redesign). Same input-safety contract as the DSR query: never consume
+// pending input, never leak a late reply, raw mode only for milliseconds.
+// ----------------------------------------------------------------------
+
+/// Upper bound on one OSC 11 reply (`ESC]11;rgb:FFFF/FFFF/FFFF` + BEL/ST):
+/// generous over any real reply, finite so a malformed stream can't pin the
+/// probe.
+const MAX_OSC_REPLY: usize = 40;
+
+/// Whether `b` can continue an OSC 11 reply accumulated in `resp`
+/// (`ESC]11;rgb:<hex>/<hex>/<hex>` closed by BEL or `ESC\`): the 9-byte
+/// prefix is exact, then hex digits, `/`, or a terminator.
+fn osc11_byte_ok(resp: &[u8], b: u8) -> bool {
+    match resp.len() {
+        0 => b == b'\x1b',
+        1 => b == b']',
+        2 => b == b'1',
+        3 => b == b'1',
+        4 => b == b';',
+        5 => b == b'r',
+        6 => b == b'g',
+        7 => b == b'b',
+        8 => b == b':',
+        _ => b.is_ascii_hexdigit() || b == b'/' || b == b'\x07' || b == b'\x1b' || b == b'\\',
+    }
+}
+
+/// Parse an OSC 11 reply into an sRGB triple, normalizing each channel's
+/// 1–4 hex digits to 8 bits. Pure (no I/O). Accepts both terminators (BEL
+/// and `ESC\`).
+fn parse_osc11(resp: &[u8]) -> Option<(u8, u8, u8)> {
+    let s = std::str::from_utf8(resp).ok()?;
+    let body = s
+        .strip_prefix("\x1b]11;rgb:")?
+        .trim_end_matches('\x07')
+        .trim_end_matches("\x1b\\");
+    let parts: Vec<&str> = body.split('/').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let mut chans = [0u8; 3];
+    for (i, part) in parts.into_iter().enumerate() {
+        if part.is_empty() || part.len() > 4 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let max = 16u32.pow(part.len() as u32) - 1;
+        let v = u32::from_str_radix(part, 16).ok()?;
+        chans[i] = (v * 255 / max) as u8;
+    }
+    Some((chans[0], chans[1], chans[2]))
+}
+
+/// sRGB → WCAG relative luminance, the palette tests' formula — threshold
+/// applied by [`background_is_dark`].
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    fn chan(c: u8) -> f64 {
+        let s = c as f64 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
+}
+
+/// Query the terminal's background color over OSC 11 and report whether it
+/// is dark. Returns `false` on any failure (stdin not a tty, pending input,
+/// timeout, unparseable reply) — the caller treats "unknown" as the classic
+/// dual-theme palette, never worse than today. Same contract as
+/// [`query_cursor_row`]; blocking tty I/O, so call from
+/// `spawn_blocking`.
+#[cfg(unix)]
+pub(crate) fn background_is_dark() -> bool {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return false;
+    }
+    query_background_core(libc::STDIN_FILENO).is_some_and(|rgb| relative_luminance(rgb) < 0.3)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn background_is_dark() -> bool {
+    false
+}
+
+/// The OSC 11 query itself, against an already-validated tty fd — the
+/// sibling of [`query_cursor_row_core`] with the same three-part
+/// input-safety contract (quiet-queue precondition, immediate bail on a
+/// non-reply byte, late-reply drain).
+#[cfg(unix)]
+fn query_background_core(fd: std::os::fd::RawFd) -> Option<(u8, u8, u8)> {
+    use std::time::Instant;
+
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // 1. Pending input is the user's, not ours to eat.
+    if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
+        return None;
+    }
+    let query = b"\x1b]11;?\x07";
+    if unsafe { libc::write(fd, query.as_ptr().cast(), query.len()) } != query.len() as isize {
+        return None;
+    }
+    let _raw = RawTermios::enter(fd)?;
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let mut resp: Vec<u8> = Vec::with_capacity(MAX_OSC_REPLY);
+    let result = loop {
+        if Instant::now() >= deadline {
+            break None;
+        }
+        if unsafe { libc::poll(&mut pfd, 1, 50) } <= 0 {
+            continue;
+        }
+        let Some(byte) = read_byte(fd) else {
+            break None;
+        };
+        // 2. Anything that can't be the reply ends the probe immediately —
+        // raw mode lasts milliseconds, not the deadline.
+        if !osc11_byte_ok(&resp, byte) {
+            break None;
+        }
+        resp.push(byte);
+        if byte == b'\x07' || resp.ends_with(b"\x1b\\") {
+            break parse_osc11(&resp);
+        }
+        if resp.len() > MAX_OSC_REPLY {
+            break None;
+        }
+    };
+    // 3. Drain a straggler so it can't surface in a later prompt read.
+    if result.is_none() {
+        let drain_deadline = Instant::now() + DRAIN_GRACE;
+        if resp.is_empty() {
+            while Instant::now() < drain_deadline {
+                if unsafe { libc::poll(&mut pfd, 1, 10) } > 0 {
+                    if read_byte(fd) == Some(b'\x1b') {
+                        drain_osc_reply(fd);
+                    }
+                    break;
+                }
+            }
+        } else {
+            drain_osc_reply(fd);
+        }
+    }
+    result
+}
+
+/// The OSC sibling of [`drain_dsr_reply`]: consume the rest of a reply
+/// known to be in flight until a terminator, byte budget, or grace.
+#[cfg(unix)]
+fn drain_osc_reply(fd: std::os::fd::RawFd) {
+    use std::time::Instant;
+
+    let deadline = Instant::now() + DRAIN_GRACE;
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut n = 0usize;
+    while Instant::now() < deadline && n < MAX_OSC_REPLY {
+        if unsafe { libc::poll(&mut pfd, 1, 10) } <= 0 {
+            break;
+        }
+        let Some(byte) = read_byte(fd) else {
+            break;
+        };
+        n += 1;
+        if byte == b'\x07' {
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +639,50 @@ mod tests {
         assert_eq!(f.max_rows, REASONING_FALLBACK_ROWS);
         assert_eq!(f.cursor_row, None);
     }
+
+    /// [`parse_osc11`] normalizes 1–4-digit channels to 8 bits and accepts
+    /// both terminators; the dark-detection threshold separates real themes
+    /// (light backgrounds are near 1.0, dark ones near 0).
+    #[test]
+    fn parse_osc11_normalizes_channels_and_terminators() {
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:0d0d/1111/1717\x07"),
+            Some((13, 17, 23))
+        );
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"),
+            Some((255, 255, 255))
+        );
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:f/f/f\x07"), Some((255, 255, 255)));
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:00/00/00\x07"), Some((0, 0, 0)));
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:0/1/2\x07"), Some((0, 17, 34)));
+        // Garbage and truncation never yield a color.
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:12/34\x07"), None);
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:zz/00/00\x07"), None);
+        assert_eq!(parse_osc11(b"garbage"), None);
+        assert_eq!(parse_osc11(b""), None);
+        // Dark-detection threshold: GitHub dark is dark, white is not.
+        assert!(relative_luminance((13, 17, 23)) < 0.3);
+        assert!(relative_luminance((255, 255, 255)) >= 0.3);
+    }
+
+    /// [`osc11_byte_ok`] enforces the exact 9-byte prefix, then a body of
+    /// hex, `/`, and the two terminators — a stray keypress bails the probe.
+    #[test]
+    fn osc11_byte_ok_pins_prefix_and_body_alphabet() {
+        let prefix = b"\x1b]11;rgb:";
+        for (i, b) in prefix.iter().enumerate() {
+            assert!(osc11_byte_ok(&prefix[..i], *b), "byte {i} must pass");
+        }
+        assert!(!osc11_byte_ok(b"", b'x'));
+        assert!(!osc11_byte_ok(prefix, b'x'));
+        assert!(osc11_byte_ok(prefix, b'a'));
+        assert!(osc11_byte_ok(prefix, b'/'));
+        assert!(osc11_byte_ok(prefix, b'\x07'));
+        assert!(osc11_byte_ok(b"\x1b]11;rgb:ab", b'\x1b'));
+        assert!(osc11_byte_ok(b"\x1b]11;rgb:ab\x1b", b'\\'));
+        assert!(!osc11_byte_ok(b"\x1b]11;rgb:ab\x1b", b'x'));
+    }
 }
 
 /// Full-I/O tests for [`query_cursor_row_core`] over a real PTY: a forked
@@ -468,7 +692,7 @@ mod tests {
 /// claim — the input-safety contract (never consume pending input, never
 /// leak a late reply) is exercised end to end, not just the pure parse.
 #[cfg(all(unix, test))]
-mod pty_tests {
+pub(crate) mod pty_tests {
     use super::*;
     use std::os::fd::RawFd;
     use std::time::{Duration, Instant};
@@ -476,8 +700,10 @@ mod pty_tests {
     /// What the fake terminal does on the pty master.
     #[derive(Clone, Copy)]
     enum Script {
-        /// Wait for the query, then reply immediately.
+        /// Wait for the DSR query, then reply immediately.
         Reply(&'static [u8]),
+        /// Wait for the OSC 11 query (not the DSR one), then reply.
+        OscReply(&'static [u8]),
         /// Wait for the query, sleep `ms`, then reply (a late reply).
         ReplyLate(&'static [u8], u32),
         /// Wait for the query, then stay silent (no reply ever).
@@ -486,7 +712,7 @@ mod pty_tests {
         PreWrite(&'static [u8]),
     }
 
-    fn open_pty() -> (RawFd, RawFd) {
+    pub(crate) fn open_pty() -> (RawFd, RawFd) {
         let mut master = 0;
         let mut slave = 0;
         let rc = unsafe {
@@ -509,8 +735,11 @@ mod pty_tests {
             let n = unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) };
             return if n == bytes.len() as isize { 0 } else { 1 };
         }
-        // Wait for the DSR query (`ESC[6n`) to arrive on the master.
-        let query = b"\x1b[6n";
+        // Wait for the query this script answers (DSR or OSC 11) on the master.
+        let query: &[u8] = match script {
+            Script::OscReply(_) => b"\x1b]11;?\x07",
+            _ => b"\x1b[6n",
+        };
         let mut buf = [0u8; 64];
         let mut len = 0usize;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -546,7 +775,7 @@ mod pty_tests {
                 let n = unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) };
                 if n == bytes.len() as isize { 0 } else { 5 }
             }
-            Script::Reply(bytes) => {
+            Script::Reply(bytes) | Script::OscReply(bytes) => {
                 let n = unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) };
                 if n == bytes.len() as isize { 0 } else { 5 }
             }
@@ -710,6 +939,21 @@ mod pty_tests {
             libc::close(slave);
         }
         assert_eq!(reap(pid), 0);
+    }
+
+    /// The OSC 11 round trip over a real PTY: the fake terminal sees the
+    /// background query and answers GitHub dark; the probe parses the triple.
+    #[test]
+    fn osc11_roundtrip_over_pty() {
+        let (master, slave, pid) =
+            spawn_terminal(Script::OscReply(b"\x1b]11;rgb:0d0d/1111/1717\x07"));
+        let rgb = query_background_core(slave);
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(reap(pid), 0);
+        assert_eq!(rgb, Some((13, 17, 23)));
     }
 
     /// termios restore is panic-safe via the RAII guard: the query enters raw

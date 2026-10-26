@@ -51,6 +51,11 @@ pub struct FileStats {
     pub removed: bool,
     /// Binary delta: no line counts exist; renders `(binary)`.
     pub binary: bool,
+    /// Old/new blob sizes (libgit2 `DiffFile::size()`), for the binary
+    /// byte-size delta of the Commit entry v2 footer (`(binary) +12.3 KB`).
+    /// Text files carry them too but nothing renders them there.
+    pub old_size: u64,
+    pub new_size: u64,
 }
 
 /// The canonical non-zero-exit diagnostic: the command line (once), the exit

@@ -192,12 +192,12 @@ fn provider_label_shows_provider_and_model() {
 }
 
 /// [`yes_no`] renders the toggle row for both gates: absent (default) reads
-/// "no", an explicit choice reads back verbatim.
+/// "off", an explicit choice reads back verbatim (ADR 0018 wording).
 #[test]
 fn yes_no_defaults_off_and_reflects_choice() {
-    assert_eq!(yes_no(None), "no");
-    assert_eq!(yes_no(Some(false)), "no");
-    assert_eq!(yes_no(Some(true)), "yes");
+    assert_eq!(yes_no(None), "off");
+    assert_eq!(yes_no(Some(false)), "off");
+    assert_eq!(yes_no(Some(true)), "on");
 }
 
 #[test]

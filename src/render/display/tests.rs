@@ -8,6 +8,20 @@ use std::sync::Arc;
 // keep the suite safe to run multi-threaded.
 static COLOR_ENV: Mutex<()> = Mutex::new(());
 
+/// Takes both process-global color-state locks for tests asserting exact
+/// truecolor bytes: `COLOR_ENV` (console's enabled flag, flipped by
+/// `ColorGuard`) and the palette neon toggle — a `set_neon` in a parallel
+/// `palette::tests` test would otherwise reroute accessors mid-assertion.
+fn color_locks() -> (
+    parking_lot::MutexGuard<'static, ()>,
+    parking_lot::MutexGuard<'static, ()>,
+) {
+    (
+        COLOR_ENV.lock(),
+        crate::render::palette::NEON_TOGGLE_LOCK.lock(),
+    )
+}
+
 /// Forces `console` to emit ANSI escapes for the guard's lifetime,
 /// restoring the prior state on drop. `console::Style` only renders
 /// escapes when the global `colors_enabled()` is true; in the test runner
@@ -70,6 +84,8 @@ fn commit_preview_renders_message_body_and_file_list() {
                 new: true,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/main.rs".into(),
@@ -78,6 +94,8 @@ fn commit_preview_renders_message_body_and_file_list() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
@@ -102,7 +120,7 @@ fn commit_preview_renders_message_body_and_file_list() {
     // rows' reserved blank.
     assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
     assert_eq!(got[4], "     +4 −1  src/main.rs");
-    assert_eq!(got[5], "  Σ +16 −4  (2 files)");
+    assert_eq!(got[5], "  Σ ████████░░ +16 −4 · 2 files");
     assert_eq!(got[6], "");
     assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
 }
@@ -124,6 +142,8 @@ fn commit_preview_singleton_file_list_omits_count() {
             new: false,
             removed: false,
             binary: false,
+            old_size: 0,
+            new_size: 0,
         }],
     );
     let got = lines.lock().clone();
@@ -179,6 +199,8 @@ fn commit_preview_truncates_long_file_lists() {
             new: false,
             removed: false,
             binary: false,
+            old_size: 0,
+            new_size: 0,
         })
         .collect();
     let rows = d.commit_preview("feat: big", None, &stats);
@@ -192,7 +214,8 @@ fn commit_preview_truncates_long_file_lists() {
         "the elision line must not repeat the Σ row's (N files) count, got: {got:?}"
     );
     assert!(
-        got.iter().any(|l| l.contains("Σ +10 −0  (10 files)")),
+        got.iter()
+            .any(|l| l.contains("Σ ██████████ +10 −0 · 10 files")),
         "expected a total over all files, got: {got:?}"
     );
     assert!(
@@ -228,6 +251,8 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
                 new: true,
                 removed: false,
                 binary: true,
+                old_size: 0,
+                new_size: 512,
             },
             FileStats {
                 path: "src/old.rs".into(),
@@ -236,6 +261,8 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
                 new: false,
                 removed: true,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -243,16 +270,19 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
-    // the counts, not the tag). "(binary)" spans the counts region; the
-    // name pads to align with src/old.rs (10 chars). The deletion-only file
-    // renders no `+0` column (git --stat convention) — its `−12` still ends
-    // where the Σ row's `−12` ends.
-    assert_eq!(got[0], "    (binary)  img.png    [new]");
-    assert_eq!(got[1], "         −12  src/old.rs [del]");
-    assert_eq!(got[2], "  Σ   +0 −12  (2 files)");
+    // the line counts, not the tag) and shows its full blob size as the
+    // byte delta (`+512 B`). `(binary) +512 B` (15 chars) spans the widened
+    // counts region; the name pads to align with src/old.rs (10 chars). The
+    // deletion-only file renders no `+0` column (git --stat convention) —
+    // its `−12` right-aligns to the region like every text row. The Σ bar
+    // is deletion-only → all `░` cells.
+    assert_eq!(got[0], "    (binary) +512 B  img.png    [new]");
+    assert_eq!(got[1], "                −12  src/old.rs [del]");
+    assert_eq!(got[2], "  Σ ░░░░░░░░░░ +0 −12 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -276,6 +306,8 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "b.rs".into(),
@@ -284,6 +316,8 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -291,6 +325,7 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
@@ -300,7 +335,7 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
     // `(2 files)` label starts.
     assert_eq!(got[0], "     +5     a.rs");
     assert_eq!(got[1], "     +5     b.rs");
-    assert_eq!(got[2], "  Σ +10 −0  (2 files)");
+    assert_eq!(got[2], "  Σ ██████████ +10 −0 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -323,6 +358,8 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
                 new: true,
                 removed: false,
                 binary: true,
+                old_size: 0,
+                new_size: 2048,
             },
             FileStats {
                 path: "data.bin".into(),
@@ -331,6 +368,8 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
                 new: false,
                 removed: false,
                 binary: true,
+                old_size: 4096,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -338,15 +377,17 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
-    // New binary keeps `[new]`; non-new binary carries no tag. The counts
-    // region widens to fit `(binary)` (8 > the `+0`/`−0` base region of 7),
-    // so the Σ row gains a leading pad and its `(2 files)` label lands in
-    // the same column as the filenames above.
-    assert_eq!(got[0], "    (binary)  img.png  [new]");
-    assert_eq!(got[1], "    (binary)  data.bin");
-    assert_eq!(got[2], "  Σ    +0 −0  (2 files)");
+    // New binary keeps `[new]` and shows its full size (`+2.0 KB`); the
+    // deleted binary shows a negative delta (`−4.0 KB`). The counts region
+    // widens to fit the 16-char binary labels, so the filename column
+    // aligns across both rows. T = 0 (all-binary) → the Σ bar is omitted
+    // entirely: `Σ +0 −0 · 2 files`.
+    assert_eq!(got[0], "    (binary) +2.0 KB  img.png  [new]");
+    assert_eq!(got[1], "    (binary) −4.0 KB  data.bin");
+    assert_eq!(got[2], "  Σ +0 −0 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -371,6 +412,8 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
                 new: false,
                 removed: false,
                 binary: true,
+                old_size: 1024,
+                new_size: 13312,
             },
             FileStats {
                 path: "a.rs".into(),
@@ -379,6 +422,8 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -386,16 +431,19 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
-    // base region (Σ 2 + `+1` 2 + gap 1 + `−0` 2 = 7) widens to 8 for
-    // `(binary)`; the text row and Σ row each carry one leading pad, so
-    // all three rows' counts end at the same column and the filenames
-    // start at the same column. The text row's zero-deletion column renders
-    // blank but keeps its width, so `a.rs` still lands under `x.bin`.
-    assert_eq!(got[0], "    (binary)  x.bin");
-    assert_eq!(got[1], "       +1     a.rs");
-    assert_eq!(got[2], "  Σ    +1 −0  (2 files)");
+    // base region (`+1` 2 + gap 1 + `−0` 2 = 5) widens to 17 for
+    // `(binary) +12.0 KB`; the text row carries the lead pad, so both rows'
+    // counts end at the same column and the filenames start at the same
+    // column. The text row's zero-deletion column renders blank but keeps
+    // its width, so `a.rs` still lands under `x.bin`. Byte churn stays
+    // per-file: the Σ bar/counts are text-lines-only (single-sign → full
+    // `█` bar).
+    assert_eq!(got[0], "    (binary) +12.0 KB  x.bin");
+    assert_eq!(got[1], "                +1     a.rs");
+    assert_eq!(got[2], "  Σ ██████████ +1 −0 · 2 files");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -420,6 +468,8 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "a.rs".into(),
@@ -428,6 +478,8 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
                 new: true,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
         &SubjectOffsets {
@@ -435,6 +487,7 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
             hash: 0,
             message: 2,
         },
+        d.text_width(),
     );
     let got = lines.lock().clone();
     // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
@@ -459,7 +512,6 @@ fn commit_line_renders_file_stats_footer() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        None,
         "[1/3]",
         &[FileStats {
             path: "src/auth.rs".into(),
@@ -468,6 +520,8 @@ fn commit_line_renders_file_stats_footer() {
             new: true,
             removed: false,
             binary: false,
+            old_size: 0,
+            new_size: 0,
         }],
     );
     let got = lines.lock().clone();
@@ -496,7 +550,6 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        None,
         "[1/2]",
         &[
             FileStats {
@@ -506,6 +559,8 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/b.rs".into(),
@@ -514,30 +569,32 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
                 new: true,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
     let got = lines.lock().clone();
     assert!(
         got.iter().any(|l| {
-            l.contains("Σ") && l.contains("+8") && l.contains("−1") && l.contains("(2 files)")
+            l.contains("Σ") && l.contains("+8") && l.contains("−1") && l.contains("· 2 files")
         }),
         "multi-file landed commit must show the Σ total row, got: {got:?}"
     );
 }
 
-/// Three hang anchors on the landed ✓ line, pinned with and without a
-/// `[n/m] ` batch prefix (staged / single-commit Runs) so the hangs track
-/// the real subject prefix rather than a frozen column: the body under the
-/// subject's message start, the footer's file rows under the commit ID,
-/// and the Σ total under the `✓` marker. Columns are derived from the
-/// emitted subject line itself (char-counted — the ✓ marker is multi-byte,
-/// so a byte offset would overcount), so the asserts stay honest if the
-/// prefix format changes. A single file keeps the footer Σ-less; the
-/// Σ-under-✓ anchor is pinned on the preview twin above and the Σ-row
-/// geometry tests below.
+/// The footer's file rows hang under the commit ID while the subject line
+/// carries the whole entry delta, pinned with and without a `[n/m] ` batch
+/// prefix (staged / single-commit Runs) so the hang tracks the real subject
+/// prefix rather than a frozen column. Columns are derived from the emitted
+/// subject line itself (char-counted — the ✓ marker is multi-byte, so a
+/// byte offset would overcount), so the asserts stay honest if the prefix
+/// format changes. The commit body is NOT part of the entry (ADR 0018
+/// redesign): exactly two rows — subject + file row. A single file keeps
+/// the footer Σ-less; the Σ-under-✓ anchor is pinned on the preview twin
+/// above and the Σ-row geometry tests below.
 #[test]
-fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
+fn commit_footer_hangs_under_subject_hash_and_carries_delta() {
     for prefix in ["[1/2]", ""] {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with(Buf {
@@ -547,7 +604,6 @@ fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
         d.commit_line(
             "abc1234",
             "feat: add thing",
-            Some("body line"),
             prefix,
             &[FileStats {
                 path: "src/a.rs".into(),
@@ -556,6 +612,8 @@ fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             }],
         );
         let got = lines.lock().clone();
@@ -568,14 +626,18 @@ fn commit_body_and_footer_hang_under_subject_hash_and_tick() {
         let msg_col = cols("feat: add thing");
         let hash_col = cols("abc1234");
         assert_eq!(
-            got[1],
-            format!("{}body line", " ".repeat(msg_col)),
-            "body must hang under the message start (prefix {prefix:?}): {got:?}"
+            got.len(),
+            2,
+            "entry = subject row + file row, no body (prefix {prefix:?}): {got:?}"
+        );
+        assert!(
+            got[0].ends_with("· +1 −0"),
+            "subject carries the text-line delta (prefix {prefix:?}): {got:?}"
         );
         // Counts (`+1`, region 2) anchor at the hash; the gap to the name
         // fills the rest of the hash→message span (uniform across rows).
         assert_eq!(
-            got[2],
+            got[1],
             format!(
                 "{}+1{}src/a.rs",
                 " ".repeat(hash_col),
@@ -603,7 +665,6 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     d.commit_line(
         "0875db3",
         "fix(display): align footer",
-        None,
         "[1/1]",
         &[
             FileStats {
@@ -613,6 +674,8 @@ fn commit_footer_wide_counts_grow_left_not_right() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/render/display/tests.rs".into(),
@@ -621,6 +684,8 @@ fn commit_footer_wide_counts_grow_left_not_right() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
@@ -630,11 +695,11 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     // (16), names pin at 16.
     assert_eq!(
         got[0],
-        "  [1/1] \u{2713} 0875db3 fix(display): align footer"
+        "  [1/1] \u{2713} 0875db3 fix(display): align footer · +152 −84"
     );
     assert_eq!(got[1], "         +64 −51  src/render/display/mod.rs");
     assert_eq!(got[2], "         +88 −33  src/render/display/tests.rs");
-    assert_eq!(got[3], "      Σ +152 −84  (2 files)");
+    assert_eq!(got[3], "      Σ ██████░░░░ +152 −84 · 2 files");
 }
 
 /// The Σ total row hangs under the `✓` marker — exactly `sigma_col` (2)
@@ -651,7 +716,6 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        None,
         "[1/2]",
         &[
             FileStats {
@@ -661,6 +725,8 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
             FileStats {
                 path: "src/b.rs".into(),
@@ -669,6 +735,8 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
                 new: false,
                 removed: false,
                 binary: false,
+                old_size: 0,
+                new_size: 0,
             },
         ],
     );
@@ -677,10 +745,10 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     // 16. Region 5 (`+8 −1` sized): block starts at the hash (8), ends 13,
     // names pin at the message (16) — a 3-col gap — and the Σ glyph hugs
     // the block's left edge at 6, exactly under the ✓.
-    assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing");
+    assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing · +8 −1");
     assert_eq!(got[1], "          +3 −1   src/a.rs");
     assert_eq!(got[2], "          +5      src/b.rs");
-    assert_eq!(got[3], "        Σ +8 −1   (2 files)");
+    assert_eq!(got[3], "        Σ █████████░ +8 −1 · 2 files");
 }
 
 #[test]
@@ -690,38 +758,26 @@ fn plain_when_colors_disabled() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line(
-        "abc1234",
-        "feat: add thing",
-        Some("body line"),
-        "[1/3]",
-        &[],
-    );
+    d.commit_line("abc1234", "feat: add thing", "[1/3]", &[]);
     let got = lines.lock().clone();
     // No ANSI escapes; [n/m] prefix retained (not collapsed to "n.").
     // Type prefix "feat" is present, followed by ": add thing". Subject
-    // carries the 2-col left margin; the body hangs under the subject's
-    // message start — `[1/3] ✓ abc1234 ` = 16 cols past the margin.
+    // carries the 2-col left margin; empty stats → no delta segment, and
+    // the entry is a single row (the body is omitted — ADR 0018 redesign).
+    assert_eq!(got.len(), 1);
     assert_eq!(got[0], "  [1/3] \u{2713} abc1234 feat: add thing");
-    assert_eq!(got[1], "                  body line");
 }
 
 #[test]
 fn truecolor_when_colors_enabled() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line(
-        "abc1234",
-        "feat: add thing",
-        Some("body line"),
-        "[1/3]",
-        &[],
-    );
+    d.commit_line("abc1234", "feat: add thing", "[1/3]", &[]);
     let joined = lines.lock().join("\n");
     // hash #d97706 (bold), feat type green #15803d (bold), description bold
     // default fg, body + prefix muted gray #6b7280.
@@ -751,14 +807,14 @@ fn truecolor_when_colors_enabled() {
 
 #[test]
 fn fix_type_gets_orange_color() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
+    d.commit_line("def5678", "fix(auth): correct token check", "", &[]);
     let joined = lines.lock().join("\n");
     // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
     // readability — see types::NAMED_PALETTE).
@@ -785,7 +841,7 @@ fn scoped_commit_preserves_parens_plain() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", None, "", &[]);
+    d.commit_line("def5678", "fix(auth): correct token check", "", &[]);
     let got = lines.lock().clone();
     // Exact visible text — catches the dropped-paren regression directly.
     // Subject carries a 2-col left margin.
@@ -800,7 +856,7 @@ fn scoped_commit_preserves_parens_plain() {
 /// test only pins the display wiring.
 #[test]
 fn each_type_renders_its_palette_color() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     for (type_str, rgb) in [
         ("feat", "21;128;61"),
@@ -813,7 +869,7 @@ fn each_type_renders_its_palette_color() {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("hash000", &format!("{type_str}: msg"), None, "", &[]);
+        d.commit_line("hash000", &format!("{type_str}: msg"), "", &[]);
         let joined = lines.lock().join("\n");
         assert!(
             joined.contains(rgb),
@@ -828,14 +884,14 @@ fn each_type_renders_its_palette_color() {
 /// read as "uncolored"). Stability/distribution is pinned in `types::tests`.
 #[test]
 fn unrecognized_type_gets_hash_fallback_color() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("ghi9012", "blob: thing in progress", None, "", &[]);
+    d.commit_line("ghi9012", "blob: thing in progress", "", &[]);
     let joined = lines.lock().join("\n");
     assert!(
         !joined.contains("107;114;128"),
@@ -860,14 +916,14 @@ fn unrecognized_type_gets_hash_fallback_color() {
 
 #[test]
 fn no_colon_message_gets_muted_gray() {
-    let _env = COLOR_ENV.lock();
+    let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("jkl3456", "no colon message", None, "", &[]);
+    d.commit_line("jkl3456", "no colon message", "", &[]);
     let joined = lines.lock().join("\n");
     // No-colon messages have no type token to color → muted gray #6b7280
     // (darkened from the old #9ca3af for white-bg readability).
@@ -875,4 +931,97 @@ fn no_colon_message_gets_muted_gray() {
         joined.contains("107;114;128"),
         "no-colon message should be muted gray: {joined:?}"
     );
+}
+
+/// Diff bar cell split (v2, ADR 0018): `add = round(cells · A / T)`, deletes
+/// take the rest; single-sign diffs get the full bar; `T == 0` (all-binary)
+/// and an empty budget return `(0, 0)` — the caller omits the bar.
+#[test]
+fn diff_bar_splits_cells_with_delete_taking_the_remainder() {
+    // 12/(12+3) = 0.8 → 8 add cells (the spec's own worked example).
+    assert_eq!(diff_bar(12, 3, 10), (8, 2));
+    // Single-sign: full bar in one color.
+    assert_eq!(diff_bar(10, 0, 10), (10, 0));
+    assert_eq!(diff_bar(0, 12, 10), (0, 10));
+    // All-binary: no text churn, no bar.
+    assert_eq!(diff_bar(0, 0, 10), (0, 0));
+    // Half-away rounding, delete side takes the remainder — never 11 cells.
+    assert_eq!(diff_bar(1, 1, 10), (5, 5));
+    assert_eq!(diff_bar(1, 3, 10), (3, 7));
+    assert_eq!(diff_bar(2, 1, 9), (6, 3));
+    // Degenerate budget.
+    assert_eq!(diff_bar(5, 5, 0), (0, 0));
+}
+
+/// Byte-size delta formatting (v2, ADR 0018): sign always present (`−` is
+/// U+2212, matching the `−M` counts convention); `< 1024` renders whole
+/// bytes, else one decimal of the fitting KB/MB/GB unit (÷1024 steps).
+#[test]
+fn format_bytes_delta_covers_units_and_signs() {
+    assert_eq!(format_bytes_delta(0, 0), "+0 B");
+    assert_eq!(format_bytes_delta(0, 512), "+512 B");
+    assert_eq!(format_bytes_delta(600, 100), "−500 B");
+    assert_eq!(format_bytes_delta(0, 1024), "+1.0 KB");
+    assert_eq!(format_bytes_delta(0, 12595), "+12.3 KB");
+    assert_eq!(format_bytes_delta(46080, 0), "−45.0 KB");
+    assert_eq!(format_bytes_delta(0, 3 * 1024 * 1024), "+3.0 MB");
+    assert_eq!(format_bytes_delta(5 * 1024 * 1024 * 1024, 0), "−5.0 GB");
+    // New binary → full size (old = 0); deleted → negative of the old size.
+    assert_eq!(format_bytes_delta(0, 200), "+200 B");
+    assert_eq!(format_bytes_delta(200, 0), "−200 B");
+}
+
+/// The Σ bar shrinks before it disappears on narrow terminals (v2, ADR 0018):
+/// a 30-col terminal affords 6 cells, a 26-col one the 4-cell floor, and a
+/// 24-col one drops the bar entirely — the counts and `· N files` scope
+/// never truncate.
+#[test]
+fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
+    let stats = |a: usize| {
+        vec![
+            FileStats {
+                path: "a.rs".into(),
+                added: a,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: false,
+                old_size: 0,
+                new_size: 0,
+            },
+            FileStats {
+                path: "b.rs".into(),
+                added: 0,
+                deleted: 0,
+                new: false,
+                removed: false,
+                binary: true,
+                old_size: 0,
+                new_size: 512,
+            },
+        ]
+    };
+    for (cols, want_bar) in [(30, " ██████ "), (28, " ████ "), (24, " ")] {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let d = Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            cols,
+        );
+        d.emit_file_stats(
+            &stats(10),
+            &SubjectOffsets {
+                tick: 0,
+                hash: 0,
+                message: 2,
+            },
+            d.text_width(),
+        );
+        let got = lines.lock().clone();
+        let sigma = got.last().expect("Σ row present");
+        let want = format!("  Σ{want_bar}+10 −0 · 2 files");
+        assert_eq!(sigma.trim_end(), want, "cols {cols}: {got:?}");
+    }
 }

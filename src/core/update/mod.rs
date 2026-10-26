@@ -68,6 +68,11 @@ pub fn run_update() -> Result<()> {
         return Ok(());
     }
 
+    // The running binary's version, captured before the self-swap — after a
+    // successful `update()` the crate version call still returns the *old*
+    // binary's compile-time constant, but capturing here keeps the old→new
+    // pair honest regardless (ADR 0018 shows `v1.4.2 → v1.4.3`).
+    let old = format!("v{}", cargo_crate_version!());
     let status = self_update::backends::github::Update::configure()
         .repo_owner("CaicoLeung")
         .repo_name("aic")
@@ -77,14 +82,19 @@ pub fn run_update() -> Result<()> {
         .verifying_keys([*ZIPSIGN_PUBLIC_KEY])
         .build()?
         .update()?;
-    match status {
-        self_update::VersionStatus::UpToDate(_) => {
-            println!("Already up to date (v{})", cargo_crate_version!())
-        }
-        self_update::VersionStatus::Updated(v) => println!("Updated to version {v}"),
+    let line = match status {
+        self_update::VersionStatus::UpToDate(_) => format!("Already up to date · {old}"),
+        self_update::VersionStatus::Updated(v) => format!("Updated · {old} → {v}"),
         // `VersionStatus` is `#[non_exhaustive]`; any future variant is reported generically.
-        _ => println!("Update completed (v{})", cargo_crate_version!()),
-    }
+        _ => format!("Update completed · {old}"),
+    };
+    println!(
+        "  {}",
+        crate::render::palette::styled_stdout(
+            &format!("✓ {line}"),
+            crate::render::palette::success()
+        )
+    );
     Ok(())
 }
 

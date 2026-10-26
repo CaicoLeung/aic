@@ -61,11 +61,11 @@ A Commit-confirmation menu action that lets the user modify the full Drafted Mes
 _Avoid_: message tweak, inline edit (overloaded), editor step
 
 **Commit entry**:
-The rendered card for one Batch — either the pending Commit preview (the `?`-marked draft) or the landed ✓ line. Both share the subject styling and the File stats footer; the footer shows the diff as it stands when rendered (staged for the preview, just-committed for the ✓ line), so a pre-commit hook that restages whole files can change the ✓ line's numbers.
+The rendered record for one Batch — the pending Commit preview (the `?`-marked draft) or the landed table row. The landed entry is flushed to permanent scrollback below the live frame (`RunFrame::flush`): the subject line carries the whole batch delta (`[n/m] ✓ hash subject · +A −D`), and the File stats footer stretches to the terminal's real edge. The commit body is omitted from the landed entry — `git log` owns the prose; the preview still shows it in full.
 _Avoid_: commit card, entry, item
 
 **File stats footer**:
-The per-file block under a Commit entry's Drafted Message — in the Commit preview and on the landed ✓ line — listing each file with its `+N`/`−M` line counts, a `[new]`/`[del]` tag for added/deleted files, and a `Σ` total line when more than one file. Counts describe the diff the commit will land (preview) or just landed (✓ line); binary files show `(binary)`.
+The per-file block of a Commit entry — in the Commit preview and on the landed table row — listing each file with its `+N`/`−M` line counts, a `[new]`/`[del]` tag for added/deleted files, and a `Σ` total line when more than one file. Filenames render with the directory muted and the basename emphasized. Counts describe the diff the commit will land (preview) or just landed (entry); binary files show `(binary)`.
 _Avoid_: diff stats, file summary, stats block
 
 
@@ -144,6 +144,22 @@ The module (`src/workflow/resolve/`) that owns the `aic resolve` workflow: `reso
 _Avoid_: resolution module, conflict workflow (the detection/Finalize half lives in the Conflict module)
 
 ### Progress
+
+**Run Step**:
+One user-visible unit of the Run timeline — the row a flow paints for each part of its progress (the commit Run's Scan / Redact / Plan / Review / Draft / Commit; the resolve flow's Detect / Redact / Resolve / Review / Finalize). A Step's on-screen lifecycle is pending → active (streaming its live output beneath its row) → completed (collapsed to one summary line) or failed (marked with the error, which stays). The set of Steps is fixed per flow and all shown from the start; counts and per-Batch sub-rows are revealed as the flow discovers them.
+_Avoid_: phase, stage (overloaded — see Batch staging), progress
+
+**Run timeline**:
+The upfront Step list a flow paints before doing any work and keeps updating in place until it ends. The whole timeline stays in the scrollback when the flow ends; Commit entries land under their Step. Both the commit Run and the resolve flow paint one; which one appears is decided by the Conflict gate before anything is drawn.
+_Avoid_: step list, task list, progress panel
+
+**Diff bar**:
+The proportional +/− block on a Commit entry's Σ line — a short run of cells colored by the Palette's `added`/`removed` roles in proportion to the entry's added/removed line counts. Aggregates text lines only; binary files never feed the bar (their per-file row shows a byte-size change instead).
+_Avoid_: ratio bar, stats bar, diff meter
+
+**Neon mode**:
+The Palette's dark-terminal variant set: when the OSC 11 probe reports a dark background, every truecolor palette entry switches to a brighter variant clearing WCAG AA Normal (4.5:1) on dark. Classic dual-theme tables remain the fallback for light themes, pipes, `NO_COLOR`, and unresponsive terminals.
+_Avoid_: dark theme, dark mode (overloaded)
 
 **Palette**:
 The module (`src/render/palette/`) where every color decision lives: the WCAG-guarded named/fallback palettes keyed by Commit Type (`CommitType::color_for` is defined here, next to the data), the single-source neutral-gray/commit-id/sigma accessors, and the terminal-16 role functions (`success`, `pending`, `caution`, `added`, `removed`, `hint`, …) that replaced ~30 ad-hoc `Style::new()` chains across the commit panel and resolve UI. Renderers call roles, never hand-roll styles.

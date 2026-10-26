@@ -47,7 +47,11 @@ pub fn run_setup() -> Result<()> {
         Some(config) => {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
-            println!("\n{ICON_CHECK} Saved to {}\n", path.display());
+            println!(
+                "\n  {} Saved to {}\n",
+                crate::render::palette::styled_stdout("✓", crate::render::palette::success()),
+                path.display()
+            );
             Ok(())
         }
         None => {
@@ -73,30 +77,26 @@ fn show_screen(section: &str) -> Result<()> {
 }
 
 // Glyphs that visually distinguish each setup item across the menus. Each
-// appears at the start of its menu row so items are scannable at a glance
-// (AIC-15). Nerd Font icons (nf-md-*) written as escapes with their names,
-// so the source stays legible without a patched font. Deliberate trade:
-// they need a Nerd Font-patched terminal and render as tofu without one —
-// emoji were rejected because their VS16 forms go tofu or double-wide in
-// CJK-ambiguous terminals, and plain ASCII read as noise.
-const ICON_PROVIDER: &str = "\u{f167a}"; // nf-md-robot_outline
-const ICON_API_KEY: &str = "\u{f0306}"; // nf-md-key
-const ICON_BASE_URL: &str = "\u{f059f}"; // nf-md-web
-const ICON_MODEL: &str = "\u{f09d1}"; // nf-md-brain
-const ICON_CONFIRM: &str = "\u{f014c}"; // nf-md-clipboard_outline
-const ICON_SAVE: &str = "\u{f0193}"; // nf-md-content_save
-const ICON_VERIFY: &str = "\u{f1616}"; // nf-md-connection
-const ICON_DONE: &str = "\u{f004d}"; // nf-md-arrow_left
-const ICON_CLI: &str = "\u{f018d}"; // nf-md-console
-const ICON_BACKEND: &str = "\u{f0a1a}"; // nf-md-toggle_switch_outline
-const ICON_SELECT: &str = "\u{f0142}"; // nf-md-chevron_right — "pick this" row marker
+// appears at the start of its menu row so items are scannable at a glance.
+// Marker vocabulary fixed by ADR 0018: a muted `·` section bullet for menu
+// rows, ✓/✗/⚠ for outcome rows — plain Unicode, no Nerd Font required.
+const ICON_PROVIDER: &str = "·";
+const ICON_API_KEY: &str = "·";
+const ICON_BASE_URL: &str = "·";
+const ICON_MODEL: &str = "·";
+const ICON_CONFIRM: &str = "·";
+const ICON_SAVE: &str = "·";
+const ICON_VERIFY: &str = "·";
+const ICON_DONE: &str = "·";
+const ICON_CLI: &str = "·";
+const ICON_BACKEND: &str = "·";
+const ICON_SELECT: &str = "·"; // "pick this" row marker
 
-// Status markers for verify outcomes and the save line — same Nerd Font
-// family, same trade.
-const ICON_CHECK: &str = "\u{f05e1}"; // nf-md-check_circle_outline
-const ICON_CROSS: &str = "\u{f1398}"; // nf-md-close_thick
-const ICON_ALERT: &str = "\u{f0026}"; // nf-md-alert
-const ICON_PENCIL: &str = "\u{f0cb6}"; // nf-md-pencil_outline
+// Status markers for verify outcomes and the save line — same glyph family.
+const ICON_CHECK: &str = "✓";
+const ICON_CROSS: &str = "✗";
+const ICON_ALERT: &str = "⚠";
+const ICON_PENCIL: &str = "·";
 
 /// Per-step outcome for the setup state machine.
 #[derive(PartialEq)]
@@ -357,12 +357,12 @@ fn provider_label(draft: &Draft) -> String {
     }
 }
 /// Menu-row label for an opt-in toggle (both workflow gates default off):
-/// "yes" only when explicitly on.
+/// `on` only when explicitly on (ADR 0018 toggle wording).
 fn yes_no(value: Option<bool>) -> String {
     if value.unwrap_or(false) {
-        "yes".to_string()
+        "on".to_string()
     } else {
-        "no".to_string()
+        "off".to_string()
     }
 }
 
@@ -471,7 +471,7 @@ fn step_toggle(
     set: fn(&mut Draft, bool),
 ) -> Result<bool> {
     show_screen(screen)?;
-    let items = vec![format!("{ICON_CHECK} yes"), format!("{ICON_CROSS} no")];
+    let items = vec!["on".to_string(), "off".to_string()];
     let default_idx = usize::from(!initial);
     match opt_nav(prompt, &items, default_idx)? {
         OptNav::Value(0) => {

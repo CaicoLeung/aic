@@ -144,34 +144,17 @@ pub(crate) fn undo_run(
         anyhow::bail!("the last aic run made no commits — nothing to undo (stale state cleared)");
     }
 
-    let scope = if after > 0 {
-        format!(
-            "{} {} will be reset — {} {} from the run, {} {} made after it —",
-            run + after,
-            commits(run + after),
-            run,
-            commits(run),
-            after,
-            commits(after),
-        )
-    } else if tip.is_some() {
-        // Uniform "will be reset" sidesteps the is/are plural split.
-        format!("{} {} from the run will be reset", run, commits(run))
-    } else {
-        // No tip anchor (a Run from before tip tracking, or a crash between
-        // start and first commit): the split is unavailable, so say so
-        // instead of mislabeling everything as the Run's own.
-        format!(
-            "{} {} since the run started will be reset (run tip unknown — may \
-             include commits made after it) —",
-            run,
-            commits(run),
-        )
-    };
-    let approved = prompt(&format!(
-        "undo this aic run? {scope} and all their changes return to the working tree \
-         unstaged (anything currently staged also becomes unstaged)",
-    ))?;
+    println!(
+        "  {}",
+        crate::render::palette::styled_stdout("· aic run found", crate::render::palette::muted())
+    );
+    for row in scope_rows(run, after, tip.is_some()) {
+        println!(
+            "    {}",
+            crate::render::palette::styled_stdout(&row, crate::render::palette::muted())
+        );
+    }
+    let approved = prompt("undo this aic run?")?;
     if !approved {
         anyhow::bail!("aborted — nothing was changed");
     }
@@ -179,8 +162,62 @@ pub(crate) fn undo_run(
     git.reset_mixed(&start)
         .with_context(|| "failed to reset back to the last aic run's start")?;
     clear_state(git).with_context(|| "undone, but the undo state files could not be removed")?;
-    println!("undone — run reset; all its changes are back in the working tree, unstaged");
+    println!(
+        "  {}",
+        crate::render::palette::styled_stdout(
+            &format!(
+                "✓ undone — HEAD reset to {} · {} {} dropped",
+                &start[..7],
+                run + after,
+                commits(run + after),
+            ),
+            crate::render::palette::success()
+        )
+    );
     Ok(())
+}
+
+/// The undo scope-disclosure rows (ADR 0018): what the reset would strip,
+/// one fact per row, printed as muted detail under the `· aic run found`
+/// line. Pure so tests can assert the exact disclosure without a prompt.
+/// `tip_known` distinguishes "N commits from the run" from the no-tip
+/// unknown-split case (see [`undo_run`]).
+pub(crate) fn scope_rows(run: usize, after: usize, tip_known: bool) -> Vec<String> {
+    let mut rows = Vec::new();
+    if after > 0 {
+        rows.push(format!(
+            "{} {} will be reset — {} {} from the run, {} {} made after it",
+            run + after,
+            commits(run + after),
+            run,
+            commits(run),
+            after,
+            commits(after),
+        ));
+    } else if tip_known {
+        // Uniform "will be reset" sidesteps the is/are plural split.
+        rows.push(format!(
+            "{} {} from the run will be reset",
+            run,
+            commits(run)
+        ));
+    } else {
+        // No tip anchor (a Run from before tip tracking, or a crash between
+        // start and first commit): the split is unavailable, so say so
+        // instead of mislabeling everything as the Run's own.
+        rows.push(format!(
+            "{} {} since the run started will be reset (run tip unknown — may \
+             include commits made after it)",
+            run,
+            commits(run),
+        ));
+    }
+    rows.push(
+        "all their changes return to the working tree unstaged (anything currently \
+         staged also becomes unstaged)"
+            .to_string(),
+    );
+    rows
 }
 
 /// Remove both undo state files after a successful undo (or a stale,

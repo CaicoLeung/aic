@@ -745,16 +745,18 @@ pub(crate) fn resolve_base_url(
     }
 }
 
-/// Pure: the lines `aic list` prints for a loaded config, by resolved backend.
-/// Tested without IO so the CLI-backend branch — which re-resolves the
-/// args/timeout with source tracking — is covered, not just the API path that
-/// goes through [`ResolvedConfig`] (cf. [`apply_use`] for the same split).
-fn list_lines(config: Option<&Config>) -> Result<Vec<String>> {
+/// Pure: the (key, value) rows `aic list` prints for a loaded config, by
+/// resolved backend. `run_list` renders them with the margin-2 aligned key
+/// column (ADR 0018). Tested without IO so the CLI-backend branch —
+/// which re-resolves the args/timeout with source tracking — is covered, not
+/// just the API path that goes through [`ResolvedConfig`] (cf. [`apply_use`]
+/// for the same split).
+fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
     let kind = config
         .map(|c| c.resolve_backend())
         .transpose()?
         .unwrap_or(BackendKind::Api);
-    let mut lines = vec![format!("Backend:  {}", kind.display_name())];
+    let mut lines = vec![("Backend".to_string(), kind.display_name().to_string())];
     match kind {
         BackendKind::Cli => {
             // resolve_backend guarantees a command is set for the CLI backend.
@@ -762,7 +764,10 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<String>> {
             let command = c
                 .active_cli_command()
                 .expect("cli backend implies command set");
-            lines.push(format!("Command:  {command} (source: {})", Source::Config));
+            lines.push((
+                "Command".to_string(),
+                format!("{command} (source: {})", Source::Config),
+            ));
             let (args, args_src) = match &c.cli.args {
                 Some(a) => (a.join(" "), Source::Config),
                 None => (
@@ -770,40 +775,49 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<String>> {
                     Source::Default,
                 ),
             };
-            lines.push(format!("Args:     {args} (source: {args_src})"));
+            lines.push(("Args".to_string(), format!("{args} (source: {args_src})")));
             let (timeout, to_src) = match c.cli.timeout_secs {
                 Some(t) => (t, Source::Config),
                 None => (crate::llm::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
             };
-            lines.push(format!("Timeout:  {timeout}s (source: {to_src})"));
+            lines.push((
+                "Timeout".to_string(),
+                format!("{timeout}s (source: {to_src})"),
+            ));
         }
         BackendKind::Api => {
             let resolved = ResolvedConfig::resolve(config);
-            lines.push(format!(
-                "Provider: {} (source: {})",
-                resolved.backend, resolved.backend_source
+            lines.push((
+                "Provider".to_string(),
+                format!("{} (source: {})", resolved.backend, resolved.backend_source),
             ));
-            lines.push(format!(
-                "Model:    {} (source: {})",
-                resolved.model, resolved.model_source
+            lines.push((
+                "Model".to_string(),
+                format!("{} (source: {})", resolved.model, resolved.model_source),
             ));
-            lines.push(format!(
-                "API key:  {} (source: {})",
-                resolved.mask_api_key(),
-                resolved.api_key_source
+            lines.push((
+                "API key".to_string(),
+                format!(
+                    "{} (source: {})",
+                    resolved.mask_api_key(),
+                    resolved.api_key_source
+                ),
             ));
-            lines.push(format!(
-                "Base URL: {} (source: {})",
-                resolved.base_url.as_deref().unwrap_or("(none)"),
-                resolved.base_url_source
+            lines.push((
+                "Base URL".to_string(),
+                format!(
+                    "{} (source: {})",
+                    resolved.base_url.as_deref().unwrap_or("(none)"),
+                    resolved.base_url_source
+                ),
             ));
             let saved: Vec<&str> = config
                 .map(|c| c.providers.iter().map(|p| p.backend.as_str()).collect())
                 .unwrap_or_default();
             if !saved.is_empty() {
-                lines.push(format!(
-                    "Saved:   {} (switch with `aic use <name>`)",
-                    saved.join(", ")
+                lines.push((
+                    "Saved".to_string(),
+                    format!("{} (switch with `aic use <name>`)", saved.join(", ")),
                 ));
             }
         }
@@ -811,12 +825,23 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-/// `aic list` — print the resolved configuration. A thin load → format → print
-/// shell over [`list_lines`]; all presentation lives there.
+/// `aic list` — print the resolved configuration as the one-shot table
+/// (ADR 0018): margin 2, the key column muted and aligned to the
+/// widest key plus a 2-space gap, values default fg, wording unchanged.
 pub fn run_list() -> Result<()> {
     let config = Config::load()?;
-    for line in list_lines(config.as_ref())? {
-        println!("{line}");
+    let rows = list_lines(config.as_ref())?;
+    let width = rows
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (key, value) in rows {
+        let pad = " ".repeat(width - key.chars().count() + 2);
+        println!(
+            "  {}{pad}{value}",
+            crate::render::palette::styled_stdout(&key, crate::render::palette::muted())
+        );
     }
     Ok(())
 }
@@ -911,7 +936,7 @@ fn use_messages(config: &Config) -> (String, Option<String>) {
                 .cli
                 .active_command()
                 .expect("apply_use's preset arm always sets a command");
-            (format!("Switched to CLI agent {command}."), None)
+            (format!("Switched to CLI agent {command}"), None)
         }
         _ => {
             let normalized = config
@@ -925,11 +950,11 @@ fn use_messages(config: &Config) -> (String, Option<String>) {
                 .unwrap_or(false);
             let note = (!had_key).then(|| {
                 format!(
-                    "note: {normalized} has no saved API key — run `aic setup` to add one if \
-                     it's needed"
+                    "{normalized} has no saved API key — run `aic setup` to add one if it's \
+                     needed"
                 )
             });
-            (format!("Switched to {normalized}."), note)
+            (format!("Switched to {normalized}"), note)
         }
     }
 }
@@ -954,9 +979,18 @@ pub fn run_use(name: &str) -> Result<()> {
 
     let (line, note) = use_messages(&config);
     config.save()?;
-    println!("{line}");
+    println!(
+        "  {}",
+        crate::render::palette::styled_stdout(
+            &format!("✓ {line}"),
+            crate::render::palette::success()
+        )
+    );
     if let Some(note) = note {
-        eprintln!("{note}");
+        eprintln!(
+            "  {}",
+            crate::render::palette::styled_stderr(&note, crate::render::palette::muted())
+        );
     }
     Ok(())
 }

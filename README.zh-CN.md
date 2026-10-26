@@ -8,7 +8,7 @@ aic 把你杂乱的工作区变成一串干净的原子化 commit —— 由你�
 
 [![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml) [![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
-![aic 把一个文件的改动拆成原子提交](https://vhs.charm.sh/vhs-2lPY6yY1uBpk7fWCgd7ypH.gif)
+![aic 把一个文件的改动拆成原子提交](https://vhs.charm.sh/vhs-5fKEk2PDlX5rhYUkrODXSt.gif)
 
 *无需 stage、无需 `git add -p` —— 一个文件里的三处无关改动，变成三个干净的原子 commit。*
 
@@ -89,7 +89,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 
 ## 解决 merge 冲突
 
-![aic resolve 提出解决方案并完成 merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
+![aic resolve 提出解决方案并完成 merge](https://vhs.charm.sh/vhs-61qCzie4DkiLFb7i8CQXYJ.gif)
 
 *merge 冲突中，`aic resolve` 逐文件提出不含 marker 的解决方案 —— 你审核 diff、逐个确认，它来完成 merge。*
 

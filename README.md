@@ -8,7 +8,7 @@ aic turns your messy working tree into a series of clean, atomic commits — pow
 
 [![CI](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/ci.yml) [![Release](https://github.com/CaicoLeung/aic/actions/workflows/release.yml/badge.svg)](https://github.com/CaicoLeung/aic/actions/workflows/release.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](./CHANGELOG.md)
 
-![aic splits one file's changes into atomic commits](https://vhs.charm.sh/vhs-2lPY6yY1uBpk7fWCgd7ypH.gif)
+![aic splits one file's changes into atomic commits](https://vhs.charm.sh/vhs-5fKEk2PDlX5rhYUkrODXSt.gif)
 
 *Nothing staged, no `git add -p` — three unrelated edits in one file become three clean commits.*
 
@@ -89,7 +89,7 @@ Full reference: [supported providers](#supported-providers) · [CLI-agent preset
 
 ## Resolving merge conflicts
 
-![aic resolve proposes resolutions and finalizes the merge](https://vhs.charm.sh/vhs-7qCGKxgjJXzbXVdwa5bmx2.gif)
+![aic resolve proposes resolutions and finalizes the merge](https://vhs.charm.sh/vhs-61qCzie4DkiLFb7i8CQXYJ.gif)
 
 *Mid-merge, `aic resolve` proposes a marker-free resolution per conflicted file — you review the diff, approve each, and it finalizes the merge.*
 

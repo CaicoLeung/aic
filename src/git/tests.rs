@@ -699,6 +699,36 @@ fn staged_and_committed_stats_match_the_landed_diff() {
     assert_eq!(landed, staged, "preview and landed footers must agree");
 }
 
+/// `workdir_stats` counts only unstaged churn (index → workdir): a staged
+/// edit contributes nothing, a later unstaged edit on top does, and an
+/// untracked file counts as new. The Scan summary's `+A −D` must describe
+/// the work the Run is about to plan, not the whole status.
+#[test]
+fn workdir_stats_counts_unstaged_churn_only() {
+    let dir = tempfile::tempdir().unwrap();
+    init_test_repo(dir.path());
+    let git = Git::at(dir.path()).unwrap();
+
+    // Stage an edit to the seeded tracked file, then edit it again in the
+    // workdir and add a fresh untracked file.
+    std::fs::write(dir.path().join("tracked.txt"), "staged\n").unwrap();
+    git.add(&["tracked.txt"]).unwrap();
+    std::fs::write(dir.path().join("tracked.txt"), "staged\nplus\n").unwrap();
+    std::fs::write(dir.path().join("new.txt"), "a\nb\n").unwrap();
+
+    let paths = vec!["tracked.txt".to_string(), "new.txt".to_string()];
+    let stats = git.workdir_stats(&paths).unwrap();
+    assert_eq!(stats.len(), 2, "one delta per path: {stats:?}");
+    assert_eq!(stats[0].path, "tracked.txt");
+    assert_eq!(stats[0].added, 1, "only the unstaged `plus` line");
+    assert_eq!(stats[0].deleted, 0);
+    assert!(!stats[0].new);
+    assert_eq!(stats[1].path, "new.txt");
+    assert_eq!(stats[1].added, 2);
+    assert_eq!(stats[1].deleted, 0);
+    assert!(stats[1].new, "untracked file is new");
+}
+
 /// `committed_stats` on a root commit (no parent) diffs against the empty
 /// tree — the `parent_count() == 0` branch. After `init_test_repo`, HEAD
 /// is exactly such a root commit, seeded with `tracked.txt`.

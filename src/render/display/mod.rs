@@ -4,6 +4,8 @@
 //! [`crate::git::conflict`] next to its domain, rendering through this module's
 //! `styled`/`emit` primitives so both surfaces share one seam and one margin.
 
+use std::sync::Arc;
+
 use console::{Style, Term};
 
 use crate::git::FileStats;
@@ -55,7 +57,7 @@ pub trait DisplayWrite: Send + Sync {
 /// Write errors are intentionally ignored: this is fire-and-forget
 /// status output to stderr (e.g. a closed pipe), never load-bearing.
 pub struct Display {
-    out: Box<dyn DisplayWrite>,
+    out: Arc<dyn DisplayWrite>,
     colors: bool,
     /// Terminal width in columns. Read once from the sink's terminal in
     /// [`Display::new`]; injected by tests via [`Display::with_cols`]. A value
@@ -112,18 +114,31 @@ impl Display {
         Self::with_cols(out, FALLBACK_COLS)
     }
 
-    /// Injectable constructor with an explicit terminal column count. Used by
-    /// tests to drive wrap behavior deterministically without probing the real
-    /// terminal; prod keeps [`Display::new`]. `cols == 0` is treated as
+    /// Injectable constructor with an explicit terminal column count. Used
+    /// by tests to drive wrap behavior deterministically without probing the
+    /// real terminal, and by the timeline driver as the frame-capture
+    /// constructor (its rows must wrap to the frame's width, not the probed
+    /// terminal's); prod keeps [`Display::new`]. `cols == 0` is treated as
     /// "unknown" and resolved to [`FALLBACK_COLS`] inside [`Display::text_width`].
-    /// Private: only the two prod constructors above and the inline test module
-    /// call it, and both reach private items — no reason to widen the API.
-    fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
+    pub(crate) fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
         let colors = out.colors_enabled();
         Self {
-            out: Box::new(out),
+            out: Arc::new(out),
             colors,
             cols,
+        }
+    }
+
+    /// A second [`Display`] sharing this one's sink — same bytes, same
+    /// colors, same width. The Run timeline driver (ADR 0018) hands these
+    /// out so step-scoped output (commit entries, previews, warnings) lands
+    /// in the same place as the run's own lines, whether the sink is the
+    /// real stderr or a test buffer.
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            out: Arc::clone(&self.out),
+            colors: self.colors,
+            cols: self.cols,
         }
     }
 
@@ -177,64 +192,78 @@ impl Display {
         resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
     }
 
+    /// Full terminal-width budget for the Commit entry table (ADR 0018
+    /// redesign): unlike [`Self::text_width`] the 100-column prose cap does
+    /// NOT apply — the Σ Diff bar and the file-name column stretch to the
+    /// terminal's real edge. Rows built to this budget never wrap when
+    /// flushed below the frame: `emit` adds the 2-col margin on top of it,
+    /// leaving [`RIGHT_MARGIN`] slack.
+    fn table_width(&self) -> usize {
+        let cols = if self.cols == 0 {
+            FALLBACK_COLS
+        } else {
+            self.cols
+        };
+        cols.saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
+    }
+
     // ------------------------------------------------------------------
     // Public rendering entry points
     // ------------------------------------------------------------------
 
-    /// Commit-completion line — shown after each commit.
+    /// Commit entry table row (ADR 0018 redesign) — one row per landed
+    /// batch, flushed to permanent scrollback below the Run timeline frame.
     ///
     /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
     /// pass `""` for single-commit or staged workflows.
     ///
-    /// Layout (ADR: commit-line readability): the whole block is inset by
-    /// [`LEFT_MARGIN`] so it isn't flush with the terminal edge. The subject
-    /// is a single title line and is **never wrapped** (overflow preferable to
-    /// truncation/re-flow). The body hangs to the column where the subject's
-    /// message text starts (see [`Self::subject_offsets`]); the file-stats
+    /// Layout: the subject line is a single full-width title row —
+    /// `[prefix] ✓ <hash> <styled subject> · +A −D` — never wrapped
+    /// (overflow preferable to truncation/re-flow), carrying the batch's
+    /// whole text-line delta. The commit **body is omitted**: `git log`
+    /// owns the prose; the pre-commit preview ([`Self::commit_preview`])
+    /// still shows it in full before the commit lands. The file-stats
     /// footer hangs shallower — file rows under the commit ID, the Σ total
-    /// under the `✓` marker — so the footer reads as keyed to the ref line
-    /// while the body reads as the message's own continuation. Blank body
-    /// lines stay blank.
-    ///
-    /// `stats` render as the file-stats footer ([`Display::emit_file_stats`]) —
-    /// the landed twin of the preview's footer, so the confirmed draft and the
-    /// completed line show the same file information.
-    pub fn commit_line(
-        &self,
-        hash: &str,
-        message: &str,
-        body: Option<&str>,
-        prefix: &str,
-        stats: &[FileStats],
-    ) {
-        // Muted gray for prefix/body/scope — read from the single-source
-        // palette so it can't drift from the WCAG-guarded value.
+    /// under the `✓` marker — so the footer reads as keyed to the ref
+    /// line. `stats` render on the full [`Self::table_width`] budget.
+    pub fn commit_line(&self, hash: &str, message: &str, prefix: &str, stats: &[FileStats]) {
+        // Muted gray for prefix — read from the single-source palette so it
+        // can't drift from the WCAG-guarded value.
         let gray = neutral_gray();
 
-        // Main line: [prefix] ✓ <hash> <message>
+        // Main line: [prefix] ✓ <hash> <message> · +A −D — one full-width
+        // table row per landed batch (ADR 0018 redesign). The body is
+        // deliberately omitted: `git log` owns the prose, the entry owns the
+        // delta. Commit ID: amber #d97706, bold so the short token qualifies
+        // as WCAG AA Large (3:1) on both themes.
         let check = self.styled("\u{2713}", palette::success());
-        // Commit ID: amber #d97706, bold so the short token qualifies as WCAG
-        // AA Large (3:1) on both themes — the old #f3b340 read at ~1.9:1 on
-        // white. Bold is also the right visual weight for a ref.
         let hash_styled = self.styled(hash, commit_id_color().bold());
         let pre = if prefix.is_empty() {
             String::new()
         } else {
             format!("{} ", self.styled(prefix, gray.clone()))
         };
-        // Subject: margin only, never wrapped (title line).
+        let total_added: usize = stats.iter().map(|s| s.added).sum();
+        let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
+        let delta = if total_added + total_deleted > 0 {
+            format!(
+                " {} {} {}",
+                self.styled("·", gray.clone()),
+                self.styled(&format!("+{total_added}"), palette::added()),
+                self.styled(&format!("−{total_deleted}"), palette::removed())
+            )
+        } else {
+            String::new()
+        };
         self.emit(&format!(
-            "{pre}{check} {hash_styled} {}",
+            "{pre}{check} {hash_styled} {}{delta}",
             self.styled_subject(message)
         ));
 
-        // Body hangs under the message start; footer block anchors at the
-        // hash with names pinned to the message start.
+        // File rows + Σ anchor at the hash with names pinned to the message
+        // start, on the full-width table budget.
         let subject = Self::subject_offsets(prefix, hash);
-        if let Some(b) = body {
-            self.emit_body(b, subject.message);
-        }
-        self.emit_file_stats(stats, &subject);
+        self.emit_file_stats(stats, &subject, self.table_width());
     }
 
     /// Subject-prefix geometry, as [`SubjectOffsets`]: with no prefix
@@ -344,14 +373,20 @@ impl Display {
     /// wide, hugging the block's left edge). A zero per-file count renders
     /// as a blank column (`git diff --stat` never shows zeros); the Σ total
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
-    /// `−M`, muted filenames, a green-bold `[new]` / red-bold `[del]` tag,
-    /// and a bold-cyan `Σ +X −Y` total row when more than one file. Binary
-    /// files render `(binary)` right-aligned in the counts region, which
-    /// widens to fit the label when any shown file is binary; a binary file
-    /// that is new or removed keeps its `[new]`/`[del]` tag.
+    /// `−M`, muted directories with emphasized basenames, a green-bold `[new]` / red-bold `[del]` tag,
+    /// and a bold-cyan `Σ <bar> +X −Y · N files` total row when more than one
+    /// file (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
+    /// deletion cells over text line counts only, shrinking then omitted on
+    /// narrow terminals). Binary files render `(binary) <byte-delta>`
+    /// right-aligned in the counts region, which widens to fit the widest
+    /// such label when any shown file is binary; a binary file that is new
+    /// or removed keeps its `[new]`/`[del]` tag.
     ///
     /// Glyph colors follow [`Display::review_section`]'s diff-line convention
-    /// (`+` green, `-` red); filenames use [`neutral_gray`] like body text.
+    /// (`+` green, `-` red); directories use [`neutral_gray`] like body text
+    /// while basenames take `emphasis` (ADR 0018 redesign). The caller's
+    /// `width` is the row budget: full terminal width for landed Commit
+    /// entries, the 100-column prose cap for the in-frame preview.
     /// Widths use the codebase's char-count model (same as [`wrap_line`]), so
     /// the grid holds exactly for ASCII paths and approximately for CJK ones.
     /// Column widths come from the shown files only. A filename wider than
@@ -361,7 +396,12 @@ impl Display {
     /// matching [`wrap_line`]'s `width == 0` convention. The
     /// [`FILE_STATS_CAP`] bounds height. Returns the rows emitted, for the
     /// preview's erase accounting.
-    fn emit_file_stats(&self, stats: &[FileStats], subject: &SubjectOffsets) -> usize {
+    fn emit_file_stats(
+        &self,
+        stats: &[FileStats],
+        subject: &SubjectOffsets,
+        width: usize,
+    ) -> usize {
         if stats.is_empty() {
             return 0;
         }
@@ -431,20 +471,24 @@ impl Display {
         } else {
             0
         };
-        // The counts region must also fit the `(binary)` label when any shown
-        // file is binary — otherwise `(binary)` (8 chars) overflows a narrower
-        // region and the binary rows drift out of line with the Σ total row.
-        // The extra width becomes leading pad (`lead`) on the text rows and
-        // the Σ row, so all three row kinds — text file, binary file, Σ total
-        // — occupy the same `counts_region` and the filename column lands at
-        // one column across every row.
-        let binary_label = "(binary)".chars().count();
-        let base_region = plus_width + sep + minus_width;
-        let counts_region = if shown_stats.iter().any(|s| s.binary) {
-            base_region.max(binary_label)
-        } else {
-            base_region
+        // Binary rows carry the byte-size delta label `(binary) +12.3 KB`
+        // (Commit entry v2, ADR 0018) — the counts region widens to the
+        // widest binary label and the lead pad keeps the name column
+        // aligned across text, binary, and Σ rows.
+        let binary_label = |s: &FileStats| {
+            if s.binary {
+                format!("(binary) {}", format_bytes_delta(s.old_size, s.new_size))
+            } else {
+                String::new()
+            }
         };
+        let base_region = plus_width + sep + minus_width;
+        let counts_region = shown_stats
+            .iter()
+            .map(|s| binary_label(s).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(base_region);
         let lead = " ".repeat(counts_region - base_region);
         // Fixed 2-column gutter between the counts block and the names.
         let name_gap: usize = 2;
@@ -473,7 +517,7 @@ impl Display {
         } else {
             0
         };
-        let name_cap = self.text_width().saturating_sub(name_col + tag_col);
+        let name_cap = width.saturating_sub(name_col + tag_col);
         let align = name_cap > 0;
         let name_width = if align {
             shown_stats
@@ -518,11 +562,19 @@ impl Display {
             // at zero (git's own summary line does), and the width math
             // already sizes to the totals, so geometry is unchanged.
             let counts = if s.binary {
-                let pad = counts_region - binary_label;
+                let label = binary_label(s);
+                let pad = counts_region - label.chars().count();
+                let delta = format_bytes_delta(s.old_size, s.new_size);
+                let delta_style = if delta.starts_with('−') {
+                    red.clone()
+                } else {
+                    green.clone()
+                };
                 format!(
-                    "{}{}",
+                    "{}{} {}",
                     " ".repeat(pad),
-                    self.styled("(binary)", gray.clone())
+                    self.styled("(binary)", gray.clone()),
+                    self.styled(&delta, delta_style)
                 )
             } else {
                 let plus = if s.added > 0 {
@@ -538,12 +590,25 @@ impl Display {
                 format!("{lead}{}", fmt_columns(&plus, &minus))
             };
             // Name column: truncated with `…` when wider than the cap,
-            // padded to the grid width otherwise.
+            // padded to the grid width otherwise. Coloring (ADR 0018
+            // redesign): the directory stays muted gray while the basename
+            // takes `emphasis` — the eye finds the file, the path stays
+            // quiet. Truncation first, coloring after, so the `…` rides the
+            // basename's style; colors-off renders the same plain text as
+            // before.
             let mut name = s.path.clone();
             if align && name.chars().count() > name_width {
                 let keep = name_width.saturating_sub(1);
                 name = format!("{}…", name.chars().take(keep).collect::<String>());
             }
+            let styled_name = match name.rfind('/') {
+                Some(i) => format!(
+                    "{}{}",
+                    self.styled(&name[..=i], gray.clone()),
+                    self.styled(&name[i + 1..], palette::emphasis())
+                ),
+                None => self.styled(&name, palette::emphasis()),
+            };
             let name_pad = name_width.saturating_sub(name.chars().count());
             let tag = if s.new {
                 self.styled(" [new]", new_tag.clone())
@@ -556,8 +621,7 @@ impl Display {
             // plain spaces, so it is safe with ANSI styling enabled too.
             self.emit(
                 format!(
-                    "{start_pad}{counts}{gap}{}{}{}",
-                    self.styled(&name, gray.clone()),
+                    "{start_pad}{counts}{gap}{styled_name}{}{}",
                     " ".repeat(name_pad),
                     tag
                 )
@@ -580,26 +644,54 @@ impl Display {
         if stats.len() > 1 {
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
-            // `Σ` sits in its own column (padded to the column width, like
-            // the file rows' blank) in cyan-600 — harmonizing with the green
-            // `+N` additions while staying distinct from the red `−M`; the
-            // totals right-align into the same `+N` / `−M` columns above.
-            let sigma_text = format!(
-                "{}{}",
-                self.styled("Σ", sigma_color().bold()),
-                " ".repeat(sigma_cell.saturating_sub(1)),
-            );
+            // Commit entry v2 (ADR 0018): the Σ row is its own shape —
+            // `Σ <bar> +A −D · N files` — with the Diff bar between the
+            // glyph and the counts, so the totals no longer column-align
+            // under the per-file counts (accepted by the spec). `Σ` stays in
+            // cyan-600 bold, harmonizing with the green `+N` additions while
+            // staying distinct from the red `−M`.
+            let scope = format!("· {} files", stats.len());
+            // The bar spends 10 cells when the text width affords it,
+            // shrinks first (floor 4 cells — narrow terminals), then is
+            // omitted; the counts never truncate. Binary files contribute 0
+            // to the text-line totals, so they never skew the ratio; an
+            // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
+            const BAR_CELLS: usize = 10;
+            const MIN_BAR_CELLS: usize = 4;
+            let fixed = sigma_cell
+                + plus.chars().count()
+                + 1
+                + minus.chars().count()
+                + 1
+                + scope.chars().count();
+            let budget = width.saturating_sub(fixed + 2);
+            let cells = BAR_CELLS.min(budget);
+            let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
+                diff_bar(total_added, total_deleted, cells)
+            } else {
+                (0, 0)
+            };
+            let bar = if add_cells + del_cells > 0 {
+                format!(
+                    " {}{}",
+                    self.styled(&"█".repeat(add_cells), green.clone()),
+                    self.styled(&"░".repeat(del_cells), red.clone())
+                )
+            } else {
+                String::new()
+            };
             let sigma_pad = " ".repeat(start.saturating_sub(sigma_cell));
             self.emit(&format!(
-                "{sigma_pad}{sigma_text}{lead}{}{gap}{}",
-                fmt_columns(&plus, &minus),
-                self.styled(&format!("({} files)", stats.len()), gray.clone()),
+                "{sigma_pad}{}{bar} {} {} {}",
+                self.styled("Σ", sigma_color().bold()),
+                self.styled(&plus, green.clone()),
+                self.styled(&minus, red.clone()),
+                self.styled(&scope, gray.clone()),
             ));
             rows += 1;
         }
         rows
     }
-
     /// Pre-commit confirmation preview (issue #78): the exact message that
     /// would be committed, framed as *pending* so it can't be mistaken for the
     /// ✓ lines of already-landed batches — a yellow `?` marker on the header
@@ -642,7 +734,7 @@ impl Display {
         if let Some(b) = body {
             rows += self.emit_body(b, PREVIEW_OFFSETS.message);
         }
-        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS);
+        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS, self.text_width());
         self.emit_blank();
         rows + 1
     }
@@ -700,6 +792,48 @@ struct SubjectOffsets {
     /// Column of the subject's message text — the body hang and the
     /// footer's name pin.
     message: usize,
+}
+
+/// The Diff bar cell split (Commit entry v2, ADR 0018): `add_cells =
+/// round(cells · A / T)` over **text line counts only** (callers pass text
+/// totals; binary churn never feeds the bar), `T = A + D`. `T == 0`
+/// (all-binary) returns `(0, 0)` — the caller omits the bar. A single-sign
+/// diff returns the full bar in one color. Rounding can never overflow the
+/// budget: the delete side takes whatever is left. Pure.
+fn diff_bar(added: usize, deleted: usize, cells: usize) -> (usize, usize) {
+    let total = added + deleted;
+    if total == 0 || cells == 0 {
+        return (0, 0);
+    }
+    let add = ((added as f64 / total as f64) * cells as f64).round() as usize;
+    let add = add.min(cells);
+    (add, cells - add)
+}
+
+/// Format a blob-size delta for a binary per-file row (ADR 0018): sign
+/// always present (`+`/`−` — U+2212, matching the `−M` counts convention);
+/// `< 1024` renders whole bytes (`+512 B`), else one decimal of the fitting
+/// KB/MB/GB unit (÷1024 steps). Pure, byte-exact-testable.
+fn format_bytes_delta(old: u64, new: u64) -> String {
+    let delta = new as i64 - old as i64;
+    let sign = if delta < 0 { '−' } else { '+' };
+    let abs = delta.unsigned_abs();
+    let body = if abs < 1024 {
+        format!("{abs} B")
+    } else {
+        let kb = abs as f64 / 1024.0;
+        if kb < 1024.0 {
+            format!("{kb:.1} KB")
+        } else {
+            let mb = kb / 1024.0;
+            if mb < 1024.0 {
+                format!("{mb:.1} MB")
+            } else {
+                format!("{:.1} GB", mb / 1024.0)
+            }
+        }
+    };
+    format!("{sign}{body}")
 }
 
 #[cfg(test)]

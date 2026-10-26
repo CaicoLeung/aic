@@ -62,14 +62,6 @@ pub(crate) const LOADING_GRACE: Duration = Duration::from_secs(5);
 // spinner feels sluggish to restart after a stall.
 pub(crate) const ACTIVE_THRESHOLD: Duration = Duration::from_millis(150);
 
-/// Per-row stagger of the dissolution at [`ReasoningRenderer::finish`]: each
-/// row is erased one tick apart so the block visibly *dissolves* row-by-row
-/// (oldest last, bottom-up) rather than blinking out wholesale. Total dissolve
-/// ≈ `rows × DISSOLVE_STEP`, bounded because the row cap is bounded.
-// ponytail: visual tuning — raise for a slower, more legible dissolve, lower
-// if it drags the end of a fast commit.
-const DISSOLVE_STEP: Duration = Duration::from_millis(70);
-
 /// Shared indicatif spinner style: a braille tick and a prefix matching
 /// [`MARGIN`] so the spinner glyph sits at the same 2-column inset as the rest
 /// of the run's stderr block — not flush against the edge. One place to
@@ -95,49 +87,6 @@ where
     pb.disable_steady_tick();
     pb.finish_and_clear();
     result
-}
-
-/// Run N concurrent futures, each behind its own bar on one shared
-/// [`indicatif::MultiProgress`], labeled `[i/N] {label}`. Unlike N standalone
-/// [`with_spinner`] calls — whose independent [`indicatif::ProgressBar`]s
-/// collide on a single terminal line (only one clears, the rest leave residue)
-/// — a `MultiProgress` gives each bar its own row and clears it on completion,
-/// so concurrent drafts render cleanly. Futures are polled `concurrency` at a
-/// time via order-preserving `buffered`, keeping call order (and the test
-/// messengers' per-call counters) deterministic. The outer `Result` is a setup
-/// failure (a malformed style); each inner `Result` is one future's outcome.
-pub(crate) async fn with_indexed_spinners<T>(
-    label: &str,
-    concurrency: usize,
-    futs: impl IntoIterator<Item = crate::core::types::BoxFuture<anyhow::Result<T>>>,
-) -> anyhow::Result<Vec<anyhow::Result<T>>>
-where
-    T: Send + 'static,
-{
-    use futures::stream::{self, StreamExt};
-    let futs: Vec<crate::core::types::BoxFuture<anyhow::Result<T>>> = futs.into_iter().collect();
-    let count = futs.len();
-    let mp = indicatif::MultiProgress::new();
-    let style = spinner_style()?;
-    let tracked: Vec<crate::core::types::BoxFuture<anyhow::Result<T>>> = futs
-        .into_iter()
-        .enumerate()
-        .map(
-            |(i, fut)| -> crate::core::types::BoxFuture<anyhow::Result<T>> {
-                let bar = mp.add(indicatif::ProgressBar::new_spinner());
-                bar.set_style(style.clone());
-                bar.set_message(format!("[{}/{}] {label}", i + 1, count));
-                bar.enable_steady_tick(SPINNER_TICK);
-                Box::pin(async move {
-                    let r = fut.await;
-                    bar.disable_steady_tick();
-                    bar.finish_and_clear();
-                    r
-                })
-            },
-        )
-        .collect();
-    Ok(stream::iter(tracked).buffered(concurrency).collect().await)
 }
 
 /// A rolling window over the model's streamed reasoning, sized to the caller's
@@ -382,7 +331,14 @@ const SHOW: &str = "\x1b[?25h"; // DECSET — show cursor
 /// [`ReasoningRenderer::finish`] restores it ([`SHOW`]). Mid-stream repaints
 /// emit neither — the caret stays hidden, so where it sits during the traversal
 /// is irrelevant and can never smear across the repainted rows.
-fn frame_bytes(
+///
+/// ADR 0018 generalizes this from "the reasoning window" to "the live
+/// frame": the whole visible stack — timeline rows above the active step's
+/// live window — repaints through this same function as the bottom-most
+/// region. The mechanics are unchanged (it has always been pure over an
+/// arbitrary row vector); it is `pub` so the stage-2 timeline driver paints
+/// whole-stack frames with this exact byte contract.
+pub fn frame_bytes(
     rows: &[String],
     prev_height: usize,
     start_row: Option<usize>,
@@ -478,7 +434,11 @@ fn frame_bytes(
 /// a zero-row frame that still hid the cursor restores it; a frame that was
 /// never painted (`cursor_hidden == false`) owes nothing. No leading [`HIDE`]:
 /// the caret is already hidden, so the clear traversal can't smear it.
-fn clear_frame_bytes(prev_height: usize, cursor_hidden: bool) -> String {
+///
+/// ADR 0018: this is also the one-frame erase for any live block replaced
+/// by a completed summary (reasoning window, draft sub-rows, menus) — `pub`
+/// alongside [`frame_bytes`] for the stage-2 timeline driver.
+pub fn clear_frame_bytes(prev_height: usize, cursor_hidden: bool) -> String {
     let mut out = String::new();
     // Clear the current (bottom) row, ascend, repeat — ending on the top row.
     for i in 0..prev_height {
@@ -664,45 +624,19 @@ impl ReasoningRenderer {
         self.active = true;
     }
 
-    /// End the reasoning stream by **dissolving** the frame one row at a time,
-    /// each erased [`DISSOLVE_STEP`] apart, so the block visibly retreats
-    /// row-by-row instead of blinking out wholesale — the "linger then exit
-    /// one-by-one" close. The erase runs bottom-up (matching the terminal's
-    /// scroll direction) and, like the old one-shot clear, ends on the frame's
-    /// top row — exactly where the first frame began — so the cursor is
-    /// restored to the prompt's line and the next stderr output continues with
-    /// no gap above or below. Idempotent.
-    ///
-    /// The staggered waits are decoration at the *end* of analysis (the stream
-    /// is already complete), replacing the old fixed read-tail hold-then-erase:
-    /// the dissolve itself is the readability window. An *aborted* stream takes
-    /// the fast path in [`Drop`] instead, never blocking on decoration.
+    /// End the reasoning stream by erasing the frame in ONE frame — the
+    /// single [`clear_frame_bytes`] byte string, no per-row sleeps (ADR 0018
+    /// deleted the old 70 ms/row dissolve: it cost `rows × 70 ms` of dead
+    /// time at the exact moment the user waits for the next output). The
+    /// erase is bottom-up, ending on the frame's top row — exactly where the
+    /// first frame began — so the cursor is restored to the prompt's line and
+    /// the next stderr output continues with no gap. Idempotent: a no-op
+    /// (`active == false`) when nothing was painted.
     fn finish(&mut self) {
         if !self.active {
             return;
         }
-        let n = self.prev_height;
-        for i in 0..n {
-            // Erase the lowest remaining row, flush so it shows, then ascend to
-            // the next — ending on the top row after n-1 ascents.
-            let mut buf = String::from("\r");
-            buf.push_str(CLR_LINE);
-            let _ = self.term.write_str(&buf);
-            let _ = self.term.flush();
-            if i + 1 < n {
-                let _ = self.term.write_str(UP);
-                let _ = self.term.flush();
-                std::thread::sleep(DISSOLVE_STEP);
-            }
-        }
-        if self.cursor_hidden {
-            let _ = self.term.write_str(SHOW);
-            let _ = self.term.flush();
-        }
-        self.prev_rows.clear();
-        self.prev_height = 0;
-        self.active = false;
-        self.cursor_hidden = false;
+        self.erase_frame();
     }
 
     /// Fast wholesale erase — the [`Drop`] backstop for a stream that aborted

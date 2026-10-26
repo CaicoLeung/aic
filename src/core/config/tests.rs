@@ -440,7 +440,7 @@ fn apply_use_preset_match_is_case_insensitive() {
 fn use_messages_cli_arm_names_agent_and_skips_api_key_note() {
     let out = super::apply_use(cfg("openai", Some("sk"), None, None), "claude").unwrap();
     let (line, note) = super::use_messages(&out);
-    assert_eq!(line, "Switched to CLI agent claude.");
+    assert_eq!(line, "Switched to CLI agent claude");
     assert!(note.is_none(), "CLI arm must not print the API-key note");
 }
 
@@ -457,7 +457,7 @@ fn use_messages_provider_arm_notes_only_a_missing_key() {
     ));
     let out = super::apply_use(keyed, "anthropic").unwrap();
     let (line, note) = super::use_messages(&out);
-    assert_eq!(line, "Switched to anthropic.");
+    assert_eq!(line, "Switched to anthropic");
     assert!(note.is_none());
 
     let mut keyless = cfg("openai", Some("sk"), None, None);
@@ -466,7 +466,7 @@ fn use_messages_provider_arm_notes_only_a_missing_key() {
         .push(ProviderProfile::new("anthropic", None, None, None));
     let out = super::apply_use(keyless, "anthropic").unwrap();
     let (line, note) = super::use_messages(&out);
-    assert_eq!(line, "Switched to anthropic.");
+    assert_eq!(line, "Switched to anthropic");
     let note = note.expect("keyless profile must produce the note");
     assert!(note.contains("no saved API key"), "got: {note}");
 }
@@ -504,22 +504,23 @@ fn run_use_provider_without_config_errors() {
 #[test]
 fn list_lines_api_branch_shows_resolved_provider() {
     let c = cfg("openai", Some("sk-live-key"), Some("gpt-4o"), None);
-    let lines = super::list_lines(Some(&c)).unwrap();
-    assert_eq!(lines[0], "Backend:  API provider");
+    let rows = super::list_lines(Some(&c)).unwrap();
+    assert_eq!(rows[0], ("Backend".into(), "API provider".into()));
     assert!(
-        lines.iter().any(|l| l.contains("Provider: openai")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Provider" && v.starts_with("openai ")),
+        "got {rows:?}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("Model:    gpt-4o")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Model" && v.starts_with("gpt-4o ")),
+        "got {rows:?}"
     );
     // mask_api_key: first 3 … last 3 of an 11-char key.
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("API key:") && l.contains("sk-...key")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "API key" && v.contains("sk-...key")),
+        "got {rows:?}"
     );
 }
 
@@ -535,36 +536,33 @@ fn list_lines_cli_branch_resolves_defaults_with_source() {
         },
         ..Default::default()
     };
-    let lines = super::list_lines(Some(&c)).unwrap();
-    assert_eq!(lines[0], "Backend:  CLI agent");
+    let rows = super::list_lines(Some(&c)).unwrap();
+    assert_eq!(rows[0], ("Backend".into(), "CLI agent".into()));
     assert!(
-        lines
-            .iter()
-            .any(|l| l == "Command:  claude (source: config)"),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Command" && v == "claude (source: config)"),
+        "got {rows:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("Args:") && l.contains("source: default")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Args" && v.contains("source: default")),
+        "got {rows:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("Timeout:") && l.contains("source: default")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Timeout" && v.contains("source: default")),
+        "got {rows:?}"
     );
 }
 
 #[test]
 fn list_lines_no_config_defaults_to_api_backend() {
     // No config file at all ⇒ Api backend, every resolved value default-sourced.
-    let lines = super::list_lines(None).unwrap();
-    assert_eq!(lines[0], "Backend:  API provider");
+    let rows = super::list_lines(None).unwrap();
+    assert_eq!(rows[0], ("Backend".into(), "API provider".into()));
     assert!(
-        lines.iter().all(|l| !l.contains("source: config")),
-        "nothing config-sourced: {lines:?}"
+        rows.iter().all(|(_, v)| !v.contains("source: config")),
+        "nothing config-sourced: {rows:?}"
     );
 }
 

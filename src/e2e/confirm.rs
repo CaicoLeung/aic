@@ -615,7 +615,7 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
     );
     assert!(
         lines.iter().any(|l| {
-            l.contains("Σ") && l.contains("+2") && l.contains("−2") && l.contains("(2 files)")
+            l.contains("Σ") && l.contains("+2") && l.contains("−2") && l.contains("· 2 files")
         }),
         "multi-file landed commit must show the Σ total row, got: {lines:?}"
     );

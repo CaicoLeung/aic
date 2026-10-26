@@ -471,3 +471,67 @@ fn thinking_view_partial_enters_at_running_fence_state() {
         .collect();
     assert_eq!(kinds, vec![LineKind::CodeFence, LineKind::Code]);
 }
+
+/// ADR 0018's whole-stack repaint: a frame of timeline rows above live-window
+/// rows — 8 rows total, prev frame 7 — repaints through the same
+/// interleaved clear-then-write sequence as the reasoning window alone: UP
+/// preamble to the drifted top, then per row `\r` + CLR_LINE + write with
+/// DOWN between, the new 8th row descended into, and the cursor parked on
+/// the bottom row. Pinning the full bytes guarantees the generalization
+/// didn't change the engine's contract.
+#[test]
+fn frame_bytes_repaints_whole_stack_of_timeline_and_window_rows() {
+    let rows: Vec<String> = vec![
+        "  ✓ Scanned 14 files".into(),
+        "  ✓ Redaction gate · clean".into(),
+        "  ⠋ Plan batches".into(),
+        "    │ ## Splitting decode changes".into(),
+        "    │ The hunk at line 40 shares context with…".into(),
+        String::new(),
+        "  · Draft messages".into(),
+        "  · Commit batches".into(),
+    ];
+    let (bytes, end_row) = frame_bytes(&rows, 7, None, 24);
+    let mut want = String::new();
+    for _ in 0..6 {
+        want.push_str(UP);
+    }
+    for (i, r) in rows.iter().enumerate() {
+        want.push('\r');
+        want.push_str(CLR_LINE);
+        want.push_str(r);
+        if i + 1 < rows.len() {
+            want.push_str(DOWN);
+        }
+    }
+    assert_eq!(bytes, want);
+    assert_eq!(end_row, None);
+}
+
+/// ADR 0018's end-of-thinking contract: the erase after a whole-stack frame
+/// is the single one-frame `clear_frame_bytes` traversal — bottom-up clears
+/// ending on the (drifted) frame top, cursor restored — and the erase byte
+/// string contains no `\n` (an unreclaimable scroll) and, being pure byte
+/// assembly, no sleeps can exist between its rows.
+#[test]
+fn whole_stack_erase_is_one_frame_clear_ending_at_drifted_top() {
+    // A stack that scrolled: the frame grew to 9 rows painted from row 10 of
+    // a 12-row terminal, so scrolls drifted its top upward.
+    let rows: Vec<String> = (0..9).map(|i| format!("row {i}")).collect();
+    let (_bytes, end_row) = frame_bytes(&rows, 8, Some(12), 12);
+    assert_eq!(end_row, Some(12), "cursor parks on the bottom margin");
+    let erase = clear_frame_bytes(9, true);
+    // The paint reports the cursor's row itself (bottom margin, 12); the
+    // erase must then walk up `rows - 1` rows and land on the frame's
+    // DRIFTED top (4 — one scroll shifted it up from 5), not the row the
+    // paint started from.
+    assert_eq!(end_row, Some(12));
+    let ups = erase.matches(UP).count();
+    assert_eq!(
+        12usize.saturating_sub(ups),
+        4,
+        "erase must end on the drifted frame top"
+    );
+    assert!(!erase.contains('\n'), "erase must never scroll");
+    assert!(erase.ends_with(SHOW), "hidden cursor must be restored");
+}

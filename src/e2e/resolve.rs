@@ -752,6 +752,31 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
         "buffer sink must emit plain text (no ANSI), got: {:?}",
         buf.lines()
     );
+
+    // --- ledger (ADR 0018): the timeline ends at Review when anything
+    // blocked finalize — no `✓ Finalized` line — and the Review summary
+    // carries the applied/rejected split; the two skip kinds ride as
+    // durable caution rows under Review. ---
+    let lines = buf.lines();
+    let step = |prefix: &str| lines.iter().any(|l| l.starts_with(prefix));
+    assert!(
+        step("  ✓ Reviewed 2 files · 1 applied · 1 rejected"),
+        "review counts only files that reached it (the LLM failure never did): {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.starts_with("  ✓ Finalized")),
+        "a blocked finalize must not complete a Finalize step: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("skipped: binary.bin")),
+        "the structural skip is a caution row: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("skipped: third.txt — LLM error")),
+        "the LLM failure is a caution row: {lines:?}"
+    );
 }
 
 /// A conflicted file whose content holds a secret-shaped token (AWS key ID)
@@ -834,4 +859,189 @@ async fn resolve_no_redact_proceeds_past_the_gate() {
     );
     assert!(is_clean(dir.path()), "merge must be finalized");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
+}
+
+// ----------------------------------------------------------------------
+// Resolve timeline ledger (ADR 0018) — mirrors e2e/timeline.rs: the buffer
+// sink is non-TTY, so the steps append plain `✓` lines as they complete and
+// the failed screens append `✗` headlines with their detail rows (§2.9).
+// ----------------------------------------------------------------------
+
+/// The happy-path ledger: one `✓` line per step in skeleton order — Detect,
+/// Redaction Gate, Resolve, Review, Finalize — with today's per-file verdict
+/// row (`resolved + staged:`) still interleaved. `starts_with` because a slow
+/// machine can push a step over the 1 s duration threshold (`· Xs`).
+#[tokio::test]
+async fn resolve_appends_the_step_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+
+    let buf = BufferWrite::default();
+    let git = Git::at(dir.path()).unwrap();
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver_returning("merged\n"),
+            prompt: prompt_queue(vec![true]),
+            display: Display::with(buf.clone()),
+            redact: Redact::On,
+        },
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    let lines = buf.lines();
+    let step = |prefix: &str| lines.iter().any(|l| l.starts_with(prefix));
+    assert!(step("  ✓ Detected 1 conflict"), "{lines:?}");
+    assert!(step("  ✓ Redaction gate · clean"), "{lines:?}");
+    assert!(step("  ✓ Resolved 1 of 1"), "{lines:?}");
+    assert!(step("  ✓ Reviewed 1 file · 1 applied"), "{lines:?}");
+    assert!(step("  ✓ Finalized merge commit"), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("resolved + staged: tracked.txt")),
+        "the verdict row records the worktree mutation: {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.contains('✗')),
+        "the happy path never prints a failed screen: {lines:?}"
+    );
+}
+
+/// `Redact::Off` (`aic resolve --no-redact`): the gate step is absent from
+/// the skeleton and the ledger — no "Redaction gate" line at all (the
+/// resolve sibling of `no_redact_run_has_no_gate_step`).
+#[tokio::test]
+async fn resolve_no_redact_omits_the_gate_step() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+
+    let buf = BufferWrite::default();
+    let git = Git::at(dir.path()).unwrap();
+    let result = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver_returning("merged\n"),
+            prompt: prompt_queue(vec![true]),
+            display: Display::with(buf.clone()),
+            redact: Redact::Off,
+        },
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    let lines = buf.lines();
+    assert!(
+        lines.iter().all(|l| !l.contains("Redaction gate")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  ✓ Finalized merge commit")),
+        "{lines:?}"
+    );
+}
+
+/// A redaction refusal is the gate step's failed screen (ADR 0018): the `✗`
+/// headline names the gate, the detail rows carry the refusal (file + pattern
+/// kind), and no later step's ledger line appears — the timeline stops there.
+#[tokio::test]
+async fn resolve_redaction_refusal_shapes_the_failed_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+    std::fs::write(
+        dir.path().join("tracked.txt"),
+        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
+    )
+    .unwrap();
+
+    let buf = BufferWrite::default();
+    let git = Git::at(dir.path()).unwrap();
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: unreachable_resolver(),
+            prompt: prompt_queue(vec![]),
+            display: Display::with(buf.clone()),
+            redact: Redact::On,
+        },
+    )
+    .await
+    .expect_err("the gate must refuse the secret");
+
+    let lines = buf.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  ✗ Redaction gate — secret-like content detected")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("tracked.txt") && l.contains("AWS access key ID")),
+        "the refusal detail must name the file and pattern: {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.starts_with("  ✓ Resolve files")),
+        "later steps never complete after a failure: {lines:?}"
+    );
+    assert!(
+        format!("{err:#}").contains("secret-shaped"),
+        "the propagated error keeps its information: {err:#}"
+    );
+}
+
+/// Persistent markers fail the Resolve step's screen (ADR 0018): the
+/// headline names the step, the skipped file rides as a detail row with its
+/// truthful reason, and the remediation row follows. The Review/Finalize
+/// ledger lines never appear.
+#[tokio::test]
+async fn resolve_failed_resolution_shapes_the_failed_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    merge_conflict(dir.path());
+
+    let buf = BufferWrite::default();
+    let git = Git::at(dir.path()).unwrap();
+    let err = resolve_run(
+        &git,
+        ResolveDeps {
+            resolve: resolver_always_markers().0,
+            prompt: prompt_queue(vec![]),
+            display: Display::with(buf.clone()),
+            redact: Redact::On,
+        },
+    )
+    .await
+    .expect_err("persistent markers must bail");
+
+    let lines = buf.lines();
+    // The failed step keeps its *live* label (ADR 0018) — the resolve loop
+    // had already advanced the cursor to `Resolving files · 1 of 1`.
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  ✗ Resolving files · 1 of 1 — no files could be resolved")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("skipped: tracked.txt — markers remain after retry")),
+        "the skip reason must be the durable detail row: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("resolve the conflicts manually")),
+        "the remediation hint follows the error: {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.starts_with("  ✓ Reviewed")),
+        "later steps never complete after a failure: {lines:?}"
+    );
+    assert!(
+        format!("{err:#}").contains("no files could be resolved"),
+        "the bail keeps its wording: {err:#}"
+    );
 }
