@@ -241,10 +241,13 @@ impl RunFrame {
     /// Complete step `i` with `summary`: its live output (sub-rows, preview,
     /// reasoning window, already-landed entries) collapses to the `✓` line in
     /// one frame — except rows emitted while it was active, which persist as
-    /// its durable block (spec §2.1). Off a terminal this appends the plain
-    /// ledger line through `display` instead.
+    /// its durable block (spec §2.1). The plain ledger line is emitted ONLY
+    /// off a terminal: on a TTY the frame already shows the summary in place,
+    /// and printing it again below the frame would both duplicate the line
+    /// and push the cursor out from under the painter's `prev_rows` geometry,
+    /// desyncing every later whole-frame repaint.
     pub fn complete(&self, display: &Display, i: usize, summary: impl Into<String>) {
-        let lines = {
+        let (lines, ledger) = {
             let mut st = self.0.lock().unwrap();
             let duration = st.step_elapsed(i);
             // A step with draft sub-rows owns its live rows wholly (the
@@ -263,28 +266,41 @@ impl RunFrame {
                 step.durable_rows = live;
             }
             st.repaint();
-            plain_step_lines(&st.steps[i])
+            (
+                plain_step_lines(&st.steps[i]),
+                st.paint.is_none(), // ledger only off a terminal
+            )
         };
-        for line in lines {
-            display.emit(&line);
+        if ledger {
+            for line in lines {
+                display.emit(&line);
+            }
         }
     }
 
     /// Fail step `i`: `✗` headline + detail rows persist; every later step
     /// is absent from the frame (spec §2.9). Off a terminal the headline and
-    /// details append to the ledger. Nothing erases on failure.
+    /// details append to the ledger; on a terminal the frame shows them in
+    /// place (a second emit below the frame would duplicate the block and
+    /// desync the repaint geometry — see [`Self::complete`]). Nothing erases
+    /// on failure.
     pub fn fail(&self, display: &Display, i: usize, failure: Failure) {
-        let lines = {
+        let (lines, ledger) = {
             let mut st = self.0.lock().unwrap();
             st.steps[i].state = StepState::Failed;
             st.steps[i].failure = Some(failure);
             st.steps[i].live_rows.clear();
             st.steps[i].active_elapsed = None;
             st.repaint();
-            plain_step_lines(&st.steps[i])
+            (
+                plain_step_lines(&st.steps[i]),
+                st.paint.is_none(), // ledger only off a terminal
+            )
         };
-        for line in lines {
-            display.emit(&line);
+        if ledger {
+            for line in lines {
+                display.emit(&line);
+            }
         }
     }
 
