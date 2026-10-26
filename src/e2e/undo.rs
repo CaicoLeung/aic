@@ -216,7 +216,7 @@ async fn undo_prompt_discloses_commits_made_after_the_run() {
     .unwrap();
 
     let label = seen.into_inner();
-    // The ask row is the short spec §4.4 label; the scope facts print as
+    // The ask row is the short ADR 0018 label; the scope facts print as
     // muted detail rows above it (asserted via the pure fn).
     assert_eq!(label, "undo this aic run?");
     let rows = undo::scope_rows(2, 1, true);

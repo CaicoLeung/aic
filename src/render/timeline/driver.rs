@@ -1,18 +1,18 @@
-//! The Run timeline frame driver (ADR 0018 §2, design spec §2.10): the stateful
-//! half that sits on top of the pure [`timeline`](super) builders.
+//! The Run timeline frame driver (ADR 0018): the stateful half that sits
+//! on top of the pure [`timeline`](super) builders.
 //!
 //! One [`RunFrame`] owns the whole visible stack — the Step rows plus the
 //! active step's live output — and repaints it as the bottom-most region via
 //! the generalized [`frame_bytes`](crate::render::progress) painter: a 50 ms
 //! tick while any step is active, plus an immediate repaint on every state
-//! change (spec §1.4). Completed step lines are immutable, so rows that scroll
+//! change (ADR 0018). Completed step lines are immutable, so rows that scroll
 //! off the top into scrollback freeze permanently — correct, because they
 //! never change again. The final frame stays in the scrollback; nothing erases
 //! at the end of the Run (or on failure).
 //!
 //! Off a terminal (piped stderr, tests) there is **no frame**: the driver
 //! still tracks step state — sub-row accounting, durations, menu-time
-//! exclusion — but its only output is the non-TTY *ledger* (spec §5): each
+//! exclusion — but its only output is the non-TTY *ledger* (ADR 0018): each
 //! step appends its plain `✓` summary (or `✗` headline + details) through the
 //! Run's [`Display`] as it completes. Panels (Commit entries, warnings) print
 //! via their owners exactly as before, which is what the e2e Buffer harness
@@ -78,7 +78,7 @@ impl Drop for FrameGuard {
     }
 }
 
-/// Braille frames for the active step marker (spec §1.1) — the same 10-glyph
+/// Braille frames for the active step marker (ADR 0018) — the same 10-glyph
 /// set the reasoning spinner uses, advanced once per tick.
 const GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -89,12 +89,12 @@ struct FrameState {
     /// Per-step start instant (set on activate) for the live elapsed counter
     /// and the completion duration.
     starts: Vec<Option<Instant>>,
-    /// Per-step draft sub-row slots (spec §2.6): `subs[step][i-1]` holds
+    /// Per-step draft sub-row slots (ADR 0018): `subs[step][i-1]` holds
     /// sub-row `i` of `total`, `None` until the draft starts. The active
     /// step's live rows are the compacted non-`None` slots, so sub-rows are
     /// revealed as drafts start and all vanish together at completion.
     subs: Vec<Vec<Option<String>>>,
-    /// When a menu is open, the clock stops (spec §1.4: durations cover LLM /
+    /// When a menu is open, the clock stops (ADR 0018: durations cover LLM /
     /// git work only, not wall time spent sitting at a prompt).
     menu_pause: Option<Instant>,
     /// Menu wall time already excluded from the active step's elapsed.
@@ -454,7 +454,7 @@ impl RunFrame {
     }
 
     /// Suspend the frame for a full-screen takeover (the message editor,
-    /// spec §1.4): one-frame erase, cursor restored. [`Self::resume`]
+    /// ADR 0018): one-frame erase, cursor restored. [`Self::resume`]
     /// repaints the whole frame afterwards.
     pub fn suspend(&self) {
         let mut st = self.0.lock().unwrap();
@@ -474,7 +474,7 @@ impl RunFrame {
         st.repaint();
     }
 
-    /// Stop the clock while a menu is open (spec §1.4: durations cover LLM /
+    /// Stop the clock while a menu is open (ADR 0018: durations cover LLM /
     /// git work, not prompt time).
     pub fn menu_open(&self) {
         let mut st = self.0.lock().unwrap();

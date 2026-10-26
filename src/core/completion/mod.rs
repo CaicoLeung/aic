@@ -187,7 +187,7 @@ pub(crate) fn install_completion_impl(
 }
 
 /// Installs `shell`'s completion to its conventional location and prints the
-/// one-shot result (design spec §4.4): a `✓` result line naming the shell
+/// one-shot result (ADR 0018): a `✓` result line naming the shell
 /// with the install path as a muted detail row beneath, plus any follow-up
 /// the user needs.
 pub fn install_completion(shell: Shell) -> anyhow::Result<()> {

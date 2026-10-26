@@ -157,7 +157,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             return Ok(());
         }
 
-        // Step skeleton (spec §2.3): Scan, the Redaction Gate (iff `--no-redact`
+        // Step skeleton (ADR 0018): Scan, the Redaction Gate (iff `--no-redact`
         // did not turn it off), Plan, Review (iff configured), Draft, Commit.
         let redact_on = redact == Redact::On;
         let review_on = matches!(review, BatchReview::Interactive { .. });
@@ -275,7 +275,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // work lands in exactly one batch), so issue #34's silent no-op
         // cannot recur — real work always yields ≥1 batch. The re-validation
         // is defensive only. The summary reads "Grouped" on this fallback
-        // path (spec §2.4) and the caution row rides right under it.
+        // path (ADR 0018) and the caution row rides right under it.
         let mut fallback_err: Option<String> = None;
         let mut result = match generator::validate_batch_plan(&result, &file_hunk_counts) {
             Ok(()) => result,
@@ -322,7 +322,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // rewrites bytes — irrelevant to a commit message — and the
         // confirmation Re-generate action still redrafts against the staged
         // diff. Each concurrent draft reveals its own `[i/N]` sub-row as it
-        // starts and flips it to a `✓` on finish (spec §2.6); all sub-rows
+        // starts and flips it to a `✓` on finish (ADR 0018); all sub-rows
         // erase together at step completion. Order-preserving `buffered`
         // keeps the messenger's call order (and the test messengers'
         // per-call counters) deterministic. The fixed MAX_CONCURRENT_DRAFTS
@@ -423,7 +423,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 // commit path's "no commit made". Other failures keep the
                 // underlying cause in the message. Either way the step's
                 // failed screen names the batch and the remediation rows
-                // carry the recovery contract (spec §2.9).
+                // carry the recovery contract (ADR 0018).
                 if e.downcast_ref::<CommitDeclined>().is_some() {
                     frame.fail(
                         &display,
@@ -469,7 +469,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         );
     } else {
         let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        // Step skeleton (spec §2.3): the staged branch's three steps (four
+        // Step skeleton (ADR 0018): the staged branch's three steps (four
         // with the gate) — no plan or review; the user did the partitioning.
         let redact_on = redact == Redact::On;
         let mut labels: Vec<String> = vec!["Scan changes".into()];
@@ -621,7 +621,7 @@ async fn generate_and_commit(
     // staged diff — then the commit. Staged stats (what the commit would land)
     // feed the preview footer — shown only when confirmation is on; landed
     // stats (what it did land) always feed the ✓ line. `display` is the
-    // frame's step display (spec §2.7): on a terminal the preview, the
+    // frame's step display (ADR 0018): on a terminal the preview, the
     // confirmation menu, and the staging warning ride the active step's live
     // rows, while the Commit entry flushes to permanent scrollback (see
     // [`RunFrame::flush`]); off a terminal it is the Run's own sink.
@@ -716,7 +716,7 @@ pub(crate) async fn default_run(
 /// Run an LLM call behind the live reasoning feed. On a terminal with a Run
 /// frame on screen the feed is the frame's [`FrameReasoningSink`] — the
 /// window rides the Plan step's live rows, its height budgeted against the
-/// whole frame (spec §2.4); otherwise the standalone probe-and-paint
+/// whole frame (ADR 0018); otherwise the standalone probe-and-paint
 /// [`progress::ReasoningRenderer`] path, as before the timeline.
 async fn run_with_reasoning_feed<F, T>(
     label: &'static str,
@@ -755,7 +755,7 @@ where
     reasoning_feed::run(&mut sink, sizing.max_rows, cold_start.as_deref(), make_call).await
 }
 
-/// The reasoning feed as the frame's Plan-step live rows (spec §2.4): the
+/// The reasoning feed as the frame's Plan-step live rows (ADR 0018): the
 /// window's rows replace the step's live output on every paint, and the
 /// spinner + elapsed ride the step's own label (animated by the frame's
 /// ticker), so only the window content repaints as reasoning streams. The

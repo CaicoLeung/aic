@@ -1,6 +1,6 @@
 //! Run timeline e2e (ADR 0018): the non-TTY ledger each flow appends through
-//! the Run's Display as its steps complete (spec §5), plus the failed-screen
-//! shape (spec §2.9). Every test here drives the real `commit_run` against a
+//! the Run's Display as its steps complete (ADR 0018), plus the failed-screen
+//! shape (ADR 0018). Every test here drives the real `commit_run` against a
 //! scratch git repo with stub LLM seams — the same harness as the other e2e
 //! modules, asserting on the captured buffer.
 

@@ -52,7 +52,7 @@ fn step_line_failed_joins_reason_after_em_dash() {
         detail: vec![],
     });
     assert_eq!(
-        step_line(&s, W, &THEME),
+        step_line(&s, &THEME),
         "  ✗ Commit batches — failed on batch 2 of 3"
     );
 }
@@ -158,7 +158,7 @@ fn timeline_frame_failed_step_hides_all_later_steps() {
 }
 
 /// Durable rows persist under a completed step's summary and keep one blank
-/// row after the block before the next step line (spec §1.3/§2.7) — but no
+/// row after the block before the next step line (ADR 0018) — but no
 /// trailing blank when the block ends the frame.
 #[test]
 fn timeline_frame_durable_block_gets_one_blank_before_next_step() {
@@ -267,7 +267,7 @@ fn menu_rows_cursor_marks_selected_option() {
 }
 
 /// The Batch Review menu: `?` ask headline, `#i` listing rows, then the
-/// options menu — cursor index addresses the assembled rows (spec §2.5).
+/// options menu — cursor index addresses the assembled rows (ADR 0018).
 #[test]
 fn review_menu_rows_compose_ask_listing_and_menu() {
     let entries = vec![
@@ -334,7 +334,7 @@ fn plain_step_lines_print_only_completed_and_failed() {
     );
 }
 
-/// Height budget (spec §2.4): min of the window cap and the terminal's spare
+/// Height budget (ADR 0018): min of the window cap and the terminal's spare
 /// rows; below 3 rows the window is suppressed (0).
 #[test]
 fn window_height_budget_caps_and_suppresses_below_three() {

@@ -71,7 +71,7 @@ pub fn run_update() -> Result<()> {
     // The running binary's version, captured before the self-swap — after a
     // successful `update()` the crate version call still returns the *old*
     // binary's compile-time constant, but capturing here keeps the old→new
-    // pair honest regardless (spec §4.4 shows `v1.4.2 → v1.4.3`).
+    // pair honest regardless (ADR 0018 shows `v1.4.2 → v1.4.3`).
     let old = format!("v{}", cargo_crate_version!());
     let status = self_update::backends::github::Update::configure()
         .repo_owner("CaicoLeung")

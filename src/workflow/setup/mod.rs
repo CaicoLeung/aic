@@ -78,8 +78,8 @@ fn show_screen(section: &str) -> Result<()> {
 
 // Glyphs that visually distinguish each setup item across the menus. Each
 // appears at the start of its menu row so items are scannable at a glance.
-// Design-spec §4.4 markers: a muted `·` section bullet for menu rows, ✓/✗/⚠
-// for outcome rows — plain Unicode, no Nerd Font required.
+// Marker vocabulary fixed by ADR 0018: a muted `·` section bullet for menu
+// rows, ✓/✗/⚠ for outcome rows — plain Unicode, no Nerd Font required.
 const ICON_PROVIDER: &str = "·";
 const ICON_API_KEY: &str = "·";
 const ICON_BASE_URL: &str = "·";
@@ -357,7 +357,7 @@ fn provider_label(draft: &Draft) -> String {
     }
 }
 /// Menu-row label for an opt-in toggle (both workflow gates default off):
-/// `on` only when explicitly on (design spec §4.4 toggle wording).
+/// `on` only when explicitly on (ADR 0018 toggle wording).
 fn yes_no(value: Option<bool>) -> String {
     if value.unwrap_or(false) {
         "on".to_string()

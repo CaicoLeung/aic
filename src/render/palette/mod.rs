@@ -360,7 +360,7 @@ impl CommitType {
 // One-shot command lines
 //
 // The one-shot commands (`use`, `list`, `update`, `undo`, `completion`, and
-// `setup`'s save line — design spec §4.4) print through `println!` /
+// `setup`'s save line — ADR 0018) print through `println!` /
 // `eprintln!`, off the `Display` seam, so they style their marker glyphs
 // and detail rows through these standalone probes instead.
 // ----------------------------------------------------------------------

@@ -45,12 +45,12 @@ pub(crate) struct ResolveDeps {
 /// `e2e/commit.rs`.
 ///
 /// Both entries (`aic resolve` and the mid-Run handoff) paint the resolve
-/// timeline (spec §2.8): Detect → (Redaction Gate) → Resolve files → Review
+/// timeline (ADR 0018): Detect → (Redaction Gate) → Resolve files → Review
 /// resolutions → Finalize, with the per-file resolve sub-rows and the review
 /// diffs as ephemeral live output and the review verdicts as durable rows.
 /// The early exits — clean repo, rebase/am refusal, the all-resolved
 /// finalize offer — render alone, with no timeline. Off a terminal the same
-/// steps append the plain ledger (spec §5).
+/// steps append the plain ledger (ADR 0018).
 pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<()> {
     let ResolveDeps {
         resolve,
@@ -84,7 +84,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         return Ok(());
     }
 
-    // Step skeleton (spec §2.2/§2.8): Detect, the Redaction Gate (iff
+    // Step skeleton (ADR 0018): Detect, the Redaction Gate (iff
     // `--no-redact` did not turn it off), Resolve, Review, Finalize.
     let redact_on = redact == Redact::On;
     let mut labels: Vec<String> = vec!["Detect conflicts".into()];
@@ -273,7 +273,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
 
     if plans.is_empty() {
         // Nothing reached review — the failed screen names the step, and the
-        // skipped files ride as its detail rows (spec §2.9) so the user
+        // skipped files ride as its detail rows (ADR 0018) so the user
         // still sees why every file was refused.
         let mut detail: Vec<String> = skipped
             .iter()
@@ -442,7 +442,7 @@ fn frame_ask(frame: &RunFrame, step: usize, question: &str) -> bool {
     answer
 }
 
-/// The Finalize step's completion summary (spec §2.8, open item 9): the
+/// The Finalize step's completion summary (ADR 0018, open item 9): the
 /// operation being finalized, from `RepoState` — `Finalized merge commit`
 /// for a merge, `Finalized cherry-pick` / `Finalized revert` otherwise.
 fn finalize_summary(state: RepoState) -> String {
@@ -503,7 +503,7 @@ fn unified_diff(old: &str, new: &str) -> String {
 mod tests {
     use super::{RepoState, finalize_summary, unified_diff};
 
-    /// The Finalize summary names the operation from `RepoState` (spec §2.8,
+    /// The Finalize summary names the operation from `RepoState` (ADR 0018,
     /// open item 9): "merge commit" for a merge, the bare label otherwise —
     /// the sequencer states share their single-shot labels.
     #[test]

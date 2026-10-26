@@ -753,7 +753,7 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
         buf.lines()
     );
 
-    // --- ledger (spec §5 / §2.8): the timeline ends at Review when anything
+    // --- ledger (ADR 0018): the timeline ends at Review when anything
     // blocked finalize — no `✓ Finalized` line — and the Review summary
     // carries the applied/rejected split; the two skip kinds ride as
     // durable caution rows under Review. ---
@@ -862,7 +862,7 @@ async fn resolve_no_redact_proceeds_past_the_gate() {
 }
 
 // ----------------------------------------------------------------------
-// Resolve timeline ledger (spec §5) — mirrors e2e/timeline.rs: the buffer
+// Resolve timeline ledger (ADR 0018) — mirrors e2e/timeline.rs: the buffer
 // sink is non-TTY, so the steps append plain `✓` lines as they complete and
 // the failed screens append `✗` headlines with their detail rows (§2.9).
 // ----------------------------------------------------------------------
@@ -942,7 +942,7 @@ async fn resolve_no_redact_omits_the_gate_step() {
     );
 }
 
-/// A redaction refusal is the gate step's failed screen (spec §2.9): the `✗`
+/// A redaction refusal is the gate step's failed screen (ADR 0018): the `✗`
 /// headline names the gate, the detail rows carry the refusal (file + pattern
 /// kind), and no later step's ledger line appears — the timeline stops there.
 #[tokio::test]
@@ -992,7 +992,7 @@ async fn resolve_redaction_refusal_shapes_the_failed_screen() {
     );
 }
 
-/// Persistent markers fail the Resolve step's screen (spec §2.9): the
+/// Persistent markers fail the Resolve step's screen (ADR 0018): the
 /// headline names the step, the skipped file rides as a detail row with its
 /// truthful reason, and the remediation row follows. The Review/Finalize
 /// ledger lines never appear.
@@ -1016,7 +1016,7 @@ async fn resolve_failed_resolution_shapes_the_failed_screen() {
     .expect_err("persistent markers must bail");
 
     let lines = buf.lines();
-    // The failed step keeps its *live* label (spec §2.9) — the resolve loop
+    // The failed step keeps its *live* label (ADR 0018) — the resolve loop
     // had already advanced the cursor to `Resolving files · 1 of 1`.
     assert!(
         lines

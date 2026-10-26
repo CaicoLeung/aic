@@ -82,7 +82,7 @@ impl BatchReview {
 /// plan simply offers Continue / Abort (nothing is mergeable, but the plan
 /// is still shown and abortable before any drafting is paid for).
 ///
-/// The listing and menu are the Review step's live output (spec §2.5): on a
+/// The listing and menu are the Review step's live output (ADR 0018): on a
 /// terminal they render as frame rows under the active step and every
 /// merge/undo re-renders the same frame in place; off a terminal the
 /// listing prints and erases exactly as before the timeline. Continue
@@ -364,7 +364,7 @@ fn available_actions(len: usize, can_undo: bool) -> Vec<(&'static str, ReviewAct
 }
 
 /// Production Batch Review menu (issue #157): the offered actions as
-/// timeline frame rows under the plan listing (spec §2.5) — `›` cursor, raw
+/// timeline frame rows under the plan listing (ADR 0018) — `›` cursor, raw
 /// keys; Merge then walks two Batch picks. A cancel at the action menu
 /// (Esc / Ctrl-C / closed stdin) aborts — nothing has been staged, and the
 /// menu's only go-back is the undo row (same philosophy as the confirm

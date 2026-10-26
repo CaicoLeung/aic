@@ -382,7 +382,7 @@ impl Display {
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
     /// `−M`, muted directories with emphasized basenames, a green-bold `[new]` / red-bold `[del]` tag,
     /// and a bold-cyan `Σ <bar> +X −Y · N files` total row when more than one
-    /// file (Commit entry v2, spec §3: the Diff bar — `█` addition / `░`
+    /// file (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
     /// deletion cells over text line counts only, shrinking then omitted on
     /// narrow terminals). Binary files render `(binary) <byte-delta>`
     /// right-aligned in the counts region, which widens to fit the widest
@@ -479,7 +479,7 @@ impl Display {
             0
         };
         // Binary rows carry the byte-size delta label `(binary) +12.3 KB`
-        // (Commit entry v2, spec §3) — the counts region widens to the
+        // (Commit entry v2, ADR 0018) — the counts region widens to the
         // widest binary label and the lead pad keeps the name column
         // aligned across text, binary, and Σ rows.
         let binary_label = |s: &FileStats| {
@@ -651,7 +651,7 @@ impl Display {
         if stats.len() > 1 {
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
-            // Commit entry v2 (spec §3): the Σ row is its own shape —
+            // Commit entry v2 (ADR 0018): the Σ row is its own shape —
             // `Σ <bar> +A −D · N files` — with the Diff bar between the
             // glyph and the counts, so the totals no longer column-align
             // under the per-file counts (accepted by the spec). `Σ` stays in

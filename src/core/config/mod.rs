@@ -747,7 +747,7 @@ pub(crate) fn resolve_base_url(
 
 /// Pure: the (key, value) rows `aic list` prints for a loaded config, by
 /// resolved backend. `run_list` renders them with the margin-2 aligned key
-/// column (design spec §4.4). Tested without IO so the CLI-backend branch —
+/// column (ADR 0018). Tested without IO so the CLI-backend branch —
 /// which re-resolves the args/timeout with source tracking — is covered, not
 /// just the API path that goes through [`ResolvedConfig`] (cf. [`apply_use`]
 /// for the same split).
@@ -826,7 +826,7 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
 }
 
 /// `aic list` — print the resolved configuration as the one-shot table
-/// (design spec §4.4): margin 2, the key column muted and aligned to the
+/// (ADR 0018): margin 2, the key column muted and aligned to the
 /// widest key plus a 2-space gap, values default fg, wording unchanged.
 pub fn run_list() -> Result<()> {
     let config = Config::load()?;

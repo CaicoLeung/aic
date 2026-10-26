@@ -971,7 +971,7 @@ fn format_bytes_delta_covers_units_and_signs() {
     assert_eq!(format_bytes_delta(200, 0), "−200 B");
 }
 
-/// The Σ bar shrinks before it disappears on narrow terminals (v2, spec §3):
+/// The Σ bar shrinks before it disappears on narrow terminals (v2, ADR 0018):
 /// a 30-col terminal affords 6 cells, a 26-col one the 4-cell floor, and a
 /// 24-col one drops the bar entirely — the counts and `· N files` scope
 /// never truncate.

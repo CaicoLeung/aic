@@ -177,7 +177,7 @@ pub(crate) fn undo_run(
     Ok(())
 }
 
-/// The undo scope-disclosure rows (spec §4.4): what the reset would strip,
+/// The undo scope-disclosure rows (ADR 0018): what the reset would strip,
 /// one fact per row, printed as muted detail under the `· aic run found`
 /// line. Pure so tests can assert the exact disclosure without a prompt.
 /// `tip_known` distinguishes "N commits from the run" from the no-tip

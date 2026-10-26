@@ -114,12 +114,12 @@ impl std::error::Error for CommitDeclined {}
 /// Run the confirmation loop for a drafted message. Returns the confirmed
 /// (message, body, preview_rows) after the user approves or edits it. The
 /// preview renders through `display` — the frame's step display, so on a
-/// terminal it is the active step's live output (spec §2.7) and each
+/// terminal it is the active step's live output (ADR 0018) and each
 /// replacement erases its predecessor in one frame; off a terminal it is
 /// the Run's own sink, byte-identical to the pre-timeline output. The
 /// Re-generate wait paints as one live note row (`⠋ Re-generating commit
 /// message`); the Edit launch suspends the whole frame for the editor and
-/// repaints it afterwards (spec §1.4).
+/// repaints it afterwards (ADR 0018).
 pub(crate) async fn confirm_draft(
     draft: (String, Option<String>),
     stats: &[FileStats],
@@ -157,7 +157,7 @@ pub(crate) async fn confirm_draft(
                 display.clear_last(rows);
                 // The editor owns the terminal: the whole frame erases in
                 // one frame first and repaints with the menu state restored
-                // on exit (spec §1.4) — the timeline never scrolls away
+                // on exit (ADR 0018) — the timeline never scrolls away
                 // mid-edit.
                 if let Some(f) = frame {
                     f.suspend();

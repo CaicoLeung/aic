@@ -1,22 +1,22 @@
-//! Pure row builders for the Steps timeline (ADR 0018; design spec §1/§2/§6).
+//! Pure row builders for the Steps timeline (ADR 0018).
 //!
 //! Everything here is a pure function of a step-state model → pre-styled
 //! `Vec<String>` rows, byte-exact-testable exactly like the `display` and
-//! `progress` suites (spec §6). Nothing writes to a terminal: the frame the
+//! `progress` suites (ADR 0018). Nothing writes to a terminal: the frame the
 //! builders produce is repainted by the generalized
 //! [`frame_bytes`](crate::render::progress) painter as the bottom-most region
 //! (ADR 0018 §2 — no CUP, no scroll regions, ADR 0013 intact).
 //!
-//! One layout rule ([`timeline_frame`], spec §2.1): completed step lines
+//! One layout rule ([`timeline_frame`], ADR 0018): completed step lines
 //! oldest-first, the active step line, the active step's live output, a blank
 //! separator (only if pending steps exist), pending step lines. A failed step
 //! renders `✗` + detail and every later step is absent from the frame — never
 //! rendered, not even as pending.
 //!
-//! Marker/color vocabulary is fixed by the spec (§1.1/§1.2): `·` muted
+//! Marker/color vocabulary is fixed by the spec (ADR 0018): `·` muted
 //! (pending), `⠋` pending (active — first glyph of the existing braille set),
-//! `✓` success, `✗` failure, `?` caution, `›` menu cursor, `│` muted gutter.
-//! Only existing Palette roles; no new colors, no new dependencies.
+//! `✓` success, `✗` failure, `?` caution, `›` menu cursor. Only existing
+//! Palette roles; no new colors, no new dependencies.
 
 use std::time::Duration;
 
@@ -30,12 +30,12 @@ pub(crate) mod driver;
 mod tests;
 
 /// Marker column geometry: the step marker sits at column 2 (past the shared
-/// [`MARGIN`]), sub-rows and live-output content at column 4 (spec §1.3).
+/// [`MARGIN`]), sub-rows and live-output content at column 4 (ADR 0018).
 const SUB_INDENT: &str = "  ";
 
 /// One styled-or-plain text segment of a row. Rendering concatenates segments
 /// and truncates at the row's display-width budget so no row ever wraps or
-/// carries trailing spaces (spec §1.3); styling is applied per segment after
+/// carries trailing spaces (ADR 0018); styling is applied per segment after
 /// truncation, which keeps width math ANSI-blind (ADR 0013).
 struct Seg {
     text: String,
@@ -126,7 +126,7 @@ pub enum StepState {
 /// The failure record for a failed step: the headline reason joins the step
 /// label (`✗ Commit batches — failed on batch 2 of 3`); `detail` rows render
 /// under the headline — the first in `failure`, the rest as muted remediation
-/// hints (spec §2.9), capped to 3 rows.
+/// hints (ADR 0018), capped to 3 rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     /// Short reason appended to the label after ` — `.
@@ -148,10 +148,10 @@ pub struct Step {
     /// Completion summary headline (`Planned 3 batches`); `None` falls back
     /// to the label.
     pub summary: Option<String>,
-    /// Wall time of a completed step; shown only when ≥ 1 s (spec §1.4).
+    /// Wall time of a completed step; shown only when ≥ 1 s (ADR 0018).
     pub duration: Option<Duration>,
     /// Live elapsed counter for the active step's label (`⠋ Plan batches · 12s`,
-    /// integer seconds — spec §2.4).
+    /// integer seconds — ADR 0018).
     pub active_elapsed: Option<Duration>,
     /// Live output under the active step's row (pre-styled, ephemeral).
     pub live_rows: Vec<String>,
@@ -195,7 +195,7 @@ pub fn format_duration(d: Duration) -> Option<String> {
     }
 }
 
-/// The active step's live elapsed counter: integer seconds (`12s`), spec §2.4
+/// The active step's live elapsed counter: integer seconds (`12s`), ADR 0018
 /// — coarser than [`format_duration`] because it ticks every frame.
 pub fn format_elapsed(d: Duration) -> String {
     format!("{}s", d.as_secs())
@@ -203,7 +203,7 @@ pub fn format_elapsed(d: Duration) -> String {
 
 /// The plain completion headline of a completed step: summary (or label),
 /// plus ` · <duration>` when it took ≥ 1 s. Shared verbatim by the styled
-/// [`step_line`] path and the non-TTY [`plain_step_lines`] path (spec §6:
+/// [`step_line`] path and the non-TTY [`plain_step_lines`] path (ADR 0018:
 /// same strings, no styling).
 fn completed_text(step: &Step) -> String {
     let headline = step.summary.as_deref().unwrap_or(&step.label);
@@ -213,7 +213,7 @@ fn completed_text(step: &Step) -> String {
     }
 }
 
-/// One step row (spec §1.1/§1.2/§1.3): `  <marker> <label>`, truncated never
+/// One step row (ADR 0018): `  <marker> <label>`, truncated never
 /// wrapped, no trailing spaces. All four states:
 ///
 /// - pending — `·` muted marker + muted label;
@@ -328,7 +328,7 @@ pub fn timeline_frame(steps: &[Step], width: usize, theme: &Theme) -> Vec<String
     rows
 }
 
-/// The body of one `[i/N]` sub-row (spec §2.6/§2.8): an in-flight label
+/// The body of one `[i/N]` sub-row (ADR 0018): an in-flight label
 /// (`⠋ Generating commit message`) or a done row (`✓ [text] [· duration]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubBody {
@@ -339,11 +339,11 @@ pub enum SubBody {
     Done(String, Option<Duration>),
 }
 
-/// One `[i/N]` sub-row at column 4 (spec §1.3): the prefix pads to the width
+/// One `[i/N]` sub-row at column 4 (ADR 0018): the prefix pads to the width
 /// of `[N/N]` for the run's final N so every sub-row of the run aligns.
 /// `[1/3] ⠋ Generating commit message` / `[2/3] ✓ 6.2s` /
 /// `[1/3] ✓ src/render/progress.rs · 18.1s`.
-pub fn sub_row(index: usize, total: usize, body: &SubBody, width: usize, theme: &Theme) -> String {
+pub fn sub_row(index: usize, total: usize, body: &SubBody, theme: &Theme) -> String {
     let prefix = format!("[{index}/{total}]");
     let full = format!("[{total}/{total}]");
     let padded = format!(
@@ -511,11 +511,11 @@ pub fn plain_step_lines(step: &Step) -> Vec<String> {
     }
 }
 
-/// Below this many rows the live window is suppressed entirely (spec §2.4):
+/// Below this many rows the live window is suppressed entirely (ADR 0018):
 /// the spinner label + elapsed alone carry the wait.
 pub const MIN_WINDOW_ROWS: usize = 3;
 
-/// The live window's height budget (spec §2.4):
+/// The live window's height budget (ADR 0018):
 /// `window_rows = min(max_rows, terminal_height − timeline_fixed_rows − 2)`
 /// where `timeline_fixed_rows` is every fixed row of the frame (all step
 /// rows, the separator, already-durable rows). A result below
