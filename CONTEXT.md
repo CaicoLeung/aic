@@ -153,6 +153,10 @@ _Avoid_: phase, stage (overloaded — see Batch staging), progress
 The upfront Step list a flow paints before doing any work. Completed Steps peel to permanent scrollback the moment they finish (chronological collapse); the live frame keeps updating in place holding only the active and pending Steps. At flow end every Step line and every Commit entry sit in the scrollback in happening order — the flow's last Step is the tail. Both the commit Run and the resolve flow paint one; which one appears is decided by the Conflict gate before anything is drawn.
 _Avoid_: step list, task list, progress panel
 
+**One-shot line**:
+Any line `aic` prints outside a Run timeline or resolve frame — the one-shot commands' result lines and detail rows, start-up notices, cancellation lines, and the setup wizard's screens. Every one sits on the Run's shared inset: result and marker lines at the Step marker's column, explanatory detail rows one level deeper at the sub-row column; blank separator lines carry no inset. inquire-rendered menus and clap's `--help` are not aic lines and stay flush.
+_Avoid_: padding, container, wrapper
+
 **Diff bar**:
 The proportional +/− block on a Commit entry's Σ line — it trails the `+A −D` counts (no file count) and fills every remaining cell up to the shared text boundary (the capped width the Run's prose and reasoning wrap at — not the terminal's real edge), colored by the Palette's `added`/`removed` roles in proportion to the entry's added/removed line counts (floor 4 cells, omitted on narrower terminals). Aggregates text lines only; binary files never feed the bar (their per-file row shows a byte-size change instead).
 _Avoid_: ratio bar, stats bar, diff meter
