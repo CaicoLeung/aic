@@ -644,28 +644,34 @@ impl Display {
         if stats.len() > 1 {
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
-            // Commit entry v2 (ADR 0018): the Σ row is its own shape —
-            // `Σ <bar> +A −D · N files` — with the Diff bar between the
-            // glyph and the counts, so the totals no longer column-align
-            // under the per-file counts (accepted by the spec). `Σ` stays in
-            // cyan-600 bold, harmonizing with the green `+N` additions while
-            // staying distinct from the red `−M`.
-            let scope = format!("· {} files", stats.len());
-            // The bar spends 10 cells when the text width affords it,
-            // shrinks first (floor 4 cells — narrow terminals), then is
-            // omitted; the counts never truncate. Binary files contribute 0
-            // to the text-line totals, so they never skew the ratio; an
+            // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D · N files
+            // <bar>` — the Diff bar trails the counts and fills EVERY
+            // remaining cell to the terminal's real edge, so the row reads
+            // totals-first and the bar is the full-bleed ratio visual (the
+            // fixed 10-cell chunk is gone). Binary files contribute 0 to
+            // the text-line totals, so they never skew the ratio; an
             // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
-            const BAR_CELLS: usize = 10;
             const MIN_BAR_CELLS: usize = 4;
-            let fixed = sigma_cell
+            let scope = format!("· {} files", stats.len());
+            // The row hangs under the subject (sigma_pad) before Σ even
+            // starts, so the pad must be inside the fixed spend: budgeting
+            // the bar from the raw `width` alone overshoots by the hang and
+            // wraps the row on the terminal (found by the PTY harness at
+            // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts +
+            // scope + the bar's leading space complete the spend; every
+            // count is fixed-width, so the counts never truncate — only the
+            // bar shrinks, and it disappears below the floor.
+            let sigma_pad_width = start.saturating_sub(sigma_cell);
+            let fixed = sigma_pad_width
+                + sigma_cell
+                + 1
                 + plus.chars().count()
                 + 1
                 + minus.chars().count()
                 + 1
-                + scope.chars().count();
-            let budget = width.saturating_sub(fixed + 2);
-            let cells = BAR_CELLS.min(budget);
+                + scope.chars().count()
+                + 1;
+            let cells = width.saturating_sub(fixed);
             let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
                 diff_bar(total_added, total_deleted, cells)
             } else {
@@ -680,9 +686,9 @@ impl Display {
             } else {
                 String::new()
             };
-            let sigma_pad = " ".repeat(start.saturating_sub(sigma_cell));
+            let sigma_pad = " ".repeat(sigma_pad_width);
             self.emit(&format!(
-                "{sigma_pad}{}{bar} {} {} {}",
+                "{sigma_pad}{} {} {} {}{bar}",
                 self.styled("Σ", sigma_color().bold()),
                 self.styled(&plus, green.clone()),
                 self.styled(&minus, red.clone()),

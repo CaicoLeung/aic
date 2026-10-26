@@ -120,7 +120,10 @@ fn commit_preview_renders_message_body_and_file_list() {
     // rows' reserved blank.
     assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
     assert_eq!(got[4], "     +4 −1  src/main.rs");
-    assert_eq!(got[5], "  Σ ████████░░ +16 −4 · 2 files");
+    assert_eq!(
+        got[5],
+        "  Σ +16 −4 · 2 files █████████████████████████████████████████████░░░░░░░░░░░"
+    );
     assert_eq!(got[6], "");
     assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
 }
@@ -214,8 +217,7 @@ fn commit_preview_truncates_long_file_lists() {
         "the elision line must not repeat the Σ row's (N files) count, got: {got:?}"
     );
     assert!(
-        got.iter()
-            .any(|l| l.contains("Σ ██████████ +10 −0 · 10 files")),
+        got.iter().any(|l| l.contains("Σ +10 −0 · 10 files █")),
         "expected a total over all files, got: {got:?}"
     );
     assert!(
@@ -282,7 +284,10 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
     // is deletion-only → all `░` cells.
     assert_eq!(got[0], "    (binary) +512 B  img.png    [new]");
     assert_eq!(got[1], "                −12  src/old.rs [del]");
-    assert_eq!(got[2], "  Σ ░░░░░░░░░░ +0 −12 · 2 files");
+    // Deletion-only → every bar cell is `░`; the bar is the full remaining
+    // width (56 cells at this width), spelled with `repeat` so the pinned
+    // width cannot drift by a miscounted glyph.
+    assert_eq!(got[2], format!("  Σ +0 −12 · 2 files {}", "░".repeat(56)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -335,7 +340,10 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
     // `(2 files)` label starts.
     assert_eq!(got[0], "     +5     a.rs");
     assert_eq!(got[1], "     +5     b.rs");
-    assert_eq!(got[2], "  Σ ██████████ +10 −0 · 2 files");
+    assert_eq!(
+        got[2],
+        "  Σ +10 −0 · 2 files ████████████████████████████████████████████████████████"
+    );
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -443,7 +451,10 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
     // `█` bar).
     assert_eq!(got[0], "    (binary) +12.0 KB  x.bin");
     assert_eq!(got[1], "                +1     a.rs");
-    assert_eq!(got[2], "  Σ ██████████ +1 −0 · 2 files");
+    assert_eq!(
+        got[2],
+        "  Σ +1 −0 · 2 files █████████████████████████████████████████████████████████"
+    );
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -699,7 +710,16 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     );
     assert_eq!(got[1], "         +64 −51  src/render/display/mod.rs");
     assert_eq!(got[2], "         +88 −33  src/render/display/tests.rs");
-    assert_eq!(got[3], "      Σ ██████░░░░ +152 −84 · 2 files");
+    // Bar budget includes the 4-col subject hang, so it stops at the table
+    // edge (no wrap): computed, not hand-counted glyphs.
+    assert_eq!(
+        got[3],
+        format!(
+            "      Σ +152 −84 · 2 files {}{}",
+            "█".repeat(32),
+            "░".repeat(18)
+        )
+    );
 }
 
 /// The Σ total row hangs under the `✓` marker — exactly `sigma_col` (2)
@@ -748,7 +768,14 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing · +8 −1");
     assert_eq!(got[1], "          +3 −1   src/a.rs");
     assert_eq!(got[2], "          +5      src/b.rs");
-    assert_eq!(got[3], "        Σ █████████░ +8 −1 · 2 files");
+    assert_eq!(
+        got[3],
+        format!(
+            "        Σ +8 −1 · 2 files {}{}",
+            "█".repeat(45),
+            "░".repeat(6)
+        )
+    );
 }
 
 #[test]
@@ -971,10 +998,10 @@ fn format_bytes_delta_covers_units_and_signs() {
     assert_eq!(format_bytes_delta(200, 0), "−200 B");
 }
 
-/// The Σ bar shrinks before it disappears on narrow terminals (v2, ADR 0018):
-/// a 30-col terminal affords 6 cells, a 26-col one the 4-cell floor, and a
-/// 24-col one drops the bar entirely — the counts and `· N files` scope
-/// never truncate.
+/// The Σ bar fills the row's remaining width (v3, ADR 0018 amendment 3):
+/// a 30-col terminal affords 6 trailing cells, a 28-col one 4, and a 26-col
+/// one drops the bar entirely (below the 4-cell floor) — the counts and
+/// `· N files` scope never truncate.
 #[test]
 fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
     let stats = |a: usize| {
@@ -1001,7 +1028,8 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
             },
         ]
     };
-    for (cols, want_bar) in [(30, " ██████ "), (28, " ████ "), (24, " ")] {
+    for (cols, want_bar) in [(30, " ██████"), (28, " ████"), (26, ""), (24, "")]
+    {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with_cols(
             Buf {
@@ -1021,7 +1049,64 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
         );
         let got = lines.lock().clone();
         let sigma = got.last().expect("Σ row present");
-        let want = format!("  Σ{want_bar}+10 −0 · 2 files");
+        let want = format!("  Σ +10 −0 · 2 files{want_bar}");
         assert_eq!(sigma.trim_end(), want, "cols {cols}: {got:?}");
     }
+}
+
+/// The Σ row's full-bleed bar is budgeted against the row's whole prefix —
+/// subject hang included — not the bare table width: without the hang in
+/// the fixed spend the bar overshoots the terminal and the row wraps (a
+/// 103-column Σ row on a 100-col terminal, caught by the PTY render
+/// harness). Contract: margin (2) + table_width (cols − 4) bounds the row.
+#[test]
+fn sigma_bar_never_wraps_the_entry_row() {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let d = Display::with_cols(
+        Buf {
+            colors: false,
+            lines: lines.clone(),
+        },
+        100,
+    );
+    let stats = vec![
+        FileStats {
+            path: "a.rs".into(),
+            added: 60,
+            deleted: 0,
+            new: false,
+            removed: false,
+            binary: false,
+            old_size: 0,
+            new_size: 0,
+        },
+        FileStats {
+            path: "b.rs".into(),
+            added: 4,
+            deleted: 1,
+            new: false,
+            removed: false,
+            binary: false,
+            old_size: 0,
+            new_size: 0,
+        },
+    ];
+    // `[1/2] ` prefix geometry: the Σ row hangs 6 cols past the margin.
+    d.emit_file_stats(
+        &stats,
+        &SubjectOffsets {
+            tick: 6,
+            hash: 8,
+            message: 16,
+        },
+        d.table_width(),
+    );
+    let got = lines.lock().clone();
+    let sigma = got.last().expect("Σ row present");
+    assert!(sigma.contains('█'), "bar present: {sigma:?}");
+    assert_eq!(
+        sigma.chars().count(),
+        97,
+        "the Σ row ends exactly at the table edge (margin 2 + 95 of the 96-col table), never past it: {sigma:?}"
+    );
 }
