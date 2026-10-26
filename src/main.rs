@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
                 match completion::prompt_shell(completion::detect_shell())? {
                     Some(shell) => shell,
                     None => {
-                        eprintln!("Cancelled.");
+                        oneshot::err("Cancelled.", palette::muted());
                         return Ok(());
                     }
                 }
