@@ -504,22 +504,23 @@ fn run_use_provider_without_config_errors() {
 #[test]
 fn list_lines_api_branch_shows_resolved_provider() {
     let c = cfg("openai", Some("sk-live-key"), Some("gpt-4o"), None);
-    let lines = super::list_lines(Some(&c)).unwrap();
-    assert_eq!(lines[0], "Backend:  API provider");
+    let rows = super::list_lines(Some(&c)).unwrap();
+    assert_eq!(rows[0], ("Backend".into(), "API provider".into()));
     assert!(
-        lines.iter().any(|l| l.contains("Provider: openai")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Provider" && v.starts_with("openai ")),
+        "got {rows:?}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("Model:    gpt-4o")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Model" && v.starts_with("gpt-4o ")),
+        "got {rows:?}"
     );
     // mask_api_key: first 3 … last 3 of an 11-char key.
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("API key:") && l.contains("sk-...key")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "API key" && v.contains("sk-...key")),
+        "got {rows:?}"
     );
 }
 
@@ -535,36 +536,33 @@ fn list_lines_cli_branch_resolves_defaults_with_source() {
         },
         ..Default::default()
     };
-    let lines = super::list_lines(Some(&c)).unwrap();
-    assert_eq!(lines[0], "Backend:  CLI agent");
+    let rows = super::list_lines(Some(&c)).unwrap();
+    assert_eq!(rows[0], ("Backend".into(), "CLI agent".into()));
     assert!(
-        lines
-            .iter()
-            .any(|l| l == "Command:  claude (source: config)"),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Command" && v == "claude (source: config)"),
+        "got {rows:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("Args:") && l.contains("source: default")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Args" && v.contains("source: default")),
+        "got {rows:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("Timeout:") && l.contains("source: default")),
-        "got {lines:?}"
+        rows.iter()
+            .any(|(k, v)| k == "Timeout" && v.contains("source: default")),
+        "got {rows:?}"
     );
 }
 
 #[test]
 fn list_lines_no_config_defaults_to_api_backend() {
     // No config file at all ⇒ Api backend, every resolved value default-sourced.
-    let lines = super::list_lines(None).unwrap();
-    assert_eq!(lines[0], "Backend:  API provider");
+    let rows = super::list_lines(None).unwrap();
+    assert_eq!(rows[0], ("Backend".into(), "API provider".into()));
     assert!(
-        lines.iter().all(|l| !l.contains("source: config")),
-        "nothing config-sourced: {lines:?}"
+        rows.iter().all(|(_, v)| !v.contains("source: config")),
+        "nothing config-sourced: {rows:?}"
     );
 }
 
