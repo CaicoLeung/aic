@@ -4,6 +4,8 @@
 //! [`crate::git::conflict`] next to its domain, rendering through this module's
 //! `styled`/`emit` primitives so both surfaces share one seam and one margin.
 
+use std::sync::Arc;
+
 use console::{Style, Term};
 
 use crate::git::FileStats;
@@ -55,7 +57,7 @@ pub trait DisplayWrite: Send + Sync {
 /// Write errors are intentionally ignored: this is fire-and-forget
 /// status output to stderr (e.g. a closed pipe), never load-bearing.
 pub struct Display {
-    out: Box<dyn DisplayWrite>,
+    out: Arc<dyn DisplayWrite>,
     colors: bool,
     /// Terminal width in columns. Read once from the sink's terminal in
     /// [`Display::new`]; injected by tests via [`Display::with_cols`]. A value
@@ -121,10 +123,30 @@ impl Display {
     fn with_cols(out: impl DisplayWrite + 'static, cols: usize) -> Self {
         let colors = out.colors_enabled();
         Self {
-            out: Box::new(out),
+            out: Arc::new(out),
             colors,
             cols,
         }
+    }
+
+    /// A second [`Display`] sharing this one's sink — same bytes, same
+    /// colors, same width. The Run timeline driver (ADR 0018) hands these
+    /// out so step-scoped output (commit entries, previews, warnings) lands
+    /// in the same place as the run's own lines, whether the sink is the
+    /// real stderr or a test buffer.
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            out: Arc::clone(&self.out),
+            colors: self.colors,
+            cols: self.cols,
+        }
+    }
+
+    /// A [`Display`] over a caller-owned sink with an explicit column count
+    /// — the frame-capture constructor the timeline driver uses (its rows
+    /// must wrap to the frame's width, not the probed terminal's).
+    pub(crate) fn framed(out: impl DisplayWrite + 'static, cols: usize) -> Self {
+        Self::with_cols(out, cols)
     }
 
     // ------------------------------------------------------------------
