@@ -138,7 +138,7 @@ fn fallback_palette() -> &'static [(u8, u8, u8); 6] {
 }
 
 /// Whether neon variants are active.
-pub fn neon() -> bool {
+fn neon() -> bool {
     NEON.load(std::sync::atomic::Ordering::Relaxed)
 }
 
