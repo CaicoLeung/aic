@@ -113,6 +113,9 @@ pub(crate) fn compact_count(n: usize) -> String {
     };
     match n {
         0..=999 => n.to_string(),
+        // 999_950+ rounds up to 1000k — roll into `m` instead of "1000k".
+        // (The `m` arm has the same wart at ~1e9 lines; unreachable, left.)
+        1_000..=999_999 if n >= 999_950 => unit(n, 1_000_000, "m"),
         1_000..=999_999 => unit(n, 1_000, "k"),
         _ => unit(n, 1_000_000, "m"),
     }
@@ -939,7 +942,9 @@ mod tests {
         assert_eq!(compact_count(2_100), "2.1k");
         assert_eq!(compact_count(9_999), "10k");
         assert_eq!(compact_count(15_000), "15k");
-        assert_eq!(compact_count(1_234_567), "1.2m");
+        assert_eq!(compact_count(999_949), "999k");
+        assert_eq!(compact_count(999_950), "1m");
+        assert_eq!(compact_count(999_999), "1m");
     }
 
     /// `delta_suffix` sums per-file stats into one ` · +A −D` segment and
