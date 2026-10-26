@@ -122,3 +122,9 @@ this amendment records the accepted resolutions.
    switches every truecolor palette entry to a neon variant clearing WCAG
    AA Normal (4.5:1) on dark. Light themes, pipes, `NO_COLOR`, and silent
    terminals keep the classic tables.
+   Known limits, accepted: the probe is Unix-only, so Windows terminals
+   stay classic even where OSC 11 is answered (Windows Terminal does); the
+   tty check reads stdin only, so `CLICOLOR_FORCE` with piped output and a
+   tty stdin can enable neon on a pipe; and the query is written to stdin's
+   fd, mirroring the DSR probe's convention (read-only fd 0 degrades
+   gracefully). None of these surface in normal terminal use.
