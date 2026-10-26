@@ -192,21 +192,6 @@ impl Display {
         resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
     }
 
-    /// Full terminal-width budget for the Commit entry table (ADR 0018
-    /// redesign): unlike [`Self::text_width`] the 100-column prose cap does
-    /// NOT apply — the Σ Diff bar and the file-name column stretch to the
-    /// terminal's real edge. Rows built to this budget never wrap when
-    /// flushed below the frame: `emit` adds the 2-col margin on top of it,
-    /// leaving [`RIGHT_MARGIN`] slack.
-    fn table_width(&self) -> usize {
-        let cols = if self.cols == 0 {
-            FALLBACK_COLS
-        } else {
-            self.cols
-        };
-        cols.saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
-    }
-
     // ------------------------------------------------------------------
     // Public rendering entry points
     // ------------------------------------------------------------------
@@ -360,7 +345,7 @@ impl Display {
     /// as a blank column (`git diff --stat` never shows zeros); the Σ total
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
     /// `−M`, muted directories with emphasized basenames, a green-bold `[new]` / red-bold `[del]` tag,
-    /// and a bold-cyan `Σ <bar> +X −Y · N files` total row when more than one
+    /// and a bold-cyan `Σ +X −Y <bar>` total row when more than one
     /// file (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
     /// deletion cells over text line counts only, shrinking then omitted on
     /// narrow terminals). Binary files render `(binary) <byte-delta>`
@@ -616,9 +601,9 @@ impl Display {
             rows += 1;
         }
         if stats.len() > Self::FILE_STATS_CAP {
-            // The Σ total row below already carries the `(N files)` count —
-            // repeating it here was noise; the elision line names only how
-            // many rows were cut, and sits in the name column with the
+            // The Σ total row below carries no file count — the elision
+            // line names only how many rows were cut, and sits in the name
+            // column with the
             // filenames it stands in for.
             self.emit(&format!(
                 "{}{}",
@@ -630,23 +615,23 @@ impl Display {
         if stats.len() > 1 {
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
-            // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D · N files
-            // <bar>` — the Diff bar trails the counts and fills EVERY
-            // remaining cell to the terminal's real edge, so the row reads
-            // totals-first and the bar is the full-bleed ratio visual (the
-            // fixed 10-cell chunk is gone). Binary files contribute 0 to
-            // the text-line totals, so they never skew the ratio; an
+            // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D <bar>` —
+            // the Diff bar trails the counts and fills EVERY remaining
+            // cell of the text budget (the same prose boundary every other
+            // Run surface wraps at — like the reasoning feed — not the
+            // terminal's real edge), so the row reads totals-first and the
+            // bar is the full-bleed ratio visual. Binary files contribute
+            // 0 to the text-line totals, so they never skew the ratio; an
             // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
             const MIN_BAR_CELLS: usize = 4;
-            let scope = format!("· {} files", stats.len());
             // The row hangs under the subject (sigma_pad) before Σ even
             // starts, so the pad must be inside the fixed spend: budgeting
             // the bar from the raw `width` alone overshoots by the hang and
             // wraps the row on the terminal (found by the PTY harness at
-            // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts +
-            // scope + the bar's leading space complete the spend; every
-            // count is fixed-width, so the counts never truncate — only the
-            // bar shrinks, and it disappears below the floor.
+            // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts
+            // + the bar's leading space complete the spend; every count is
+            // fixed-width, so the counts never truncate — only the bar
+            // shrinks, and it disappears below the floor.
             let sigma_pad_width = start.saturating_sub(sigma_cell);
             let fixed = sigma_pad_width
                 + sigma_cell
@@ -654,8 +639,6 @@ impl Display {
                 + plus.chars().count()
                 + 1
                 + minus.chars().count()
-                + 1
-                + scope.chars().count()
                 + 1;
             let cells = width.saturating_sub(fixed);
             let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
@@ -674,11 +657,10 @@ impl Display {
             };
             let sigma_pad = " ".repeat(sigma_pad_width);
             self.emit(&format!(
-                "{sigma_pad}{} {} {} {}{bar}",
+                "{sigma_pad}{} {} {}{bar}",
                 self.styled("Σ", sigma_color().bold()),
                 self.styled(&plus, green.clone()),
                 self.styled(&minus, red.clone()),
-                self.styled(&scope, gray.clone()),
             ));
             rows += 1;
         }

@@ -122,7 +122,7 @@ fn commit_preview_renders_message_body_and_file_list() {
     assert_eq!(got[4], "     +4 −1  src/main.rs");
     assert_eq!(
         got[5],
-        "  Σ +16 −4 · 2 files █████████████████████████████████████████████░░░░░░░░░░░"
+        format!("  Σ +16 −4 {}{}", "█".repeat(53), "░".repeat(13))
     );
     assert_eq!(got[6], "");
     assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
@@ -217,7 +217,7 @@ fn commit_preview_truncates_long_file_lists() {
         "the elision line must not repeat the Σ row's (N files) count, got: {got:?}"
     );
     assert!(
-        got.iter().any(|l| l.contains("Σ +10 −0 · 10 files █")),
+        got.iter().any(|l| l.contains("Σ +10 −0 █")),
         "expected a total over all files, got: {got:?}"
     );
     assert!(
@@ -285,9 +285,9 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
     assert_eq!(got[0], "    (binary) +512 B  img.png    [new]");
     assert_eq!(got[1], "                −12  src/old.rs [del]");
     // Deletion-only → every bar cell is `░`; the bar is the full remaining
-    // width (56 cells at this width), spelled with `repeat` so the pinned
-    // width cannot drift by a miscounted glyph.
-    assert_eq!(got[2], format!("  Σ +0 −12 · 2 files {}", "░".repeat(56)));
+    // width, spelled with `repeat` so the pinned width cannot drift by a
+    // miscounted glyph.
+    assert_eq!(got[2], format!("  Σ +0 −12 {}", "░".repeat(66)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -337,13 +337,10 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
     // sits under the total's `0` of `+10`; both end at the same column.
     // The zero-deletion column renders blank (git --stat convention) but
     // keeps its reserved width, so the name still lands where the Σ row's
-    // `(2 files)` label starts.
+    // total's `+10` column.
     assert_eq!(got[0], "     +5     a.rs");
     assert_eq!(got[1], "     +5     b.rs");
-    assert_eq!(
-        got[2],
-        "  Σ +10 −0 · 2 files ████████████████████████████████████████████████████████"
-    );
+    assert_eq!(got[2], format!("  Σ +10 −0 {}", "█".repeat(66)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -392,10 +389,10 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
     // deleted binary shows a negative delta (`−4.0 KB`). The counts region
     // widens to fit the 16-char binary labels, so the filename column
     // aligns across both rows. T = 0 (all-binary) → the Σ bar is omitted
-    // entirely: `Σ +0 −0 · 2 files`.
+    // entirely: `Σ +0 −0`.
     assert_eq!(got[0], "    (binary) +2.0 KB  img.png  [new]");
     assert_eq!(got[1], "    (binary) −4.0 KB  data.bin");
-    assert_eq!(got[2], "  Σ +0 −0 · 2 files");
+    assert_eq!(got[2], "  Σ +0 −0");
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -451,10 +448,7 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
     // `█` bar).
     assert_eq!(got[0], "    (binary) +12.0 KB  x.bin");
     assert_eq!(got[1], "                +1     a.rs");
-    assert_eq!(
-        got[2],
-        "  Σ +1 −0 · 2 files █████████████████████████████████████████████████████████"
-    );
+    assert_eq!(got[2], format!("  Σ +1 −0 {}", "█".repeat(67)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -585,76 +579,70 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
     );
     let got = lines.lock().clone();
     assert!(
-        got.iter().any(|l| {
-            l.contains("Σ") && l.contains("+8") && l.contains("−1") && l.contains("· 2 files")
-        }),
+        got.iter()
+            .any(|l| l.contains("Σ") && l.contains("+8") && l.contains("−1")),
         "multi-file landed commit must show the Σ total row, got: {got:?}"
     );
 }
 
 /// The footer's file rows hang under the commit ID while the subject line
-/// carries the whole entry delta, pinned with and without a `[n/m] ` batch
-/// prefix (staged / single-commit Runs) so the hang tracks the real subject
-/// prefix rather than a frozen column. Columns are derived from the emitted
+/// carries the whole entry delta. Columns are derived from the emitted
 /// subject line itself (char-counted — the ✓ marker is multi-byte, so a
-/// byte offset would overcount), so the asserts stay honest if the prefix
+/// byte offset would overcount), so the asserts stay honest if the entry
 /// format changes. The commit body is NOT part of the entry (ADR 0018
 /// redesign): exactly two rows — subject + file row. A single file keeps
 /// the footer Σ-less; the Σ-under-✓ anchor is pinned on the preview twin
 /// above and the Σ-row geometry tests below.
 #[test]
 fn commit_footer_hangs_under_subject_hash_and_carries_delta() {
-    for prefix in ["[1/2]", ""] {
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let d = Display::with(Buf {
-            colors: false,
-            lines: lines.clone(),
-        });
-        d.commit_line(
-            "abc1234",
-            "feat: add thing",
-            prefix,
-            &[FileStats {
-                path: "src/a.rs".into(),
-                added: 1,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            }],
-        );
-        let got = lines.lock().clone();
-        let cols = |needle: &str| {
-            got[0]
-                .find(needle)
-                .map(|i| got[0][..i].chars().count())
-                .unwrap_or_else(|| panic!("subject must carry {needle:?}: {got:?}"))
-        };
-        let msg_col = cols("feat: add thing");
-        let hash_col = cols("abc1234");
-        assert_eq!(
-            got.len(),
-            2,
-            "entry = subject row + file row, no body (prefix {prefix:?}): {got:?}"
-        );
-        assert!(
-            got[0].ends_with("· +1 −0"),
-            "subject carries the text-line delta (prefix {prefix:?}): {got:?}"
-        );
-        // Counts (`+1`, region 2) anchor at the hash; the gap to the name
-        // fills the rest of the hash→message span (uniform across rows).
-        assert_eq!(
-            got[1],
-            format!(
-                "{}+1{}src/a.rs",
-                " ".repeat(hash_col),
-                " ".repeat(msg_col - hash_col - 2)
-            ),
-            "footer must hang under the commit ID (prefix {prefix:?}): {got:?}"
-        );
-    }
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let d = Display::with(Buf {
+        colors: false,
+        lines: lines.clone(),
+    });
+    d.commit_line(
+        "abc1234",
+        "feat: add thing",
+        &[FileStats {
+            path: "src/a.rs".into(),
+            added: 1,
+            deleted: 0,
+            new: false,
+            removed: false,
+            binary: false,
+            old_size: 0,
+            new_size: 0,
+        }],
+    );
+    let got = lines.lock().clone();
+    let cols = |needle: &str| {
+        got[0]
+            .find(needle)
+            .map(|i| got[0][..i].chars().count())
+            .unwrap_or_else(|| panic!("subject must carry {needle:?}: {got:?}"))
+    };
+    let msg_col = cols("feat: add thing");
+    let hash_col = cols("abc1234");
+    assert_eq!(
+        got.len(),
+        2,
+        "entry = subject row + file row, no body: {got:?}"
+    );
+    assert!(
+        got[0].ends_with("· +1 −0"),
+        "subject carries the text-line delta: {got:?}"
+    );
+    // Counts (`+1`, region 2) anchor at the hash; the gap to the name
+    // fills the rest of the hash→message span (uniform across rows).
+    assert_eq!(
+        got[1],
+        format!(
+            "{}+1{}src/a.rs",
+            " ".repeat(hash_col),
+            " ".repeat(msg_col - hash_col - 2)
+        ),
+        "footer must hang under the commit ID: {got:?}"
+    );
 }
 
 /// When the counts block is exactly as wide as the hash→message span
@@ -674,7 +662,6 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     d.commit_line(
         "0875db3",
         "fix(display): align footer",
-        "[1/1]",
         &[
             FileStats {
                 path: "src/render/display/mod.rs".into(),
@@ -699,24 +686,18 @@ fn commit_footer_wide_counts_grow_left_not_right() {
         ],
     );
     let got = lines.lock().clone();
-    // Region 8 (`+152 −84` sized): block starts at the ✓ column (6 past
-    // margin, so `+64` carries 1 pad col), ends 2 short of the message
-    // (16), names pin at 16.
+    // Region 8 (`+152 −84` sized): block starts at the hash column (2),
+    // ends 2 short of the message (10), names pin at 12.
     assert_eq!(
         got[0],
-        "  [1/1] \u{2713} 0875db3 fix(display): align footer · +152 −84"
+        "  \u{2713} 0875db3 fix(display): align footer · +152 −84"
     );
-    assert_eq!(got[1], "         +64 −51  src/render/display/mod.rs");
-    assert_eq!(got[2], "         +88 −33  src/render/display/tests.rs");
-    // Bar budget includes the 4-col subject hang, so it stops at the table
+    assert_eq!(got[1], "     +64 −51  src/render/display/mod.rs");
+    assert_eq!(got[2], "     +88 −33  src/render/display/tests.rs");
     // edge (no wrap): computed, not hand-counted glyphs.
     assert_eq!(
         got[3],
-        format!(
-            "      Σ +152 −84 · 2 files {}{}",
-            "█".repeat(32),
-            "░".repeat(18)
-        )
+        format!("  Σ +152 −84 {}{}", "█".repeat(41), "░".repeat(23))
     );
 }
 
@@ -734,7 +715,6 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        "[1/2]",
         &[
             FileStats {
                 path: "src/a.rs".into(),
@@ -759,20 +739,16 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
         ],
     );
     let got = lines.lock().clone();
-    // `[1/2] ` = 6 cols past the margin: tick at 6, hash at 8, message at
-    // 16. Region 5 (`+8 −1` sized): block starts at the hash (8), ends 13,
-    // names pin at the message (16) — a 3-col gap — and the Σ glyph hugs
-    // the block's left edge at 6, exactly under the ✓.
-    assert_eq!(got[0], "  [1/2] \u{2713} abc1234 feat: add thing · +8 −1");
-    assert_eq!(got[1], "          +3 −1   src/a.rs");
-    assert_eq!(got[2], "          +5      src/b.rs");
+    // Prefix-free geometry: tick at 0, hash at 2, message at 10. Region 5
+    // (`+8 −1` sized): block starts at the hash (2), ends 7, names pin at
+    // the message (10) — a 3-col gap — and the Σ glyph hugs the block's
+    // left edge at 0, exactly under the ✓.
+    assert_eq!(got[0], "  \u{2713} abc1234 feat: add thing · +8 −1");
+    assert_eq!(got[1], "    +3 −1   src/a.rs");
+    assert_eq!(got[2], "    +5      src/b.rs");
     assert_eq!(
         got[3],
-        format!(
-            "        Σ +8 −1 · 2 files {}{}",
-            "█".repeat(45),
-            "░".repeat(6)
-        )
+        format!("  Σ +8 −1 {}{}", "█".repeat(60), "░".repeat(7))
     );
 }
 
@@ -1020,8 +996,7 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
             },
         ]
     };
-    for (cols, want_bar) in [(30, " ██████"), (28, " ████"), (26, ""), (24, "")]
-    {
+    for (cols, cells) in [(30, 16), (28, 14), (24, 10), (16, 0)] {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with_cols(
             Buf {
@@ -1041,25 +1016,32 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
         );
         let got = lines.lock().clone();
         let sigma = got.last().expect("Σ row present");
-        let want = format!("  Σ +10 −0 · 2 files{want_bar}");
+        let bar = if cells > 0 {
+            format!(" {}", "█".repeat(cells))
+        } else {
+            String::new()
+        };
+        let want = format!("  Σ +10 −0{bar}");
         assert_eq!(sigma.trim_end(), want, "cols {cols}: {got:?}");
     }
 }
 
-/// The Σ row's full-bleed bar is budgeted against the row's whole prefix —
-/// subject hang included — not the bare table width: without the hang in
-/// the fixed spend the bar overshoots the terminal and the row wraps (a
-/// 103-column Σ row on a 100-col terminal, caught by the PTY render
-/// harness). Contract: margin (2) + table_width (cols − 4) bounds the row.
+/// The Σ row's full-bleed bar is budgeted against the row's whole prefix
+/// — subject hang included — within the TEXT budget (`text_width`, the
+/// same prose boundary the reasoning feed wraps at), NOT the terminal's
+/// real edge: on a 140-col terminal the bar still ends at the capped
+/// the row (a 103-column Σ row on a 100-col terminal, caught by the PTY
+/// render harness). Contract: margin (2) + the capped text budget bound
+/// the row.
 #[test]
-fn sigma_bar_never_wraps_the_entry_row() {
+fn sigma_bar_ends_at_the_text_boundary_never_the_terminal_edge() {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with_cols(
         Buf {
             colors: false,
             lines: lines.clone(),
         },
-        100,
+        140,
     );
     let stats = vec![
         FileStats {
@@ -1083,15 +1065,17 @@ fn sigma_bar_never_wraps_the_entry_row() {
             new_size: 0,
         },
     ];
-    // `[1/2] ` prefix geometry: the Σ row hangs 6 cols past the margin.
+    // Prefix-free entry geometry: tick 0, hash 2, message 10 — the Σ row
+    // starts at the margin. `text_width` caps at the 100-col prose edge
+    // even though the terminal reports 140.
     d.emit_file_stats(
         &stats,
         &SubjectOffsets {
-            tick: 6,
-            hash: 8,
-            message: 16,
+            tick: 0,
+            hash: 2,
+            message: 10,
         },
-        d.table_width(),
+        d.text_width(),
     );
     let got = lines.lock().clone();
     let sigma = got.last().expect("Σ row present");
@@ -1099,6 +1083,6 @@ fn sigma_bar_never_wraps_the_entry_row() {
     assert_eq!(
         sigma.chars().count(),
         97,
-        "the Σ row ends exactly at the table edge (margin 2 + 95 of the 96-col table), never past it: {sigma:?}"
+        "the Σ row ends at the capped text boundary (margin 2 + 95 of the 96-col budget), never at the terminal edge: {sigma:?}"
     );
 }
