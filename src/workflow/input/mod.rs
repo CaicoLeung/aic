@@ -96,8 +96,13 @@ pub(crate) fn inquire_opt<T>(result: Result<T, InquireError>) -> anyhow::Result<
 /// fixed in inquire 0.8 — but it is deliberately not used, because narrowing
 /// is still wanted on these short lists.
 pub(crate) fn opt_nav(prompt: &str, options: &[String], default: usize) -> Result<OptNav> {
+    // The `›` menu cursor (design spec §1.1) — the one marker inquire's
+    // default `>` is swapped for; everything else keeps inquire's rendering.
+    let render = inquire::ui::RenderConfig::default_colored()
+        .with_highlighted_option_prefix(inquire::ui::Styled::new("›"));
     match Select::new(prompt, options.to_vec())
         .with_starting_cursor(default)
+        .with_render_config(render)
         .raw_prompt()
     {
         Ok(ListOption { index, .. }) => Ok(OptNav::Value(index)),
