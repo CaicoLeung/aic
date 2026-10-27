@@ -112,9 +112,9 @@ fn render(segs: &[Seg], theme: &Theme) -> String {
 }
 
 /// Lifecycle state of one Run Step (ADR 0018 §3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepState {
-    /// Not started — `·` marker, muted label.
+    #[default]
     Pending,
     /// Running — `⠋` marker, live output streams under the row.
     Active,
@@ -151,7 +151,7 @@ impl Failure {
 /// active step's pre-styled live output (reasoning-window gutter rows,
 /// sub-rows, menus); `durable_rows` persist under a completed step's summary
 /// line (Commit entries, resolve verdicts, fallback notices — ADR 0018).
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct Step {
     /// Skeleton label, shown from frame one (`Scan changes`, `Plan batches`).
     pub label: String,
@@ -182,14 +182,7 @@ impl Step {
     pub fn pending(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            state: StepState::Pending,
-            summary: None,
-            duration: None,
-            active_elapsed: None,
-            live_rows: Vec::new(),
-            durable_rows: Vec::new(),
-            peeled: false,
-            failure: None,
+            ..Default::default()
         }
     }
 

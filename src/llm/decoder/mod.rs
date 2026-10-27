@@ -392,6 +392,7 @@ pub(crate) trait Decoder: Send {
 /// pairs; a `thinking_delta` clears the window so a milestone re-fires after
 /// reasoning resumes). Milestones carry their own trailing newline; thinking
 /// does not — a decoder-internal formatting choice the caller never sees.
+#[derive(Default)]
 pub(crate) struct ClaudeDecoder {
     text: String,
     result: Option<String>,
@@ -400,11 +401,7 @@ pub(crate) struct ClaudeDecoder {
 
 impl ClaudeDecoder {
     pub(crate) fn new() -> Self {
-        Self {
-            text: String::new(),
-            result: None,
-            last_milestone: None,
-        }
+        Self::default()
     }
 }
 

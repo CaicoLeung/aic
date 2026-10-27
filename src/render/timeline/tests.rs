@@ -483,11 +483,7 @@ fn delta_suffix_sums_and_survives_zero() {
         path: "x.rs".into(),
         added: a,
         deleted: d,
-        new: false,
-        removed: false,
-        binary: false,
-        old_size: 0,
-        new_size: 0,
+        ..Default::default()
     };
     assert_eq!(delta_suffix(&[stats(3, 1), stats(5, 0)]), " · +8 −1");
     assert_eq!(delta_suffix(&[]), " · +0 −0");

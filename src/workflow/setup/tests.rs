@@ -118,10 +118,6 @@ fn seed_draft_carries_existing_config() {
 #[test]
 fn seed_draft_carries_confirm_before_commit() {
     let existing = Some(Config {
-        backend: None,
-        api_key: None,
-        model: None,
-        base_url: None,
         confirm_before_commit: Some(true),
         ..Default::default()
     });
@@ -133,11 +129,6 @@ fn seed_draft_carries_confirm_before_commit() {
 #[test]
 fn seed_draft_carries_review_batch_plan() {
     let existing = Some(Config {
-        backend: None,
-        api_key: None,
-        model: None,
-        base_url: None,
-        confirm_before_commit: None,
         review_batch_plan: Some(true),
         ..Default::default()
     });

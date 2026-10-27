@@ -55,8 +55,8 @@ fn fail(stderr: &str, code: Option<i32>) -> Result<CommandOutput> {
     Ok(CommandOutput {
         success: false,
         code,
-        stdout: String::new(),
         stderr: stderr.into(),
+        ..Default::default()
     })
 }
 
@@ -305,9 +305,7 @@ async fn signal_death_is_not_misreported_as_not_installed() {
     // binary was found and ran. Distinct from the NotFound path above.
     let (agent, _) = agent_with(vec![Ok(CommandOutput {
         success: false,
-        code: None,
-        stdout: String::new(),
-        stderr: String::new(),
+        ..Default::default()
     })]);
     let res = agent.call("x").await;
     match res.unwrap_err().downcast_ref::<LlmError>() {

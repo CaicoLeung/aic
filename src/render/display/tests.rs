@@ -73,11 +73,7 @@ fn fs(path: &str, added: usize, deleted: usize) -> FileStats {
         path: path.into(),
         added,
         deleted,
-        new: false,
-        removed: false,
-        binary: false,
-        old_size: 0,
-        new_size: 0,
+        ..Default::default()
     }
 }
 

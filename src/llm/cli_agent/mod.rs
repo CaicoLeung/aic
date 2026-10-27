@@ -517,7 +517,7 @@ pub struct CommandSpec {
 }
 
 /// The outcome of one subprocess run, already classified.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CommandOutput {
     /// Process exited zero.
     pub success: bool,

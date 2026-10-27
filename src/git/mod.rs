@@ -40,7 +40,7 @@ pub enum StatusKind {
 /// [`Git::staged_stats`] (what a pending commit would land) and
 /// [`Git::committed_stats`] (what a landed commit did land); rendered by
 /// `display::Display::emit_file_stats`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileStats {
     pub path: String,
     pub added: usize,

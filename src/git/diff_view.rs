@@ -147,13 +147,7 @@ impl Git {
             .iter()
             .map(|p| FileStats {
                 path: p.clone(),
-                added: 0,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
+                ..Default::default()
             })
             .collect();
         let mut new_flags = vec![false; paths.len()];
