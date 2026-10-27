@@ -211,6 +211,14 @@ this amendment records both resolutions.
    - **No delta suffix on the entry subject.** `✓ hash subject · +A −D`
      dropped its tail — the footer's per-file counts and Σ row own the
      numbers, `git log` owns the prose. The subject is a title row only.
+   - **Subject rows clamp to the terminal width.** The entry title row
+     and the preview subject clamp (`…`, CJK display-width-aware — the
+     same `layout::clamp_to_width` the sub-rows use) to the row's
+     remaining columns: subjects are prompt-capped at 72 chars but
+     nothing validates that, and a wrapped row desyncs the flush
+     printer's and the frame painter's one-physical-row-per-row cursor
+     arithmetic. Overflow past the prose cap is gone; the guarantee is
+     one physical line per row.
    - **Run-wide counts region.** Each entry's footer no longer sizes its
      `+N`/`−M` grid to its own batch: `counts_geometry` (pure, in
      `render::display`) computes the region once over the Run's WHOLE

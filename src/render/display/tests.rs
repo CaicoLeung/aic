@@ -1149,3 +1149,61 @@ fn sigma_bar_ends_at_the_text_boundary_never_the_terminal_edge() {
         "the Σ row ends at the capped text boundary (margin 2 + 95 of the 96-col budget), never at the terminal edge: {sigma:?}"
     );
 }
+
+/// Subject rows clamp to the terminal's effective width (`…` marking the
+/// cut): the entry row is a permanent terminal line and the preview row
+/// rides the live frame — either wrapping to two physical rows desyncs
+/// the painter/flush cursor arithmetic, which assumes one row per emitted
+/// row. Commit subjects are prompt-capped at 72 chars but nothing
+/// validates that, so the renderer owns the guard.
+#[test]
+fn commit_line_subject_clamps_to_the_terminal_width() {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let d = Display::with_cols(
+        Buf {
+            colors: false,
+            lines: lines.clone(),
+        },
+        40,
+    );
+    let message = format!("feat: {}", "x".repeat(60));
+    d.commit_line("abc1234", &message, &[], 0);
+    let got = lines.lock().clone();
+    let row = &got[0];
+    // Budget 28 (40 − margin 2 − `✓ ` 2 − hash 7 − space 1): the subject
+    // carries the cut marker and the whole row fits 40 columns.
+    assert!(row.contains('…'), "the cut is marked: {row:?}");
+    assert!(
+        row.chars().count() <= 40,
+        "row must fit the terminal width: {row:?}"
+    );
+    assert!(
+        row.starts_with("  \u{2713} abc1234 feat: "),
+        "head kept: {row:?}"
+    );
+}
+
+/// The preview subject clamps the same way (it rides the live frame,
+/// where a wrapped row corrupts every later whole-frame repaint) —
+/// budget is 2 wider than the entry's (no hash cell).
+#[test]
+fn commit_preview_subject_clamps_to_the_terminal_width() {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let d = Display::with_cols(
+        Buf {
+            colors: false,
+            lines: lines.clone(),
+        },
+        30,
+    );
+    let message = format!("feat: {}", "y".repeat(60));
+    d.commit_preview(&message, None, &[]);
+    let got = lines.lock().clone();
+    let row = &got[1];
+    assert!(row.contains('…'), "the cut is marked: {row:?}");
+    assert!(
+        row.chars().count() <= 30,
+        "row must fit the terminal width: {row:?}"
+    );
+    assert!(row.starts_with("  ? feat: "), "head kept: {row:?}");
+}

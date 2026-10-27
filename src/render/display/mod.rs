@@ -10,7 +10,7 @@ use console::{Style, Term};
 
 use crate::git::FileStats;
 use crate::render::commit_type::CommitType;
-use crate::render::layout::{FALLBACK_COLS, MARGIN, resolve_cols, wrap_line};
+use crate::render::layout::{FALLBACK_COLS, MARGIN, clamp_to_width, resolve_cols, wrap_line};
 use crate::render::palette;
 use crate::render::palette::{commit_id_color, neutral_gray, sigma_color};
 
@@ -200,19 +200,22 @@ impl Display {
     /// batch, flushed to permanent scrollback below the Run timeline frame.
     ///
     /// Layout: the subject line is a single full-width title row —
-    /// `✓ <hash> <styled subject>` — never wrapped (overflow preferable to
-    /// truncation/re-flow), carrying no delta: the footer's per-file counts
-    /// and Σ row own the numbers, `git log` owns the prose; the pre-commit
-    /// preview ([`Self::commit_preview`]) still shows the body in full
-    /// before the commit lands. The file-stats footer hangs shallower —
-    /// file rows under the commit ID, the Σ total under the `✓` marker —
-    /// so the footer reads as keyed to the ref line. `stats` render on the
-    /// [`Self::text_width`] budget: the same prose boundary every other Run
-    /// surface wraps at, so the Σ Diff bar's right edge is where text ends,
-    /// not the terminal's real edge. `region_floor` is the Run-wide counts
-    /// width ([`counts_geometry`]) so every entry of a multi-batch Run
-    /// shares one counts grid — batch-local digit counts can't drift the
-    /// columns.
+    /// `✓ <hash> <styled subject>` — never re-flowed, clamped with `…`
+    /// at the terminal's edge, carrying no delta: the footer's per-file
+    /// counts and Σ row own the numbers, `git log` owns the prose; the
+    /// pre-commit preview ([`Self::commit_preview`]) still shows the body
+    /// in full before the commit lands. The clamp keeps the row one
+    /// physical terminal line — the flush printer's cursor arithmetic
+    /// assumes one row per emitted row (subjects are prompt-capped at 72
+    /// chars but nothing validates that). The file-stats footer hangs
+    /// shallower — file rows under the commit ID, the Σ total under the
+    /// `✓` marker — so the footer reads as keyed to the ref line.
+    /// `stats` render on the [`Self::text_width`] budget: the same prose
+    /// boundary every other Run surface wraps at, so the Σ Diff bar's
+    /// right edge is where text ends, not the terminal's real edge.
+    /// `region_floor` is the Run-wide counts width ([`counts_geometry`])
+    /// so every entry of a multi-batch Run shares one counts grid —
+    /// batch-local digit counts can't drift the columns.
     pub fn commit_line(&self, hash: &str, message: &str, stats: &[FileStats], region_floor: usize) {
         // Main line: ✓ <hash> <message> — one full-width table row per
         // landed batch (ADR 0018 redesign). Commit ID: amber #d97706, bold
@@ -220,9 +223,15 @@ impl Display {
         // themes.
         let check = self.styled("\u{2713}", palette::success());
         let hash_styled = self.styled(hash, commit_id_color().bold());
+        // The subject clamps to the row's remaining effective columns
+        // (margin + `✓ ` + hash + space already spent): the entry is a
+        // permanent terminal line and must never wrap to two physical
+        // rows.
+        let budget =
+            resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + 2 + hash.chars().count() + 1);
         self.emit(&format!(
             "{check} {hash_styled} {}",
-            self.styled_subject(message)
+            self.styled_subject(&clamp_to_width(message, budget))
         ));
 
         // File rows + Σ anchor at the hash with names pinned to the message
@@ -647,10 +656,13 @@ impl Display {
             self.styled("?", pending.clone()),
             self.styled("proposed commit:", pending.clone())
         ));
+        // The preview rides the live frame, where a wrapped row would
+        // desync the whole-frame repaint — same clamp as the landed entry.
+        let budget = resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + 2);
         self.emit(&format!(
             "{} {}",
             self.styled("?", pending.clone()),
-            self.styled_subject(message)
+            self.styled_subject(&clamp_to_width(message, budget))
         ));
         let mut rows = 2;
         // `? ` — the preview subject's marker prefix: body hangs under the
