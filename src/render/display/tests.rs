@@ -66,37 +66,61 @@ impl DisplayWrite for Buf {
     }
 }
 
+/// Plain text-file `FileStats`; flagged variants use `..fs(..)` struct
+/// update.
+fn fs(path: &str, added: usize, deleted: usize) -> FileStats {
+    FileStats {
+        path: path.into(),
+        added,
+        deleted,
+        new: false,
+        removed: false,
+        binary: false,
+        old_size: 0,
+        new_size: 0,
+    }
+}
+
+/// A `Display` over a fresh `Buf` sink, plain or styled, plus the sink's
+/// shared line buffer for post-hoc assertions.
+fn disp(colors: bool) -> (Display, Arc<Mutex<Vec<String>>>) {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    (
+        Display::with(Buf {
+            colors,
+            lines: lines.clone(),
+        }),
+        lines,
+    )
+}
+
+/// `disp` with an explicit terminal width.
+fn disp_cols(cols: usize) -> (Display, Arc<Mutex<Vec<String>>>) {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    (
+        Display::with_cols(
+            Buf {
+                colors: false,
+                lines: lines.clone(),
+            },
+            cols,
+        ),
+        lines,
+    )
+}
+
 #[test]
 fn commit_preview_renders_message_body_and_file_list() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     let rows = d.commit_preview(
         "feat(auth): add OAuth2 login support",
         Some("Allow users to sign in via Google and GitHub OAuth2 providers"),
         &[
             FileStats {
-                path: "src/auth.rs".into(),
-                added: 12,
-                deleted: 3,
                 new: true,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
+                ..fs("src/auth.rs", 12, 3)
             },
-            FileStats {
-                path: "src/main.rs".into(),
-                added: 4,
-                deleted: 1,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
+            fs("src/main.rs", 4, 1),
         ],
     );
     let got = lines.lock().clone();
@@ -133,25 +157,8 @@ fn commit_preview_renders_message_body_and_file_list() {
 /// the same totals-first ratio bar as its multi-file siblings.
 #[test]
 fn commit_preview_single_file_still_shows_sigma_total() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
-    let rows = d.commit_preview(
-        "chore: bump dep",
-        None,
-        &[FileStats {
-            path: "Cargo.toml".into(),
-            added: 5,
-            deleted: 2,
-            new: false,
-            removed: false,
-            binary: false,
-            old_size: 0,
-            new_size: 0,
-        }],
-    );
+    let (d, lines) = disp(false);
+    let rows = d.commit_preview("chore: bump dep", None, &[fs("Cargo.toml", 5, 2)]);
     let got = lines.lock().clone();
     assert_eq!(got[0], "  ? chore: bump dep");
     // Single file, no body: the footer hangs under the subject's message
@@ -173,11 +180,7 @@ fn commit_preview_single_file_still_shows_sigma_total() {
 /// so the confirmed-draft erase never touches earlier commit lines.
 #[test]
 fn clear_last_erases_only_the_most_recent_rows() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.emit("keep me");
     d.emit("preview line 1");
     d.emit("preview line 2");
@@ -198,21 +201,11 @@ fn clear_last_erases_only_the_most_recent_rows() {
 /// first 8 are named, the rest are summarized.
 #[test]
 fn commit_preview_truncates_long_file_lists() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     let stats: Vec<FileStats> = (1..=10)
         .map(|i| FileStats {
             path: format!("src/f{i}.rs"),
-            added: 1,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: false,
-            old_size: 0,
-            new_size: 0,
+            ..fs("", 1, 0)
         })
         .collect();
     let rows = d.commit_preview("feat: big", None, &stats);
@@ -245,32 +238,18 @@ fn commit_preview_truncates_long_file_lists() {
 /// and the Σ total sums across all entries.
 #[test]
 fn file_stats_footer_marks_binary_and_deleted_files() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     let rows = d.emit_file_stats(
         &[
             FileStats {
-                path: "img.png".into(),
-                added: 0,
-                deleted: 0,
                 new: true,
-                removed: false,
                 binary: true,
-                old_size: 0,
                 new_size: 512,
+                ..fs("img.png", 0, 0)
             },
             FileStats {
-                path: "src/old.rs".into(),
-                added: 0,
-                deleted: 12,
-                new: false,
                 removed: true,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
+                ..fs("src/old.rs", 0, 12)
             },
         ],
         &SubjectOffsets {
@@ -305,34 +284,9 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
 /// the per-file-max-only column width.
 #[test]
 fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     let rows = d.emit_file_stats(
-        &[
-            FileStats {
-                path: "a.rs".into(),
-                added: 5,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
-            FileStats {
-                path: "b.rs".into(),
-                added: 5,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
-        ],
+        &[fs("a.rs", 5, 0), fs("b.rs", 5, 0)],
         &SubjectOffsets {
             tick: 0,
             hash: 0,
@@ -358,32 +312,19 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
 /// Regression for the all-binary column collapse.
 #[test]
 fn file_stats_footer_stable_columns_when_all_files_binary() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     let rows = d.emit_file_stats(
         &[
             FileStats {
-                path: "img.png".into(),
-                added: 0,
-                deleted: 0,
                 new: true,
-                removed: false,
                 binary: true,
-                old_size: 0,
                 new_size: 2048,
+                ..fs("img.png", 0, 0)
             },
             FileStats {
-                path: "data.bin".into(),
-                added: 0,
-                deleted: 0,
-                new: false,
-                removed: false,
                 binary: true,
                 old_size: 4096,
-                new_size: 0,
+                ..fs("data.bin", 0, 0)
             },
         ],
         &SubjectOffsets {
@@ -414,33 +355,16 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
 /// binary-overflow column drift between file rows and the Σ row.
 #[test]
 fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     let rows = d.emit_file_stats(
         &[
             FileStats {
-                path: "x.bin".into(),
-                added: 0,
-                deleted: 0,
-                new: false,
-                removed: false,
                 binary: true,
                 old_size: 1024,
                 new_size: 13312,
+                ..fs("x.bin", 0, 0)
             },
-            FileStats {
-                path: "a.rs".into(),
-                added: 1,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
+            fs("a.rs", 1, 0),
         ],
         &SubjectOffsets {
             tick: 0,
@@ -470,33 +394,17 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
 /// at the same column as a tag on the truncated row would.
 #[test]
 fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     let long = "x".repeat(70);
     let rows = d.emit_file_stats(
         &[
             FileStats {
                 path: long.clone(),
-                added: 1,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
+                ..fs("", 1, 0)
             },
             FileStats {
-                path: "a.rs".into(),
-                added: 1,
-                deleted: 0,
                 new: true,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
+                ..fs("a.rs", 1, 0)
             },
         ],
         &SubjectOffsets {
@@ -522,23 +430,13 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
 /// survive the commit.
 #[test]
 fn commit_line_renders_file_stats_footer() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.commit_line(
         "abc1234",
         "feat: add thing",
         &[FileStats {
-            path: "src/auth.rs".into(),
-            added: 7,
-            deleted: 2,
             new: true,
-            removed: false,
-            binary: false,
-            old_size: 0,
-            new_size: 0,
+            ..fs("src/auth.rs", 7, 2)
         }],
         CountsGeometry::ZERO,
     );
@@ -563,34 +461,15 @@ fn commit_line_renders_file_stats_footer() {
 /// (e.g. a guard misplaced between the two callers) fails here.
 #[test]
 fn commit_line_renders_sigma_row_for_multiple_files() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.commit_line(
         "abc1234",
         "feat: add thing",
         &[
+            fs("src/a.rs", 3, 1),
             FileStats {
-                path: "src/a.rs".into(),
-                added: 3,
-                deleted: 1,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
-            FileStats {
-                path: "src/b.rs".into(),
-                added: 5,
-                deleted: 0,
                 new: true,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
+                ..fs("src/b.rs", 5, 0)
             },
         ],
         CountsGeometry::ZERO,
@@ -614,24 +493,11 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
 /// the preview twin above and the Σ-row geometry tests below.
 #[test]
 fn commit_footer_hangs_under_subject_hash_without_delta() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        &[FileStats {
-            path: "src/a.rs".into(),
-            added: 1,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: false,
-            old_size: 0,
-            new_size: 0,
-        }],
+        &[fs("src/a.rs", 1, 0)],
         CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
@@ -681,35 +547,13 @@ fn commit_footer_hangs_under_subject_hash_without_delta() {
 /// commit message when Σ totals carry more digits than any single file.
 #[test]
 fn commit_footer_wide_counts_grow_left_not_right() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.commit_line(
         "0875db3",
         "fix(display): align footer",
         &[
-            FileStats {
-                path: "src/render/display/mod.rs".into(),
-                added: 64,
-                deleted: 51,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
-            FileStats {
-                path: "src/render/display/tests.rs".into(),
-                added: 88,
-                deleted: 33,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
+            fs("src/render/display/mod.rs", 64, 51),
+            fs("src/render/display/tests.rs", 88, 33),
         ],
         CountsGeometry::ZERO,
     );
@@ -732,36 +576,11 @@ fn commit_footer_wide_counts_grow_left_not_right() {
 /// totals still right-align into the per-file `+N`/`−M` columns.
 #[test]
 fn commit_footer_sigma_hangs_under_the_tick_marker() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.commit_line(
         "abc1234",
         "feat: add thing",
-        &[
-            FileStats {
-                path: "src/a.rs".into(),
-                added: 3,
-                deleted: 1,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
-            FileStats {
-                path: "src/b.rs".into(),
-                added: 5,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
-        ],
+        &[fs("src/a.rs", 3, 1), fs("src/b.rs", 5, 0)],
         CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
@@ -789,17 +608,7 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
 /// table's names/count columns drift apart across entries.
 #[test]
 fn commit_line_region_floor_keeps_entries_aligned() {
-    let mk = |path: &str, added: usize, deleted: usize| FileStats {
-        path: path.into(),
-        added,
-        deleted,
-        new: false,
-        removed: false,
-        binary: false,
-        old_size: 0,
-        new_size: 0,
-    };
-    let run = vec![mk("src/big.rs", 152, 84), mk("src/a.rs", 1, 0)];
+    let run = vec![fs("src/big.rs", 152, 84), fs("src/a.rs", 1, 0)];
     let floor = counts_geometry(&run);
     assert_eq!(floor.region, 8, "`+152 −84` sizes the Run-wide region");
     assert_eq!(
@@ -808,13 +617,9 @@ fn commit_line_region_floor_keeps_entries_aligned() {
         "…and the `+`/`−` columns inside it: `+152`/`−84` are the widest"
     );
 
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
-    d.commit_line("abc1234", "feat: small", &[mk("src/a.rs", 1, 0)], floor);
-    d.commit_line("def5678", "feat: big", &[mk("src/big.rs", 152, 84)], floor);
+    let (d, lines) = disp(false);
+    d.commit_line("abc1234", "feat: small", &[fs("src/a.rs", 1, 0)], floor);
+    d.commit_line("def5678", "feat: big", &[fs("src/big.rs", 152, 84)], floor);
     let got = lines.lock().clone();
     // Small entry: every field floored (plus 4, minus 3, region 8) and
     // anchored at the shared σ column (start 2) — its `+1` right-aligns
@@ -847,11 +652,7 @@ fn commit_line_region_floor_keeps_entries_aligned() {
 
 #[test]
 fn plain_when_colors_disabled() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.commit_line("abc1234", "feat: add thing", &[], CountsGeometry::ZERO);
     let got = lines.lock().clone();
     // No ANSI escapes. Type prefix "feat" is present, followed by
@@ -866,11 +667,7 @@ fn plain_when_colors_disabled() {
 fn truecolor_when_colors_enabled() {
     let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: true,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(true);
     d.commit_line("abc1234", "feat: add thing", &[], CountsGeometry::ZERO);
     let joined = lines.lock().join("\n");
     // hash #d97706 (bold), feat type green #15803d (bold), description
@@ -897,11 +694,7 @@ fn truecolor_when_colors_enabled() {
 fn fix_type_gets_orange_color() {
     let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: true,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(true);
     d.commit_line(
         "def5678",
         "fix(auth): correct token check",
@@ -929,11 +722,7 @@ fn fix_type_gets_orange_color() {
 
 #[test]
 fn scoped_commit_preserves_parens_plain() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: false,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(false);
     d.commit_line(
         "def5678",
         "fix(auth): correct token check",
@@ -962,11 +751,7 @@ fn each_type_renders_its_palette_color() {
         ("chore", "15;118;110"),
         ("wip", "100;116;139"),
     ] {
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let d = Display::with(Buf {
-            colors: true,
-            lines: lines.clone(),
-        });
+        let (d, lines) = disp(true);
         d.commit_line(
             "hash000",
             &format!("{type_str}: msg"),
@@ -989,11 +774,7 @@ fn each_type_renders_its_palette_color() {
 fn unrecognized_type_gets_hash_fallback_color() {
     let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: true,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(true);
     d.commit_line(
         "ghi9012",
         "blob: thing in progress",
@@ -1026,11 +807,7 @@ fn unrecognized_type_gets_hash_fallback_color() {
 fn no_colon_message_gets_muted_gray() {
     let (_env, _neon) = color_locks();
     let _guard = ColorGuard::force();
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with(Buf {
-        colors: true,
-        lines: lines.clone(),
-    });
+    let (d, lines) = disp(true);
     d.commit_line("jkl3456", "no colon message", &[], CountsGeometry::ZERO);
     let joined = lines.lock().join("\n");
     // No-colon messages have no type token to color → muted gray #6b7280
@@ -1087,37 +864,16 @@ fn format_bytes_delta_covers_units_and_signs() {
 fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
     let stats = |a: usize| {
         vec![
+            fs("a.rs", a, 0),
             FileStats {
-                path: "a.rs".into(),
-                added: a,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
-            },
-            FileStats {
-                path: "b.rs".into(),
-                added: 0,
-                deleted: 0,
-                new: false,
-                removed: false,
                 binary: true,
-                old_size: 0,
                 new_size: 512,
+                ..fs("b.rs", 0, 0)
             },
         ]
     };
     for (cols, cells) in [(30, 8), (28, 6), (24, 0), (16, 0)] {
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let d = Display::with_cols(
-            Buf {
-                colors: false,
-                lines: lines.clone(),
-            },
-            cols,
-        );
+        let (d, lines) = disp_cols(cols);
         d.emit_file_stats(
             &stats(10),
             &SubjectOffsets {
@@ -1150,36 +906,8 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
 /// the row.
 #[test]
 fn sigma_bar_ends_at_the_text_boundary_never_the_terminal_edge() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with_cols(
-        Buf {
-            colors: false,
-            lines: lines.clone(),
-        },
-        140,
-    );
-    let stats = vec![
-        FileStats {
-            path: "a.rs".into(),
-            added: 60,
-            deleted: 0,
-            new: false,
-            removed: false,
-            binary: false,
-            old_size: 0,
-            new_size: 0,
-        },
-        FileStats {
-            path: "b.rs".into(),
-            added: 4,
-            deleted: 1,
-            new: false,
-            removed: false,
-            binary: false,
-            old_size: 0,
-            new_size: 0,
-        },
-    ];
+    let (d, lines) = disp_cols(140);
+    let stats = vec![fs("a.rs", 60, 0), fs("b.rs", 4, 1)];
     // Prefix-free entry geometry: tick 0, hash 2, message 10 — the Σ row
     // starts at the margin. `text_width` caps at the 100-col prose edge
     // even though the terminal reports 140.
@@ -1211,14 +939,7 @@ fn sigma_bar_ends_at_the_text_boundary_never_the_terminal_edge() {
 /// validates that, so the renderer owns the guard.
 #[test]
 fn commit_line_subject_clamps_to_the_terminal_width() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with_cols(
-        Buf {
-            colors: false,
-            lines: lines.clone(),
-        },
-        40,
-    );
+    let (d, lines) = disp_cols(40);
     let message = format!("feat: {}", "x".repeat(60));
     d.commit_line("abc1234", &message, &[], CountsGeometry::ZERO);
     let got = lines.lock().clone();
@@ -1241,14 +962,7 @@ fn commit_line_subject_clamps_to_the_terminal_width() {
 /// budget is 2 wider than the entry's (no hash cell).
 #[test]
 fn commit_preview_subject_clamps_to_the_terminal_width() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let d = Display::with_cols(
-        Buf {
-            colors: false,
-            lines: lines.clone(),
-        },
-        30,
-    );
+    let (d, lines) = disp_cols(30);
     let message = format!("feat: {}", "y".repeat(60));
     d.commit_preview(&message, None, &[]);
     let got = lines.lock().clone();

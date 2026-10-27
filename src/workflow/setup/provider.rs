@@ -248,6 +248,20 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
     }
 }
 
+/// Map a one-shot text prompt's outcome to step navigation, storing the typed
+/// value via `set`. Back / Cancel pass straight through; the loop-based
+/// sub-modes that retry on Back keep their own match.
+fn text_nav(act: TextAct, set: impl FnOnce(String)) -> Nav {
+    match act {
+        TextAct::Value(v) => {
+            set(v);
+            Nav::Next
+        }
+        TextAct::Back => Nav::Back,
+        TextAct::Cancel => Nav::Cancel,
+    }
+}
+
 fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
     // Effective key for editing + keep semantics: the draft (a user edit or
@@ -272,15 +286,10 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             // otherwise the validator enforces a non-empty entry.
             let allow_empty = !key.is_empty();
             show_screen(PROVIDER_SCREEN)?;
-            match prompt_text(&prompt, None, allow_empty, "API key cannot be empty")? {
-                TextAct::Value(v) => {
-                    let v = if v.is_empty() { key } else { v };
-                    draft.api_key = Some(v);
-                    Ok(Nav::Next)
-                }
-                TextAct::Back => Ok(Nav::Back),
-                TextAct::Cancel => Ok(Nav::Cancel),
-            }
+            Ok(text_nav(
+                prompt_text(&prompt, None, allow_empty, "API key cannot be empty")?,
+                |v| draft.api_key = Some(if v.is_empty() { key } else { v }),
+            ))
         }
         // OpenAI-compatible — key optional (keyless servers allowed). "No key"
         // is a first-class choice a single text field cannot express, so keep
@@ -357,19 +366,15 @@ fn step_base_url(
     match provider.base_url_requirement() {
         BaseUrlRequirement::Required => {
             show_screen(PROVIDER_SCREEN)?;
-            match prompt_text(
-                "Base URL (e.g. http://localhost:1234/v1)",
-                initial.as_deref(),
-                false,
-                "base URL cannot be empty",
-            )? {
-                TextAct::Value(v) => {
-                    draft.base_url = Some(v);
-                    Ok(Nav::Next)
-                }
-                TextAct::Back => Ok(Nav::Back),
-                TextAct::Cancel => Ok(Nav::Cancel),
-            }
+            Ok(text_nav(
+                prompt_text(
+                    "Base URL (e.g. http://localhost:1234/v1)",
+                    initial.as_deref(),
+                    false,
+                    "base URL cannot be empty",
+                )?,
+                |v| draft.base_url = Some(v),
+            ))
         }
         BaseUrlRequirement::Optional(default) => {
             let (effective, source) = resolve_base_url(
@@ -444,19 +449,15 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
     // No curated list (OpenRouter, OpenAI-compatible) -> required free text.
     if models.is_empty() {
         show_screen(PROVIDER_SCREEN)?;
-        return match prompt_text(
-            "Model (required)",
-            initial.as_deref(),
-            false,
-            "model cannot be empty",
-        )? {
-            TextAct::Value(v) => {
-                draft.model = Some(v);
-                Ok(Nav::Next)
-            }
-            TextAct::Back => Ok(Nav::Back),
-            TextAct::Cancel => Ok(Nav::Cancel),
-        };
+        return Ok(text_nav(
+            prompt_text(
+                "Model (required)",
+                initial.as_deref(),
+                false,
+                "model cannot be empty",
+            )?,
+            |v| draft.model = Some(v),
+        ));
     }
 
     let mut items: Vec<String> = models

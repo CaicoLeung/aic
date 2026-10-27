@@ -67,6 +67,20 @@ pub(super) fn pause_done() -> Result<()> {
     let _ = std::io::stdin().lock().read_line(&mut line);
     Ok(())
 }
+
+/// Drive `fut` under the Verify spinner label on a dedicated current-thread
+/// Tokio runtime. `block_in_place` parks the outer multi-thread task; the
+/// nested current-thread runtime then drives the async probe future. Without
+/// `block_in_place`, `Runtime::block_on` panics inside an active runtime.
+fn probe(label: &str, fut: impl Future<Output = Result<String>>) -> Result<String> {
+    tokio::task::block_in_place(|| -> Result<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build verify runtime")?;
+        rt.block_on(crate::render::progress::with_spinner(label, fut))
+    })
+}
 /// The Verify item (AIC-23): make a minimal sample request against the
 /// selected provider using the **effective** config — config > default, with
 /// an in-session draft edit standing in for the config value — i.e. exactly
@@ -107,23 +121,46 @@ pub(super) fn step_verify(draft: &Draft) -> Result<Nav> {
 
     let llm = resolved.to_llm();
     let label = format!("Contacting {} ({model})…", p.display());
-    // block_in_place parks the outer multi-thread task; the nested
-    // current-thread runtime then drives the async verify future. Without
-    // block_in_place, Runtime::block_on panics inside an active runtime.
-    let result = tokio::task::block_in_place(|| -> Result<String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to build verify runtime")?;
-        rt.block_on(crate::render::progress::with_spinner(&label, async {
-            llm.agent("You are a connectivity checker. Follow the user's instruction exactly.")
-                .verify()
-                .await
-        }))
+    let result = probe(&label, async {
+        llm.agent("You are a connectivity checker. Follow the user's instruction exactly.")
+            .verify()
+            .await
     });
 
     show_verify_result(&p, &model, &resolved.api_key, base_url.as_deref(), result)?;
     Ok(Nav::Next)
+}
+
+/// The outcome block shared by both Verify screens: the success / failure
+/// line, the trimmed reply, the error plus its common causes, and the pause
+/// before the sub-menu redraws. Callers print their own headers first.
+fn show_outcome(
+    term: &Term,
+    result: Result<String>,
+    ok: &str,
+    failed: &str,
+    causes: &[&str],
+) -> Result<()> {
+    match result {
+        Ok(reply) => {
+            oneshot::stderr_line(&format!("{ICON_CHECK} {ok}"), palette::success());
+            if !reply.is_empty() {
+                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
+            }
+        }
+        Err(e) => {
+            oneshot::stderr_line(&format!("{ICON_CROSS} {failed}"), palette::failure());
+            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
+            eprintln!();
+            for cause in causes {
+                oneshot::stderr_detail(cause, palette::muted());
+            }
+        }
+    }
+    eprintln!();
+    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
+    let _ = term.read_char();
+    Ok(())
 }
 
 /// Render the Verify result on a fresh screen and pause for a keypress so the
@@ -159,33 +196,13 @@ fn show_verify_result(
         palette::muted(),
     );
     eprintln!();
-    match result {
-        Ok(reply) => {
-            oneshot::stderr_line(
-                &format!("{ICON_CHECK} Success — the provider responded."),
-                palette::success(),
-            );
-            if !reply.is_empty() {
-                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
-            }
-        }
-        Err(e) => {
-            oneshot::stderr_line(
-                &format!("{ICON_CROSS} Failed — the provider did not accept the request."),
-                palette::failure(),
-            );
-            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
-            eprintln!();
-            oneshot::stderr_detail(
-                "Common causes: wrong API key, model name, base URL, or network.",
-                palette::muted(),
-            );
-        }
-    }
-    eprintln!();
-    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
-    let _ = term.read_char();
-    Ok(())
+    show_outcome(
+        &term,
+        result,
+        "Success — the provider responded.",
+        "Failed — the provider did not accept the request.",
+        &["Common causes: wrong API key, model name, base URL, or network."],
+    )
 }
 
 /// The CLI analogue of [`step_verify`] (AIC-23): probe the configured CLI with a
@@ -218,15 +235,7 @@ pub(super) fn step_verify_cli(draft: &Draft) -> Result<Nav> {
         spec,
         "You are a connectivity checker. Follow the user's instruction exactly.".to_string(),
     );
-    let result = tokio::task::block_in_place(|| -> Result<String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to build verify runtime")?;
-        rt.block_on(crate::render::progress::with_spinner(&label, async {
-            agent.verify().await
-        }))
-    });
+    let result = probe(&label, async { agent.verify().await });
     show_cli_verify_result(result)?;
     Ok(Nav::Next)
 }
@@ -242,35 +251,14 @@ fn show_cli_verify_result(result: Result<String>) -> Result<()> {
     term.move_cursor_to(0, 0)?;
     oneshot::stderr_line("Verify — CLI agent", palette::plain());
     eprintln!();
-    match result {
-        Ok(reply) => {
-            oneshot::stderr_line(
-                &format!("{ICON_CHECK} Success — the CLI responded."),
-                palette::success(),
-            );
-            if !reply.is_empty() {
-                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
-            }
-        }
-        Err(e) => {
-            oneshot::stderr_line(
-                &format!("{ICON_CROSS} Failed — the CLI did not answer."),
-                palette::failure(),
-            );
-            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
-            eprintln!();
-            oneshot::stderr_detail(
-                "Common causes: the CLI is not installed, not",
-                palette::muted(),
-            );
-            oneshot::stderr_detail(
-                "authenticated, or timed out. Run the CLI once to log in.",
-                palette::muted(),
-            );
-        }
-    }
-    eprintln!();
-    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
-    let _ = term.read_char();
-    Ok(())
+    show_outcome(
+        &term,
+        result,
+        "Success — the CLI responded.",
+        "Failed — the CLI did not answer.",
+        &[
+            "Common causes: the CLI is not installed, not",
+            "authenticated, or timed out. Run the CLI once to log in.",
+        ],
+    )
 }

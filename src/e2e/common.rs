@@ -577,13 +577,9 @@ pub fn merge_text_and_binary(dir: &Path) {
 pub fn rebase_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     git_in(dir, &["branch", "topic"]);
-    std::fs::write(dir.join("tracked.txt"), "on master\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "master side"]);
+    commit_file(dir, "tracked.txt", "on master\n", "master side");
     git_in(dir, &["checkout", "topic"]);
-    std::fs::write(dir.join("tracked.txt"), "on topic\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "topic side"]);
+    commit_file(dir, "tracked.txt", "on topic\n", "topic side");
     git_in(dir, &["rebase", "master"]);
 }
 
@@ -597,9 +593,12 @@ pub fn rebase_conflict(dir: &Path) {
 pub fn am_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     // Diverge master so the patch's context (`original`) no longer matches.
-    std::fs::write(dir.join("tracked.txt"), "modified on master\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "master override"]);
+    commit_file(
+        dir,
+        "tracked.txt",
+        "modified on master\n",
+        "master override",
+    );
     // A single well-formed patch that fails to apply. `git am` of a valid mbox
     // that doesn't fit lands in the am state; the `From ` line and `Subject:`
     // header are what make it a mailbox rather than a bare diff.
@@ -637,13 +636,9 @@ pub fn make_lines(prefix: &str, n: usize) -> String {
 pub fn cherry_pick_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     git_in(dir, &["branch", "topic"]);
-    std::fs::write(dir.join("tracked.txt"), "on master\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "master side"]);
+    commit_file(dir, "tracked.txt", "on master\n", "master side");
     git_in(dir, &["checkout", "topic"]);
-    std::fs::write(dir.join("tracked.txt"), "on topic\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "topic side"]);
+    commit_file(dir, "tracked.txt", "on topic\n", "topic side");
     git_in(dir, &["checkout", "master"]);
     git_in(dir, &["cherry-pick", "topic"]);
 }
@@ -652,12 +647,8 @@ pub fn cherry_pick_conflict(dir: &Path) {
 /// then reverting A conflicts with B. Repo ends in the Revert state.
 pub fn revert_conflict(dir: &Path) {
     gh::init_test_repo(dir);
-    std::fs::write(dir.join("tracked.txt"), "changed\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "change tracked"]);
-    std::fs::write(dir.join("tracked.txt"), "master override\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "master override"]);
+    commit_file(dir, "tracked.txt", "changed\n", "change tracked");
+    commit_file(dir, "tracked.txt", "master override\n", "master override");
     git_in(dir, &["revert", "HEAD~1"]);
 }
 
@@ -673,20 +664,14 @@ pub fn revert_conflict(dir: &Path) {
 pub fn cherry_pick_sequence_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     // master advances tracked.txt from the initial "original".
-    std::fs::write(dir.join("tracked.txt"), "on master\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "master side"]);
+    commit_file(dir, "tracked.txt", "on master\n", "master side");
     // topic branches off the initial commit (no master side yet) with two
     // commits: a clean addition, then a tracked.txt change that collides with
     // master.
     git_in(dir, &["branch", "topic", "master~1"]);
     git_in(dir, &["checkout", "topic"]);
-    std::fs::write(dir.join("extra.txt"), "feature\n").unwrap();
-    git_in(dir, &["add", "extra.txt"]);
-    git_in(dir, &["commit", "-m", "topic clean add"]);
-    std::fs::write(dir.join("tracked.txt"), "on topic\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "topic tracked change"]);
+    commit_file(dir, "extra.txt", "feature\n", "topic clean add");
+    commit_file(dir, "tracked.txt", "on topic\n", "topic tracked change");
     git_in(dir, &["checkout", "master"]);
     // Multi-commit cherry-pick: A (clean) then B (conflict). Activating the
     // sequencer is what flips the state to CherryPickSequence.
@@ -705,16 +690,10 @@ pub fn cherry_pick_sequence_conflict(dir: &Path) {
 pub fn revert_sequence_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     // P: a standalone addition that reverts cleanly later.
-    std::fs::write(dir.join("fileP.txt"), "p\n").unwrap();
-    git_in(dir, &["add", "fileP.txt"]);
-    git_in(dir, &["commit", "-m", "add fileP"]);
+    commit_file(dir, "fileP.txt", "p\n", "add fileP");
     // Q: change tracked.txt; R: overwrite it so reverting Q conflicts.
-    std::fs::write(dir.join("tracked.txt"), "changed\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "change tracked"]);
-    std::fs::write(dir.join("tracked.txt"), "master override\n").unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "master override"]);
+    commit_file(dir, "tracked.txt", "changed\n", "change tracked");
+    commit_file(dir, "tracked.txt", "master override\n", "master override");
     // Multi-commit revert: revert P (clean) then Q (conflict). Activating the
     // sequencer is what flips the state to RevertSequence. Q is HEAD~1.
     git_in(dir, &["revert", "--no-edit", "HEAD~2", "HEAD~1"]);
@@ -743,9 +722,7 @@ pub fn merge_delete_modify_conflict(dir: &Path) {
 pub fn merge_oversized_and_text(dir: &Path) {
     gh::init_test_repo(dir);
     let big_base = make_lines("base", 2500);
-    std::fs::write(dir.join("big.txt"), &big_base).unwrap();
-    git_in(dir, &["add", "big.txt"]);
-    git_in(dir, &["commit", "-m", "add big base"]);
+    commit_file(dir, "big.txt", &big_base, "add big base");
     git_in(dir, &["branch", "other"]);
     std::fs::write(dir.join("tracked.txt"), "master\n").unwrap();
     std::fs::write(dir.join("big.txt"), make_lines("master", 2500)).unwrap();
@@ -821,9 +798,7 @@ pub fn partial_stage_two_hunk_file(dir: &Path) -> (String, String) {
     let base = "top\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nbottom\n";
     let a_state = "A-staged\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nbottom\n";
     let b_state = "A-staged\nfill1\nfill2\nfill3\nfill4\nfill5\nfill6\nfill7\nB-unstaged\n";
-    std::fs::write(dir.join("tracked.txt"), base).unwrap();
-    git_in(dir, &["add", "tracked.txt"]);
-    git_in(dir, &["commit", "-m", "base"]);
+    commit_file(dir, "tracked.txt", base, "base");
     std::fs::write(dir.join("tracked.txt"), a_state).unwrap();
     git_in(dir, &["add", "tracked.txt"]);
     std::fs::write(dir.join("tracked.txt"), b_state).unwrap();
