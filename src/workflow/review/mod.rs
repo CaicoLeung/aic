@@ -433,7 +433,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::llm::generator::BatchChange;
+    use crate::llm::generator::test_util::{batch, change, plan};
     use crate::render::display::DisplayWrite;
 
     /// Discarding sink so unit tests never paint stderr.
@@ -460,20 +460,6 @@ mod tests {
         fn clear_last(&self, _n: usize) {}
     }
 
-    fn change(file: &str, hunks: &[usize]) -> BatchChange {
-        BatchChange {
-            file: file.to_string(),
-            hunks: hunks.to_vec(),
-        }
-    }
-
-    fn batch(changes: Vec<BatchChange>, reason: Option<&str>) -> BatchPlanBatch {
-        BatchPlanBatch {
-            changes,
-            reason: reason.map(String::from),
-        }
-    }
-
     /// Menu that pops decisions from a queue and panics when exhausted, so
     /// an under-specified test fails loudly (same contract as e2e's
     /// `review_queue`).
@@ -491,10 +477,6 @@ mod tests {
 
     fn interactive(menu: ReviewMenu) -> BatchReview {
         BatchReview::Interactive { menu }
-    }
-
-    fn plan(batches: Vec<BatchPlanBatch>) -> BatchPlanOutput {
-        BatchPlanOutput { batches }
     }
 
     /// Merging folds two Batches into one at the earlier index: same-file

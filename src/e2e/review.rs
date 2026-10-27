@@ -8,15 +8,6 @@
 
 use super::common::*;
 
-/// A two-Batch plan over the two-file fixture: alpha.txt hunk 1 and
-/// beta.txt hunk 1, each in its own Batch.
-fn two_batch_plan() -> generator::BatchPlanOutput {
-    plan(vec![
-        plan_batch("alpha.txt", &[1], "alpha"),
-        plan_batch("beta.txt", &[1], "beta"),
-    ])
-}
-
 /// Merge then Continue: the plan folds into one Batch, so the Run lands one
 /// commit carrying both files — the Drafted Message is drafted for the
 /// merged diff (one messenger call), not two per-Batch messages.
@@ -31,7 +22,7 @@ async fn batch_review_merge_then_continue_commits_one_combined_commit() {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
             },
             ..deps(
-                planner_fixed(two_batch_plan()),
+                planner_fixed(two_file_two_batch_plan()),
                 messenger_fixed("feat: combined change"),
             )
         },
@@ -60,7 +51,10 @@ async fn batch_review_abort_stages_nothing_and_commits_nothing() {
                 menu: review_queue(vec![ReviewChoice::Abort]),
             },
             // Abort precedes drafting — the messenger must never be called.
-            ..deps(planner_fixed(two_batch_plan()), unreachable_messenger())
+            ..deps(
+                planner_fixed(two_file_two_batch_plan()),
+                unreachable_messenger(),
+            )
         },
     )
     .await
@@ -104,7 +98,7 @@ async fn batch_review_undo_restores_the_two_batch_plan() {
                 ]),
             },
             ..deps(
-                planner_fixed(two_batch_plan()),
+                planner_fixed(two_file_two_batch_plan()),
                 messenger_fixed("feat: separate change"),
             )
         },
@@ -219,7 +213,7 @@ async fn batch_review_merge_then_confirm_commit_lands_the_combined_commit() {
                 editor: unreachable_editor(),
             },
             ..deps(
-                planner_fixed(two_batch_plan()),
+                planner_fixed(two_file_two_batch_plan()),
                 messenger_fixed("feat: combined change"),
             )
         },

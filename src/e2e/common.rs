@@ -8,6 +8,7 @@ pub(super) use crate::git::conflict;
 pub(super) use crate::git::conflict::tests as cf;
 pub(super) use crate::git::tests as gh;
 pub(super) use crate::llm::generator;
+pub(super) use crate::llm::generator::test_util::{batch, change};
 pub(super) use crate::llm::redact::Redact;
 pub(super) use crate::render::display::{Display, DisplayWrite};
 pub(super) use crate::workflow::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
@@ -169,15 +170,7 @@ pub fn planner_capture(
 /// plan is trivially small; the split tests build their multi-batch plans
 /// inline instead.
 pub fn plan_single_batch(file: &str, reason: &str) -> generator::BatchPlanOutput {
-    generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: file.to_string(),
-                hunks: vec![1],
-            }],
-            reason: Some(reason.into()),
-        }],
-    }
+    plan(vec![batch(vec![change(file, &[1])], Some(reason))])
 }
 
 /// `generator::CommitOutput` with `message` and no body — the shape every
@@ -199,35 +192,21 @@ pub fn messenger_fixed(msg: &str) -> CommitMessenger {
 /// explained by `reason`. Collapses the multi-line struct literals the
 /// multi-batch e2e tests build plans from.
 pub fn plan_batch(file: &str, hunks: &[usize], reason: &str) -> generator::BatchPlanBatch {
-    generator::BatchPlanBatch {
-        changes: vec![generator::BatchChange {
-            file: file.to_string(),
-            hunks: hunks.to_vec(),
-        }],
-        reason: Some(reason.to_string()),
-    }
+    batch(vec![change(file, hunks)], Some(reason))
 }
 
 /// One multi-file batch: `files` as (file, hunks) pairs sharing one `reason`.
 pub fn plan_multi_batch(files: &[(&str, &[usize])], reason: &str) -> generator::BatchPlanBatch {
-    generator::BatchPlanBatch {
-        changes: files
-            .iter()
-            .map(|&(file, hunks)| generator::BatchChange {
-                file: file.to_string(),
-                hunks: hunks.to_vec(),
-            })
-            .collect(),
-        reason: Some(reason.to_string()),
-    }
+    batch(
+        files.iter().map(|&(f, h)| change(f, h)).collect(),
+        Some(reason),
+    )
 }
 
 /// A [`generator::BatchPlanOutput`] wrapping `batches` — the envelope every
 /// plan assembled from [`plan_batch`] / [`plan_multi_batch`] needs, including
 /// the empty (invalid) plan the fallback tests feed [`planner_fixed`].
-pub fn plan(batches: Vec<generator::BatchPlanBatch>) -> generator::BatchPlanOutput {
-    generator::BatchPlanOutput { batches }
-}
+pub(super) use crate::llm::generator::test_util::plan;
 
 /// Messenger that succeeds for the first `ok_for` calls then errors, with a
 /// call counter. Drives the partial-failure path: an early batch commits, then
@@ -417,20 +396,10 @@ pub fn resolve_deps_buf(resolve: Resolver, prompt: Prompt, buf: BufferWrite) -> 
     }
 }
 
-/// `tempfile::tempdir()` + run a `&Path`-taking fixture on it (e.g.
-/// `gh::init_test_repo`). Collapses the two-line setup pair every e2e test opens with.
-pub fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    dir
-}
-
-/// [`with_repo`] plus the `Git` handle every resolve test opens next.
-pub fn with_git(setup: fn(&Path)) -> (tempfile::TempDir, Git) {
-    let dir = with_repo(setup);
-    let git = Git::at(dir.path()).unwrap();
-    (dir, git)
-}
+// `tempfile::tempdir()` + run a `&Path`-taking fixture on it (`with_repo`),
+// plus the `Git` handle every resolve test opens next (`with_git`) — defined
+// once in `crate::git::tests`, shared with the unit tests there.
+pub(super) use crate::git::tests::{with_git, with_repo};
 
 /// `assert!(format!("{err:#}").contains(needle))` for every needle, with the
 /// formatted error in the panic message.
@@ -577,6 +546,15 @@ pub fn two_file_unstaged_repo(dir: &Path) {
     git_in(dir, &["commit", "-m", "base"]);
     std::fs::write(dir.join("alpha.txt"), "a1\n").unwrap();
     std::fs::write(dir.join("beta.txt"), "b1\n").unwrap();
+}
+
+/// The two-file / two-batch plan the multi-batch tests share: each file's
+/// hunk 1 in its own batch, over the [`two_file_unstaged_repo`] fixture.
+pub fn two_file_two_batch_plan() -> generator::BatchPlanOutput {
+    plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ])
 }
 
 /// The single-file counterpart of [`two_file_unstaged_repo`]: commits

@@ -6,14 +6,6 @@
 
 use super::common::*;
 
-/// The two-file / two-batch plan the multi-batch timeline tests share.
-fn two_file_two_batch_plan() -> generator::BatchPlanOutput {
-    plan(vec![
-        plan_batch("alpha.txt", &[1], "change alpha"),
-        plan_batch("beta.txt", &[1], "change beta"),
-    ])
-}
-
 /// Whether any ledger line starts with `prefix`.
 fn has_step(lines: &[String], prefix: &str) -> bool {
     lines.iter().any(|l| l.starts_with(prefix))

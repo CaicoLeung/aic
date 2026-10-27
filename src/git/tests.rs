@@ -24,13 +24,13 @@ pub(crate) fn init_test_repo(dir: &Path) {
         .unwrap();
 }
 
-fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
+pub(crate) fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     dir
 }
 
-fn with_git(setup: fn(&Path)) -> (tempfile::TempDir, Git) {
+pub(crate) fn with_git(setup: fn(&Path)) -> (tempfile::TempDir, Git) {
     let dir = with_repo(setup);
     let git = Git::at(dir.path()).unwrap();
     (dir, git)
