@@ -452,15 +452,14 @@ impl Decoder for ClaudeDecoder {
 /// pi `--mode json` decoder. The answer is the concatenation of every
 /// `text_delta` in arrival order (pi emits no terminal result event);
 /// `thinking_delta` streams live to the reasoning window.
+#[derive(Default)]
 pub(crate) struct PiDecoder {
     text: String,
 }
 
 impl PiDecoder {
     pub(crate) fn new() -> Self {
-        Self {
-            text: String::new(),
-        }
+        Self::default()
     }
 }
 
@@ -489,13 +488,14 @@ impl Decoder for PiDecoder {
 /// event's `part.text` at completion; a multi-step run may emit several, in
 /// which case the last wins. `reasoning` events forward live (usually a UI
 /// no-op — they land with the answer).
+#[derive(Default)]
 pub(crate) struct OpenCodeDecoder {
     answer: Option<String>,
 }
 
 impl OpenCodeDecoder {
     pub(crate) fn new() -> Self {
-        Self { answer: None }
+        Self::default()
     }
 }
 
@@ -521,13 +521,14 @@ impl Decoder for OpenCodeDecoder {
 /// `item.completed`; the last one wins. `reasoning` items forward live when
 /// present — best-effort, since they are account/org dependent and often
 /// absent (Issue #10746); their absence is normal, never an error.
+#[derive(Default)]
 pub(crate) struct CodexDecoder {
     answer: Option<String>,
 }
 
 impl CodexDecoder {
     pub(crate) fn new() -> Self {
-        Self { answer: None }
+        Self::default()
     }
 }
 

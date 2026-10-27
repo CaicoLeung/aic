@@ -753,6 +753,11 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
         .transpose()?
         .unwrap_or(BackendKind::Api);
     let mut lines = vec![("Backend".to_string(), kind.display_name().to_string())];
+    // Every resolved row shares the "(value (source: X))" shape — one push
+    // helper keeps the table wording in one place.
+    let row = |lines: &mut Vec<(String, String)>, key: &str, value: String, src| {
+        lines.push((key.to_string(), format!("{value} (source: {src})")));
+    };
     match kind {
         BackendKind::Cli => {
             // resolve_backend guarantees a command is set for the CLI backend.
@@ -760,10 +765,7 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
             let command = c
                 .active_cli_command()
                 .expect("cli backend implies command set");
-            lines.push((
-                "Command".to_string(),
-                format!("{command} (source: {})", Source::Config),
-            ));
+            row(&mut lines, "Command", command.to_string(), Source::Config);
             let (args, args_src) = match &c.cli.args {
                 Some(a) => (a.join(" "), Source::Config),
                 None => (
@@ -771,42 +773,30 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
                     Source::Default,
                 ),
             };
-            lines.push(("Args".to_string(), format!("{args} (source: {args_src})")));
+            row(&mut lines, "Args", args, args_src);
             let (timeout, to_src) = match c.cli.timeout_secs {
                 Some(t) => (t, Source::Config),
                 None => (crate::llm::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
             };
-            lines.push((
-                "Timeout".to_string(),
-                format!("{timeout}s (source: {to_src})"),
-            ));
+            row(&mut lines, "Timeout", format!("{timeout}s"), to_src);
         }
         BackendKind::Api => {
             let resolved = ResolvedConfig::resolve(config);
-            lines.push((
-                "Provider".to_string(),
-                format!("{} (source: {})", resolved.backend, resolved.backend_source),
-            ));
-            lines.push((
-                "Model".to_string(),
-                format!("{} (source: {})", resolved.model, resolved.model_source),
-            ));
-            lines.push((
-                "API key".to_string(),
-                format!(
-                    "{} (source: {})",
-                    resolved.mask_api_key(),
-                    resolved.api_key_source
-                ),
-            ));
-            lines.push((
-                "Base URL".to_string(),
-                format!(
-                    "{} (source: {})",
-                    resolved.base_url.as_deref().unwrap_or("(none)"),
-                    resolved.base_url_source
-                ),
-            ));
+            let r = &resolved;
+            row(
+                &mut lines,
+                "Provider",
+                r.backend.to_string(),
+                r.backend_source,
+            );
+            row(&mut lines, "Model", r.model.to_string(), r.model_source);
+            row(&mut lines, "API key", r.mask_api_key(), r.api_key_source);
+            row(
+                &mut lines,
+                "Base URL",
+                r.base_url.as_deref().unwrap_or("(none)").to_string(),
+                r.base_url_source,
+            );
             let saved: Vec<&str> = config
                 .map(|c| c.providers.iter().map(|p| p.backend.as_str()).collect())
                 .unwrap_or_default();
