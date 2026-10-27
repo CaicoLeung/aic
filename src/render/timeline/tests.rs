@@ -248,6 +248,68 @@ fn sub_row_shows_done_duration() {
     );
 }
 
+/// A landed commit's echo shares the durable entry's grammar — hash then
+/// subject — so the live row and the flushed row read identically
+/// (colors-off: the styled test theme emits no ANSI).
+#[test]
+fn sub_row_landed_echoes_hash_and_styled_subject() {
+    assert_eq!(
+        sub_row(
+            &SubBody::Landed {
+                hash: "a1b2c3d".into(),
+                subject: "fix(auth): correct token check".into()
+            },
+            80,
+            &THEME
+        ),
+        "    ✓ a1b2c3d fix(auth): correct token check"
+    );
+    // Colon-less messages fall back to the full text, like the entry row.
+    assert_eq!(
+        sub_row(
+            &SubBody::Landed {
+                hash: "a1b2c3d".into(),
+                subject: "plain message".into()
+            },
+            80,
+            &THEME
+        ),
+        "    ✓ a1b2c3d plain message"
+    );
+}
+
+/// The landed echo clamps like every other sub-row: the subject is LLM
+/// output with no builder-side budget (prompt-capped at 72 chars, nothing
+/// validates that), and an unclamped row would wrap and desync the
+/// painter's whole-frame repaint on every later tick.
+#[test]
+fn sub_row_clamps_long_landed_subject_to_the_terminal_width() {
+    let subject = format!("feat: {}", "x".repeat(70));
+    let row = sub_row(
+        &SubBody::Landed {
+            hash: "a1b2c3d".into(),
+            subject,
+        },
+        40,
+        &THEME,
+    );
+    // Budget 26 (40 − inset 6 − hash 7 − joiner 1): `feat: ` + 19 x's +
+    // `…` — the whole row is exactly 40 columns.
+    assert_eq!(row, format!("    ✓ a1b2c3d feat: {}…", "x".repeat(19)));
+}
+
+/// The active row's live elapsed joins only from 1 s — mirroring the
+/// completed state's rule — so a fast step never flashes `· 0s`.
+#[test]
+fn step_line_active_hides_sub_second_elapsed() {
+    let s = Step::active("Plan batches");
+    let s = Step {
+        active_elapsed: Some(Duration::from_millis(400)),
+        ..s
+    };
+    assert_eq!(step_line(&s, &THEME), "  ⠋ Plan batches");
+}
+
 /// A live sub-row clamps its text to the terminal width (`…` marking the
 /// cut, duration suffix kept inside the budget): sub-row text is the one
 /// frame content with no builder-side budget — commit subjects are
@@ -301,6 +363,23 @@ fn menu_rows_cursor_marks_selected_option() {
         rows,
         vec!["      Continue", "    › Merge two batches…", "      Abort"]
     );
+}
+
+/// Menu options and ask rows ride the live frame, so they clamp to the
+/// theme's width budget — a batch label built from deep repo paths can
+/// exceed the terminal, and a wrapped live row desyncs the painter's
+/// whole-frame repaint on every later tick.
+#[test]
+fn menu_rows_and_ask_row_clamp_to_the_frame_width() {
+    let t = theme(40);
+    let (rows, cursor) = menu_rows(&["Abort", &"o".repeat(100)], 1, &t);
+    assert_eq!(cursor, 1);
+    // Budget 34 (40 − inset 6): the unselected row indents, the selected
+    // one carries the `› ` cursor; both rows are exactly 40 columns.
+    assert_eq!(rows[0], "      Abort");
+    assert_eq!(rows[1], format!("    › {}…", "o".repeat(33)));
+    let ask = ask_row(&"q".repeat(100), &t);
+    assert_eq!(ask, format!("    ? {}…", "q".repeat(33)));
 }
 
 /// The Batch Review menu: `?` ask headline, `#i` listing rows, then the
@@ -429,4 +508,50 @@ fn delta_suffix_sums_and_survives_zero() {
     };
     assert_eq!(delta_suffix(&[stats(3, 1), stats(5, 0)]), " · +8 −1");
     assert_eq!(delta_suffix(&[]), " · +0 −0");
+}
+
+/// `menu_frame_rows` is the single assembly `frame_menu` paints per key
+/// read (ADR 0018): the original menu bug built ask/options/help rows
+/// every loop but never handed them to the painter — every interactive
+/// menu rendered zero rows on a TTY. e2e's non-TTY buffer cannot see
+/// frame painting, so this pins the painted row set itself: the ask row
+/// leads, the `›` cursor marks the selection, the help row closes, and
+/// every row clamps to the frame width with `…` (the no-wrap contract).
+#[test]
+fn menu_frame_rows_compose_ask_options_and_help_in_order() {
+    let rows = menu_frame_rows(
+        Some("stage this hunk?"),
+        &["Commit", "Abort"],
+        0,
+        "↑/↓ select · Enter confirm · Esc aborts",
+        &THEME,
+    );
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert_eq!(rows[0], "    ? stage this hunk?");
+    assert_eq!(rows[1], "    › Commit");
+    assert_eq!(rows[2], "      Abort");
+    assert_eq!(rows[3], "    ↑/↓ select · Enter confirm · Esc aborts");
+}
+
+/// Without an ask the assembly is options + help only — the merge-pick
+/// prompts pass an ask, the confirm menu does not.
+#[test]
+fn menu_frame_rows_without_ask_skip_the_ask_row() {
+    let rows = menu_frame_rows(None, &["Commit", "Abort"], 1, "Esc aborts", &THEME);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows[0].contains("Commit") && !rows[0].contains('›'));
+    assert_eq!(rows[1], "    › Abort");
+}
+
+/// Every row of the assembly honors the no-wrap budget: at width 20 each
+/// row (ask, option, help) is at most 20 columns and the cut carries `…`.
+#[test]
+fn menu_frame_rows_clamp_every_row_to_the_frame_width() {
+    let long: String = "x".repeat(80);
+    let t = theme(20);
+    let rows = menu_frame_rows(Some(&long), &[&long], 0, &long, &t);
+    for row in &rows {
+        assert!(display_width(row) <= 20, "{row:?}");
+        assert!(row.ends_with('…'), "the cut must be marked: {row:?}");
+    }
 }

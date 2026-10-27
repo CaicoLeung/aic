@@ -250,7 +250,8 @@ pub fn format_duration(d: Duration) -> Option<String> {
 }
 
 /// The active step's live elapsed counter: integer seconds (`12s`), ADR 0018
-/// — coarser than [`format_duration`] because it ticks every frame.
+/// — coarser than [`format_duration`] because it ticks every frame. The
+/// join-at-≥1s rule lives in [`step_line`]; this only formats.
 pub fn format_elapsed(d: Duration) -> String {
     format!("{}s", d.as_secs())
 }
@@ -271,8 +272,11 @@ fn completed_text(step: &Step) -> String {
 /// wrapped, no trailing spaces. All four states:
 ///
 /// - pending — `·` muted marker + muted label;
-/// - active — `⠋` pending marker + pending label + optional ` · <n>s` elapsed
-///   detail in `neutral_gray`;
+/// - active — `⠋` pending marker + default-fg bold label + optional
+///   ` · <n>s` elapsed detail in `neutral_gray`. The glyph alone carries
+///   the yellow: a whole yellow-bold row would be the loudest thing on
+///   the screen, outshouting the durable record (motion already says
+///   "working"); yellow stays reserved for "needs your attention".
 /// - completed — `✓` success marker, default-fg summary, `neutral_gray` detail;
 /// - failed — `✗` failure marker + `label — reason` headline in `failure`.
 pub fn step_line(step: &Step, theme: &Theme) -> String {
@@ -284,8 +288,13 @@ pub fn step_line(step: &Step, theme: &Theme) -> String {
         }
         StepState::Active => {
             segs.push(styled("⠋ ", palette::pending()));
-            segs.push(styled(step.label.clone(), palette::pending()));
-            if let Some(e) = step.active_elapsed {
+            // Glyph-only yellow — see the state list above.
+            segs.push(styled(step.label.clone(), palette::emphasis()));
+            // The live elapsed joins only from 1 s — matching the completed
+            // state's < 1 s rule, so a fast step never flashes `· 0s`.
+            if let Some(e) = step.active_elapsed
+                && e.as_secs() >= 1
+            {
                 segs.push(styled(
                     format!(" · {}", format_elapsed(e)),
                     palette::neutral_gray(),
@@ -385,7 +394,8 @@ pub fn timeline_frame(steps: &[Step], theme: &Theme) -> Vec<String> {
 }
 
 /// The body of one live sub-row (ADR 0018): an in-flight label
-/// (`⠋ Generating commit message`) or a done row (`✓ [text] [· duration]`).
+/// (`⠋ Drafting f2.rs`), a done row (`✓ [text] [· duration]`), or a landed
+/// commit echo (`✓ a1b2c3d feat: first`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubBody {
     /// In-flight: spinner glyph + label in `pending`.
@@ -393,27 +403,43 @@ pub enum SubBody {
     /// Done: `✓` in `success`, optional default-fg text (file path, hash
     /// line), optional duration shown only when ≥ 1 s.
     Done(String, Option<Duration>),
+    /// A landed commit's in-frame echo: `✓` in `success`, the short hash in
+    /// amber bold, then the subject through the shared
+    /// [`palette::subject_segments`] — the same grammar the flushed Commit
+    /// entry renders, so the live row and the durable row of one batch read
+    /// identically (the pre-flush echo used to lose every color anchor).
+    Landed { hash: String, subject: String },
 }
 
-/// One live sub-row at column 4 (ADR 0018): an in-flight label or a done
-/// row. No `[i/N]` numbering — rows land in happening order and every row
-/// of the step shares one shape: `⠋ Generating commit message` /
-/// `✓ 6.2s` / `✓ a1b2c3d feat: first`. Text clamps to `width` (the
-/// terminal's raw column count; `…` marks the cut) so a live row can
-/// never wrap to two physical rows: sub-row text is the one frame content
-/// with no builder-side budget (commit subjects are prompt-capped at 72
-/// chars but nothing validates that), and the painter's whole-frame
-/// repaint assumes one physical row per row.
+/// Clamp live-row text after its fixed chrome (ADR 0018's no-wrap
+/// contract): every live row spends the inset (4) plus its marker columns
+/// (`⠋ `, `✓` + space, `› `, `? `) before the text, and the painter's
+/// whole-frame repaint assumes one physical row per row — so the text
+/// clamps to `width − chrome` with `…` marking the cut. `width` is the
+/// budget the surface owns: frame rows the theme's prose width, sub-row
+/// callers the raw terminal width (flushed table rows budget to the real
+/// edge).
+pub(crate) fn clamp_row_text(text: &str, width: usize, chrome: usize) -> String {
+    clamp_to_width(text, width.saturating_sub(chrome))
+}
+
+/// One live sub-row at column 4 (ADR 0018): an in-flight label, a done row,
+/// or a landed-commit echo. No `[i/N]` numbering — rows land in happening
+/// order and every row of the step shares one shape: `⠋ Drafting f2.rs` /
+/// `✓ f2.rs · 6.2s` / `✓ a1b2c3d feat: first`. Text clamps to `width` (the
+/// terminal's raw column count; `…` marks the cut) so a live row can never
+/// wrap to two physical rows: sub-row text is the one frame content with no
+/// builder-side budget (commit subjects are prompt-capped at 72 chars but
+/// nothing validates that), and the painter's whole-frame repaint assumes
+/// one physical row per row.
 pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
     let mut segs = vec![seg(MARGIN), seg(SUB_INDENT)];
     match body {
         SubBody::InFlight(label) => {
             segs.push(styled("⠋ ", palette::pending()));
-            // Inset (4) + `⠋ ` (2) precede the label.
-            segs.push(styled(
-                clamp_to_width(label, width.saturating_sub(6)),
-                palette::pending(),
-            ));
+            // Glyph-only yellow, matching the active step row; the text
+            // clamps to the no-wrap budget (inset 4 + `⠋ ` 2).
+            segs.push(styled(clamp_row_text(label, width, 6), palette::emphasis()));
         }
         SubBody::Done(text, duration) => {
             segs.push(styled("✓", palette::success()));
@@ -426,13 +452,33 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
                 None => 0,
             };
             // Inset (4) + `✓` (1) + the text's leading space (1).
-            let text = clamp_to_width(text, width.saturating_sub(6 + suffix));
+            let text = clamp_row_text(text, width, 6 + suffix);
             if !text.is_empty() {
                 segs.push(seg(format!(" {text}")));
             }
             if let Some(d) = dur {
                 let joiner = if text.is_empty() { " " } else { " · " };
                 segs.push(styled(format!("{joiner}{d}"), palette::neutral_gray()));
+            }
+        }
+        SubBody::Landed { hash, subject } => {
+            segs.push(styled("✓", palette::success()));
+            segs.push(styled(
+                format!(" {hash}"),
+                palette::commit_id_color().bold(),
+            ));
+            // Inset (4) + ✓ (1) + the hash's leading space (1) + the hash
+            // itself + the joiner space (1) — the same no-wrap contract as
+            // the other variants: the subject is the one live-row text with
+            // no builder-side budget (prompt-capped at 72 chars, nothing
+            // validates that). Clamping the plain subject before
+            // `subject_segments` keeps the budget ANSI-blind.
+            let subject = clamp_row_text(subject, width, 7 + display_width(hash));
+            if !subject.is_empty() {
+                segs.push(seg(" "));
+                for (text, style) in palette::subject_segments(&subject) {
+                    segs.push(styled(text, style));
+                }
             }
         }
     }
@@ -446,22 +492,27 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
 /// `›` cursor sits on, so key handling can move it without re-deriving
 /// geometry.
 pub fn menu_rows(options: &[&str], selected: usize, theme: &Theme) -> (Vec<String>, usize) {
+    // The menu rides the live frame, where a wrapped row desyncs the
+    // whole-frame repaint — options clamp to the theme's width (the
+    // resolved prose width, always ≤ the raw terminal): inset (4) + the
+    // cursor/indent column pair (2) precede every option.
     let rows = options
         .iter()
         .enumerate()
         .map(|(i, opt)| {
+            let opt = clamp_row_text(opt, theme.width, 6);
             if i == selected {
                 render(
                     &[
                         seg(MARGIN),
                         seg(SUB_INDENT),
                         styled("› ", palette::emphasis()),
-                        seg(*opt),
+                        seg(opt),
                     ],
                     theme,
                 )
             } else {
-                render(&[seg(MARGIN), seg(SUB_INDENT), seg("  "), seg(*opt)], theme)
+                render(&[seg(MARGIN), seg(SUB_INDENT), seg("  "), seg(opt)], theme)
             }
         })
         .collect();
@@ -506,6 +557,9 @@ pub fn review_menu_rows(
 /// A one-row interactive ask (y/n prompts, ADR 0018): `? ` + question in
 /// `caution`, at the sub-row column.
 pub fn ask_row(question: &str, theme: &Theme) -> String {
+    // Same no-wrap contract as `menu_rows`: inset (4) + `? ` (2) precede
+    // the question.
+    let question = clamp_row_text(question, theme.width, 6);
     render(
         &[
             seg(MARGIN),
@@ -518,14 +572,15 @@ pub fn ask_row(question: &str, theme: &Theme) -> String {
 }
 
 /// One transient live note row under the active step (ADR 0018's Re-generate
-/// loop): margin + sub-row indent + spinner glyph + label in `pending`.
+/// loop): margin + sub-row indent + spinner glyph + label — glyph-only
+/// yellow like every active-work row.
 pub fn note_row(label: &str, theme: &Theme) -> String {
     render(
         &[
             seg(MARGIN),
             seg(SUB_INDENT),
             styled("⠋ ", palette::pending()),
-            styled(label.to_string(), palette::pending()),
+            styled(label.to_string(), palette::emphasis()),
         ],
         theme,
     )
@@ -637,10 +692,36 @@ pub(crate) fn delta_suffix(stats: &[crate::git::FileStats]) -> String {
 
 /// One muted help row under a frame menu's options — the key hints the
 /// inquire fallback shows via `with_help_message`, so the frame path keeps
-/// parity (`↑/↓ select · Enter confirm · Esc or Ctrl-C aborts`).
+/// parity (`↑/↓ select · Enter confirm · Esc or Ctrl-C aborts`). Clamped
+/// like every other live row (inset 4 chrome) — a hint past the frame
+/// width would wrap and desync the whole-frame repaint.
 pub(crate) fn help_row(help: &str, theme: &Theme) -> String {
     render(
-        &[seg(MARGIN), seg(SUB_INDENT), styled(help, palette::muted())],
+        &[
+            seg(MARGIN),
+            seg(SUB_INDENT),
+            styled(clamp_row_text(help, theme.width, 4), palette::muted()),
+        ],
         theme,
     )
+}
+
+/// The full row set one frame menu paints per key read (ADR 0018): the
+/// optional ask row, the option rows ([`menu_rows`]), and the help row —
+/// exactly what `frame_menu` hands the painter each loop, so the built
+/// rows and the painted rows cannot drift (the original menu bug built
+/// rows every loop but never painted them; e2e's non-TTY buffer cannot
+/// see frame painting, so this assembly is the unit-testable seam).
+pub(crate) fn menu_frame_rows(
+    ask: Option<&str>,
+    options: &[&str],
+    selected: usize,
+    help: &str,
+    theme: &Theme,
+) -> Vec<String> {
+    let mut rows = ask.map(|q| vec![ask_row(q, theme)]).unwrap_or_default();
+    let (menu, _) = menu_rows(options, selected, theme);
+    rows.extend(menu);
+    rows.push(help_row(help, theme));
+    rows
 }

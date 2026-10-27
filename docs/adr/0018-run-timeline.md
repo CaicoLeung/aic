@@ -231,3 +231,69 @@ this amendment records both resolutions.
      is unconditional; a per-Σ-row clamp drifted single-file entries one
      column left). The pre-commit preview keeps its own (unfloored)
      geometry: it renders alone and is erased on confirm.
+
+   - **Σ on every footer.** The Σ total row renders unconditionally —
+     single-file entries included — so every footer of a Run carries the
+     same totals-first ratio bar; the σ column the shared grid always
+     reserved is now always drawn on (the old `> 1`-file gate left
+     single-file footers with no totals row while their σ column sat
+     blank). Grid geometry and the Run-wide counts floor are unchanged.
+
+## Amendment (2026-10-27): menus paint; sub-rows and labels carry meaning
+
+Second PTY-harness review pass, same day. Six fixes:
+
+1. **Menus paint.** `frame_menu` (confirm, review, merge picks) built its
+   ask/options/help rows every loop but never handed them to the painter —
+   on a TTY every interactive menu was invisible. It now pushes the rows
+   through `replace_live_tail` before each key read; `truncate_live` after
+   the loop is unchanged.
+2. **The frame is static while a menu is open.** The ticker kept advancing
+   the glyph and repainting under an open menu (only the clock paused).
+   `spawn_ticker` now skips the repaint entirely while `menu_pause` is set:
+   a user weighing a decision sees a frozen frame, not an animation loop
+   fighting the menu for the cursor.
+3. **Draft sub-rows carry their batch's lead file.** The Draft step's
+   sub-rows were anonymous (`⠋ Generating commit message` → bare `✓`):
+   no way to map an outcome to a batch. Rows now read
+   `⠋ Drafting f2.rs` / `✓ f2.rs · 6.2s` (lead file, `+N more` on
+   multi-file batches) via `run::files_label`.
+4. **The landed echo is a `Landed` sub-row.** `SubBody::Landed { hash,
+   subject }` renders `✓ a1b2c3d fix(auth): subject` — amber bold hash,
+   then the subject through the new shared `palette::subject_segments`
+   (typed `type` color, gray scope, bold description). The static panel's
+   `styled_subject` delegates to the same function, so a subject renders
+   identically in the pre-commit preview, the flushed entry, and the live
+   sub-row — one grammar, one source.
+5. **Skeleton verbs hold.** The Plan step keeps its verb on the
+   deterministic fallback (`✓ Planned 2 batches` + the ⚠ row telling the
+   fallback story; the old `Grouped` swap re-labeled the step mid-run),
+   and the commit cursor is `⠋ Commit batches · 2/3` (the skeleton
+   promised "Commit batches"; the old "Committing batch 2 of 3" was a
+   second grammar). The declined failure screen slims to `— declined`
+   because the label now carries the position.
+6. **Live rows respect the 1 s rule and the clamp budget.** The active
+   step's `· 0s` flash is gone (elapsed joins only at ≥ 1 s, matching the
+   completed state), and `Display::warn` clamps its text with `…` —
+   the fallback ⚠ row front-loads its actionable half ("Regrouping
+   deterministically — invalid batch plan (…)") because the frame's live
+   rows truncate bare.
+
+## Amendment (2026-10-27): one `?`; yellow means attention, not work
+
+Third review pass — two palette-semantics fixes:
+
+1. **The preview drops its header row.** `commit_preview` used to stack two
+   ask-markers — `? proposed commit:` over `? <subject>` — while `?` also
+   marks menu asks. The subject row's single `?` carries the pending-ness
+   (body, footer, and the confirm menu around it supply the context), the
+   erase accounting drops a row, and the frame keeps the saved row in its
+   budget.
+2. **Active-work rows are glyph-only yellow.** The active step row, in-flight
+   sub-rows, and note rows painted glyph *and* label in `pending`
+   (yellow bold) — the loudest styling on screen reserved for transient
+   state, outshouting the durable record, and splitting yellow three ways
+   (work / ask / caution). Labels now render in `emphasis` (plain bold);
+   only the spinner glyph keeps the yellow. Yellow is left meaning "needs
+   your attention": the `?` pending/ask markers and the ⚠ rows. Motion
+   already says "working".

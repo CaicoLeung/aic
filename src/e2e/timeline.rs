@@ -229,7 +229,7 @@ async fn declined_batch_shapes_the_failed_screen() {
     assert!(
         lines
             .iter()
-            .any(|l| l.starts_with("  ✗ Committing batch 2 of 2 — declined on batch 2 of 2")),
+            .any(|l| l.starts_with("  ✗ Commit batches · 2/2 — declined")),
         "{lines:?}"
     );
     assert!(
@@ -347,10 +347,11 @@ async fn review_abort_shapes_the_failed_screen() {
     );
 }
 
-/// The deterministic-fallback plan completes the Plan step as "Grouped" and
-/// the durable caution row rides under it.
+/// The deterministic-fallback plan completes the Plan step with the same
+/// "Planned" verb as the happy path (the ⚠ caution row tells the fallback
+/// story) and the durable caution row rides under it.
 #[tokio::test]
-async fn invalid_plan_groups_deterministically_with_caution_row() {
+async fn invalid_plan_completes_with_planned_verb_and_caution_row() {
     let dir = tempfile::tempdir().unwrap();
     two_file_unstaged_repo(dir.path());
     // An empty plan is invalid (real work exists) → deterministic regrouping.
@@ -373,13 +374,13 @@ async fn invalid_plan_groups_deterministically_with_caution_row() {
     assert!(result.is_ok(), "{result:?}");
     let lines = buf.lines();
     assert!(
-        lines.iter().any(|l| l.starts_with("  ✓ Grouped 2 batches")),
+        lines.iter().any(|l| l.starts_with("  ✓ Planned 2 batches")),
         "{lines:?}"
     );
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("regrouping deterministically")),
+            .any(|l| l.contains("Regrouping deterministically")),
         "{lines:?}"
     );
 }

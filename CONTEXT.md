@@ -65,7 +65,7 @@ The rendered record for one Batch — the pending Commit preview (the `?`-marked
 _Avoid_: commit card, entry, item
 
 **File stats footer**:
-The per-file block of a Commit entry — in the Commit preview and on the landed table row — listing each file with its `+N`/`−M` line counts, a `[new]`/`[del]` tag for added/deleted files, and a `Σ` total line when more than one file. Filenames render with the directory muted and the basename emphasized. Counts describe the diff the commit will land (preview) or just landed (entry); binary files show `(binary)`. On landed entries the `+N`/`−M` columns are sized by the Run-wide counts region (`counts_geometry`, computed once at Scan over the Run's whole diff) so every entry shares one grid; the σ column is reserved in every footer, blank on file rows.
+The per-file block of a Commit entry — in the Commit preview and on the landed table row — listing each file with its `+N`/`−M` line counts, a `[new]`/`[del]` tag for added/deleted files, and a `Σ` total line on every footer, single-file entries included. Filenames render with the directory muted and the basename emphasized. Counts describe the diff the commit will land (preview) or just landed (entry); binary files show `(binary)`. On landed entries the `+N`/`−M` columns are sized by the Run-wide counts region (`counts_geometry`, computed once at Scan over the Run's whole diff) so every entry shares one grid; the σ column is reserved in every footer, blank on file rows.
 _Avoid_: diff stats, file summary, stats block
 
 

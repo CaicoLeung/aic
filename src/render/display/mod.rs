@@ -9,7 +9,6 @@ use std::sync::Arc;
 use console::{Style, Term};
 
 use crate::git::FileStats;
-use crate::render::commit_type::CommitType;
 use crate::render::layout::{FALLBACK_COLS, MARGIN, clamp_to_width, resolve_cols, wrap_line};
 use crate::render::palette;
 use crate::render::palette::{commit_id_color, neutral_gray, sigma_color};
@@ -261,36 +260,15 @@ impl Display {
 
     /// Style a conventional-commit subject line the same way in every
     /// renderer: typed `type` in its palette color, gray `(scope)`, bold
-    /// description. Unknown/colon-less messages fall back to the full message
-    /// in the type palette color. Shared by [`Display::commit_line`] (post-commit)
-    /// and [`Display::commit_preview`] (pre-commit confirmation) so what the
-    /// user confirms is byte-for-byte what the completed line will show.
+    /// description — via the shared [`palette::subject_segments`], so the
+    /// pre-commit preview, the landed entry, and the timeline's live sub-row
+    /// all render one subject identically (ADR 0018). Unknown/colon-less
+    /// messages fall back to the full message in muted gray.
     fn styled_subject(&self, message: &str) -> String {
-        // Muted gray for the optional `(scope)` — matches the body/prefix tone.
-        let gray = neutral_gray();
-        let parsed = CommitType::parse_message(message);
-        match parsed.description {
-            Some(desc) => {
-                // Type token: named palette color, or deterministic hash color
-                // for unrecognized non-empty types, or neutral gray for empty.
-                // Bolded so the short token qualifies as WCAG AA Large (3:1) on
-                // both themes — the old bright type colors (feat #4ade80 etc.)
-                // read at ~1.7:1 on white.
-                let colored_type = self.styled(
-                    parsed.type_name,
-                    CommitType::color_for(parsed.type_name).bold(),
-                );
-                let scope = match parsed.scope {
-                    Some(s) => self.styled(&format!("({s})"), gray.clone()),
-                    None => String::new(),
-                };
-                let bold_desc = self.styled(desc, palette::emphasis());
-                format!("{}{}: {}", colored_type, scope, bold_desc)
-            }
-            // No colon — no type token to color; render the whole message in
-            // muted gray so it reads as a non-conventional fallback.
-            None => self.styled(message, gray),
-        }
+        palette::subject_segments(message)
+            .iter()
+            .map(|(text, style)| self.styled(text, style.clone()))
+            .collect()
     }
 
     /// Emit a commit body — hang-indented by `indent` columns beyond the
@@ -346,8 +324,8 @@ impl Display {
     /// as a blank column (`git diff --stat` never shows zeros); the Σ total
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
     /// `−M`, muted directories with emphasized basenames, a green-bold `[new]` / red-bold `[del]` tag,
-    /// and a bold-cyan `Σ +X −Y <bar>` total row when more than one
-    /// file (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
+    /// and a bold-cyan `Σ +X −Y <bar>` total row on every footer, single
+    /// file included (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
     /// deletion cells over text line counts only, shrinking then omitted on
     /// narrow terminals). Binary files render `(binary) <byte-delta>`
     /// right-aligned in the counts region, which widens to fit the widest
@@ -403,7 +381,7 @@ impl Display {
         let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
         // The Σ glyph's own cell width ("Σ ") — the σ column every footer
         // reserves left of the counts block (blank on file rows, drawn on
-        // the Σ row of multi-file footers).
+        // the footer's Σ row).
         let sigma_cell: usize = 2;
         // Binary rows carry the byte-size delta label `(binary) +12.3 KB`
         // (Commit entry v2, ADR 0018) — the counts region widens to the
@@ -432,10 +410,9 @@ impl Display {
         // Block anchor: start at the hash, slide left only as far as the
         // tick column (`SubjectOffsets::tick`) when the capped right edge
         // demands it. The Σ row's glyph needs 2 columns of its own left of
-        // the block — and so does every entry WITHOUT a Σ row: the σ
-        // column is part of the shared grid (file rows render it blank),
-        // and a Run-wide floor means single-file and multi-file entries
-        // must anchor identically or their name columns drift apart.
+        // the block — the σ column is part of the shared grid (file rows
+        // render it blank), so a Run-wide floor keeps every entry of a Run
+        // anchored identically and name columns cannot drift apart.
         let start = subject
             .hash
             .min(
@@ -581,98 +558,95 @@ impl Display {
             ));
             rows += 1;
         }
-        if stats.len() > 1 {
-            let plus = format!("+{total_added}");
-            let minus = format!("−{total_deleted}");
-            // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D <bar>` —
-            // the Diff bar trails the counts and fills EVERY remaining
-            // cell of the text budget (the same prose boundary every other
-            // Run surface wraps at — like the reasoning feed — not the
-            // terminal's real edge), so the row reads totals-first and the
-            // bar is the full-bleed ratio visual. Binary files contribute
-            // 0 to the text-line totals, so they never skew the ratio; an
-            // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
-            const MIN_BAR_CELLS: usize = 4;
-            // The row hangs under the subject (sigma_pad) before Σ even
-            // starts, so the pad must be inside the fixed spend: budgeting
-            // the bar from the raw `width` alone overshoots by the hang and
-            // wraps the row on the terminal (found by the PTY harness at
-            // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts
-            // + the bar's leading space complete the spend; every count is
-            // fixed-width, so the counts never truncate — only the bar
-            // shrinks, and it disappears below the floor.
-            let sigma_pad_width = start.saturating_sub(sigma_cell);
-            // The counts ride the same region as the file rows (lead pad +
-            // right-aligned columns) instead of their natural width, so
-            // under a Run-wide floor the Σ numbers still land under the
-            // per-file counts and the bar starts at the same column in
-            // every entry of the Run. Budget: the bar's leading space is
-            // the only spend beyond the fixed prefix, so the row ends
-            // exactly at the text boundary — margin 2 + the full capped
-            // text budget — never past it.
-            let fixed = sigma_pad_width + sigma_cell + counts_region + 1;
-            let cells = width.saturating_sub(fixed);
-            let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
-                diff_bar(total_added, total_deleted, cells)
-            } else {
-                (0, 0)
-            };
-            let bar = if add_cells + del_cells > 0 {
-                format!(
-                    " {}{}",
-                    self.styled(&"█".repeat(add_cells), green.clone()),
-                    self.styled(&"░".repeat(del_cells), red.clone())
-                )
-            } else {
-                String::new()
-            };
-            let sigma_pad = " ".repeat(sigma_pad_width);
-            self.emit(&format!(
-                "{sigma_pad}{} {lead}{}{bar}",
-                self.styled("Σ", sigma_color().bold()),
-                fmt_columns(&plus, &minus),
-            ));
-            rows += 1;
-        }
+        // The Σ total row renders on EVERY footer — single file included
+        // — so a one-file commit carries the same totals-first ratio bar
+        // as its multi-file siblings; the σ column the grid always
+        // reserved is now always drawn on.
+        let plus = format!("+{total_added}");
+        let minus = format!("−{total_deleted}");
+        // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D <bar>` —
+        // the Diff bar trails the counts and fills EVERY remaining
+        // cell of the text budget (the same prose boundary every other
+        // Run surface wraps at — like the reasoning feed — not the
+        // terminal's real edge), so the row reads totals-first and the
+        // bar is the full-bleed ratio visual. Binary files contribute
+        // 0 to the text-line totals, so they never skew the ratio; an
+        // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
+        const MIN_BAR_CELLS: usize = 4;
+        // The row hangs under the subject (sigma_pad) before Σ even
+        // starts, so the pad must be inside the fixed spend: budgeting
+        // the bar from the raw `width` alone overshoots by the hang and
+        // wraps the row on the terminal (found by the PTY harness at
+        // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts
+        // + the bar's leading space complete the spend; every count is
+        // fixed-width, so the counts never truncate — only the bar
+        // shrinks, and it disappears below the floor.
+        let sigma_pad_width = start.saturating_sub(sigma_cell);
+        // The counts ride the same region as the file rows (lead pad +
+        // right-aligned columns) instead of their natural width, so
+        // under a Run-wide floor the Σ numbers still land under the
+        // per-file counts and the bar starts at the same column in
+        // every entry of the Run. Budget: the bar's leading space is
+        // the only spend beyond the fixed prefix, so the row ends
+        // exactly at the text boundary — margin 2 + the full capped
+        // text budget — never past it.
+        let fixed = sigma_pad_width + sigma_cell + counts_region + 1;
+        let cells = width.saturating_sub(fixed);
+        let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
+            diff_bar(total_added, total_deleted, cells)
+        } else {
+            (0, 0)
+        };
+        let bar = if add_cells + del_cells > 0 {
+            format!(
+                " {}{}",
+                self.styled(&"█".repeat(add_cells), green.clone()),
+                self.styled(&"░".repeat(del_cells), red.clone())
+            )
+        } else {
+            String::new()
+        };
+        let sigma_pad = " ".repeat(sigma_pad_width);
+        self.emit(&format!(
+            "{sigma_pad}{} {lead}{}{bar}",
+            self.styled("Σ", sigma_color().bold()),
+            fmt_columns(&plus, &minus),
+        ));
+        rows += 1;
         rows
     }
     /// Pre-commit confirmation preview (issue #78): the exact message that
     /// would be committed, framed as *pending* so it can't be mistaken for the
-    /// ✓ lines of already-landed batches — a yellow `?` marker on the header
-    /// and subject (the subject keeps its conventional-commit coloring, so the
-    /// draft previews the exact styling the ✓ line will use), gray body, and
-    /// the file-stats footer ([`Display::emit_file_stats`]). The preview's
-    /// own prefix rule: body hangs under the subject's message start (the
-    /// `? ` marker is the whole prefix, so 2 cols); the footer has no ref
-    /// line to key on, so its counts anchor at the margin — nudged 2 cols
-    /// right when the Σ row is present, so the glyph still lands under the
-    /// `?` — and names pin to the message start.
+    /// ✓ lines of already-landed batches — a single yellow `?` marker on the
+    /// subject row (the subject keeps its conventional-commit coloring, so
+    /// the draft previews the exact styling the ✓ line will use; no header
+    /// row — one `?` carries the pending-ness and the saved row stays in the
+    /// frame budget), gray body, and the file-stats footer
+    /// ([`Display::emit_file_stats`]). The preview's own prefix rule: body
+    /// hangs under the subject's message start (the `? ` marker is the whole
+    /// prefix, so 2 cols); the footer has no ref line to key on, so its
+    /// counts anchor at the margin — nudged 2 cols right so the Σ glyph
+    /// lands under the `?` — and names pin to the message start.
     ///
     /// Returns how many rows the preview occupies, so the caller can erase it
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
     /// a confirmed draft never lingers on screen.
     pub fn commit_preview(&self, message: &str, body: Option<&str>, stats: &[FileStats]) -> usize {
         let pending = palette::pending();
-        self.emit(&format!(
-            "{} {}",
-            self.styled("?", pending.clone()),
-            self.styled("proposed commit:", pending.clone())
-        ));
         // The preview rides the live frame, where a wrapped row would
         // desync the whole-frame repaint — same clamp as the landed entry.
         let budget = resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + 2);
         self.emit(&format!(
             "{} {}",
-            self.styled("?", pending.clone()),
+            self.styled("?", pending),
             self.styled_subject(&clamp_to_width(message, budget))
         ));
-        let mut rows = 2;
+        let mut rows = 1;
         // `? ` — the preview subject's marker prefix: body hangs under the
         // message start (2 cols); the footer anchors its counts at the
-        // margin (no ref line) — nudged 2 right on multi-file footers so
-        // the Σ glyph lands under the `?` — with names pinned to the
-        // message start (see [`Self::subject_offsets`] for the landed
-        // twin's rule).
+        // margin (no ref line) — nudged 2 right so the Σ glyph lands under
+        // the `?` — with names pinned to the message start (see
+        // [`Self::subject_offsets`] for the landed twin's rule).
         const PREVIEW_OFFSETS: SubjectOffsets = SubjectOffsets {
             tick: 0,
             hash: 0,
@@ -699,10 +673,15 @@ impl Display {
     /// Generic warning line, routed through the shared margin so ad-hoc
     /// status failures stay visually consistent with the rest of the run's
     /// output instead of being dumped flush to the edge via raw `eprintln!`.
+    /// The text clamps to the row budget with `…` — the frame's live rows
+    /// truncate bare, so an unclamped long warning would lose its tail
+    /// (often the actionable part) with no marker.
     pub fn warn(&self, msg: &str) {
+        let budget = self.text_width().saturating_sub(2); // the `⚠ ` marker
         self.emit(&format!(
-            "{} {msg}",
-            self.styled("\u{26A0}", palette::pending())
+            "{} {}",
+            self.styled("\u{26A0}", palette::pending()),
+            clamp_to_width(msg, budget)
         ));
     }
 }

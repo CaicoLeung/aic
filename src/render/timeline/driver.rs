@@ -42,8 +42,8 @@ use crate::render::layout::terminal_width;
 use crate::render::progress::{SPINNER_TICK, clear_frame_bytes, frame_bytes};
 use crate::render::timeline::note_row;
 use crate::render::timeline::{
-    Failure, Step, StepIdx, StepState, SubBody, Theme, help_row, menu_rows, plain_step_lines,
-    sub_row, timeline_frame, window_height_budget,
+    Failure, Step, StepIdx, StepState, SubBody, Theme, plain_step_lines, sub_row, timeline_frame,
+    window_height_budget,
 };
 
 /// The process-global frame slot. The production interactive menus (commit
@@ -198,6 +198,13 @@ impl RunFrame {
                 if !st.steps.iter().any(|s| s.state == StepState::Active) {
                     break;
                 }
+                // A menu is open: the Run waits on the user, not on work —
+                // freeze the glyph and skip the repaint. Motion would read
+                // as progress while nothing progresses, and the static
+                // frame is the visual cue that input is expected.
+                if st.menu_pause.is_some() {
+                    continue;
+                }
                 st.glyph = st.glyph.wrapping_add(1);
                 st.repaint();
             }
@@ -226,7 +233,7 @@ impl RunFrame {
     }
 
     /// Replace the (active) step's label — the live commit cursor
-    /// `⠋ Committing batch 2 of 3` (ADR 0018).
+    /// `⠋ Commit batches · 2/3` (ADR 0018).
     pub fn set_label(&self, i: StepIdx, label: impl Into<String>) {
         let mut st = self.0.lock().unwrap();
         st.steps[i.0].label = label.into();
@@ -748,20 +755,18 @@ pub(crate) fn frame_menu(
     frame.menu_open();
     let base = frame.live_len(step);
     let theme = frame.theme();
-    let mut ask_rows = Vec::new();
-    if let Some(q) = ask {
-        ask_rows.push(crate::render::timeline::ask_row(q, &theme));
-    }
-    // The key hints ride under the options — the same text the inquire
-    // fallback shows as its help message, so both paths stay discoverable.
-    let help = help_row(help, &theme);
     let mut sel = selected.min(options.len().saturating_sub(1));
     let term = Term::stderr();
     let outcome = loop {
-        let (rows, _) = menu_rows(options, sel, &theme);
-        let mut all = ask_rows.clone();
-        all.extend(rows);
-        all.push(help.clone());
+        // Paint the menu rows before blocking on a key: without this the
+        // ask, the `›` cursor, and the key hints never reach the frame and
+        // the menu is invisible — reachable only by blind keys (the
+        // regression this call restores). `menu_frame_rows` is the single
+        // assembly the painter and the unit tests both see, so the built
+        // rows and the painted rows cannot drift. Repaints dedupe when the
+        // frame is unchanged; only a selection move changes it.
+        let all = crate::render::timeline::menu_frame_rows(ask, options, sel, help, &theme);
+        frame.replace_live_tail(step, base, all);
         match term.read_key() {
             Ok(console::Key::ArrowUp) if !options.is_empty() => {
                 sel = (sel + options.len() - 1) % options.len();

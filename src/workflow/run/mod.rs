@@ -239,17 +239,21 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // peels the finished block to scrollback at once, so a row emitted
         // after it would land on a step the frame no longer renders.
         if let Some(err) = &fallback_err {
+            // Outcome first: the row clamps at the text budget, so the
+            // actionable half ("Regrouping deterministically") must lead —
+            // the e2e suite widens to 120 cols so its causes survive the
+            // clamp whole (at the default 80 the cause text is cut).
             frame.step_display(&display).warn(&format!(
-                "LLM batch plan invalid ({err}); regrouping deterministically"
+                "Regrouping deterministically — invalid batch plan ({err})"
             ));
         }
+        // One verb for the step in every state: the skeleton promises
+        // "Plan batches", so the summary keeps "Planned" even on the
+        // deterministic fallback — the ⚠ row above already tells that story.
         frame.complete(
             &display,
             plan_step,
-            match &fallback_err {
-                Some(_) => format!("Grouped {}", plural(count, "batch")),
-                None => format!("Planned {}", plural(count, "batch")),
-            },
+            format!("Planned {}", plural(count, "batch")),
         );
 
         // Batch Review (issue #157): the opt-in pre-draft gate — applies to
@@ -287,22 +291,31 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 .collect::<anyhow::Result<Vec<_>>>(),
         )?;
         frame.activate(draft_step);
+        // Each draft's sub-row carries its batch's lead file (plus a
+        // "+N more" count) — an anonymous `Generating commit message` column
+        // gives the user no way to map an outcome to a batch (ADR 0018).
+        let draft_labels: Vec<String> = result
+            .batches
+            .iter()
+            .map(|b| files_label(&b.changes))
+            .collect();
         let drafts: Vec<anyhow::Result<generator::CommitOutput>> = {
             let futs = batch_diffs.into_iter().enumerate().map(|(i, batch_diff)| {
                 let frame = frame.clone();
                 let messenger = &messenger;
+                let label = draft_labels[i].clone();
                 async move {
                     frame.set_sub_row(
                         draft_step,
                         i + 1,
-                        &SubBody::InFlight("Generating commit message".to_string()),
+                        &SubBody::InFlight(format!("Drafting {label}")),
                     );
                     let started = Instant::now();
                     let outcome = messenger(batch_diff).await;
                     frame.set_sub_row(
                         draft_step,
                         i + 1,
-                        &SubBody::Done(String::new(), Some(started.elapsed())),
+                        &SubBody::Done(label, Some(started.elapsed())),
                     );
                     outcome
                 }
@@ -324,7 +337,9 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         for (i, (batch, draft)) in result.batches.iter().zip(drafts).enumerate() {
             frame.set_label(
                 commit_step,
-                format!("Committing batch {} of {count}", i + 1),
+                // Keep the skeleton's verb — the pending row promised
+                // "Commit batches", and `· i/N` carries the position.
+                format!("Commit batches · {}/{}", i + 1, count),
             );
             // Stage this batch's hunks, then commit its pre-drafted message.
             // Either step failing after earlier batches already committed
@@ -377,7 +392,9 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                         &display,
                         commit_step,
                         Failure {
-                            reason: format!("declined on batch {} of {count}", i + 1),
+                            // The step label already carries `· i/N`; the
+                            // error chain below keeps the full position.
+                            reason: "declined".to_string(),
                             detail: remediation.to_vec(),
                         },
                     );
@@ -619,14 +636,33 @@ async fn generate_and_commit(
     if let Some(index) = sub
         && let Some(step) = frame.active_index()
     {
-        let subject = message.lines().next().unwrap_or_default();
+        // Echo the landed commit as a `Landed` sub-row — hash + subject
+        // through the shared subject grammar, matching the flushed entry
+        // below it (ADR 0018; the old plain-text echo lost every color).
         frame.set_sub_row(
             step,
             index,
-            &SubBody::Done(format!("{hash} {subject}"), None),
+            &SubBody::Landed {
+                hash: hash.clone(),
+                subject: message.lines().next().unwrap_or_default().to_string(),
+            },
         );
     }
     Ok(())
+}
+
+/// One batch's file label for its draft sub-row: the lead file, plus
+/// `+N` more` when the batch spans several — the row clamps at the text
+/// budget, so a many-file label stays short (ADR 0018).
+fn files_label(changes: &[generator::BatchChange]) -> String {
+    let Some(lead) = changes.first() else {
+        return "batch".to_string();
+    };
+    if changes.len() == 1 {
+        lead.file.clone()
+    } else {
+        format!("{} +{} more", lead.file, changes.len() - 1)
+    }
 }
 
 /// The staged diff for one batch's files (read live from the index via
