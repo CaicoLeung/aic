@@ -10,7 +10,7 @@ use console::{Style, Term};
 
 use crate::git::FileStats;
 use crate::render::commit_type::CommitType;
-use crate::render::layout::{FALLBACK_COLS, MARGIN, resolve_cols, wrap_line};
+use crate::render::layout::{FALLBACK_COLS, MARGIN, clamp_to_width, resolve_cols, wrap_line};
 use crate::render::palette;
 use crate::render::palette::{commit_id_color, neutral_gray, sigma_color};
 
@@ -192,21 +192,6 @@ impl Display {
         resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
     }
 
-    /// Full terminal-width budget for the Commit entry table (ADR 0018
-    /// redesign): unlike [`Self::text_width`] the 100-column prose cap does
-    /// NOT apply — the Σ Diff bar and the file-name column stretch to the
-    /// terminal's real edge. Rows built to this budget never wrap when
-    /// flushed below the frame: `emit` adds the 2-col margin on top of it,
-    /// leaving [`RIGHT_MARGIN`] slack.
-    fn table_width(&self) -> usize {
-        let cols = if self.cols == 0 {
-            FALLBACK_COLS
-        } else {
-            self.cols
-        };
-        cols.saturating_sub(LEFT_MARGIN + RIGHT_MARGIN)
-    }
-
     // ------------------------------------------------------------------
     // Public rendering entry points
     // ------------------------------------------------------------------
@@ -214,76 +199,63 @@ impl Display {
     /// Commit entry table row (ADR 0018 redesign) — one row per landed
     /// batch, flushed to permanent scrollback below the Run timeline frame.
     ///
-    /// `prefix` is prepended for batch progress (e.g. `[1/3]`);
-    /// pass `""` for single-commit or staged workflows.
-    ///
     /// Layout: the subject line is a single full-width title row —
-    /// `[prefix] ✓ <hash> <styled subject> · +A −D` — never wrapped
-    /// (overflow preferable to truncation/re-flow), carrying the batch's
-    /// whole text-line delta. The commit **body is omitted**: `git log`
-    /// owns the prose; the pre-commit preview ([`Self::commit_preview`])
-    /// still shows it in full before the commit lands. The file-stats
-    /// footer hangs shallower — file rows under the commit ID, the Σ total
-    /// under the `✓` marker — so the footer reads as keyed to the ref
-    /// line. `stats` render on the full [`Self::table_width`] budget.
-    pub fn commit_line(&self, hash: &str, message: &str, prefix: &str, stats: &[FileStats]) {
-        // Muted gray for prefix — read from the single-source palette so it
-        // can't drift from the WCAG-guarded value.
-        let gray = neutral_gray();
-
-        // Main line: [prefix] ✓ <hash> <message> · +A −D — one full-width
-        // table row per landed batch (ADR 0018 redesign). The body is
-        // deliberately omitted: `git log` owns the prose, the entry owns the
-        // delta. Commit ID: amber #d97706, bold so the short token qualifies
-        // as WCAG AA Large (3:1) on both themes.
+    /// `✓ <hash> <styled subject>` — never re-flowed, clamped with `…`
+    /// at the terminal's edge, carrying no delta: the footer's per-file
+    /// counts and Σ row own the numbers, `git log` owns the prose; the
+    /// pre-commit preview ([`Self::commit_preview`]) still shows the body
+    /// in full before the commit lands. The clamp keeps the row one
+    /// physical terminal line — the flush printer's cursor arithmetic
+    /// assumes one row per emitted row (subjects are prompt-capped at 72
+    /// chars but nothing validates that). The file-stats footer hangs
+    /// shallower — file rows under the commit ID, the Σ total under the
+    /// `✓` marker — so the footer reads as keyed to the ref line.
+    /// `stats` render on the [`Self::text_width`] budget: the same prose
+    /// boundary every other Run surface wraps at, so the Σ Diff bar's
+    /// right edge is where text ends, not the terminal's real edge.
+    /// `floor` is the Run-wide counts geometry ([`counts_geometry`] over
+    /// the Run's whole diff) so every entry of a multi-batch Run shares
+    /// one counts grid — batch-local digit counts can't drift the
+    /// columns. `pub(crate)`: callers are the Run flow and its tests.
+    pub(crate) fn commit_line(
+        &self,
+        hash: &str,
+        message: &str,
+        stats: &[FileStats],
+        floor: CountsGeometry,
+    ) {
+        // Main line: ✓ <hash> <message> — one full-width table row per
+        // landed batch (ADR 0018 redesign). Commit ID: amber #d97706, bold
+        // so the short token qualifies as WCAG AA Large (3:1) on both
+        // themes.
         let check = self.styled("\u{2713}", palette::success());
         let hash_styled = self.styled(hash, commit_id_color().bold());
-        let pre = if prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", self.styled(prefix, gray.clone()))
-        };
-        let total_added: usize = stats.iter().map(|s| s.added).sum();
-        let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
-        let delta = if total_added + total_deleted > 0 {
-            format!(
-                " {} {} {}",
-                self.styled("·", gray.clone()),
-                self.styled(&format!("+{total_added}"), palette::added()),
-                self.styled(&format!("−{total_deleted}"), palette::removed())
-            )
-        } else {
-            String::new()
-        };
+        // The subject clamps to the row's remaining effective columns
+        // (margin + `✓ ` + hash + space already spent): the entry is a
+        // permanent terminal line and must never wrap to two physical
+        // rows.
+        let budget =
+            resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + 2 + hash.chars().count() + 1);
         self.emit(&format!(
-            "{pre}{check} {hash_styled} {}{delta}",
-            self.styled_subject(message)
+            "{check} {hash_styled} {}",
+            self.styled_subject(&clamp_to_width(message, budget))
         ));
 
         // File rows + Σ anchor at the hash with names pinned to the message
-        // start, on the full-width table budget.
-        let subject = Self::subject_offsets(prefix, hash);
-        self.emit_file_stats(stats, &subject, self.table_width());
+        // start, on the shared text budget.
+        let subject = Self::subject_offsets(hash);
+        self.emit_file_stats(stats, &subject, self.text_width(), floor);
     }
 
-    /// Subject-prefix geometry, as [`SubjectOffsets`]: with no prefix
-    /// (`""`, single-commit / staged Runs) the marker sits at column 0,
-    /// the hash at 2, the message at 10; each `[n/m] ` prefix shifts all
-    /// three. A Run with ≥10 batches widens the prefix mid-run (`[9/9]` →
-    /// `[10/9]`) and the hangs shift with it — accepted: rare, and
-    /// tracking the real subject start beats freezing a stale column.
-    /// Pure, so the geometry is unit-testable without a sink.
-    fn subject_offsets(prefix: &str, hash: &str) -> SubjectOffsets {
-        // Optional `[n/m] ` prefix, then "✓ " — marker and space.
-        let tick = if prefix.is_empty() {
-            0
-        } else {
-            prefix.chars().count() + 1
-        };
+    /// Subject-prefix geometry, as [`SubjectOffsets`]: the marker sits at
+    /// column 0, the hash at 2, the message at `2 + hash + 1`. Every entry
+    /// of a Run shares it — no per-batch prefix — so all rows hang on the
+    /// same columns. Pure, so the geometry is unit-testable without a sink.
+    fn subject_offsets(hash: &str) -> SubjectOffsets {
         SubjectOffsets {
-            tick,
-            hash: tick + 2,
-            message: tick + 2 + hash.chars().count() + 1,
+            tick: 0,
+            hash: 2,
+            message: 2 + hash.chars().count() + 1,
         }
     }
 
@@ -374,7 +346,7 @@ impl Display {
     /// as a blank column (`git diff --stat` never shows zeros); the Σ total
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
     /// `−M`, muted directories with emphasized basenames, a green-bold `[new]` / red-bold `[del]` tag,
-    /// and a bold-cyan `Σ <bar> +X −Y · N files` total row when more than one
+    /// and a bold-cyan `Σ +X −Y <bar>` total row when more than one
     /// file (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
     /// deletion cells over text line counts only, shrinking then omitted on
     /// narrow terminals). Binary files render `(binary) <byte-delta>`
@@ -401,6 +373,7 @@ impl Display {
         stats: &[FileStats],
         subject: &SubjectOffsets,
         width: usize,
+        floor: CountsGeometry,
     ) -> usize {
         if stats.is_empty() {
             return 0;
@@ -413,89 +386,56 @@ impl Display {
         let mut rows = 0;
         let shown = stats.len().min(Self::FILE_STATS_CAP);
         let shown_stats = &stats[..shown];
-        let plus_len = |s: &FileStats| {
-            if s.binary {
-                0
-            } else {
-                format!("+{}", s.added).chars().count()
-            }
-        };
-        let minus_len = |s: &FileStats| {
-            if s.binary {
-                0
-            } else {
-                format!("−{}", s.deleted).chars().count()
-            }
-        };
-
         // Grid geometry. One counts block per footer: `+N` and `−M` each
         // right-align in their own column with a 1-char gap, so the total
         // row's numbers land exactly under the per-file counts. The block
         // anchors at the hash column; its right edge is capped 2 short of
         // the message start so the name column can pin there — wider blocks
         // (4-digit Σ totals) grow leftward, clamped at the tick column
-        // (`SubjectOffsets::tick`) so they never cross into the batch
-        // prefix. The Σ row adds its `Σ ` glyph at the block's left edge —
-        // landing under
-        // the ✓ whenever the block starts at the hash (the common case,
-        // since hash = ✓ + 2) — and needs the block to start ≥ 2 so the
-        // glyph never crosses the margin. Tag column exists only when a
-        // shown file carries one (` [new]` / ` [del]` are both 6 chars).
-        // Name column: widest shown name, capped so the row fits the
-        // resolved text width.
+        // (`SubjectOffsets::tick`). The Σ row adds its `Σ ` glyph at the
+        // block's left edge — landing under the ✓ whenever the block starts
+        // at the hash (the common case, since hash = ✓ + 2) — and needs the
+        // block to start ≥ 2 so the glyph never crosses the margin. Tag
+        // column exists only when a shown file carries one (` [new]` /
+        // ` [del]` are both 6 chars). Name column: widest shown name,
+        // capped so the row fits the resolved text width.
         let total_added: usize = stats.iter().map(|s| s.added).sum();
         let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
-        // The Σ glyph's own cell width ("Σ ") — the Σ row pads one cell
-        // left of the block start.
+        // The Σ glyph's own cell width ("Σ ") — the σ column every footer
+        // reserves left of the counts block (blank on file rows, drawn on
+        // the Σ row of multi-file footers).
         let sigma_cell: usize = 2;
-        let sigma_row = stats.len() > 1;
-        // Size to the Σ total too, not just the per-file max: the total can
-        // carry more digits than any single file (ten `+1` → `+10`), and an
-        // all-binary diff totals `+0`/`−0` where every per-file width is 0 —
-        // sizing to the total keeps the Σ row's numbers landing exactly under
-        // the per-file counts in both cases.
-        let plus_width = shown_stats
-            .iter()
-            .map(plus_len)
-            .max()
-            .unwrap_or(0)
-            .max(format!("+{total_added}").chars().count());
-        let minus_width = shown_stats
-            .iter()
-            .map(minus_len)
-            .max()
-            .unwrap_or(0)
-            .max(format!("−{total_deleted}").chars().count());
+        // Binary rows carry the byte-size delta label `(binary) +12.3 KB`
+        // (Commit entry v2, ADR 0018) — the counts region widens to the
+        // widest binary label and the lead pad keeps the name column
+        // aligned across text, binary, and Σ rows.
+        // Column widths come from [`counts_geometry`] — one shared pure
+        // derivation — with every field floored by the Run-wide geometry:
+        // flooring the region total alone is not enough, because
+        // per-entry minus widths still size where the `+` column's right
+        // edge lands. A batch whose counts are all 1-digit renders with
+        // its siblings' plus, minus, AND region widths, so no column of
+        // the flushed table drifts across entries.
+        let geo = counts_geometry(stats);
+        let plus_width = geo.plus.max(floor.plus);
+        let minus_width = geo.minus.max(floor.minus);
         let sep = if plus_width > 0 && minus_width > 0 {
             1
         } else {
             0
         };
-        // Binary rows carry the byte-size delta label `(binary) +12.3 KB`
-        // (Commit entry v2, ADR 0018) — the counts region widens to the
-        // widest binary label and the lead pad keeps the name column
-        // aligned across text, binary, and Σ rows.
-        let binary_label = |s: &FileStats| {
-            if s.binary {
-                format!("(binary) {}", format_bytes_delta(s.old_size, s.new_size))
-            } else {
-                String::new()
-            }
-        };
         let base_region = plus_width + sep + minus_width;
-        let counts_region = shown_stats
-            .iter()
-            .map(|s| binary_label(s).chars().count())
-            .max()
-            .unwrap_or(0)
-            .max(base_region);
+        let counts_region = geo.region.max(floor.region).max(base_region);
         let lead = " ".repeat(counts_region - base_region);
         // Fixed 2-column gutter between the counts block and the names.
         let name_gap: usize = 2;
         // Block anchor: start at the hash, slide left only as far as the
         // tick column (`SubjectOffsets::tick`) when the capped right edge
-        // demands it; the Σ row's glyph needs 2 columns of its own left of
-        // the block.
+        // demands it. The Σ row's glyph needs 2 columns of its own left of
+        // the block — and so does every entry WITHOUT a Σ row: the σ
+        // column is part of the shared grid (file rows render it blank),
+        // and a Run-wide floor means single-file and multi-file entries
+        // must anchor identically or their name columns drift apart.
         let start = subject
             .hash
             .min(
@@ -505,7 +445,7 @@ impl Display {
                     .saturating_sub(counts_region),
             )
             .max(subject.tick)
-            .max(if sigma_row { sigma_cell } else { 0 });
+            .max(sigma_cell);
         let right = start + counts_region;
         // Name column pins under the message start, pushed right only when
         // the counts block is too wide to leave a gap.
@@ -630,9 +570,9 @@ impl Display {
             rows += 1;
         }
         if stats.len() > Self::FILE_STATS_CAP {
-            // The Σ total row below already carries the `(N files)` count —
-            // repeating it here was noise; the elision line names only how
-            // many rows were cut, and sits in the name column with the
+            // The Σ total row below carries no file count — the elision
+            // line names only how many rows were cut, and sits in the name
+            // column with the
             // filenames it stands in for.
             self.emit(&format!(
                 "{}{}",
@@ -644,28 +584,34 @@ impl Display {
         if stats.len() > 1 {
             let plus = format!("+{total_added}");
             let minus = format!("−{total_deleted}");
-            // Commit entry v2 (ADR 0018): the Σ row is its own shape —
-            // `Σ <bar> +A −D · N files` — with the Diff bar between the
-            // glyph and the counts, so the totals no longer column-align
-            // under the per-file counts (accepted by the spec). `Σ` stays in
-            // cyan-600 bold, harmonizing with the green `+N` additions while
-            // staying distinct from the red `−M`.
-            let scope = format!("· {} files", stats.len());
-            // The bar spends 10 cells when the text width affords it,
-            // shrinks first (floor 4 cells — narrow terminals), then is
-            // omitted; the counts never truncate. Binary files contribute 0
-            // to the text-line totals, so they never skew the ratio; an
+            // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D <bar>` —
+            // the Diff bar trails the counts and fills EVERY remaining
+            // cell of the text budget (the same prose boundary every other
+            // Run surface wraps at — like the reasoning feed — not the
+            // terminal's real edge), so the row reads totals-first and the
+            // bar is the full-bleed ratio visual. Binary files contribute
+            // 0 to the text-line totals, so they never skew the ratio; an
             // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
-            const BAR_CELLS: usize = 10;
             const MIN_BAR_CELLS: usize = 4;
-            let fixed = sigma_cell
-                + plus.chars().count()
-                + 1
-                + minus.chars().count()
-                + 1
-                + scope.chars().count();
-            let budget = width.saturating_sub(fixed + 2);
-            let cells = BAR_CELLS.min(budget);
+            // The row hangs under the subject (sigma_pad) before Σ even
+            // starts, so the pad must be inside the fixed spend: budgeting
+            // the bar from the raw `width` alone overshoots by the hang and
+            // wraps the row on the terminal (found by the PTY harness at
+            // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts
+            // + the bar's leading space complete the spend; every count is
+            // fixed-width, so the counts never truncate — only the bar
+            // shrinks, and it disappears below the floor.
+            let sigma_pad_width = start.saturating_sub(sigma_cell);
+            // The counts ride the same region as the file rows (lead pad +
+            // right-aligned columns) instead of their natural width, so
+            // under a Run-wide floor the Σ numbers still land under the
+            // per-file counts and the bar starts at the same column in
+            // every entry of the Run. Budget: the bar's leading space is
+            // the only spend beyond the fixed prefix, so the row ends
+            // exactly at the text boundary — margin 2 + the full capped
+            // text budget — never past it.
+            let fixed = sigma_pad_width + sigma_cell + counts_region + 1;
+            let cells = width.saturating_sub(fixed);
             let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
                 diff_bar(total_added, total_deleted, cells)
             } else {
@@ -680,13 +626,11 @@ impl Display {
             } else {
                 String::new()
             };
-            let sigma_pad = " ".repeat(start.saturating_sub(sigma_cell));
+            let sigma_pad = " ".repeat(sigma_pad_width);
             self.emit(&format!(
-                "{sigma_pad}{}{bar} {} {} {}",
+                "{sigma_pad}{} {lead}{}{bar}",
                 self.styled("Σ", sigma_color().bold()),
-                self.styled(&plus, green.clone()),
-                self.styled(&minus, red.clone()),
-                self.styled(&scope, gray.clone()),
+                fmt_columns(&plus, &minus),
             ));
             rows += 1;
         }
@@ -714,10 +658,13 @@ impl Display {
             self.styled("?", pending.clone()),
             self.styled("proposed commit:", pending.clone())
         ));
+        // The preview rides the live frame, where a wrapped row would
+        // desync the whole-frame repaint — same clamp as the landed entry.
+        let budget = resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + 2);
         self.emit(&format!(
             "{} {}",
             self.styled("?", pending.clone()),
-            self.styled_subject(message)
+            self.styled_subject(&clamp_to_width(message, budget))
         ));
         let mut rows = 2;
         // `? ` — the preview subject's marker prefix: body hangs under the
@@ -734,7 +681,12 @@ impl Display {
         if let Some(b) = body {
             rows += self.emit_body(b, PREVIEW_OFFSETS.message);
         }
-        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS, self.text_width());
+        rows += self.emit_file_stats(
+            stats,
+            &PREVIEW_OFFSETS,
+            self.text_width(),
+            CountsGeometry::ZERO,
+        );
         self.emit_blank();
         rows + 1
     }
@@ -808,6 +760,90 @@ fn diff_bar(added: usize, deleted: usize, cells: usize) -> (usize, usize) {
     let add = ((added as f64 / total as f64) * cells as f64).round() as usize;
     let add = add.min(cells);
     (add, cells - add)
+}
+
+/// Counts-grid geometry for one Commit entry footer (Commit entry v2, ADR
+/// 0018): the `+N`/`−M` column widths — sized to the per-file maxima AND
+/// the Σ totals, since the total can carry more digits than any single
+/// file (ten `+1` → `+10`) and an all-binary diff totals `+0`/`−0` where
+/// every per-file width is 0 — and the full counts-region width, which
+/// additionally covers the widest binary label `(binary) +12.3 KB`. Pure,
+/// so the Run computes it ONCE over all its files and floors every entry's
+/// footer with the result: per-entry digit counts can't drift the table's
+/// columns across batches.
+pub(crate) fn counts_geometry(stats: &[FileStats]) -> CountsGeometry {
+    let total_added: usize = stats.iter().map(|s| s.added).sum();
+    let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
+    let plus = stats
+        .iter()
+        .map(|s| {
+            if s.binary {
+                0
+            } else {
+                format!("+{}", s.added).chars().count()
+            }
+        })
+        .max()
+        .unwrap_or(0)
+        .max(format!("+{total_added}").chars().count());
+    let minus = stats
+        .iter()
+        .map(|s| {
+            if s.binary {
+                0
+            } else {
+                format!("−{}", s.deleted).chars().count()
+            }
+        })
+        .max()
+        .unwrap_or(0)
+        .max(format!("−{total_deleted}").chars().count());
+    let sep = if plus > 0 && minus > 0 { 1 } else { 0 };
+    let base = plus + sep + minus;
+    let region = stats
+        .iter()
+        .map(|s| binary_label(s).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(base);
+    CountsGeometry {
+        plus,
+        minus,
+        region,
+    }
+}
+
+/// The [`counts_geometry`] result. `region` is the full counts-block width
+/// (columns incl. the `+`/`−` gap and binary-label coverage); `plus` /
+/// `minus` are the right-aligned column widths inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CountsGeometry {
+    pub(crate) plus: usize,
+    pub(crate) minus: usize,
+    pub(crate) region: usize,
+}
+
+impl CountsGeometry {
+    /// The all-zero floor: the caller keeps its own per-entry geometry.
+    /// The pre-commit preview passes this — it renders alone and is
+    /// erased on confirm, so it never shares a table with siblings.
+    pub(crate) const ZERO: Self = Self {
+        plus: 0,
+        minus: 0,
+        region: 0,
+    };
+}
+
+/// A binary file's counts-region label (Commit entry v2, ADR 0018):
+/// `(binary) <byte-delta>`. One home shared by the row renderer and
+/// [`counts_geometry`]'s region width, so the label and the width it
+/// sizes can never drift apart. Pure.
+fn binary_label(s: &FileStats) -> String {
+    if s.binary {
+        format!("(binary) {}", format_bytes_delta(s.old_size, s.new_size))
+    } else {
+        String::new()
+    }
 }
 
 /// Format a blob-size delta for a binary per-file row (ADR 0018): sign

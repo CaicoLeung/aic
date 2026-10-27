@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use console::Style;
 
-use crate::render::layout::{MARGIN, char_display_width};
+use crate::render::layout::{MARGIN, char_display_width, clamp_to_width, display_width};
 use crate::render::palette;
 
 pub(crate) mod driver;
@@ -169,6 +169,10 @@ pub struct Step {
     pub live_rows: Vec<String>,
     /// Rows that persist under a completed step's summary line (pre-styled).
     pub durable_rows: Vec<String>,
+    /// The completed step's block has been peeled to permanent scrollback
+    /// (chronological collapse, ADR 0018 amendment 3): the frame no longer
+    /// renders it — its ✓ block lives above the frame as plain history.
+    pub peeled: bool,
     /// The failure record once the step failed.
     pub failure: Option<Failure>,
 }
@@ -184,6 +188,7 @@ impl Step {
             active_elapsed: None,
             live_rows: Vec::new(),
             durable_rows: Vec::new(),
+            peeled: false,
             failure: None,
         }
     }
@@ -348,6 +353,9 @@ fn failure_detail_rows(step: &Step, theme: &Theme) -> Vec<String> {
 pub fn timeline_frame(steps: &[Step], theme: &Theme) -> Vec<String> {
     let mut rows = Vec::new();
     for (i, step) in steps.iter().enumerate() {
+        if step.peeled {
+            continue;
+        }
         match step.state {
             StepState::Pending => rows.push(step_line(step, theme)),
             StepState::Active => {
@@ -376,7 +384,7 @@ pub fn timeline_frame(steps: &[Step], theme: &Theme) -> Vec<String> {
     rows
 }
 
-/// The body of one `[i/N]` sub-row (ADR 0018): an in-flight label
+/// The body of one live sub-row (ADR 0018): an in-flight label
 /// (`⠋ Generating commit message`) or a done row (`✓ [text] [· duration]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubBody {
@@ -387,34 +395,42 @@ pub enum SubBody {
     Done(String, Option<Duration>),
 }
 
-/// One `[i/N]` sub-row at column 4 (ADR 0018): the prefix pads to the width
-/// of `[N/N]` for the run's final N so every sub-row of the run aligns.
-/// `[1/3] ⠋ Generating commit message` / `[2/3] ✓ 6.2s` /
-/// `[1/3] ✓ src/render/progress.rs · 18.1s`.
-pub fn sub_row(index: usize, total: usize, body: &SubBody, theme: &Theme) -> String {
-    let prefix = format!("[{index}/{total}]");
-    let full = format!("[{total}/{total}]");
-    let padded = format!(
-        "{}{} ",
-        prefix,
-        " ".repeat(full.chars().count() - prefix.chars().count())
-    );
-    let mut segs = vec![
-        seg(MARGIN),
-        seg(SUB_INDENT),
-        styled(padded, palette::neutral_gray()),
-    ];
+/// One live sub-row at column 4 (ADR 0018): an in-flight label or a done
+/// row. No `[i/N]` numbering — rows land in happening order and every row
+/// of the step shares one shape: `⠋ Generating commit message` /
+/// `✓ 6.2s` / `✓ a1b2c3d feat: first`. Text clamps to `width` (the
+/// terminal's raw column count; `…` marks the cut) so a live row can
+/// never wrap to two physical rows: sub-row text is the one frame content
+/// with no builder-side budget (commit subjects are prompt-capped at 72
+/// chars but nothing validates that), and the painter's whole-frame
+/// repaint assumes one physical row per row.
+pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
+    let mut segs = vec![seg(MARGIN), seg(SUB_INDENT)];
     match body {
         SubBody::InFlight(label) => {
             segs.push(styled("⠋ ", palette::pending()));
-            segs.push(styled(label.clone(), palette::pending()));
+            // Inset (4) + `⠋ ` (2) precede the label.
+            segs.push(styled(
+                clamp_to_width(label, width.saturating_sub(6)),
+                palette::pending(),
+            ));
         }
         SubBody::Done(text, duration) => {
             segs.push(styled("✓", palette::success()));
+            let dur = duration.as_ref().and_then(|d| format_duration(*d));
+            // The duration suffix (joiner + `6.2s`) rides the row after the
+            // text, so it spends into the text's budget first — a clamped
+            // subject must not push its own duration past the edge.
+            let suffix = match &dur {
+                Some(d) => (if text.is_empty() { 1 } else { 3 }) + display_width(d),
+                None => 0,
+            };
+            // Inset (4) + `✓` (1) + the text's leading space (1).
+            let text = clamp_to_width(text, width.saturating_sub(6 + suffix));
             if !text.is_empty() {
                 segs.push(seg(format!(" {text}")));
             }
-            if let Some(d) = duration.as_ref().and_then(|d| format_duration(*d)) {
+            if let Some(d) = dur {
                 let joiner = if text.is_empty() { " " } else { " · " };
                 segs.push(styled(format!("{joiner}{d}"), palette::neutral_gray()));
             }

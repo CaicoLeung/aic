@@ -20,6 +20,7 @@ use std::io::{self, IsTerminal};
 
 use crate::core::config::{BackendKind, CliConfig, Config, ProviderProfile, config_path};
 use crate::llm::Provider;
+use crate::render::{oneshot, palette};
 use crate::workflow::input::{OptNav, TextAct, opt_nav, prompt_text, prompt_yes_no};
 mod cli_flow;
 mod finalize;
@@ -34,12 +35,24 @@ pub fn run_setup() -> Result<()> {
         let path = config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.config/aic/config.toml".into());
-        eprintln!("aic setup needs an interactive terminal, but stdin is not a TTY.");
-        eprintln!("To configure non-interactively you can either:");
-        eprintln!(
-            "  • write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit, review_batch_plan), or"
+        oneshot::stderr_line(
+            "aic setup needs an interactive terminal, but stdin is not a TTY.",
+            palette::plain(),
         );
-        eprintln!("  • run `aic setup` in a TTY, or edit the config file directly");
+        oneshot::stderr_line(
+            "To configure non-interactively you can either:",
+            palette::plain(),
+        );
+        oneshot::stderr_detail(
+            &format!(
+                "• write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit, review_batch_plan), or"
+            ),
+            palette::muted(),
+        );
+        oneshot::stderr_detail(
+            "• run `aic setup` in a TTY, or edit the config file directly",
+            palette::muted(),
+        );
         anyhow::bail!("cannot run interactive setup without a TTY");
     }
 
@@ -47,15 +60,20 @@ pub fn run_setup() -> Result<()> {
         Some(config) => {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
-            println!(
-                "\n  {} Saved to {}\n",
-                crate::render::palette::styled_stdout("✓", crate::render::palette::success()),
-                path.display()
+            println!();
+            oneshot::stdout_line(
+                &format!(
+                    "{} Saved to {}",
+                    palette::styled_stdout("\u{2713}", palette::success()),
+                    path.display()
+                ),
+                palette::plain(),
             );
+            println!();
             Ok(())
         }
         None => {
-            println!("Setup cancelled. Nothing was saved.");
+            oneshot::stdout_line("Setup cancelled. Nothing was saved.", palette::muted());
             Ok(())
         }
     }
@@ -70,9 +88,12 @@ fn show_screen(section: &str) -> Result<()> {
     let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    term.write_line(&format!("aic setup — {section}"))?;
-    term.write_line("  ↑/↓ move · Enter confirm · Esc back/cancel · Ctrl-C cancel")?;
-    term.write_line("")?;
+    oneshot::stderr_line(&format!("aic setup — {section}"), palette::plain());
+    oneshot::stderr_detail(
+        "↑/↓ move · Enter confirm · Esc back/cancel · Ctrl-C cancel",
+        palette::muted(),
+    );
+    eprintln!();
     Ok(())
 }
 

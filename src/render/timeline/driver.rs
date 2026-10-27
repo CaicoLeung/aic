@@ -233,21 +233,27 @@ impl RunFrame {
         st.repaint();
     }
 
-    /// Complete step `i` with `summary`: its live output (sub-rows, preview,
-    /// reasoning window, already-landed entries) collapses to the `✓` line in
-    /// one frame — except rows emitted while it was active, which persist as
-    /// its durable block (ADR 0018). The plain ledger line is emitted ONLY
-    /// off a terminal: on a TTY the frame already shows the summary in place,
-    /// and printing it again below the frame would both duplicate the line
-    /// and push the cursor out from under the painter's `prev_rows` geometry,
-    /// desyncing every later whole-frame repaint.
+    /// Complete step `i` with `summary`. Its live output (sub-rows, preview,
+    /// reasoning window) erases; rows emitted while it was active persist as
+    /// its durable block. On a terminal the finished block — `✓` summary
+    /// line plus durable rows — then **peels** to permanent scrollback
+    /// (chronological collapse, ADR 0018 amendment 3) and the frame repaints
+    /// below it holding only the steps still in play, so permanent history
+    /// reads in happening order. Off a terminal the same block prints as the
+    /// plain ledger instead; on a TTY no ledger line is emitted (the peel
+    /// just printed it — a second emit would duplicate the line and push the
+    /// cursor out from under the painter's `prev_rows` geometry, desyncing
+    /// every later whole-frame repaint).
     pub fn complete(&self, display: &Display, i: StepIdx, summary: impl Into<String>) {
-        let (lines, ledger) = {
+        let lines = {
             let mut st = self.0.lock().unwrap();
             let duration = st.step_elapsed(i);
             // A step with draft sub-rows owns its live rows wholly (the
             // compacted sub-row slots) — they erase; any other live rows
             // (warnings emitted while active) are the durable record.
+            // ponytail: sub-row-owned steps drop late live rows (a rare
+            // staging warning) at peel; route to durable rows if one ever
+            // matters.
             let has_subs = !st.subs[i.0].is_empty();
             st.subs[i.0].clear();
             let step = &mut st.steps[i.0];
@@ -259,16 +265,29 @@ impl RunFrame {
             if !live.is_empty() && !has_subs {
                 step.durable_rows = live;
             }
-            st.repaint();
-            (
-                plain_step_lines(&st.steps[i.0]),
-                st.paint.is_none(), // ledger only off a terminal
-            )
-        };
-        if ledger {
-            for line in lines {
-                display.emit(&line);
+            if st.paint.is_some() {
+                // Chronological collapse (ADR 0018 amendment 3): peel the
+                // completed block (✓ line + durable rows, one blank after a
+                // durable block — the frame's spacing rule) to permanent
+                // scrollback and repaint only the steps still in play, so
+                // permanent history reads in happening order and the frame
+                // stays active-step-only. The ledger emit below stays
+                // non-TTY-only for the same reason it always was: the block
+                // just printed is the TTY's copy of it.
+                let theme = st.theme();
+                let mut block = timeline_frame(std::slice::from_ref(&st.steps[i.0]), &theme);
+                if !st.steps[i.0].durable_rows.is_empty() {
+                    block.push(String::new());
+                }
+                st.steps[i.0].peeled = true;
+                st.flush_rows(block);
+                Vec::new()
+            } else {
+                plain_step_lines(&st.steps[i.0])
             }
+        };
+        for line in lines {
+            display.emit(&line);
         }
     }
 
@@ -330,14 +349,22 @@ impl RunFrame {
         self.live(i, Vec::new());
     }
 
-    pub fn set_sub_row(&self, i: StepIdx, index: usize, total: usize, body: &SubBody) {
+    pub fn set_sub_row(&self, i: StepIdx, index: usize, body: &SubBody) {
         let mut st = self.0.lock().unwrap();
         let theme = st.theme();
+        // The raw terminal width — the budget a live row must fit.
+        // `sub_row` clamps its text to it, so no sub-row ever wraps to two
+        // physical rows (a wrapped live row would desync the painter's
+        // whole-frame repaint on every later tick).
+        let width = st
+            .paint
+            .as_ref()
+            .map_or_else(terminal_width, |p| p.raw_width);
         let slots = &mut st.subs[i.0];
-        if slots.len() != total {
-            slots.resize_with(total, || None);
+        while slots.len() < index {
+            slots.push(None);
         }
-        let row = sub_row(index, total, body, &theme);
+        let row = sub_row(body, width, &theme);
         slots[index - 1] = Some(row);
         st.steps[i.0].live_rows = slots.iter().flatten().cloned().collect();
         st.repaint();
@@ -382,12 +409,7 @@ impl RunFrame {
     /// output is byte-identical to painting through the step display.
     ///
     /// The painter's absolute-row tracking survives the print by arithmetic,
-    /// not a fresh DSR probe: the clear leaves the cursor on the frame's top
-    /// row, `n` written lines each advance one row, and a line written on
-    /// the bottom margin scrolls instead — so the cursor lands on
-    /// `min(top + n, height)`, exactly the descent [`frame_bytes`] tracks.
-    /// Rows are budgeted to the terminal width by their builders, so no row
-    /// ever wraps to two physical rows.
+    /// not a fresh DSR probe — see [`FrameState::flush_rows`].
     pub fn flush(&self, display: &Display, render: impl FnOnce(&Display)) {
         let mut st = self.0.lock().unwrap();
         if st.paint.is_none() {
@@ -398,32 +420,10 @@ impl RunFrame {
             .paint
             .as_ref()
             .map_or_else(terminal_width, |p| p.raw_width);
-        let rows: Vec<String> = {
-            let sink = RowSink::default();
-            let collected = Display::with_cols(sink.clone(), width);
-            render(&collected);
-            sink.lines()
-        };
-        {
-            let p = st.paint.as_mut().expect("checked above");
-            let prev_height = p.prev_height();
-            let bytes = clear_frame_bytes(prev_height, p.cursor_hidden);
-            let _ = p.term.write_str(&bytes);
-            let _ = p.term.flush();
-            p.cursor_hidden = false;
-            // The clear ends on the frame's top row; remember it before
-            // `prev_rows` resets so the post-print cursor row stays exact.
-            let top = p
-                .row
-                .map(|r| r.saturating_sub(prev_height.saturating_sub(1)));
-            p.prev_rows.clear();
-            for row in &rows {
-                let _ = p.term.write_line(row);
-            }
-            let _ = p.term.flush();
-            p.row = top.map(|t| (t + rows.len()).min(p.height));
-        }
-        st.repaint();
+        let sink = RowSink::default();
+        let collected = Display::with_cols(sink.clone(), width);
+        render(&collected);
+        st.flush_rows(sink.lines());
     }
 
     /// Suspend the frame for a full-screen takeover (the message editor,
@@ -593,9 +593,39 @@ impl FrameState {
         timeline_frame(&steps, &theme).len()
     }
 
-    /// Whole-frame repaint: bake the elapsed into active step lines, build
-    /// the pure frame, animate the spinner glyph, write the bytes. Identical
-    /// frames are skipped (a paused menu tick writes nothing).
+    /// The painter half of [`RunFrame::flush`] (and the chronological-
+    /// collapse peel in [`RunFrame::complete`], ADR 0018 amendment 3): one
+    /// clear of the live frame, `rows` written as permanent terminal lines
+    /// (never repainted again), then the remaining frame repainted below —
+    /// the bounded-frame model. `rows` are finished full rows (leading
+    /// margin included, already styled); they must be budgeted to the
+    /// terminal width by their builders so no row wraps to two physical
+    /// rows. The painter's absolute-row tracking survives the print by
+    /// arithmetic, not a fresh DSR probe: the clear leaves the cursor on the
+    /// frame's top row, `n` written lines each advance one row, and a line
+    /// written on the bottom margin scrolls instead — so the cursor lands
+    /// on `min(top + n, height)`, exactly the descent [`frame_bytes`]
+    /// tracks.
+    fn flush_rows(&mut self, rows: Vec<String>) {
+        let p = self.paint.as_mut().expect("caller checks paint");
+        let prev_height = p.prev_height();
+        let bytes = clear_frame_bytes(prev_height, p.cursor_hidden);
+        let _ = p.term.write_str(&bytes);
+        let _ = p.term.flush();
+        p.cursor_hidden = false;
+        // The clear ends on the frame's top row; remember it before
+        // `prev_rows` resets so the post-print cursor row stays exact.
+        let top = p
+            .row
+            .map(|r| r.saturating_sub(prev_height.saturating_sub(1)));
+        p.prev_rows.clear();
+        for row in &rows {
+            let _ = p.term.write_line(row);
+        }
+        let _ = p.term.flush();
+        p.row = top.map(|t| (t + rows.len()).min(p.height));
+        self.repaint();
+    }
     fn repaint(&mut self) {
         let theme = match self.paint.as_ref() {
             Some(p) => Theme {
@@ -828,21 +858,19 @@ mod tests {
         f.set_sub_row(
             StepIdx(1),
             1,
-            3,
             &SubBody::InFlight("Generating commit message".into()),
         );
         f.set_sub_row(
             StepIdx(1),
             3,
-            3,
             &SubBody::InFlight("Generating commit message".into()),
         );
         let live = f.step(StepIdx(1)).live_rows;
         assert_eq!(live.len(), 2, "only started drafts are revealed");
-        assert!(live[0].contains("[1/3]"), "rows keep index order: {live:?}");
-        assert!(live[1].contains("[3/3]"), "rows keep index order: {live:?}");
-        // A finish flips its own row only; the other stays in flight.
-        f.set_sub_row(StepIdx(1), 3, 3, &SubBody::Done(String::new(), None));
+        // Out-of-order finishes never reorder rows: the slot that finished
+        // flips to ✓ in place, the not-yet-started middle slot stays absent.
+        assert!(live[0].contains('⠋'), "rows keep slot order: {live:?}");
+        f.set_sub_row(StepIdx(1), 3, &SubBody::Done(String::new(), None));
         assert_eq!(f.step(StepIdx(1)).live_rows.len(), 2);
         assert!(f.step(StepIdx(1)).live_rows[1].contains('✓'));
         f.complete(&display, StepIdx(1), "Drafted 3 messages");
@@ -870,7 +898,7 @@ mod tests {
         assert_eq!(f.step(StepIdx::FIRST).durable_rows.len(), 1);
         // While active: live, then durable at completion.
         f.activate(StepIdx(1));
-        step_display.emit("[1/2] ✓ a1b2c3d feat: first");
+        step_display.emit("✓ a1b2c3d feat: first");
         step_display.emit("+1 −1  tracked.txt");
         assert_eq!(f.step(StepIdx(1)).live_rows.len(), 2);
         step_display.clear_last(1);
@@ -900,14 +928,14 @@ mod tests {
         let f = frame(&["Scan changes", "Commit batches"]).await;
         f.complete(&display, StepIdx::FIRST, "Scanned 2 files");
         f.flush(&display, |d| {
-            d.emit("[1/2] ✓ a1b2c3d feat: first");
+            d.emit("✓ a1b2c3d feat: first");
             d.emit("+1 −1  tracked.txt");
         });
         assert_eq!(
             rec.lines(),
             vec![
                 "  ✓ Scanned 2 files",
-                "  [1/2] ✓ a1b2c3d feat: first",
+                "  ✓ a1b2c3d feat: first",
                 "  +1 −1  tracked.txt",
             ]
         );
@@ -947,9 +975,12 @@ mod pty_tests {
     /// `flush` on a terminal must (1) erase the painted frame in one
     /// sequence, (2) print the flushed entry rows exactly once, and (3)
     /// repaint the frame below them — the cursor arithmetic that keeps
-    /// `prev_rows` and the screen in lockstep. A regression in the erase or
-    /// repaint order shows up as the entry row duplicated or the step
-    /// summaries never reappearing after it.
+    /// `prev_rows` and the screen in lockstep. Under chronological collapse
+    /// (ADR 0018 amendment 3) a completed step PEELS instead: its ✓ block
+    /// prints exactly once above the entry, the repaint below omits it, and
+    /// the flow's last peel is the screen's tail. A regression shows up as
+    /// the entry row duplicated, a peeled summary repainting again, or the
+    /// tail order flipping.
     ///
     /// Fork discipline: unlike `cursor::pty_tests` (libc-only children),
     /// this child allocates — it builds a single-thread tokio runtime and
@@ -1067,20 +1098,24 @@ mod pty_tests {
             text.contains("\x1b[2K"),
             "flush must erase the painted frame (CLR_LINE bytes)"
         );
-        let first_summary = text
-            .find("Scanned 2 files")
-            .expect("frame painted pre-flush");
+        // Chronological collapse: the Scan ✓ block peeled to scrollback
+        // exactly once (never repainted), above the flushed entry; the
+        // final Plan peel lands below it — the tail of the screen.
+        let summary_at = text.find("Scanned 2 files").expect("peeled block printed");
         let entry_at = text.find("PTYFLUSH-ENTRY").expect("entry row printed");
-        let last_summary = text
-            .rfind("Scanned 2 files")
-            .expect("frame repainted post-flush");
-        assert!(
-            first_summary < entry_at,
-            "frame must be painted before the flush"
+        assert_eq!(
+            text.matches("Scanned 2 files").count(),
+            1,
+            "a peeled step prints exactly once — the frame never repaints it"
         );
         assert!(
-            last_summary > entry_at,
-            "frame must repaint below the flushed entry row"
+            summary_at < entry_at,
+            "the peeled ✓ block lands above the flushed entry"
+        );
+        let plan_at = text.rfind("Planned 2 batches").expect("final peel printed");
+        assert!(
+            plan_at > entry_at,
+            "the flow's last peel is the tail, below the flushed entry"
         );
     }
 }

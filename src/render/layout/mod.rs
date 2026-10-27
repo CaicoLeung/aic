@@ -75,6 +75,41 @@ pub(crate) fn char_display_width(c: char) -> usize {
     c.width().unwrap_or(1)
 }
 
+/// Display width of a plain (ANSI-free) string in terminal columns —
+/// [`char_display_width`] summed. Pure.
+pub(crate) fn display_width(text: &str) -> usize {
+    text.chars().map(char_display_width).sum()
+}
+
+/// `text` clamped to `budget` display columns, `…` marking the cut (the
+/// file-name column's truncation convention). Keeps whole chars: a
+/// CJK/fullwidth char that would cross the budget is dropped, never split.
+/// Pure. `budget == 0` yields the empty string — fixed chrome (margins,
+/// markers, hashes) is not the clamp's to remove; a surface narrower than
+/// its own chrome is not a target.
+pub(crate) fn clamp_to_width(text: &str, budget: usize) -> String {
+    if budget == 0 || display_width(text) <= budget {
+        return if budget == 0 {
+            String::new()
+        } else {
+            text.to_string()
+        };
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        // +1 reserves the ellipsis's column for the cut that is coming.
+        let w = char_display_width(c);
+        if used + w + 1 > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 /// Greedy word-wrap *geometry*: pack `words` (each a `Vec` of units whose
 /// display width is given by `weight`) into rows of ≤`width` display columns,
 /// hard-breaking a word wider than `width` at the boundary. Returns each row as

@@ -168,7 +168,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         frame.complete(&display, rs, "Redaction gate · clean");
     }
 
-    // Resolve files (ADR 0018): one `[i/N]` sub-row per resolvable file —
+    // Resolve files (ADR 0018): one live sub-row per resolvable file —
     // in-flight while the LLM works (`Retrying {path}` on the marker-retry
     // attempt), `✓ {path} · dur` (with a `(retry)` note) when it lands.
     // Files the LLM can't resolve leave no durable row here; they surface in
@@ -204,7 +204,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
             } else {
                 format!("Resolving {path}")
             };
-            frame.set_sub_row(resolve_step, idx, resolvable, &SubBody::InFlight(label));
+            frame.set_sub_row(resolve_step, idx, &SubBody::InFlight(label));
             // `.to_string()` (not `.clone()`) because `original` is borrowed
             // by the closure, so the bare name is a `&String` whose
             // `.clone()` would copy the reference rather than the content.
@@ -230,7 +230,6 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
                 frame.set_sub_row(
                     resolve_step,
                     idx,
-                    resolvable,
                     &SubBody::Done(text, Some(started.elapsed())),
                 );
                 content

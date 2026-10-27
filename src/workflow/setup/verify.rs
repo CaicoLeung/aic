@@ -4,6 +4,9 @@
 use super::finalize::mask_key;
 use super::*;
 use crate::core::config::{ResolvedConfig, resolve_api_key, resolve_base_url, resolve_field};
+use crate::render::layout::MARGIN;
+use crate::render::oneshot::DETAIL_INDENT;
+use crate::render::{oneshot, palette};
 use std::time::Duration;
 
 /// Best-effort check that `program` is installed. Runs `program --version`
@@ -59,7 +62,7 @@ pub(super) fn smoke_check(program: &str) -> String {
 /// screen redraws. Best-effort: a non-interactive stdin just continues.
 pub(super) fn pause_done() -> Result<()> {
     use std::io::BufRead;
-    eprint!("\nPress Enter to continue… ");
+    eprint!("\n{MARGIN}{DETAIL_INDENT}Press Enter to continue… ");
     let mut line = String::new();
     let _ = std::io::stdin().lock().read_line(&mut line);
     Ok(())
@@ -136,35 +139,51 @@ fn show_verify_result(
     let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    term.write_line(&format!("Verify — {} ({model})", p.display()))?;
-    term.write_line(&format!(
-        "  API key:  {}",
-        if api_key.is_empty() {
-            "(none)".to_string()
-        } else {
-            mask_key(api_key)
-        }
-    ))?;
-    term.write_line(&format!("  Base URL: {}", base_url.unwrap_or("(none)")))?;
-    term.write_line("")?;
+    oneshot::stderr_line(
+        &format!("Verify — {} ({model})", p.display()),
+        palette::plain(),
+    );
+    oneshot::stderr_detail(
+        &format!(
+            "API key:  {}",
+            if api_key.is_empty() {
+                "(none)".to_string()
+            } else {
+                mask_key(api_key)
+            }
+        ),
+        palette::muted(),
+    );
+    oneshot::stderr_detail(
+        &format!("Base URL: {}", base_url.unwrap_or("(none)")),
+        palette::muted(),
+    );
+    eprintln!();
     match result {
         Ok(reply) => {
-            term.write_line(&format!("{ICON_CHECK} Success — the provider responded."))?;
+            oneshot::stderr_line(
+                &format!("{ICON_CHECK} Success — the provider responded."),
+                palette::success(),
+            );
             if !reply.is_empty() {
-                term.write_line(&format!("  Reply: {reply}"))?;
+                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
             }
         }
         Err(e) => {
-            term.write_line(&format!(
-                "{ICON_CROSS} Failed — the provider did not accept the request."
-            ))?;
-            term.write_line(&format!("  Error: {e}"))?;
-            term.write_line("")?;
-            term.write_line("  Common causes: wrong API key, model name, base URL, or network.")?;
+            oneshot::stderr_line(
+                &format!("{ICON_CROSS} Failed — the provider did not accept the request."),
+                palette::failure(),
+            );
+            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
+            eprintln!();
+            oneshot::stderr_detail(
+                "Common causes: wrong API key, model name, base URL, or network.",
+                palette::muted(),
+            );
         }
     }
-    term.write_line("")?;
-    term.write_line("Press Enter to return to the menu…")?;
+    eprintln!();
+    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
     let _ = term.read_char();
     Ok(())
 }
@@ -221,25 +240,37 @@ fn show_cli_verify_result(result: Result<String>) -> Result<()> {
     let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    term.write_line("Verify — CLI agent")?;
-    term.write_line("")?;
+    oneshot::stderr_line("Verify — CLI agent", palette::plain());
+    eprintln!();
     match result {
         Ok(reply) => {
-            term.write_line(&format!("{ICON_CHECK} Success — the CLI responded."))?;
+            oneshot::stderr_line(
+                &format!("{ICON_CHECK} Success — the CLI responded."),
+                palette::success(),
+            );
             if !reply.is_empty() {
-                term.write_line(&format!("  Reply: {reply}"))?;
+                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
             }
         }
         Err(e) => {
-            term.write_line(&format!("{ICON_CROSS} Failed — the CLI did not answer."))?;
-            term.write_line(&format!("  Error: {e}"))?;
-            term.write_line("")?;
-            term.write_line("  Common causes: the CLI is not installed, not")?;
-            term.write_line("  authenticated, or timed out. Run the CLI once to log in.")?;
+            oneshot::stderr_line(
+                &format!("{ICON_CROSS} Failed — the CLI did not answer."),
+                palette::failure(),
+            );
+            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
+            eprintln!();
+            oneshot::stderr_detail(
+                "Common causes: the CLI is not installed, not",
+                palette::muted(),
+            );
+            oneshot::stderr_detail(
+                "authenticated, or timed out. Run the CLI once to log in.",
+                palette::muted(),
+            );
         }
     }
-    term.write_line("")?;
-    term.write_line("Press Enter to return to the menu…")?;
+    eprintln!();
+    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
     let _ = term.read_char();
     Ok(())
 }

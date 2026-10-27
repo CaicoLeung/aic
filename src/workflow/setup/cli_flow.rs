@@ -4,6 +4,7 @@
 use super::verify::{pause_done, smoke_check, step_verify_cli};
 use super::*;
 use crate::llm::cli_agent::{PRESETS, cli_preset};
+use crate::render::{oneshot, palette};
 
 /// Configure the CLI-agent backend: pick a preset (claude/codex/pi/opencode/
 /// omp/gemini/cursor/windsurf/copilot/trae/qwen), write it to config, and
@@ -26,7 +27,8 @@ pub(super) fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
             OptNav::Value(i) => match rows.get(i).copied() {
                 Some(CliRow::Preset(name)) => {
                     let spec = cli_preset(name).unwrap();
-                    eprintln!("\n{}", smoke_check(&spec.command));
+                    eprintln!();
+                    oneshot::stderr_line(&smoke_check(&spec.command), palette::muted());
                     draft.cli = CliConfig {
                         command: Some(spec.command),
                         args: Some(spec.args),

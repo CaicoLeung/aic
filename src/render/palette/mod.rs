@@ -283,6 +283,15 @@ pub fn emphasis() -> Style {
     Style::new().bold()
 }
 
+/// Default foreground — no styling at all: `list` table values beside muted
+/// keys, start-up notices. Also the pass-through role for one-shot rows that
+/// embed their own styled spans ([`crate::render::oneshot`]): a plain style
+/// applies nothing, so the embedded bytes survive the standalone probes
+/// verbatim.
+pub fn plain() -> Style {
+    Style::new()
+}
+
 /// Muted gray [`Style`] for prefix/body/scope text and for
 /// empty or colon-less type tokens. Reads the single-source [`NEUTRAL_GRAY`]
 /// so renderers can never drift from the contrast-guarded value — call this
@@ -360,9 +369,9 @@ impl CommitType {
 // One-shot command lines
 //
 // The one-shot commands (`use`, `list`, `update`, `undo`, `completion`, and
-// `setup`'s save line — ADR 0018) print through `println!` /
-// `eprintln!`, off the `Display` seam, so they style their marker glyphs
-// and detail rows through these standalone probes instead.
+// `setup`'s screens — ADR 0018) print through the one-shot printers
+// (`crate::render::oneshot`), off the `Display` seam; those printers style
+// their lines through these standalone probes.
 // ----------------------------------------------------------------------
 
 /// Style `text` for a one-shot line printed to stdout: plain when stdout
