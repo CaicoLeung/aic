@@ -194,9 +194,15 @@ impl RunFrame {
                 let mut st = this.0.lock().unwrap();
                 // The ticker lives exactly as long as some step is active —
                 // completion or failure of the last active step ends it, so
-                // the final frame simply stops repainting and stays.
                 if !st.steps.iter().any(|s| s.state == StepState::Active) {
                     break;
+                }
+                // A menu is open: the Run waits on the user, not on work —
+                // freeze the glyph and skip the repaint. Motion would read
+                // as progress while nothing progresses, and the static
+                // frame is the visual cue that input is expected.
+                if st.menu_pause.is_some() {
+                    continue;
                 }
                 st.glyph = st.glyph.wrapping_add(1);
                 st.repaint();
