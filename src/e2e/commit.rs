@@ -1086,7 +1086,7 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
     let lines = buf.lines();
     let notice = lines
         .iter()
-        .find(|l| l.contains("regrouping deterministically"))
+        .find(|l| l.contains("Regrouping deterministically"))
         .unwrap_or_else(|| panic!("expected fallback notice, got: {lines:?}"))
         .clone();
 

@@ -239,17 +239,20 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // peels the finished block to scrollback at once, so a row emitted
         // after it would land on a step the frame no longer renders.
         if let Some(err) = &fallback_err {
+            // Outcome first: the row clamps at the text budget, so the
+            // actionable half ("regrouping deterministically") must lead —
+            // at 80 cols the prefix plus this suite's causes still fit whole.
             frame.step_display(&display).warn(&format!(
-                "LLM batch plan invalid ({err}); regrouping deterministically"
+                "Regrouping deterministically — invalid batch plan ({err})"
             ));
         }
+        // One verb for the step in every state: the skeleton promises
+        // "Plan batches", so the summary keeps "Planned" even on the
+        // deterministic fallback — the ⚠ row above already tells that story.
         frame.complete(
             &display,
             plan_step,
-            match &fallback_err {
-                Some(_) => format!("Grouped {}", plural(count, "batch")),
-                None => format!("Planned {}", plural(count, "batch")),
-            },
+            format!("Planned {}", plural(count, "batch")),
         );
 
         // Batch Review (issue #157): the opt-in pre-draft gate — applies to
@@ -333,7 +336,9 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         for (i, (batch, draft)) in result.batches.iter().zip(drafts).enumerate() {
             frame.set_label(
                 commit_step,
-                format!("Committing batch {} of {count}", i + 1),
+                // Keep the skeleton's verb — the pending row promised
+                // "Commit batches", and `· i/N` carries the position.
+                format!("Commit batches · {}/{}", i + 1, count),
             );
             // Stage this batch's hunks, then commit its pre-drafted message.
             // Either step failing after earlier batches already committed
@@ -386,7 +391,9 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                         &display,
                         commit_step,
                         Failure {
-                            reason: format!("declined on batch {} of {count}", i + 1),
+                            // The step label already carries `· i/N`; the
+                            // error chain below keeps the full position.
+                            reason: "declined".to_string(),
                             detail: remediation.to_vec(),
                         },
                     );

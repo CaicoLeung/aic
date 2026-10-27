@@ -264,7 +264,7 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("regrouping deterministically")),
+            .any(|l| l.contains("Regrouping deterministically")),
         "expected the fallback notice before the review menu, got: {lines:?}"
     );
     assert_eq!(

@@ -232,7 +232,7 @@ impl RunFrame {
     }
 
     /// Replace the (active) step's label — the live commit cursor
-    /// `⠋ Committing batch 2 of 3` (ADR 0018).
+    /// `⠋ Commit batches · 2/3` (ADR 0018).
     pub fn set_label(&self, i: StepIdx, label: impl Into<String>) {
         let mut st = self.0.lock().unwrap();
         st.steps[i.0].label = label.into();
