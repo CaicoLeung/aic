@@ -55,7 +55,7 @@ mechanism.
    shrinks while the timeline is visible (terminal height minus timeline
    height).
 5. **Draft Step replaces the drafting bars.** One Step, per-Batch sub-rows
-   (⠋ → ✓); the sub-rows are erased when the Step completes
+   `[i/N]` (loading → ✓); the sub-rows are erased when the Step completes
    and the summary line carries the count. This supersedes ADR 0014's
    `[i/N]` MultiProgress *presentation* only — the concurrency itself is
    untouched. Draft calls get no reasoning window: streaming is not plumbed

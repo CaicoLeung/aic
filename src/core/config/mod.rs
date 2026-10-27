@@ -840,7 +840,7 @@ pub fn run_list() -> Result<()> {
         .unwrap_or(0);
     for (key, value) in rows {
         let pad = " ".repeat(width - key.chars().count() + 2);
-        oneshot::out(
+        oneshot::stdout_line(
             &format!(
                 "{}{pad}{value}",
                 palette::styled_stdout(&key, palette::muted())
@@ -984,9 +984,9 @@ pub fn run_use(name: &str) -> Result<()> {
 
     let (line, note) = use_messages(&config);
     config.save()?;
-    oneshot::out(&format!("✓ {line}"), palette::success());
+    oneshot::stdout_line(&format!("✓ {line}"), palette::success());
     if let Some(note) = note {
-        oneshot::err_detail(&note, palette::muted());
+        oneshot::stderr_detail(&note, palette::muted());
     }
     Ok(())
 }

@@ -145,9 +145,9 @@ pub(crate) fn undo_run(
         anyhow::bail!("the last aic run made no commits — nothing to undo (stale state cleared)");
     }
 
-    oneshot::out("· aic run found", palette::muted());
+    oneshot::stdout_line("· aic run found", palette::muted());
     for row in scope_rows(run, after, tip.is_some()) {
-        oneshot::out_detail(&row, palette::muted());
+        oneshot::stdout_detail(&row, palette::muted());
     }
     let approved = prompt("undo this aic run?")?;
     if !approved {
@@ -157,7 +157,7 @@ pub(crate) fn undo_run(
     git.reset_mixed(&start)
         .with_context(|| "failed to reset back to the last aic run's start")?;
     clear_state(git).with_context(|| "undone, but the undo state files could not be removed")?;
-    oneshot::out(
+    oneshot::stdout_line(
         &format!(
             "✓ undone — HEAD reset to {} · {} {} dropped",
             &start[..7],

@@ -89,7 +89,7 @@ pub fn run_update() -> Result<()> {
         // `VersionStatus` is `#[non_exhaustive]`; any future variant is reported generically.
         _ => format!("Update completed · {old}"),
     };
-    oneshot::out(&format!("✓ {line}"), palette::success());
+    oneshot::stdout_line(&format!("✓ {line}"), palette::success());
     Ok(())
 }
 

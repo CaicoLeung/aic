@@ -139,11 +139,11 @@ fn show_verify_result(
     let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    oneshot::err(
+    oneshot::stderr_line(
         &format!("Verify — {} ({model})", p.display()),
         palette::plain(),
     );
-    oneshot::err_detail(
+    oneshot::stderr_detail(
         &format!(
             "API key:  {}",
             if api_key.is_empty() {
@@ -154,36 +154,36 @@ fn show_verify_result(
         ),
         palette::muted(),
     );
-    oneshot::err_detail(
+    oneshot::stderr_detail(
         &format!("Base URL: {}", base_url.unwrap_or("(none)")),
         palette::muted(),
     );
     eprintln!();
     match result {
         Ok(reply) => {
-            oneshot::err(
+            oneshot::stderr_line(
                 &format!("{ICON_CHECK} Success — the provider responded."),
                 palette::success(),
             );
             if !reply.is_empty() {
-                oneshot::err_detail(&format!("Reply: {reply}"), palette::muted());
+                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
             }
         }
         Err(e) => {
-            oneshot::err(
+            oneshot::stderr_line(
                 &format!("{ICON_CROSS} Failed — the provider did not accept the request."),
                 palette::failure(),
             );
-            oneshot::err_detail(&format!("Error: {e}"), palette::muted());
+            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
             eprintln!();
-            oneshot::err_detail(
+            oneshot::stderr_detail(
                 "Common causes: wrong API key, model name, base URL, or network.",
                 palette::muted(),
             );
         }
     }
     eprintln!();
-    oneshot::err_detail("Press Enter to return to the menu…", palette::muted());
+    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
     let _ = term.read_char();
     Ok(())
 }
@@ -240,34 +240,37 @@ fn show_cli_verify_result(result: Result<String>) -> Result<()> {
     let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    oneshot::err("Verify — CLI agent", palette::plain());
+    oneshot::stderr_line("Verify — CLI agent", palette::plain());
     eprintln!();
     match result {
         Ok(reply) => {
-            oneshot::err(
+            oneshot::stderr_line(
                 &format!("{ICON_CHECK} Success — the CLI responded."),
                 palette::success(),
             );
             if !reply.is_empty() {
-                oneshot::err_detail(&format!("Reply: {reply}"), palette::muted());
+                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
             }
         }
         Err(e) => {
-            oneshot::err(
+            oneshot::stderr_line(
                 &format!("{ICON_CROSS} Failed — the CLI did not answer."),
                 palette::failure(),
             );
-            oneshot::err_detail(&format!("Error: {e}"), palette::muted());
+            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
             eprintln!();
-            oneshot::err_detail(
-                "Common causes: the CLI is not installed, not authenticated, or timed out. \
-                 Run the CLI once to log in.",
+            oneshot::stderr_detail(
+                "Common causes: the CLI is not installed, not",
+                palette::muted(),
+            );
+            oneshot::stderr_detail(
+                "authenticated, or timed out. Run the CLI once to log in.",
                 palette::muted(),
             );
         }
     }
     eprintln!();
-    oneshot::err_detail("Press Enter to return to the menu…", palette::muted());
+    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
     let _ = term.read_char();
     Ok(())
 }

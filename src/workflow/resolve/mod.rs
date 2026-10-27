@@ -168,7 +168,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         frame.complete(&display, rs, "Redaction gate · clean");
     }
 
-    // Resolve files (ADR 0018): one `[i/N]` sub-row per resolvable file —
+    // Resolve files (ADR 0018): one live sub-row per resolvable file —
     // in-flight while the LLM works (`Retrying {path}` on the marker-retry
     // attempt), `✓ {path} · dur` (with a `(retry)` note) when it lands.
     // Files the LLM can't resolve leave no durable row here; they surface in

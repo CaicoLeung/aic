@@ -35,21 +35,21 @@ pub fn run_setup() -> Result<()> {
         let path = config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.config/aic/config.toml".into());
-        oneshot::err(
+        oneshot::stderr_line(
             "aic setup needs an interactive terminal, but stdin is not a TTY.",
             palette::plain(),
         );
-        oneshot::err(
+        oneshot::stderr_line(
             "To configure non-interactively you can either:",
             palette::plain(),
         );
-        oneshot::err_detail(
+        oneshot::stderr_detail(
             &format!(
                 "• write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit, review_batch_plan), or"
             ),
             palette::muted(),
         );
-        oneshot::err_detail(
+        oneshot::stderr_detail(
             "• run `aic setup` in a TTY, or edit the config file directly",
             palette::muted(),
         );
@@ -61,15 +61,19 @@ pub fn run_setup() -> Result<()> {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
             println!();
-            oneshot::out(
-                &format!("✓ Saved to {}", path.display()),
-                palette::success(),
+            oneshot::stdout_line(
+                &format!(
+                    "{} Saved to {}",
+                    palette::styled_stdout("\u{2713}", palette::success()),
+                    path.display()
+                ),
+                palette::plain(),
             );
             println!();
             Ok(())
         }
         None => {
-            oneshot::out("Setup cancelled. Nothing was saved.", palette::muted());
+            oneshot::stdout_line("Setup cancelled. Nothing was saved.", palette::muted());
             Ok(())
         }
     }
@@ -84,8 +88,8 @@ fn show_screen(section: &str) -> Result<()> {
     let term = Term::stderr();
     term.clear_screen()?;
     term.move_cursor_to(0, 0)?;
-    oneshot::err(&format!("aic setup — {section}"), palette::plain());
-    oneshot::err_detail(
+    oneshot::stderr_line(&format!("aic setup — {section}"), palette::plain());
+    oneshot::stderr_detail(
         "↑/↓ move · Enter confirm · Esc back/cancel · Ctrl-C cancel",
         palette::muted(),
     );

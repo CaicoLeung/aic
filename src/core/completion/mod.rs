@@ -200,13 +200,13 @@ pub fn install_completion(shell: Shell) -> anyhow::Result<()> {
         .and_then(|exe| homebrew_prefix_from(&exe));
 
     let target = install_completion_impl(shell, &home, brew_prefix.as_deref())?;
-    oneshot::err(
+    oneshot::stderr_line(
         &format!("✓ completion installed for {}", shell.name()),
         palette::success(),
     );
-    oneshot::err_detail(&target.path.display().to_string(), palette::muted());
+    oneshot::stderr_detail(&target.path.display().to_string(), palette::muted());
     if target.autoloaded {
-        oneshot::err_detail(
+        oneshot::stderr_detail(
             &format!(
                 "Reload your shell (e.g. `exec {}`) and Tab completion will be active.",
                 shell.name()
@@ -215,7 +215,7 @@ pub fn install_completion(shell: Shell) -> anyhow::Result<()> {
         );
     } else if let Some(hint) = shell.follow_up(&target.path) {
         for line in hint.lines() {
-            oneshot::err_detail(line, palette::muted());
+            oneshot::stderr_detail(line, palette::muted());
         }
     }
     Ok(())

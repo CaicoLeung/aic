@@ -28,7 +28,7 @@ pub(super) fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
                 Some(CliRow::Preset(name)) => {
                     let spec = cli_preset(name).unwrap();
                     eprintln!();
-                    oneshot::err(&smoke_check(&spec.command), palette::muted());
+                    oneshot::stderr_line(&smoke_check(&spec.command), palette::muted());
                     draft.cli = CliConfig {
                         command: Some(spec.command),
                         args: Some(spec.args),

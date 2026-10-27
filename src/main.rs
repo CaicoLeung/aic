@@ -26,8 +26,8 @@ async fn main() -> anyhow::Result<()> {
     match config::Config::migrate_location() {
         Ok(notices) => notices
             .iter()
-            .for_each(|n| oneshot::err(&format!("aic: {n}"), palette::plain())),
-        Err(e) => oneshot::err(
+            .for_each(|n| oneshot::stderr_line(&format!("aic: {n}"), palette::plain())),
+        Err(e) => oneshot::stderr_line(
             &format!("aic: config location migration skipped: {e:#}"),
             palette::plain(),
         ),
@@ -43,8 +43,8 @@ async fn main() -> anyhow::Result<()> {
     match config::Config::migrate_if_stale() {
         Ok(notices) => notices
             .iter()
-            .for_each(|n| oneshot::err(&format!("aic: {n}"), palette::plain())),
-        Err(e) => oneshot::err(
+            .for_each(|n| oneshot::stderr_line(&format!("aic: {n}"), palette::plain())),
+        Err(e) => oneshot::stderr_line(
             &format!("aic: config migration skipped: {e:#}"),
             palette::plain(),
         ),
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
                 match completion::prompt_shell(completion::detect_shell())? {
                     Some(shell) => shell,
                     None => {
-                        oneshot::err("Cancelled.", palette::muted());
+                        oneshot::stderr_line("Cancelled.", palette::muted());
                         return Ok(());
                     }
                 }

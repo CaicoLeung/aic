@@ -2,15 +2,17 @@
 //! outside a Run/resolve frame (ADR 0018 §8: the one-shot commands adopt the
 //! Run's symbols, colors, and spacing — not its timeline).
 //!
-//! Four geometry-only printers: [`out`]/[`err`] seat a primary line at the
-//! same column as the timeline's Step markers ([`MARGIN`]); the `_detail`
-//! variants seat explanatory rows one level deeper, on the sub-row column —
-//! the same two-level grid the Run timeline uses. Styling goes through the
-//! palette's standalone probes ([`styled_stdout`]/[`styled_stderr`]) so
-//! pipes and `NO_COLOR` degrade to plain text. Markers (`✓`, `·`, `✗`) are
-//! composed by the caller, mirroring how the timeline composes its own
-//! markers over `MARGIN`; a row that mixes roles within one line (the `list`
-//! table's muted keys beside default-fg values) passes
+//! Four geometry-only printers named stream + level, so a reader can't
+//! mistake `stderr_line` for an error-only printer: [`stdout_line`] /
+//! [`stderr_line`] seat a primary line at the same column as the timeline's
+//! Step markers ([`MARGIN`]); the `_detail` variants seat explanatory rows
+//! one level deeper, on the sub-row column — the same two-level grid the
+//! Run timeline uses. Styling goes through the palette's standalone probes
+//! ([`styled_stdout`]/[`styled_stderr`]) so pipes and `NO_COLOR` degrade
+//! to plain text. Markers (`✓`, `·`, `✗`) are composed by the caller,
+//! mirroring how the timeline composes its own markers over `MARGIN`; a
+//! row that mixes roles within one line (the `list` table's muted keys
+//! beside default-fg values) passes
 //! [`palette::plain`](crate::render::palette::plain) and embeds the styled
 //! spans itself — a plain style applies nothing, so the embedded bytes
 //! survive verbatim.
@@ -33,23 +35,23 @@ use crate::render::palette::{styled_stderr, styled_stdout};
 pub(crate) const DETAIL_INDENT: &str = "  ";
 
 /// Print one primary line to stdout at the shared inset.
-pub fn out(text: &str, style: Style) {
+pub fn stdout_line(text: &str, style: Style) {
     println!("{}{}", MARGIN, styled_stdout(text, style));
 }
 
-/// Print one detail line to stdout — one level deeper than [`out`], on the
-/// timeline's sub-row column.
-pub fn out_detail(text: &str, style: Style) {
+/// Print one detail line to stdout — one level deeper than
+/// [`stdout_line`], on the timeline's sub-row column.
+pub fn stdout_detail(text: &str, style: Style) {
     println!("{}{}{}", MARGIN, DETAIL_INDENT, styled_stdout(text, style));
 }
 
-/// The stderr sibling of [`out`] — result and notice lines that belong to
-/// the terminal chrome rather than stdout's piped results.
-pub fn err(text: &str, style: Style) {
+/// The stderr sibling of [`stdout_line`] — result and notice lines that
+/// belong to the terminal chrome rather than stdout's piped results.
+pub fn stderr_line(text: &str, style: Style) {
     eprintln!("{}{}", MARGIN, styled_stderr(text, style));
 }
 
-/// The stderr sibling of [`out_detail`].
-pub fn err_detail(text: &str, style: Style) {
+/// The stderr sibling of [`stdout_detail`].
+pub fn stderr_detail(text: &str, style: Style) {
     eprintln!("{}{}{}", MARGIN, DETAIL_INDENT, styled_stderr(text, style));
 }
