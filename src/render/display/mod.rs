@@ -677,10 +677,15 @@ impl Display {
     /// Generic warning line, routed through the shared margin so ad-hoc
     /// status failures stay visually consistent with the rest of the run's
     /// output instead of being dumped flush to the edge via raw `eprintln!`.
+    /// The text clamps to the row budget with `…` — the frame's live rows
+    /// truncate bare, so an unclamped long warning would lose its tail
+    /// (often the actionable part) with no marker.
     pub fn warn(&self, msg: &str) {
+        let budget = self.text_width().saturating_sub(2); // the `⚠ ` marker
         self.emit(&format!(
-            "{} {msg}",
-            self.styled("\u{26A0}", palette::pending())
+            "{} {}",
+            self.styled("\u{26A0}", palette::pending()),
+            clamp_to_width(msg, budget)
         ));
     }
 }

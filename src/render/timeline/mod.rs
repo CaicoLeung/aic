@@ -250,7 +250,8 @@ pub fn format_duration(d: Duration) -> Option<String> {
 }
 
 /// The active step's live elapsed counter: integer seconds (`12s`), ADR 0018
-/// — coarser than [`format_duration`] because it ticks every frame.
+/// — coarser than [`format_duration`] because it ticks every frame, and
+/// joined to the row only once ≥ 1 s (a fast step never flashes `· 0s`).
 pub fn format_elapsed(d: Duration) -> String {
     format!("{}s", d.as_secs())
 }
@@ -285,7 +286,11 @@ pub fn step_line(step: &Step, theme: &Theme) -> String {
         StepState::Active => {
             segs.push(styled("⠋ ", palette::pending()));
             segs.push(styled(step.label.clone(), palette::pending()));
-            if let Some(e) = step.active_elapsed {
+            // The live elapsed joins only from 1 s — matching the completed
+            // state's < 1 s rule, so a fast step never flashes `· 0s`.
+            if let Some(e) = step.active_elapsed
+                && e.as_secs() >= 1
+            {
                 segs.push(styled(
                     format!(" · {}", format_elapsed(e)),
                     palette::neutral_gray(),

@@ -1070,7 +1070,9 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
         RunDeps {
             review: BatchReview::Disabled,
             redact: Redact::On,
-            display: Display::with(buf.clone()),
+            // 120 cols so the ⚠ row's clamp budget holds the whole cause —
+            // `warn` truncates with `…` at the text width (ADR 0018).
+            display: Display::with_cols(buf.clone(), 120),
             // Zero batches over real work — the most degenerate invalid plan.
             planner: planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
             messenger,
