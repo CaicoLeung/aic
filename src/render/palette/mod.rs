@@ -326,6 +326,35 @@ pub fn sigma_color() -> Style {
     })
 }
 
+/// A conventional-commit subject as styled segments — the single source both
+/// subject renderers consume so a subject reads identically everywhere: the
+/// panel engine's `styled_subject` (landed entries, previews) and the
+/// timeline's live sub-rows (ADR 0018). Segments: typed `type` token in its
+/// palette color (bolded so the short token clears WCAG AA Large), gray
+/// `(scope)`, unstyled `": "` joiner, bold description; a colon-less message
+/// falls back to the whole text in [`neutral_gray`]. Styling is applied by
+/// the caller (its `Theme`/`colors` policy), so the segments stay plain
+/// strings and width math stays ANSI-blind (ADR 0013).
+pub(crate) fn subject_segments(message: &str) -> Vec<(String, Style)> {
+    let parsed = CommitType::parse_message(message);
+    match parsed.description {
+        Some(desc) => {
+            let mut segs = Vec::with_capacity(4);
+            segs.push((
+                parsed.type_name.to_string(),
+                CommitType::color_for(parsed.type_name).bold(),
+            ));
+            if let Some(scope) = parsed.scope {
+                segs.push((format!("({scope})"), neutral_gray()));
+            }
+            segs.push((": ".to_string(), Style::new()));
+            segs.push((desc.to_string(), emphasis()));
+            segs
+        }
+        None => vec![(message.to_string(), neutral_gray())],
+    }
+}
+
 impl CommitType {
     /// Display color for a **named** commit type. Internal palette lookup used
     /// by [`CommitType::color_for`]; reads [`NAMED_PALETTE`] and falls back to

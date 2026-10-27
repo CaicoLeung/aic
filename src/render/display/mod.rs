@@ -9,7 +9,6 @@ use std::sync::Arc;
 use console::{Style, Term};
 
 use crate::git::FileStats;
-use crate::render::commit_type::CommitType;
 use crate::render::layout::{FALLBACK_COLS, MARGIN, clamp_to_width, resolve_cols, wrap_line};
 use crate::render::palette;
 use crate::render::palette::{commit_id_color, neutral_gray, sigma_color};
@@ -261,36 +260,15 @@ impl Display {
 
     /// Style a conventional-commit subject line the same way in every
     /// renderer: typed `type` in its palette color, gray `(scope)`, bold
-    /// description. Unknown/colon-less messages fall back to the full message
-    /// in the type palette color. Shared by [`Display::commit_line`] (post-commit)
-    /// and [`Display::commit_preview`] (pre-commit confirmation) so what the
-    /// user confirms is byte-for-byte what the completed line will show.
+    /// description — via the shared [`palette::subject_segments`], so the
+    /// pre-commit preview, the landed entry, and the timeline's live sub-row
+    /// all render one subject identically (ADR 0018). Unknown/colon-less
+    /// messages fall back to the full message in muted gray.
     fn styled_subject(&self, message: &str) -> String {
-        // Muted gray for the optional `(scope)` — matches the body/prefix tone.
-        let gray = neutral_gray();
-        let parsed = CommitType::parse_message(message);
-        match parsed.description {
-            Some(desc) => {
-                // Type token: named palette color, or deterministic hash color
-                // for unrecognized non-empty types, or neutral gray for empty.
-                // Bolded so the short token qualifies as WCAG AA Large (3:1) on
-                // both themes — the old bright type colors (feat #4ade80 etc.)
-                // read at ~1.7:1 on white.
-                let colored_type = self.styled(
-                    parsed.type_name,
-                    CommitType::color_for(parsed.type_name).bold(),
-                );
-                let scope = match parsed.scope {
-                    Some(s) => self.styled(&format!("({s})"), gray.clone()),
-                    None => String::new(),
-                };
-                let bold_desc = self.styled(desc, palette::emphasis());
-                format!("{}{}: {}", colored_type, scope, bold_desc)
-            }
-            // No colon — no type token to color; render the whole message in
-            // muted gray so it reads as a non-conventional fallback.
-            None => self.styled(message, gray),
-        }
+        palette::subject_segments(message)
+            .iter()
+            .map(|(text, style)| self.styled(text, style.clone()))
+            .collect()
     }
 
     /// Emit a commit body — hang-indented by `indent` columns beyond the
