@@ -175,17 +175,13 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
             .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
             .collect();
         let scan_paths: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_stats = frame.fail_on_err(&display, SCAN, git.workdir_stats(&scan_paths))?;
-        let scan_delta = delta_suffix(&scan_stats);
-        frame.complete(
+        let scan_stats = scanned(
+            &frame,
             &display,
             SCAN,
-            format!(
-                "Scanned {}{}",
-                plural(unstaged_files.len(), "file"),
-                scan_delta
-            ),
-        );
+            git.workdir_stats(&scan_paths),
+            unstaged_files.len(),
+        )?;
         // Run-wide counts-grid geometry: every Commit entry footer of this
         // Run floors its `+N`/`−M` columns with it — computed over the
         // WHOLE unstaged diff up front — so per-batch digit counts can't
@@ -444,17 +440,13 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
 
         frame.activate(SCAN);
         let staged_paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_stats = frame.fail_on_err(&display, SCAN, git.staged_stats(&staged_paths))?;
-        let scan_delta = delta_suffix(&scan_stats);
-        frame.complete(
+        let scan_stats = scanned(
+            &frame,
             &display,
             SCAN,
-            format!(
-                "Scanned {}{}",
-                plural(staged_files.len(), "file"),
-                scan_delta
-            ),
-        );
+            git.staged_stats(&staged_paths),
+            staged_files.len(),
+        )?;
         // Run-wide counts-grid geometry (see the unstaged branch): the
         // staged branch lands one entry, so the floor equals its own
         // geometry — kept for symmetry with the shared `commit_line`
@@ -630,6 +622,26 @@ async fn generate_and_commit(
         );
     }
     Ok(())
+}
+
+/// The Scan step shared by both branches: run the diff-stats query through
+/// [`RunFrame::fail_on_err`], then complete the step with the pluralized
+/// file count and the aggregate `+A −D` delta. Returns the stats for the
+/// run-wide counts-grid geometry.
+fn scanned(
+    frame: &RunFrame,
+    display: &Display,
+    step: StepIdx,
+    stats: anyhow::Result<Vec<crate::git::FileStats>>,
+    files: usize,
+) -> anyhow::Result<Vec<crate::git::FileStats>> {
+    let stats = frame.fail_on_err(display, step, stats)?;
+    frame.complete(
+        display,
+        step,
+        format!("Scanned {}{}", plural(files, "file"), delta_suffix(&stats)),
+    );
+    Ok(stats)
 }
 
 /// One batch's file label for its draft sub-row: the lead file, plus

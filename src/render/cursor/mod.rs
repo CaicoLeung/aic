@@ -234,15 +234,32 @@ fn read_byte(fd: std::os::fd::RawFd) -> Option<u8> {
 /// caller checks `isatty` and that stderr is a terminal). Split from
 /// [`query_cursor_row`] so the full I/O path — pre-check, raw mode, byte
 /// loop, late-reply drain — is testable over a PTY without touching the test
-/// process's real stdin/stderr.
-///
-/// Input-safety contract, in order:
+/// process's real stdin/stderr. See [`tty_query`] for the shared
+/// input-safety contract.
+#[cfg(unix)]
+fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
+    tty_query(
+        fd,
+        b"\x1b[6n",
+        MAX_DSR_REPLY,
+        dsr_byte_ok,
+        |resp| resp.last() == Some(&b'R'),
+        parse_dsr,
+        b'R',
+    )
+}
+
+/// The shared raw-mode tty probe core behind [`query_cursor_row_core`] and
+/// [`query_background_core`]: write `query` to the tty, read the reply
+/// byte-by-byte under a 200 ms deadline (poll in 50 ms slices), and hand the
+/// accumulated bytes to `parse` once `done` fires. Input-safety contract,
+/// in order:
 ///
 /// 1. **Never consume input that was pending before the query.** If anything
 ///    is already buffered (the user started typing, or a previous read leaked
 ///    bytes), the query is skipped entirely — those bytes are the user's, not
 ///    ours to eat.
-/// 2. **Bail the moment a byte can't continue a DSR reply.** Raw mode lasts
+/// 2. **Bail the moment a byte can't continue the reply.** Raw mode lasts
 ///    only as long as the reply is actually arriving; a keypress (or Ctrl-C)
 ///    landing mid-window ends the query immediately and restores the
 ///    terminal, so the raw window is a few milliseconds, not the full
@@ -254,11 +271,20 @@ fn read_byte(fd: std::os::fd::RawFd) -> Option<u8> {
 ///    actually shows up — bytes are never read speculatively past the first
 ///    one, which must be ESC to be a reply at all.
 #[cfg(unix)]
-fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
+fn tty_query<T>(
+    fd: std::os::fd::RawFd,
+    query: &[u8],
+    max: usize,
+    byte_ok: impl Fn(&[u8], u8) -> bool,
+    done: impl Fn(&[u8]) -> bool,
+    parse: impl Fn(&[u8]) -> Option<T>,
+    terminator: u8,
+) -> Option<T> {
     use std::time::Instant;
 
     // 1. Skip if input is already pending: consumed bytes are lost, so a
-    //    quiet queue is a precondition, not an optimization.
+    //    quiet queue is a precondition, not an optimization. The query goes
+    //    to the same tty the reply comes back on.
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -267,9 +293,6 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
     if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
         return None;
     }
-    // The query goes to the same tty the reply comes back on: for a terminal
-    // stdin (the only path that reaches here) that is the user's screen.
-    let query = b"\x1b[6n";
     if unsafe { libc::write(fd, query.as_ptr().cast(), query.len()) } != query.len() as isize {
         return None;
     }
@@ -280,45 +303,44 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
     // [`RawTermios::enter`] for the mode flags (canonical off, OPOST kept).
     let _raw = RawTermios::enter(fd)?;
     let deadline = Instant::now() + Duration::from_millis(200);
-    let mut resp: Vec<u8> = Vec::with_capacity(16);
+    let mut resp: Vec<u8> = Vec::with_capacity(max);
     let result = loop {
         if Instant::now() >= deadline {
             break None;
         }
-        let ready = unsafe { libc::poll(&mut pfd, 1, 50) };
-        if ready <= 0 {
+        if unsafe { libc::poll(&mut pfd, 1, 50) } <= 0 {
             continue;
         }
         let Some(byte) = read_byte(fd) else {
             break None;
         };
-        // 2. A byte that can't be part of `ESC[<row>;<col>R` is not the reply
-        //    (user input, or garbage): bail immediately instead of waiting
-        //    out the deadline in raw mode.
-        if !dsr_byte_ok(&resp, byte) {
+        // 2. A byte that can't be part of the reply is not the reply (user
+        //    input, or garbage): bail immediately instead of waiting out the
+        //    deadline in raw mode.
+        if !byte_ok(&resp, byte) {
             break None;
         }
         resp.push(byte);
-        if byte == b'R' {
-            break parse_dsr(&resp);
+        if done(&resp) {
+            break parse(&resp);
         }
-        if resp.len() > MAX_DSR_REPLY {
+        if resp.len() > max {
             break None;
         }
     };
-    // 3. Late-reply drain, still in raw mode. A reply that straggles past the
-    //    deadline would otherwise sit in the kernel queue and surface as
+    // 3. Late-reply drain, still in raw mode. A reply that straggles past
+    //    the deadline would otherwise sit in the kernel queue and surface as
     //    garbage in a later prompt read (canonical mode holds it until a
-    //    newline that never comes — the worst kind of leak), so a short grace
-    //    waits for its first byte. A partial reply (`resp` holds a real
-    //    ESC-led prefix) drains straight to its closing `R`; a query that
-    //    never saw its first byte only consumes a byte once one actually
-    //    arrives, and only when it is ESC — a non-ESC byte ends the drain
-    //    immediately (that one keystroke, typed in the millisecond race
-    //    between pre-check and reply, is lost — the alternative, an undrained
-    //    reply corrupting the next prompt read, is worse).
+    //    newline that never comes — the worst kind of leak), so a short
+    //    grace waits for its first byte. A partial reply (`resp` holds a
+    //    real ESC-led prefix) drains straight to its closing `terminator`; a
+    //    query that never saw its first byte only consumes a byte once one
+    //    actually arrives, and only when it is ESC — a non-ESC byte ends the
+    //    drain immediately (that one keystroke, typed in the millisecond
+    //    race between pre-check and reply, is lost — the alternative, an
+    //    undrained reply corrupting the next prompt read, is worse).
     if result.is_none() {
-        drain_straggler(fd, &mut pfd, &resp, MAX_DSR_REPLY, b'R');
+        drain_straggler(fd, &mut pfd, &resp, max, terminator);
     }
     // `_raw` restores termios as it goes out of scope here — the guard's
     // Drop is the single restore point, so every path (timeout, garbage,
@@ -501,57 +523,19 @@ pub(crate) fn background_is_dark() -> bool {
 }
 
 /// The OSC 11 query itself, against an already-validated tty fd — the
-/// sibling of [`query_cursor_row_core`] with the same three-part
-/// input-safety contract (quiet-queue precondition, immediate bail on a
-/// non-reply byte, late-reply drain).
+/// sibling of [`query_cursor_row_core`]. See [`tty_query`] for the shared
+/// input-safety contract.
 #[cfg(unix)]
 fn query_background_core(fd: std::os::fd::RawFd) -> Option<(u8, u8, u8)> {
-    use std::time::Instant;
-
-    let mut pfd = libc::pollfd {
+    tty_query(
         fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // 1. Pending input is the user's, not ours to eat.
-    if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
-        return None;
-    }
-    let query = b"\x1b]11;?\x07";
-    if unsafe { libc::write(fd, query.as_ptr().cast(), query.len()) } != query.len() as isize {
-        return None;
-    }
-    let _raw = RawTermios::enter(fd)?;
-    let deadline = Instant::now() + Duration::from_millis(200);
-    let mut resp: Vec<u8> = Vec::with_capacity(MAX_OSC_REPLY);
-    let result = loop {
-        if Instant::now() >= deadline {
-            break None;
-        }
-        if unsafe { libc::poll(&mut pfd, 1, 50) } <= 0 {
-            continue;
-        }
-        let Some(byte) = read_byte(fd) else {
-            break None;
-        };
-        // 2. Anything that can't be the reply ends the probe immediately —
-        // raw mode lasts milliseconds, not the deadline.
-        if !osc11_byte_ok(&resp, byte) {
-            break None;
-        }
-        resp.push(byte);
-        if byte == b'\x07' || resp.ends_with(b"\x1b\\") {
-            break parse_osc11(&resp);
-        }
-        if resp.len() > MAX_OSC_REPLY {
-            break None;
-        }
-    };
-    // 3. Drain a straggler so it can't surface in a later prompt read.
-    if result.is_none() {
-        drain_straggler(fd, &mut pfd, &resp, MAX_OSC_REPLY, b'\x07');
-    }
-    result
+        b"\x1b]11;?\x07",
+        MAX_OSC_REPLY,
+        osc11_byte_ok,
+        |resp| resp.last() == Some(&b'\x07') || resp.ends_with(b"\x1b\\"),
+        parse_osc11,
+        b'\x07',
+    )
 }
 
 #[cfg(test)]

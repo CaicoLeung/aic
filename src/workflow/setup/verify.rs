@@ -3,7 +3,7 @@
 
 use super::finalize::mask_key;
 use super::*;
-use crate::core::config::{ResolvedConfig, resolve_api_key, resolve_base_url, resolve_field};
+use crate::core::config::{ResolvedConfig, resolve_base_url, resolve_field};
 use crate::render::layout::MARGIN;
 use crate::render::oneshot::DETAIL_INDENT;
 use crate::render::{oneshot, palette};
@@ -98,7 +98,7 @@ pub(super) fn step_verify(draft: &Draft) -> Result<Nav> {
     let p = draft.provider.unwrap_or_default();
     // Effective values: the draft (a user edit or the seeded config value),
     // then the default.
-    let api_key = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty())).0;
+    let api_key = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "").0;
     let base_url = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p).0;
     let model = resolve_field(
         draft.model.as_deref().filter(|m| !m.is_empty()),

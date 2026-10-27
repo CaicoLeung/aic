@@ -2,7 +2,7 @@ use super::cli_flow::*;
 use super::finalize::*;
 use super::provider::*;
 use super::*;
-use crate::core::config::{Source, resolve_api_key};
+use crate::core::config::Source;
 use crate::llm::cli_agent::PRESETS;
 
 fn cfg(
@@ -452,18 +452,6 @@ fn toggle_initial_prefers_draft_then_existing_then_off() {
     // Draft choice wins over existing, either way.
     assert!(!toggle_initial(Some(false), Some(true)));
     assert!(toggle_initial(Some(true), None));
-}
-
-#[test]
-fn resolve_api_key_uses_config_value() {
-    // aic reads only the config file: the config value is used as-is.
-    let (key, source) = resolve_api_key(Some("sk-config"));
-    assert_eq!(key, "sk-config");
-    assert_eq!(source, Source::Config);
-    // No config value -> empty, default source.
-    let (key, source) = resolve_api_key(None);
-    assert_eq!(key, "");
-    assert_eq!(source, Source::Default);
 }
 
 fn draft_with_cli(command: Option<&str>) -> Draft {

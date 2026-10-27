@@ -595,7 +595,7 @@ impl ResolvedConfig {
 
         let provider = Provider::from_name(&backend);
 
-        let (api_key, api_key_source) = resolve_api_key(cfg.api_key.as_deref());
+        let (api_key, api_key_source) = resolve_field(cfg.api_key.as_deref(), "");
 
         let (model, model_source) = resolve_field(cfg.model.as_deref(), provider.default_model());
 
@@ -715,16 +715,6 @@ pub(crate) fn resolve_field(config_value: Option<&str>, default: &str) -> (Strin
         return (v.to_string(), Source::Config);
     }
     (default.to_string(), Source::Default)
-}
-
-/// Resolve the API key by precedence: config file > none. Environment
-/// variables are not consulted (the config file is the single source of
-/// truth). `pub(crate)` for the same setup-wizard reason as [`resolve_field`].
-pub(crate) fn resolve_api_key(config_value: Option<&str>) -> (String, Source) {
-    if let Some(v) = config_value {
-        return (v.to_string(), Source::Config);
-    }
-    (String::new(), Source::Default)
 }
 
 /// Resolve the base URL by precedence: config file > provider default.

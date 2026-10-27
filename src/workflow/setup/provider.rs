@@ -6,7 +6,7 @@
 use super::finalize::{field_initial, mask_key, switch_provider};
 use super::verify::step_verify;
 use super::*;
-use crate::core::config::{Source, resolve_api_key, resolve_base_url, resolve_field};
+use crate::core::config::{Source, resolve_base_url, resolve_field};
 use crate::llm::BaseUrlRequirement;
 
 /// Screen label shared by every screen in the provider flow — a const so the
@@ -136,7 +136,8 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
             Step::ApiKey => {
                 // Effective key for display: the draft (a user edit or the
                 // seeded config value).
-                let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
+                let (key, _) =
+                    resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
                 entries.push(ProviderEntry::ApiKey);
                 labels.push(format!("{DOT} API key — {}", api_key_label(&key)));
             }
@@ -260,7 +261,7 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
     // Effective key for editing + keep semantics: the draft (a user edit or
     // the seeded config value).
-    let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
+    let (key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
     match provider.requires_key() {
         // Cloud provider — key required. A single visible, editable prompt:
         // type a new key (shown in the clear) or leave it blank to keep the

@@ -786,32 +786,11 @@ pub(crate) fn frame_menu(
 mod tests {
     use super::*;
 
-    /// A recording sink: captures lines, pops on clear_last — the same
-    /// contract the e2e BufferWrite harness pins. (`cargo test` runs with
-    /// stderr piped, so every frame built here is the non-TTY ledger mode —
-    /// exactly the path these tests pin.)
-    #[derive(Default, Clone)]
-    struct Rec(Arc<Mutex<Vec<String>>>);
-
-    impl Rec {
-        fn lines(&self) -> Vec<String> {
-            self.0.lock().unwrap().clone()
-        }
-    }
-
-    impl DisplayWrite for Rec {
-        fn write_line(&self, line: &str) {
-            self.0.lock().unwrap().push(line.to_string());
-        }
-        fn clear_last(&self, n: usize) {
-            let mut buf = self.0.lock().unwrap();
-            let keep = buf.len().saturating_sub(n);
-            buf.truncate(keep);
-        }
-    }
-
-    fn display() -> (Display, Rec) {
-        let rec = Rec::default();
+    /// The recording sink for these tests is the production [`RowSink`]:
+    /// (`cargo test` runs with stderr piped, so every frame built here is
+    /// the non-TTY ledger mode — exactly the path these tests pin.)
+    fn display() -> (Display, RowSink) {
+        let rec = RowSink::default();
         (Display::with(rec.clone()), rec)
     }
 
