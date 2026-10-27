@@ -32,14 +32,10 @@ async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
         .expect_err("refused state must error, not succeed");
-    let msg = format!("{err:#}");
     // Pin the literal "<label> state yet" phrase — a bare `contains("am")`
     // would false-pass on common words like "stream", and stopping at
     // "<label> state" would miss the yet-wording regressing back to "in v1".
-    assert!(
-        msg.contains(&format!("{label} state yet")),
-        "expected {label} refusal, got: {msg}"
-    );
+    err_contains(&err, &[&format!("{label} state yet")]);
     assert!(
         seen.lock().is_empty(),
         "resolver must not run on refused state"
