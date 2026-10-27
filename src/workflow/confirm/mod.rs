@@ -228,12 +228,9 @@ fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Op
 /// sees in the editor is exactly the (subject, body) pair that would commit.
 fn message_to_edit(subject: &str, body: Option<&str>) -> String {
     let mut text = subject.to_string();
-    if let Some(b) = body {
-        let trimmed = b.trim();
-        if !trimmed.is_empty() {
-            text.push('\n');
-            text.push_str(trimmed);
-        }
+    if let Some(b) = body.filter(|b| !b.trim().is_empty()) {
+        text.push('\n');
+        text.push_str(b.trim());
     }
     text
 }

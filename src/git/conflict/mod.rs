@@ -94,10 +94,8 @@ impl RepoState {
         match self {
             Self::Clean => "clean",
             Self::Merge => "merge",
-            Self::CherryPick => "cherry-pick",
-            Self::CherryPickSequence => "cherry-pick",
-            Self::Revert => "revert",
-            Self::RevertSequence => "revert",
+            Self::CherryPick | Self::CherryPickSequence => "cherry-pick",
+            Self::Revert | Self::RevertSequence => "revert",
             Self::Rebase | Self::RebaseInteractive | Self::RebaseMerge => "rebase",
             Self::ApplyMailbox | Self::ApplyMailboxOrRebase => "am",
         }

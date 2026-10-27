@@ -437,15 +437,7 @@ const MAX_OSC_REPLY: usize = 40;
 /// prefix is exact, then hex digits, `/`, or a terminator.
 fn osc11_byte_ok(resp: &[u8], b: u8) -> bool {
     match resp.len() {
-        0 => b == b'\x1b',
-        1 => b == b']',
-        2 => b == b'1',
-        3 => b == b'1',
-        4 => b == b';',
-        5 => b == b'r',
-        6 => b == b'g',
-        7 => b == b'b',
-        8 => b == b':',
+        n @ 0..=8 => b == b"\x1b]11;rgb:"[n],
         _ => b.is_ascii_hexdigit() || b == b'/' || b == b'\x07' || b == b'\x1b' || b == b'\\',
     }
 }

@@ -140,13 +140,8 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
             skipped.push((f.path.clone(), f.kind.reason().to_string()));
             continue;
         }
-        match read_original(&conflict, &f.path) {
-            Ok(original) => read.push((f.path.clone(), original)),
-            Err(e) => {
-                frame.fail(&display, DETECT, Failure::from_error("failed", &e));
-                return Err(e);
-            }
-        }
+        let original = frame.fail_on_err(&display, DETECT, read_original(&conflict, &f.path))?;
+        read.push((f.path.clone(), original));
     }
 
     // Redaction Gate (issue #159, ADR 0017): the resolver sends whole-file
@@ -320,16 +315,17 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
         // The diff + ask were transient; earlier verdicts already flushed,
         // so the live block is empty again.
         frame.clear_live(review_step);
-        if let Err(e) = if apply {
-            conflict
-                .write_worktree(path, resolved)
-                .and_then(|()| git.add(&[path.as_str()]))
-        } else {
-            Ok(())
-        } {
-            frame.fail(&display, review_step, Failure::from_error("failed", &e));
-            return Err(e);
-        }
+        frame.fail_on_err(
+            &display,
+            review_step,
+            if apply {
+                conflict
+                    .write_worktree(path, resolved)
+                    .and_then(|()| git.add(&[path.as_str()]))
+            } else {
+                Ok(())
+            },
+        )?;
         let verdict = if apply {
             crate::git::conflict::resolved
         } else {
@@ -365,10 +361,7 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     let needs_manual = rejected + skipped_failed + skipped_unresolvable;
     if needs_manual == 0 {
         frame.activate(finalize_step);
-        if let Err(e) = conflict.finalize(state) {
-            frame.fail(&display, finalize_step, Failure::from_error("failed", &e));
-            return Err(e);
-        }
+        frame.fail_on_err(&display, finalize_step, conflict.finalize(state))?;
         frame.complete(&display, finalize_step, finalize_summary(state));
     } else {
         frame.truncate_steps(finalize_step);

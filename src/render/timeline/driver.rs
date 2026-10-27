@@ -337,10 +337,7 @@ impl RunFrame {
         i: StepIdx,
         result: anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        if let Err(e) = &result {
-            self.fail(display, i, Failure::from_error("failed", e));
-        }
-        result
+        result.inspect_err(|e| self.fail(display, i, Failure::from_error("failed", e)))
     }
 
     /// Replace the active step `i`'s live rows wholesale (the reasoning
