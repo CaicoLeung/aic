@@ -98,21 +98,15 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn detects_apple_silicon_cellar_path() {
+    fn detects_cellar_paths() {
+        // Apple Silicon, Intel, and Linuxbrew layouts all carry a `Cellar`
+        // path component.
         assert!(exe_is_in_cellar(Path::new(
             "/opt/homebrew/Cellar/aic/0.1.6/bin/aic"
         )));
-    }
-
-    #[test]
-    fn detects_intel_cellar_path() {
         assert!(exe_is_in_cellar(Path::new(
             "/usr/local/Cellar/aic/0.1.6/bin/aic"
         )));
-    }
-
-    #[test]
-    fn detects_linuxbrew_cellar_path() {
         assert!(exe_is_in_cellar(Path::new(
             "/home/linuxbrew/.linuxbrew/Cellar/aic/0.1.6/bin/aic"
         )));
@@ -140,14 +134,9 @@ mod tests {
     }
 
     #[test]
-    fn brew_upgrade_command_invokes_correct_program() {
+    fn brew_upgrade_command_invokes_brew_upgrade_aic() {
         let cmd = brew_upgrade_command();
         assert_eq!(cmd.get_program(), "brew");
-    }
-
-    #[test]
-    fn brew_upgrade_command_passes_correct_args() {
-        let cmd = brew_upgrade_command();
         let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
         assert_eq!(args, vec!["upgrade", "aic"]);
     }

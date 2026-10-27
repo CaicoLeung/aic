@@ -202,9 +202,8 @@ fn new_end(start: u32, count: u32) -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_file_patch_splits_header_and_hunks() {
-        let raw = "diff --git a/f.rs b/f.rs\n\
+    fn two_hunk_patch() -> &'static str {
+        "diff --git a/f.rs b/f.rs\n\
 index 1..2 100644\n\
 --- a/f.rs\n\
 +++ b/f.rs\n\
@@ -217,8 +216,12 @@ index 1..2 100644\n\
  ctx\n\
 -old2\n\
 +new2\n\
- ctx\n";
-        let patch = parse_file_patch(raw);
+ ctx\n"
+    }
+
+    #[test]
+    fn parse_file_patch_splits_header_and_hunks() {
+        let patch = parse_file_patch(two_hunk_patch());
         assert!(patch.header.starts_with("diff --git"));
         assert!(
             !patch.header.contains("@@"),
@@ -233,21 +236,7 @@ index 1..2 100644\n\
     /// order — the exact text `git apply --cached` consumes.
     #[test]
     fn slice_rebuilds_header_plus_selected_hunks() {
-        let raw = "diff --git a/f.rs b/f.rs\n\
-index 1..2 100644\n\
---- a/f.rs\n\
-+++ b/f.rs\n\
-@@ -1,3 +1,3 @@\n\
- ctx\n\
--old\n\
-+new\n\
- ctx\n\
-@@ -10,3 +10,3 @@ fn b\n\
- ctx\n\
--old2\n\
-+new2\n\
- ctx\n";
-        let patch = parse_file_patch(raw);
+        let patch = parse_file_patch(two_hunk_patch());
         let body = patch.slice(&[2]).unwrap();
         assert!(body.starts_with("diff --git"), "header must lead");
         assert!(!body.contains("-old\n"), "hunk 1 must be absent");

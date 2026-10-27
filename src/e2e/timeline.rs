@@ -6,6 +6,19 @@
 
 use super::common::*;
 
+/// The two-file / two-batch plan the multi-batch timeline tests share.
+fn two_file_two_batch_plan() -> generator::BatchPlanOutput {
+    plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ])
+}
+
+/// Whether any ledger line starts with `prefix`.
+fn has_step(lines: &[String], prefix: &str) -> bool {
+    lines.iter().any(|l| l.starts_with(prefix))
+}
+
 /// The unstaged path's happy-path ledger: one `✓` line per step in skeleton
 /// order — Scan, Redaction Gate, Plan, Draft, Commit — and nothing else from
 /// the timeline (the Commit entries print separately as panel rows).
@@ -15,10 +28,7 @@ use super::common::*;
 async fn unstaged_run_appends_the_step_ledger() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let plan = plan(vec![
-        plan_batch("alpha.txt", &[1], "change alpha"),
-        plan_batch("beta.txt", &[1], "change beta"),
-    ]);
+    let plan = two_file_two_batch_plan();
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -31,12 +41,11 @@ async fn unstaged_run_appends_the_step_ledger() {
     .await;
     assert!(result.is_ok(), "{result:?}");
     let lines = buf.lines();
-    let step = |prefix: &str| lines.iter().any(|l| l.starts_with(prefix));
-    assert!(step("  ✓ Scanned 2 files"), "{lines:?}");
-    assert!(step("  ✓ Redaction gate · clean"), "{lines:?}");
-    assert!(step("  ✓ Planned 2 batches"), "{lines:?}");
-    assert!(step("  ✓ Drafted 2 messages"), "{lines:?}");
-    assert!(step("  ✓ Committed 2 batches"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Scanned 2 files"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Redaction gate · clean"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Planned 2 batches"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Drafted 2 messages"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Committed 2 batches"), "{lines:?}");
     assert!(
         lines.iter().all(|l| !l.contains('✗')),
         "the happy path never prints a failed screen: {lines:?}"
@@ -62,11 +71,10 @@ async fn staged_run_appends_the_three_step_ledger() {
     .await;
     assert!(result.is_ok(), "{result:?}");
     let lines = buf.lines();
-    let step = |prefix: &str| lines.iter().any(|l| l.starts_with(prefix));
-    assert!(step("  ✓ Scanned 1 file"), "{lines:?}");
-    assert!(step("  ✓ Redaction gate · clean"), "{lines:?}");
-    assert!(step("  ✓ Drafted message"), "{lines:?}");
-    assert!(step("  ✓ Committed 1 batch"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Scanned 1 file"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Redaction gate · clean"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Drafted message"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Committed 1 batch"), "{lines:?}");
     assert!(
         lines.iter().all(|l| !l.contains('✗')),
         "the happy path never prints a failed screen: {lines:?}"
@@ -85,12 +93,9 @@ async fn no_redact_run_has_no_gate_step() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: staged"),
-            confirm: Confirm::Disabled,
+            ..deps(unreachable_planner(), messenger_fixed("feat: staged"))
         },
     )
     .await;
@@ -152,24 +157,19 @@ async fn redaction_refusal_shapes_the_failed_screen() {
 async fn declined_batch_shapes_the_failed_screen() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let plan = plan(vec![
-        plan_batch("alpha.txt", &[1], "change alpha"),
-        plan_batch("beta.txt", &[1], "change beta"),
-    ]);
+    let plan = two_file_two_batch_plan();
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
                 editor: editor_fixed("edited", None),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await
@@ -210,10 +210,7 @@ async fn declined_batch_shapes_the_failed_screen() {
 async fn review_flow_completes_the_plan_step() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let plan = plan(vec![
-        plan_batch("alpha.txt", &[1], "change alpha"),
-        plan_batch("beta.txt", &[1], "change beta"),
-    ]);
+    let plan = two_file_two_batch_plan();
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -224,9 +221,7 @@ async fn review_flow_completes_the_plan_step() {
             },
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await;
@@ -261,9 +256,7 @@ async fn review_abort_shapes_the_failed_screen() {
             },
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), unreachable_messenger())
         },
     )
     .await
@@ -298,12 +291,9 @@ async fn invalid_plan_completes_with_planned_verb_and_caution_row() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await;

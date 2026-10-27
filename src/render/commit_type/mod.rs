@@ -197,65 +197,27 @@ mod tests {
 
     #[test]
     fn from_message_extracts_type_before_colon() {
-        assert_eq!(
-            CommitType::from_message("feat: add thing"),
-            CommitType::Feat
-        );
-        assert_eq!(
-            CommitType::from_message("fix(auth): correct token check"),
-            CommitType::Fix
-        );
-        assert_eq!(
-            CommitType::from_message("chore: update deps"),
-            CommitType::Chore
-        );
-    }
-
-    #[test]
-    fn from_message_handles_case_variants() {
-        assert_eq!(
-            CommitType::from_message("FEAT: add thing"),
-            CommitType::Feat
-        );
-        assert_eq!(
-            CommitType::from_message("Feat: add thing"),
-            CommitType::Feat
-        );
-    }
-
-    #[test]
-    fn from_message_handles_scope_with_colon() {
-        // Scope before type: "fix(auth)" — should parse correctly
-        assert_eq!(
-            CommitType::from_message("fix(auth): correct token check"),
-            CommitType::Fix
-        );
-        assert_eq!(
-            CommitType::from_message("feat(api): add endpoint"),
-            CommitType::Feat
-        );
-    }
-
-    #[test]
-    fn from_message_returns_unknown_for_no_colon() {
-        assert_eq!(
-            CommitType::from_message("no colon message"),
-            CommitType::Unknown
-        );
-        // A colon-bearing but unrecognized type still resolves to Unknown
-        // (the renderer then routes it through the hash fallback — see
-        // `color_for`).
-        assert_eq!(CommitType::from_message("blob: thing"), CommitType::Unknown);
-        assert_eq!(CommitType::from_message(""), CommitType::Unknown);
-    }
-
-    #[test]
-    fn from_message_handles_multiple_colons() {
-        // Only first colon separates type from description
-        assert_eq!(
-            CommitType::from_message("feat: thing: with: colons"),
-            CommitType::Feat
-        );
+        for (msg, want) in [
+            ("feat: add thing", CommitType::Feat),
+            ("fix(auth): correct token check", CommitType::Fix),
+            ("chore: update deps", CommitType::Chore),
+            // Case variants normalize to lowercase
+            ("FEAT: add thing", CommitType::Feat),
+            ("Feat: add thing", CommitType::Feat),
+            // Scope before type: "fix(auth)" — should parse correctly
+            ("feat(api): add endpoint", CommitType::Feat),
+            // No colon, unrecognized type, or empty -> Unknown
+            ("no colon message", CommitType::Unknown),
+            // A colon-bearing but unrecognized type still resolves to Unknown
+            // (the renderer then routes it through the hash fallback — see
+            // `color_for`).
+            ("blob: thing", CommitType::Unknown),
+            ("", CommitType::Unknown),
+            // Only first colon separates type from description
+            ("feat: thing: with: colons", CommitType::Feat),
+        ] {
+            assert_eq!(CommitType::from_message(msg), want, "{msg:?}");
+        }
     }
 
     #[test]

@@ -242,27 +242,30 @@ fn message_to_edit(subject: &str, body: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
-    /// the file path (the `code --wait` case). Verified with a fake editor.
     #[cfg(unix)]
-    #[test]
-    fn edit_message_honors_editor_arguments() {
+    fn with_fake_editor(script_body: &str, f: impl FnOnce(&str)) {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-editor.sh");
-        // Fake editor: the file path is the last argument; rewrite it in place.
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nfor last; do :; done\nprintf 'fix: args\\n' > \"$last\"\n",
-        )
-        .unwrap();
+        std::fs::write(&script, script_body).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let editor = format!("{} --wait", script.display());
         temp_env::with_vars(
             [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
-            || {
+            || f(&editor),
+        );
+    }
+    /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
+    /// the file path (the `code --wait` case). Verified with a fake editor.
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_honors_editor_arguments() {
+        // Fake editor: the file path is the last argument; rewrite it in place.
+        with_fake_editor(
+            "#!/bin/sh\nfor last; do :; done\nprintf 'fix: args\\n' > \"$last\"\n",
+            |_| {
                 let (subject, body) = edit_message("feat: draft", None).unwrap();
                 assert_eq!(subject, "fix: args");
                 assert_eq!(body, None);
@@ -275,30 +278,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn edit_message_empty_edit_keeps_original() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-editor.sh");
         // Fake editor: blanks the file (subject becomes empty).
-        std::fs::write(&script, "#!/bin/sh\nfor last; do :; done\n: > \"$last\"\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let editor = format!("{} --wait", script.display());
-        temp_env::with_vars(
-            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
-            || {
-                let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
-                assert_eq!(
-                    subject, "feat: draft",
-                    "an empty edit must keep the draft subject"
-                );
-                assert_eq!(
-                    body.as_deref(),
-                    Some("draft body"),
-                    "an empty edit must keep the draft body"
-                );
-            },
-        );
+        with_fake_editor("#!/bin/sh\nfor last; do :; done\n: > \"$last\"\n", |_| {
+            let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
+            assert_eq!(
+                subject, "feat: draft",
+                "an empty edit must keep the draft subject"
+            );
+            assert_eq!(
+                body.as_deref(),
+                Some("draft body"),
+                "an empty edit must keep the draft body"
+            );
+        });
     }
 
     /// The confirm menu's label↔choice table is the single source — every row

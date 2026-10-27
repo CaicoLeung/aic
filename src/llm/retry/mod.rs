@@ -198,10 +198,26 @@ fn into_retry_error(reason: RetryReason, attempts: usize) -> RetryError {
 mod tests {
     use super::*;
     use std::error::Error;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+
+    /// Shared scaffolding for the `retry()` tests: runs [`retry`] against a
+    /// synchronous responder handed the 0-based attempt index, returning the
+    /// final result and the number of calls made.
+    async fn drive<T>(
+        mut respond: impl FnMut(usize) -> Result<T, RetryReason>,
+        policy: RetryPolicy,
+    ) -> (Result<T, RetryError>, usize) {
+        let mut calls = 0usize;
+        let result = retry(
+            || {
+                let out = respond(calls);
+                calls += 1;
+                std::future::ready(out)
+            },
+            policy,
+        )
+        .await;
+        (result, calls)
+    }
 
     // --- retry(): success after a retry ---
 
@@ -210,18 +226,12 @@ mod tests {
     /// a future change that makes retries infinite is caught.
     #[tokio::test]
     async fn retry_succeeds_after_empty_then_good() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = calls.clone();
-        let result = retry(
-            move || {
-                let counter = counter.clone();
-                async move {
-                    let n = counter.fetch_add(1, Ordering::SeqCst);
-                    if n < 2 {
-                        Err(RetryReason::Empty)
-                    } else {
-                        Ok("ok")
-                    }
+        let (result, calls) = drive(
+            |n| {
+                if n < 2 {
+                    Err(RetryReason::Empty)
+                } else {
+                    Ok("ok")
                 }
             },
             RetryPolicy::transient(),
@@ -229,8 +239,7 @@ mod tests {
         .await;
         assert_eq!(result.expect("must succeed after retries"), "ok");
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            3,
+            calls, 3,
             "transient budget is 2: one first attempt plus two retries"
         );
     }
@@ -239,24 +248,19 @@ mod tests {
     /// recovers on the first retry.
     #[tokio::test]
     async fn retry_succeeds_after_truncated_then_good() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = calls.clone();
-        let result = retry(
-            move || {
-                let counter = counter.clone();
-                async move {
-                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Err(RetryReason::Truncated)
-                    } else {
-                        Ok(42u8)
-                    }
+        let (result, calls) = drive(
+            |n| {
+                if n == 0 {
+                    Err(RetryReason::Truncated)
+                } else {
+                    Ok(42u8)
                 }
             },
             RetryPolicy::transient(),
         )
         .await;
         assert_eq!(result.expect("must succeed after one retry"), 42u8);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls, 2);
     }
 
     // --- retry(): exhaustion ---
@@ -266,19 +270,8 @@ mod tests {
     /// hang or spin forever.
     #[tokio::test]
     async fn retry_exhausts_with_last_reason() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = calls.clone();
-        let result: Result<(), RetryError> = retry(
-            move || {
-                let counter = counter.clone();
-                async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    Err(RetryReason::Empty)
-                }
-            },
-            RetryPolicy::transient(),
-        )
-        .await;
+        let (result, calls) =
+            drive::<()>(|_| Err(RetryReason::Empty), RetryPolicy::transient()).await;
         match result.expect_err("must give up after the retry budget") {
             RetryError::Exhausted(RetryExhausted {
                 attempts,
@@ -296,8 +289,7 @@ mod tests {
             RetryError::Fatal(_) => panic!("budget-starved exhaustion must not be Fatal"),
         }
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            3,
+            calls, 3,
             "must stop after one first attempt plus the budget of retries"
         );
     }
@@ -307,16 +299,8 @@ mod tests {
     /// are never masked by retries.
     #[tokio::test]
     async fn retry_propagates_fatal_immediately() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = calls.clone();
-        let result: Result<(), RetryError> = retry(
-            move || {
-                let counter = counter.clone();
-                async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    Err(RetryReason::Fatal(anyhow::anyhow!("boom")))
-                }
-            },
+        let (result, calls) = drive::<()>(
+            |_| Err(RetryReason::Fatal(anyhow::anyhow!("boom"))),
             RetryPolicy::transient(),
         )
         .await;
@@ -324,26 +308,14 @@ mod tests {
             RetryError::Fatal(err) => assert_eq!(format!("{err:#}"), "boom"),
             RetryError::Exhausted(_) => panic!("Fatal must not be treated as exhaustion"),
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "Fatal must not be retried");
+        assert_eq!(calls, 1, "Fatal must not be retried");
     }
 
     /// `once()` has budget 1: a retryable reason gets exactly one re-roll,
     /// then exhaustion.
     #[tokio::test]
     async fn once_policy_exhausts_after_single_retry() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = calls.clone();
-        let result: Result<(), RetryError> = retry(
-            move || {
-                let counter = counter.clone();
-                async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    Err(RetryReason::Markers)
-                }
-            },
-            RetryPolicy::once(),
-        )
-        .await;
+        let (result, calls) = drive::<()>(|_| Err(RetryReason::Markers), RetryPolicy::once()).await;
         match result.expect_err("once() budget is 1") {
             RetryError::Exhausted(RetryExhausted {
                 attempts,
@@ -354,7 +326,7 @@ mod tests {
             }
             RetryError::Fatal(_) => panic!("Markers is retryable, not Fatal"),
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls, 2);
     }
 
     // --- should_retry(): the budget-gate table ---
