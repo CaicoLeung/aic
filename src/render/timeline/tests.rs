@@ -278,6 +278,26 @@ fn sub_row_landed_echoes_hash_and_styled_subject() {
     );
 }
 
+/// The landed echo clamps like every other sub-row: the subject is LLM
+/// output with no builder-side budget (prompt-capped at 72 chars, nothing
+/// validates that), and an unclamped row would wrap and desync the
+/// painter's whole-frame repaint on every later tick.
+#[test]
+fn sub_row_clamps_long_landed_subject_to_the_terminal_width() {
+    let subject = format!("feat: {}", "x".repeat(70));
+    let row = sub_row(
+        &SubBody::Landed {
+            hash: "a1b2c3d".into(),
+            subject,
+        },
+        40,
+        &THEME,
+    );
+    // Budget 26 (40 − inset 6 − hash 7 − joiner 1): `feat: ` + 19 x's +
+    // `…` — the whole row is exactly 40 columns.
+    assert_eq!(row, format!("    ✓ a1b2c3d feat: {}…", "x".repeat(19)));
+}
+
 /// The active row's live elapsed joins only from 1 s — mirroring the
 /// completed state's rule — so a fast step never flashes `· 0s`.
 #[test]
@@ -343,6 +363,23 @@ fn menu_rows_cursor_marks_selected_option() {
         rows,
         vec!["      Continue", "    › Merge two batches…", "      Abort"]
     );
+}
+
+/// Menu options and ask rows ride the live frame, so they clamp to the
+/// theme's width budget — a batch label built from deep repo paths can
+/// exceed the terminal, and a wrapped live row desyncs the painter's
+/// whole-frame repaint on every later tick.
+#[test]
+fn menu_rows_and_ask_row_clamp_to_the_frame_width() {
+    let t = theme(40);
+    let (rows, cursor) = menu_rows(&["Abort", &"o".repeat(100)], 1, &t);
+    assert_eq!(cursor, 1);
+    // Budget 34 (40 − inset 6): the unselected row indents, the selected
+    // one carries the `› ` cursor; both rows are exactly 40 columns.
+    assert_eq!(rows[0], "      Abort");
+    assert_eq!(rows[1], format!("    › {}…", "o".repeat(33)));
+    let ask = ask_row(&"q".repeat(100), &t);
+    assert_eq!(ask, format!("    ? {}…", "q".repeat(33)));
 }
 
 /// The Batch Review menu: `?` ask headline, `#i` listing rows, then the

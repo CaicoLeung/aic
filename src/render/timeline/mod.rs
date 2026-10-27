@@ -458,9 +458,19 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
                 format!(" {hash}"),
                 palette::commit_id_color().bold(),
             ));
-            segs.push(seg(" "));
-            for (text, style) in palette::subject_segments(subject) {
-                segs.push(styled(text, style));
+            // Inset (4) + ✓ (1) + the hash's leading space (1) + the hash
+            // itself + the joiner space (1) — the same no-wrap contract as
+            // the other variants: the subject is the one live-row text with
+            // no builder-side budget (prompt-capped at 72 chars, nothing
+            // validates that). Clamping the plain subject before
+            // `subject_segments` keeps the budget ANSI-blind.
+            let budget = width.saturating_sub(7 + display_width(hash));
+            let subject = clamp_to_width(subject, budget);
+            if !subject.is_empty() {
+                segs.push(seg(" "));
+                for (text, style) in palette::subject_segments(&subject) {
+                    segs.push(styled(text, style));
+                }
             }
         }
     }
@@ -474,22 +484,28 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
 /// `›` cursor sits on, so key handling can move it without re-deriving
 /// geometry.
 pub fn menu_rows(options: &[&str], selected: usize, theme: &Theme) -> (Vec<String>, usize) {
+    // The menu rides the live frame, where a wrapped row desyncs the
+    // whole-frame repaint — options clamp to the theme's width (the
+    // resolved prose width, always ≤ the raw terminal): inset (4) + the
+    // cursor/indent column pair (2) precede every option.
+    let budget = theme.width.saturating_sub(6);
     let rows = options
         .iter()
         .enumerate()
         .map(|(i, opt)| {
+            let opt = clamp_to_width(opt, budget);
             if i == selected {
                 render(
                     &[
                         seg(MARGIN),
                         seg(SUB_INDENT),
                         styled("› ", palette::emphasis()),
-                        seg(*opt),
+                        seg(opt),
                     ],
                     theme,
                 )
             } else {
-                render(&[seg(MARGIN), seg(SUB_INDENT), seg("  "), seg(*opt)], theme)
+                render(&[seg(MARGIN), seg(SUB_INDENT), seg("  "), seg(opt)], theme)
             }
         })
         .collect();
@@ -534,6 +550,9 @@ pub fn review_menu_rows(
 /// A one-row interactive ask (y/n prompts, ADR 0018): `? ` + question in
 /// `caution`, at the sub-row column.
 pub fn ask_row(question: &str, theme: &Theme) -> String {
+    // Same no-wrap contract as `menu_rows`: inset (4) + `? ` (2) precede
+    // the question.
+    let question = clamp_to_width(question, theme.width.saturating_sub(6));
     render(
         &[
             seg(MARGIN),

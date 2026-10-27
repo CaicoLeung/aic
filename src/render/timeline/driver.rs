@@ -194,6 +194,7 @@ impl RunFrame {
                 let mut st = this.0.lock().unwrap();
                 // The ticker lives exactly as long as some step is active —
                 // completion or failure of the last active step ends it, so
+                // the final frame simply stops repainting and stays.
                 if !st.steps.iter().any(|s| s.state == StepState::Active) {
                     break;
                 }
