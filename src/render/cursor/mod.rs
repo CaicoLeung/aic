@@ -318,19 +318,7 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
     //    between pre-check and reply, is lost — the alternative, an undrained
     //    reply corrupting the next prompt read, is worse).
     if result.is_none() {
-        let drain_deadline = Instant::now() + DRAIN_GRACE;
-        if resp.is_empty() {
-            while Instant::now() < drain_deadline {
-                if unsafe { libc::poll(&mut pfd, 1, 10) } > 0 {
-                    if read_byte(fd) == Some(b'\x1b') {
-                        drain_dsr_reply(fd);
-                    }
-                    break;
-                }
-            }
-        } else {
-            drain_dsr_reply(fd);
-        }
+        drain_straggler(fd, &mut pfd, &resp, MAX_DSR_REPLY, b'R');
     }
     // `_raw` restores termios as it goes out of scope here — the guard's
     // Drop is the single restore point, so every path (timeout, garbage,
@@ -356,12 +344,12 @@ fn dsr_byte_ok(resp: &[u8], b: u8) -> bool {
     }
 }
 
-/// Consume the remainder of a DSR reply from `fd` (still in raw mode) so it
-/// cannot leak into later stdin reads: reads until the closing `R`, a reply-
+/// Consume the remainder of a reply (still in raw mode) so it cannot leak
+/// into later stdin reads: reads until the closing `terminator`, a reply-
 /// shaped byte budget, or a short grace — whichever first. Only called once
 /// the reply is known to be in flight (an ESC-led prefix was seen).
 #[cfg(unix)]
-fn drain_dsr_reply(fd: std::os::fd::RawFd) {
+fn drain_reply(fd: std::os::fd::RawFd, max: usize, terminator: u8) {
     use std::time::Instant;
 
     // Same budget as the outer wait-for-first-byte ([`DRAIN_GRACE`]): both
@@ -375,7 +363,7 @@ fn drain_dsr_reply(fd: std::os::fd::RawFd) {
         revents: 0,
     };
     let mut n = 0usize;
-    while Instant::now() < deadline && n < MAX_DSR_REPLY {
+    while Instant::now() < deadline && n < max {
         if unsafe { libc::poll(&mut pfd, 1, 10) } <= 0 {
             break;
         }
@@ -383,7 +371,37 @@ fn drain_dsr_reply(fd: std::os::fd::RawFd) {
             break;
         };
         n += 1;
-        if byte == b'R' {
+        if byte == terminator {
+            break;
+        }
+    }
+}
+
+/// Drain a straggler reply so it can't surface in a later prompt read: a
+/// partial reply (`resp` holds a real ESC-led prefix) drains straight to its
+/// closing `terminator`; a query that never saw its first byte only consumes
+/// a byte once one actually arrives, and only when it is ESC — a non-ESC
+/// byte ends the drain immediately (that one keystroke, typed in the
+/// millisecond race between pre-check and reply, is lost — the alternative,
+/// an undrained reply corrupting the next prompt read, is worse).
+#[cfg(unix)]
+fn drain_straggler(
+    fd: std::os::fd::RawFd,
+    pfd: &mut libc::pollfd,
+    resp: &[u8],
+    max: usize,
+    terminator: u8,
+) {
+    if !resp.is_empty() {
+        drain_reply(fd, max, terminator);
+        return;
+    }
+    let drain_deadline = std::time::Instant::now() + DRAIN_GRACE;
+    while std::time::Instant::now() < drain_deadline {
+        if unsafe { libc::poll(pfd, 1, 10) } > 0 {
+            if read_byte(fd) == Some(b'\x1b') {
+                drain_reply(fd, max, terminator);
+            }
             break;
         }
     }
@@ -539,48 +557,9 @@ fn query_background_core(fd: std::os::fd::RawFd) -> Option<(u8, u8, u8)> {
     };
     // 3. Drain a straggler so it can't surface in a later prompt read.
     if result.is_none() {
-        let drain_deadline = Instant::now() + DRAIN_GRACE;
-        if resp.is_empty() {
-            while Instant::now() < drain_deadline {
-                if unsafe { libc::poll(&mut pfd, 1, 10) } > 0 {
-                    if read_byte(fd) == Some(b'\x1b') {
-                        drain_osc_reply(fd);
-                    }
-                    break;
-                }
-            }
-        } else {
-            drain_osc_reply(fd);
-        }
+        drain_straggler(fd, &mut pfd, &resp, MAX_OSC_REPLY, b'\x07');
     }
     result
-}
-
-/// The OSC sibling of [`drain_dsr_reply`]: consume the rest of a reply
-/// known to be in flight until a terminator, byte budget, or grace.
-#[cfg(unix)]
-fn drain_osc_reply(fd: std::os::fd::RawFd) {
-    use std::time::Instant;
-
-    let deadline = Instant::now() + DRAIN_GRACE;
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let mut n = 0usize;
-    while Instant::now() < deadline && n < MAX_OSC_REPLY {
-        if unsafe { libc::poll(&mut pfd, 1, 10) } <= 0 {
-            break;
-        }
-        let Some(byte) = read_byte(fd) else {
-            break;
-        };
-        n += 1;
-        if byte == b'\x07' {
-            break;
-        }
-    }
 }
 
 #[cfg(test)]
