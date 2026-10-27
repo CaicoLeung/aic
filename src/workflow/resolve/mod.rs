@@ -155,18 +155,13 @@ pub(crate) async fn resolve_run(git: &Git, deps: ResolveDeps) -> anyhow::Result<
     // and stays ungated by design — the same boundary as the commit Run's
     // confirmation-menu Re-generate redraft. A refusal is the step's failed
     // screen (ADR 0018).
-    if let Some(rs) = redact_step {
-        frame.activate(rs);
-        if let Err(e) = redact::gate(&read, redact::Override::Resolve) {
-            frame.fail(
-                &display,
-                rs,
-                Failure::from_error("secret-like content detected", &e),
-            );
-            return Err(e);
-        }
-        frame.complete(&display, rs, "Redaction gate · clean");
-    }
+    super::redact_gate(
+        &frame,
+        &display,
+        redact_step,
+        redact::Override::Resolve,
+        |_| Ok(&read),
+    )?;
 
     // Resolve files (ADR 0018): one live sub-row per resolvable file —
     // in-flight while the LLM works (`Retrying {path}` on the marker-retry

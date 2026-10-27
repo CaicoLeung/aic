@@ -142,13 +142,9 @@ pub(crate) async fn confirm_draft(
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
-                if let Some(f) = frame {
-                    f.live_note("Re-generating commit message");
-                }
+                frame.inspect(|f| f.live_note("Re-generating commit message"));
                 let result = messenger(diff.clone()).await?;
-                if let Some(f) = frame {
-                    f.clear_live_note();
-                }
+                frame.inspect(|f| f.clear_live_note());
                 message = result.message;
                 body = result.body;
             }
@@ -158,13 +154,9 @@ pub(crate) async fn confirm_draft(
                 // one frame first and repaints with the menu state restored
                 // on exit (ADR 0018) — the timeline never scrolls away
                 // mid-edit.
-                if let Some(f) = frame {
-                    f.suspend();
-                }
+                frame.inspect(|f| f.suspend());
                 let edited = editor(&message, body.as_deref());
-                if let Some(f) = frame {
-                    f.resume();
-                }
+                frame.inspect(|f| f.resume());
                 (message, body) = edited?;
             }
             ConfirmChoice::Abort => return Err(CommitDeclined.into()),

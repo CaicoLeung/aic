@@ -200,18 +200,9 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // design: it re-sends content this gate already cleared. A refusal
         // is the step's failed screen: the headline names the gate, the
         // detail row carries the full files + patterns refusal (ADR 0018).
-        if let Some(rs) = redact_step {
-            frame.activate(rs);
-            if let Err(e) = redact::gate(&raw_pairs, redact::Override::Run) {
-                frame.fail(
-                    &display,
-                    rs,
-                    Failure::from_error("secret-like content detected", &e),
-                );
-                return Err(e);
-            }
-            frame.complete(&display, rs, "Redaction gate · clean");
-        }
+        super::redact_gate(&frame, &display, redact_step, redact::Override::Run, |_| {
+            Ok(&raw_pairs)
+        })?;
 
         frame.activate(plan_step);
         let result = frame.fail_on_err(&display, plan_step, planner(diff.to_string()).await)?;
@@ -470,32 +461,22 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // contract.
         let counts_floor = counts_geometry(&scan_stats);
 
-        if let Some(rs) = redact_step {
-            frame.activate(rs);
-            // Redaction Gate, second payload site (issue #155, ADR 0017): the
-            // staged branch's one LLM call sends `staged_diff_json`'s content.
-            // Gate reads the same per-file diffs itself rather than scanning
-            // inside `staged_diff_json` — that fn is shared with the confirm
-            // menu's Re-generate redraft, which stays ungated by design (the
-            // cheap second libgit2 read buys that boundary).
-            let pairs: Vec<(String, String)> = frame.fail_on_err(
+        // Redaction Gate, second payload site (issue #155, ADR 0017): the
+        // staged branch's one LLM call sends `staged_diff_json`'s content.
+        // Gate reads the same per-file diffs itself rather than scanning
+        // inside `staged_diff_json` — that fn is shared with the confirm
+        // menu's Re-generate redraft, which stays ungated by design (the
+        // cheap second libgit2 read buys that boundary).
+        super::redact_gate(&frame, &display, redact_step, redact::Override::Run, |rs| {
+            frame.fail_on_err(
                 &display,
                 rs,
                 paths
                     .iter()
                     .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
-                    .collect::<anyhow::Result<_>>(),
-            )?;
-            if let Err(e) = redact::gate(&pairs, redact::Override::Run) {
-                frame.fail(
-                    &display,
-                    rs,
-                    Failure::from_error("secret-like content detected", &e),
-                );
-                return Err(e);
-            }
-            frame.complete(&display, rs, "Redaction gate · clean");
-        }
+                    .collect::<anyhow::Result<Vec<(String, String)>>>(),
+            )
+        })?;
         // Commit the index exactly as the user staged it — no re-stage
         // (issue #150). The historic `git add` over these paths folded each
         // staged file's full workdir state into the index, silently

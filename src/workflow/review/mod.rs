@@ -15,14 +15,14 @@
 
 use std::collections::HashMap;
 
-use anyhow::Context;
-
 use crate::llm::generator::{self, BatchPlanBatch, BatchPlanOutput};
 use crate::render::display::Display;
 use crate::render::palette;
 use crate::render::timeline::driver::RunFrame;
 use crate::render::timeline::{Failure, StepIdx, plural};
 use crate::workflow::input::{select_in_frame, truncate};
+use anyhow::Context;
+use console::Style;
 
 /// One decision from the Batch Review menu (issue #157). Continue proceeds
 /// to drafting with the plan as shown; Abort ends the Run with nothing
@@ -213,26 +213,19 @@ fn paint_plan(
     // Row budget for the summary text: `text_width` already nets out both
     // margins, so only the `? ` marker's 2 columns come off the top.
     let width = display.text_width().saturating_sub(2);
-    display.emit(&format!(
-        "{} {}",
-        display.styled("?", pending),
-        display.styled(
-            &truncate(
-                &format!("batch plan — {} batches", plan.batches.len()),
-                width
-            ),
-            palette::pending(),
-        )
-    ));
-    for (i, batch) in plan.batches.iter().enumerate() {
+    let pending_row = |text: &str, style: Style| {
         display.emit(&format!(
             "{} {}",
-            display.styled("?", palette::pending()),
-            display.styled(
-                &truncate(&batch_summary(i, batch, file_hunk_counts), width),
-                palette::muted(),
-            )
+            display.styled("?", pending.clone()),
+            display.styled(&truncate(text, width), style)
         ));
+    };
+    pending_row(
+        &format!("batch plan — {} batches", plan.batches.len()),
+        palette::pending(),
+    );
+    for (i, batch) in plan.batches.iter().enumerate() {
+        pending_row(&batch_summary(i, batch, file_hunk_counts), palette::muted());
     }
     display.emit_blank();
     plan.batches.len() + 2

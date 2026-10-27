@@ -121,20 +121,17 @@ pub(crate) static NEON_TOGGLE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex:
 
 /// Current named-type table (neon or classic).
 fn named_palette() -> &'static [(CommitType, (u8, u8, u8)); 17] {
-    if neon() {
-        &NAMED_PALETTE_NEON
-    } else {
-        &NAMED_PALETTE
-    }
+    theme_pair(&NAMED_PALETTE, &NAMED_PALETTE_NEON)
 }
 
 /// Current fallback table (neon or classic).
 fn fallback_palette() -> &'static [(u8, u8, u8); 6] {
-    if neon() {
-        &FALLBACK_PALETTE_NEON
-    } else {
-        &FALLBACK_PALETTE
-    }
+    theme_pair(&FALLBACK_PALETTE, &FALLBACK_PALETTE_NEON)
+}
+
+/// `neon`-selected variant of a classic/neon pair.
+fn theme_pair<T>(classic: T, neon_variant: T) -> T {
+    if neon() { neon_variant } else { classic }
 }
 
 /// Whether neon variants are active.
@@ -297,33 +294,21 @@ pub fn plain() -> Style {
 /// so renderers can never drift from the contrast-guarded value — call this
 /// instead of re-typing the RGB literal.
 pub fn neutral_gray() -> Style {
-    rgb_style(if neon() {
-        NEUTRAL_GRAY_NEON
-    } else {
-        NEUTRAL_GRAY
-    })
+    rgb_style(theme_pair(NEUTRAL_GRAY, NEUTRAL_GRAY_NEON))
 }
 
 /// Amber [`Style`] for the commit-id token. Reads the single-source
 /// [`COMMIT_ID_COLOR`]; the caller bolds it so the short ref qualifies as
 /// WCAG AA Large.
 pub fn commit_id_color() -> Style {
-    rgb_style(if neon() {
-        COMMIT_ID_COLOR_NEON
-    } else {
-        COMMIT_ID_COLOR
-    })
+    rgb_style(theme_pair(COMMIT_ID_COLOR, COMMIT_ID_COLOR_NEON))
 }
 
 /// Cyan [`Style`] for the Σ total-row glyph. Reads the single-source
 /// [`SIGMA_COLOR`]; the caller bolds it so the glyph qualifies as WCAG AA
 /// Large.
 pub fn sigma_color() -> Style {
-    rgb_style(if neon() {
-        SIGMA_COLOR_NEON
-    } else {
-        SIGMA_COLOR
-    })
+    rgb_style(theme_pair(SIGMA_COLOR, SIGMA_COLOR_NEON))
 }
 
 /// A conventional-commit subject as styled segments — the single source both

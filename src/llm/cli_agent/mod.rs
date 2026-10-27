@@ -299,13 +299,15 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // flag.
         "claude" => (
             "claude",
-            vec![
-                "-p".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-                "--output-format".to_string(),
-                "stream-json".to_string(),
-                "--include-partial-messages".to_string(),
-            ],
+            [
+                "-p",
+                PROMPT_PLACEHOLDER,
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+            ]
+            .map(String::from)
+            .into(),
             Encoding::ClaudeStreamJson,
         ),
         // `exec` runs non-interactively; pin the sandbox to `read-only` so
@@ -329,13 +331,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // [`CodexDecoder`] so the reasoning window is not empty.
         "codex" => (
             "codex",
-            vec![
-                "exec".to_string(),
-                "--json".to_string(),
-                "-s".to_string(),
-                "read-only".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["exec", "--json", "-s", "read-only", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::CodexJson,
         ),
         // `--mode json` emits `message_update` events whose
@@ -347,13 +345,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // print mode is genuinely text-only.
         "pi" => (
             "pi",
-            vec![
-                "--no-tools".to_string(),
-                "--mode".to_string(),
-                "json".to_string(),
-                "-p".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["--no-tools", "--mode", "json", "-p", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::PiStreamJson,
         ),
         // `run --format json` emits NDJSON events; the `text` event's
@@ -366,12 +360,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // the flag.
         "opencode" => (
             "opencode",
-            vec![
-                "run".to_string(),
-                "--format".to_string(),
-                "json".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["run", "--format", "json", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::OpenCodeJson,
         ),
         // oh-my-pi (`omp`) is a pi fork; its `--mode json` emits the same
@@ -385,11 +376,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // headless print mode itself, like claude.
         "omp" => (
             "omp",
-            vec![
-                "--mode".to_string(),
-                "json".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["--mode", "json", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::PiStreamJson,
         ),
         // `-p` print mode: one prompt, answer to stdout, exit. Without
@@ -831,38 +820,19 @@ impl CliAgent {
         // preset whose stdout aic does not decode). The four envelope
         // encodings each pick a [`Decoder`] and share one
         // run/decode/error tail ([`Self::run_streamed`]).
-        match self.spec.encoding {
-            Encoding::Plain => {
-                let out = self.runner.run(&spec, timeout, on_output).await?;
-                out.into_result(&self.spec.command)
-            }
-            Encoding::ClaudeStreamJson => {
-                let mut dec = ClaudeDecoder::new();
-                self.run_streamed(&spec, timeout, &mut dec, on_output, "claude stream-json")
-                    .await
-            }
-            Encoding::PiStreamJson => {
-                let mut dec = PiDecoder::new();
-                self.run_streamed(&spec, timeout, &mut dec, on_output, "pi --mode json")
-                    .await
-            }
-            Encoding::OpenCodeJson => {
-                let mut dec = OpenCodeDecoder::new();
-                self.run_streamed(
-                    &spec,
-                    timeout,
-                    &mut dec,
-                    on_output,
-                    "opencode --format json",
-                )
-                .await
-            }
-            Encoding::CodexJson => {
-                let mut dec = CodexDecoder::new();
-                self.run_streamed(&spec, timeout, &mut dec, on_output, "codex --json")
-                    .await
-            }
+        if self.spec.encoding == Encoding::Plain {
+            let out = self.runner.run(&spec, timeout, on_output).await?;
+            return out.into_result(&self.spec.command);
         }
+        let (mut dec, envelope): (Box<dyn Decoder>, _) = match self.spec.encoding {
+            Encoding::ClaudeStreamJson => (Box::new(ClaudeDecoder::new()), "claude stream-json"),
+            Encoding::PiStreamJson => (Box::new(PiDecoder::new()), "pi --mode json"),
+            Encoding::OpenCodeJson => (Box::new(OpenCodeDecoder::new()), "opencode --format json"),
+            Encoding::CodexJson => (Box::new(CodexDecoder::new()), "codex --json"),
+            Encoding::Plain => unreachable!(),
+        };
+        self.run_streamed(&spec, timeout, dec.as_mut(), on_output, envelope)
+            .await
     }
 
     /// Shared tail for the streamed encodings: run the CLI forwarding each
