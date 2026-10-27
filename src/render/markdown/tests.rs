@@ -1,5 +1,41 @@
 use super::*;
 
+/// [`reasoning_rows`] with the common spinner/label, no clock, and a
+/// closed fence.
+fn feed(window: &[&str], w: u16, rows: u16) -> Vec<String> {
+    feed_labeled("⠹", "Analyzing", window, w, rows, false)
+}
+
+/// [`feed`] for sites whose spinner/label or entering fence state differ.
+fn feed_labeled(
+    glyph: &str,
+    label: &str,
+    window: &[&str],
+    w: u16,
+    rows: u16,
+    in_code: bool,
+) -> Vec<String> {
+    reasoning_rows(
+        glyph,
+        label,
+        &window.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        w.into(),
+        None,
+        rows.into(),
+        in_code,
+    )
+}
+
+/// Rejoins body rows (spinner row already dropped) into unwrapped text by
+/// stripping the `│ ` indent.
+fn body_text(rows: &[String]) -> String {
+    let prefix = format!("{MARGIN}│ ");
+    rows.iter()
+        .filter_map(|r| r.strip_prefix(&prefix))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// [`reasoning_rows`] with `Some(elapsed)` appends a rising seconds
 /// count to the spinner row, so the wait stays visible while the model
 /// is silent between deltas (the steady-tick repaint path). The window
@@ -30,8 +66,8 @@ fn reasoning_rows_leads_with_spinner_for_empty_window() {
 /// Each retained line becomes one indented row when it fits the budget.
 #[test]
 fn reasoning_rows_indents_each_line() {
-    let window = vec!["line 1".to_string(), "line 2".to_string()];
-    let rows = reasoning_rows("⠙", "Analyzing", &window, 80, None, 12, false);
+    let window = ["line 1", "line 2"];
+    let rows = feed_labeled("⠙", "Analyzing", &window, 80, 12, false);
     assert_eq!(
         rows,
         vec![
@@ -47,26 +83,14 @@ fn reasoning_rows_indents_each_line() {
 #[test]
 fn reasoning_rows_wraps_long_lines_to_multiple_rows() {
     let prefix = format!("{MARGIN}│ ");
-    let rows = reasoning_rows(
-        "⠹",
-        "Analyzing",
-        &["the quick brown fox".to_string()],
-        10,
-        None,
-        12,
-        false,
-    );
+    let rows = feed(&["the quick brown fox"], 10, 12);
     assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
     // every row after the spinner carries the `│ ` indent…
     for row in &rows[1..] {
         assert!(row.starts_with(&prefix), "unindented row: {row:?}");
     }
     // …and the words survive the greedy wrap, rejoinable losslessly.
-    let body: String = rows[1..]
-        .iter()
-        .filter_map(|r| r.strip_prefix(&prefix))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let body = body_text(&rows[1..]);
     assert_eq!(body, "the quick brown fox");
 }
 
@@ -86,11 +110,7 @@ fn reasoning_rows_caps_rendered_rows_to_window_budget() {
         assert!(row.starts_with(&prefix), "unindented row: {row:?}");
     }
     // The newest rows survived, losslessly rejoinable: lines 7–12 only.
-    let body: String = rows[1..]
-        .iter()
-        .filter_map(|r| r.strip_prefix(&prefix))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let body = body_text(&rows[1..]);
     assert_eq!(
         body,
         (7..=12)
@@ -214,13 +234,7 @@ fn classify_blockquote_strips_markers() {
 /// lives in the classify_* tests above.
 #[test]
 fn reasoning_rows_handles_markdown_lines_and_caps() {
-    let window = vec![
-        "# Heading".to_string(),
-        "```rs".to_string(),
-        "let x = 2;".to_string(),
-        "```".to_string(),
-    ];
-    let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 2, false);
+    let rows = feed(&["# Heading", "```rs", "let x = 2;", "```"], 80, 2);
     assert_eq!(rows.len(), 3); // spinner + newest 2 rows
     assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
 }
@@ -529,12 +543,7 @@ fn loading_rows_wraps_notice_to_budget() {
         Some(&format!("{MARGIN}⠹ Analyzing changes… 9s"))
     );
     // every body row is indented and the wrapped pieces rejoin losslessly.
-    let prefix = format!("{MARGIN}│ ");
-    let body: String = rows[1..]
-        .iter()
-        .filter_map(|r| r.strip_prefix(&prefix))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let body = body_text(&rows[1..]);
     assert_eq!(body, SILENT_NOTICE);
 }
 
@@ -547,12 +556,8 @@ fn reasoning_rows_classifies_with_running_fence_state() {
     let prefix = format!("{MARGIN}│ ");
     // Window whose opener is gone: [code, closer, prose] with entering
     // state `true`. The closer must close; prose must be Normal.
-    let window = vec![
-        "let x = 1;".to_string(),
-        "```".to_string(),
-        "done".to_string(),
-    ];
-    let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 12, true);
+    let window = ["let x = 1;", "```", "done"];
+    let rows = feed_labeled("⠹", "Analyzing", &window, 80, 12, true);
     assert_eq!(rows.first(), Some(&format!("{MARGIN}⠹ Analyzing")));
     let body: Vec<String> = rows[1..]
         .iter()
@@ -562,7 +567,7 @@ fn reasoning_rows_classifies_with_running_fence_state() {
     // And a window that starts mid-block with `false` (no opener at all,
     // e.g. the stream genuinely began outside a block) classifies the
     // first fence as an opener.
-    let rows = reasoning_rows("⠹", "Analyzing", &window, 80, None, 12, false);
+    let rows = feed(&window, 80, 12);
     assert_eq!(rows.len(), 4, "spinner + 3 rows survive the cap");
 }
 
@@ -572,12 +577,8 @@ fn reasoning_rows_classifies_with_running_fence_state() {
 #[test]
 fn reasoning_rows_indents_code_body_keeps_fence_flush() {
     let prefix = format!("{MARGIN}│ ");
-    let window = vec![
-        "```rust".to_string(),
-        "let x = 1;".to_string(),
-        "```".to_string(),
-    ];
-    let rows = reasoning_rows("⠹", "thinking", &window, 20, None, 10, false);
+    let window = ["```rust", "let x = 1;", "```"];
+    let rows = feed_labeled("⠹", "thinking", &window, 20, 10, false);
     // strip ANSI so the assertions are about geometry (indent + overflow),
     // not whichever global colour state another parallel test raced in.
     let body: Vec<String> = rows[1..]
@@ -611,19 +612,8 @@ fn reasoning_rows_highlights_tagged_code_with_syntect() {
     // A ```rust block whose opener is in view is highlighted per token:
     // syntect emits TrueColor (38;2;r;g;b) regions, distinct from the
     // uniform cyan (36) fallback used when no language is known.
-    let rows = reasoning_rows(
-        "⠹",
-        "thinking",
-        &[
-            "```rust".to_string(),
-            "let x: i32 = 1;".to_string(),
-            "```".to_string(),
-        ],
-        40,
-        None,
-        10,
-        false,
-    );
+    let window = ["```rust", "let x: i32 = 1;", "```"];
+    let rows = feed_labeled("⠹", "thinking", &window, 40, 10, false);
     let code_row = rows
         .iter()
         .find(|r| console::strip_ansi_codes(r).contains("let x"))
@@ -639,19 +629,8 @@ fn reasoning_rows_falls_back_to_cyan_without_language() {
     console::set_colors_enabled(true);
     // Bare ``` fence (no language) → uniform cyan, no TrueColor regions,
     // and so does a block whose opener scrolled out (mid-block window).
-    let bare = reasoning_rows(
-        "⠹",
-        "thinking",
-        &[
-            "```".to_string(),
-            "let x = 1;".to_string(),
-            "```".to_string(),
-        ],
-        40,
-        None,
-        10,
-        false,
-    );
+    let window = ["```", "let x = 1;", "```"];
+    let bare = feed_labeled("⠹", "thinking", &window, 40, 10, false);
     let bare_code = bare
         .iter()
         .find(|r| console::strip_ansi_codes(r).contains("let x"))
@@ -667,15 +646,7 @@ fn reasoning_rows_falls_back_to_cyan_without_language() {
 
     // Opener scrolled out: window begins inside a block, so no highlighter
     // exists and the tail is uniform cyan — the documented lazy limit.
-    let orphan = reasoning_rows(
-        "⠹",
-        "thinking",
-        &["let y = 2;".to_string()],
-        40,
-        None,
-        10,
-        true,
-    );
+    let orphan = feed_labeled("⠹", "thinking", &["let y = 2;"], 40, 10, true);
     let orphan_code = orphan
         .iter()
         .find(|r| console::strip_ansi_codes(r).contains("let y"))

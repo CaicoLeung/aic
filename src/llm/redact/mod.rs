@@ -140,137 +140,43 @@ struct Pattern {
     tail: Tail,
 }
 
+/// Row constructor for [`PATTERNS`] — one line per pattern keeps the
+/// vocabulary scannable.
+const fn pat(kind: Kind, prefix: &'static str, min_tail: usize, tail: Tail) -> Pattern {
+    Pattern {
+        kind,
+        prefix,
+        min_tail,
+        tail,
+    }
+}
+
 /// The v1 vocabulary (ADR 0017). Ordered: family-specific prefixes
 /// (`sk-ant-`, `sk-proj-`) run before the generic `sk-` so a modern key
 /// reports its precise family; the generic arm cannot double-fire on them
 /// (their tails contain `-`, which the `sk-` tail class rejects).
 const PATTERNS: &[Pattern] = &[
-    Pattern {
-        kind: Kind::AwsKeyId,
-        prefix: "AKIA",
-        min_tail: 16,
-        tail: Tail::UpperAlnum,
-    },
-    Pattern {
-        kind: Kind::AwsKeyId,
-        prefix: "ASIA",
-        min_tail: 16,
-        tail: Tail::UpperAlnum,
-    },
-    Pattern {
-        kind: Kind::GithubToken,
-        prefix: "ghp_",
-        min_tail: 36,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::GithubToken,
-        prefix: "gho_",
-        min_tail: 36,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::GithubToken,
-        prefix: "ghu_",
-        min_tail: 36,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::GithubToken,
-        prefix: "ghs_",
-        min_tail: 36,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::GithubToken,
-        prefix: "ghr_",
-        min_tail: 36,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::GithubToken,
-        prefix: "github_pat_",
-        min_tail: 22,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::AnthropicKey,
-        prefix: "sk-ant-",
-        min_tail: 20,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::OpenAiKey,
-        prefix: "sk-proj-",
-        min_tail: 20,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::OpenAiKey,
-        prefix: "sk-svcacct-",
-        min_tail: 20,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::OpenAiKey,
-        prefix: "sk-",
-        min_tail: 20,
-        tail: Tail::Alnum,
-    },
-    Pattern {
-        kind: Kind::GoogleKey,
-        prefix: "AIza",
-        min_tail: 35,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::SlackToken,
-        prefix: "xoxb-",
-        min_tail: 10,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::SlackToken,
-        prefix: "xoxa-",
-        min_tail: 10,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::SlackToken,
-        prefix: "xoxp-",
-        min_tail: 10,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::SlackToken,
-        prefix: "xoxr-",
-        min_tail: 10,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::SlackToken,
-        prefix: "xoxs-",
-        min_tail: 10,
-        tail: Tail::Token,
-    },
-    Pattern {
-        kind: Kind::StripeSecretKey,
-        prefix: "sk_live_",
-        min_tail: 20,
-        tail: Tail::Alnum,
-    },
-    Pattern {
-        kind: Kind::StripeSecretKey,
-        prefix: "rk_live_",
-        min_tail: 20,
-        tail: Tail::Alnum,
-    },
-    Pattern {
-        kind: Kind::GitlabToken,
-        prefix: "glpat-",
-        min_tail: 20,
-        tail: Tail::Token,
-    },
+    pat(Kind::AwsKeyId, "AKIA", 16, Tail::UpperAlnum),
+    pat(Kind::AwsKeyId, "ASIA", 16, Tail::UpperAlnum),
+    pat(Kind::GithubToken, "ghp_", 36, Tail::Token),
+    pat(Kind::GithubToken, "gho_", 36, Tail::Token),
+    pat(Kind::GithubToken, "ghu_", 36, Tail::Token),
+    pat(Kind::GithubToken, "ghs_", 36, Tail::Token),
+    pat(Kind::GithubToken, "ghr_", 36, Tail::Token),
+    pat(Kind::GithubToken, "github_pat_", 22, Tail::Token),
+    pat(Kind::AnthropicKey, "sk-ant-", 20, Tail::Token),
+    pat(Kind::OpenAiKey, "sk-proj-", 20, Tail::Token),
+    pat(Kind::OpenAiKey, "sk-svcacct-", 20, Tail::Token),
+    pat(Kind::OpenAiKey, "sk-", 20, Tail::Alnum),
+    pat(Kind::GoogleKey, "AIza", 35, Tail::Token),
+    pat(Kind::SlackToken, "xoxb-", 10, Tail::Token),
+    pat(Kind::SlackToken, "xoxa-", 10, Tail::Token),
+    pat(Kind::SlackToken, "xoxp-", 10, Tail::Token),
+    pat(Kind::SlackToken, "xoxr-", 10, Tail::Token),
+    pat(Kind::SlackToken, "xoxs-", 10, Tail::Token),
+    pat(Kind::StripeSecretKey, "sk_live_", 20, Tail::Alnum),
+    pat(Kind::StripeSecretKey, "rk_live_", 20, Tail::Alnum),
+    pat(Kind::GitlabToken, "glpat-", 20, Tail::Token),
 ];
 
 /// PEM private-key header line, e.g. `-----BEGIN OPENSSH PRIVATE KEY-----`.

@@ -15,12 +15,10 @@ use super::common::*;
 async fn unstaged_run_appends_the_step_ledger() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("alpha.txt", &[1], "change alpha"),
-            plan_batch("beta.txt", &[1], "change beta"),
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ]);
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -154,12 +152,10 @@ async fn redaction_refusal_shapes_the_failed_screen() {
 async fn declined_batch_shapes_the_failed_screen() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("alpha.txt", &[1], "change alpha"),
-            plan_batch("beta.txt", &[1], "change beta"),
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ]);
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let err = commit_run(
@@ -214,12 +210,10 @@ async fn declined_batch_shapes_the_failed_screen() {
 async fn review_flow_completes_the_plan_step() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("alpha.txt", &[1], "change alpha"),
-            plan_batch("beta.txt", &[1], "change beta"),
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ]);
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -297,7 +291,7 @@ async fn review_abort_shapes_the_failed_screen() {
 async fn invalid_plan_completes_with_planned_verb_and_caution_row() {
     let dir = with_repo(two_file_unstaged_repo);
     // An empty plan is invalid (real work exists) → deterministic regrouping.
-    let plan = generator::BatchPlanOutput { batches: vec![] };
+    let plan = plan(vec![]);
 
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();

@@ -11,12 +11,10 @@ use super::common::*;
 /// A two-Batch plan over the two-file fixture: alpha.txt hunk 1 and
 /// beta.txt hunk 1, each in its own Batch.
 fn two_batch_plan() -> generator::BatchPlanOutput {
-    generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("alpha.txt", &[1], "alpha"),
-            plan_batch("beta.txt", &[1], "beta"),
-        ],
-    }
+    plan(vec![
+        plan_batch("alpha.txt", &[1], "alpha"),
+        plan_batch("beta.txt", &[1], "beta"),
+    ])
 }
 
 /// Merge then Continue: the plan folds into one Batch, so the Run lands one
@@ -145,12 +143,10 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
-    let one_batch = generator::BatchPlanOutput {
-        batches: vec![plan_multi_batch(
-            &[("alpha.txt", &[1]), ("beta.txt", &[1])],
-            "everything",
-        )],
-    };
+    let one_batch = plan(vec![plan_multi_batch(
+        &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+        "everything",
+    )]);
     let err = commit_run(
         &git,
         RunDeps {
@@ -214,7 +210,7 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
             redact: Redact::On,
             display: Display::with(buf.clone()),
             // Zero batches over real work — the most degenerate invalid plan.
-            planner: planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
+            planner: planner_fixed(plan(vec![])),
             messenger: messenger_fixed("feat: combined fallback work"),
             confirm: Confirm::Disabled,
         },

@@ -257,6 +257,13 @@ pub fn plan_multi_batch(files: &[(&str, &[usize])], reason: &str) -> generator::
     }
 }
 
+/// A [`generator::BatchPlanOutput`] wrapping `batches` — the envelope every
+/// plan assembled from [`plan_batch`] / [`plan_multi_batch`] needs, including
+/// the empty (invalid) plan the fallback tests feed [`planner_fixed`].
+pub fn plan(batches: Vec<generator::BatchPlanBatch>) -> generator::BatchPlanOutput {
+    generator::BatchPlanOutput { batches }
+}
+
 /// Messenger that succeeds for the first `ok_for` calls then errors, with a
 /// call counter. Drives the partial-failure path: an early batch commits, then
 /// a later batch's message step fails mid-loop.
@@ -558,6 +565,24 @@ pub fn two_file_unstaged_repo(dir: &Path) {
     git_in(dir, &["commit", "-m", "base"]);
     std::fs::write(dir.join("alpha.txt"), "a1\n").unwrap();
     std::fs::write(dir.join("beta.txt"), "b1\n").unwrap();
+}
+
+/// The single-file counterpart of [`two_file_unstaged_repo`]: commits
+/// `tracked.txt` with one `"{letter}0\n"` change site per entry in `letters`
+/// (separated by the 8-line pad git needs to emit one hunk per site), then
+/// rewrites every site to `"{letter}1\n"` and leaves it unstaged — so a plan
+/// can give each hunk its own batch or group them.
+pub fn unstaged_hunks(dir: &Path, letters: &[&str]) {
+    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
+    let content = |sub: usize| {
+        letters
+            .iter()
+            .map(|l| format!("{l}{sub}\n"))
+            .collect::<Vec<_>>()
+            .join(&pad)
+    };
+    commit_file(dir, "tracked.txt", &content(0), "base");
+    std::fs::write(dir.join("tracked.txt"), content(1)).unwrap();
 }
 
 /// Two content conflicts (`tracked.txt` modify/modify, `second.txt` add/add)

@@ -230,20 +230,13 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
 async fn commit_splits_one_file_across_two_batches() {
     let dir = with_repo(gh::init_test_repo);
 
-    // Two change sites far enough apart that git emits two separate hunks.
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}c1\n");
-    commit_file(dir.path(), "tracked.txt", &base, "base");
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "c"]);
 
     // Stub plan: split the single file's two hunks across two batches.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("tracked.txt", &[1], "change a"),
-            plan_batch("tracked.txt", &[2], "change c"),
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -290,12 +283,10 @@ async fn commit_splits_two_files_across_two_batches() {
     let dir = with_repo(two_file_unstaged_repo);
 
     // Stub plan: one file per batch — batch 1 = alpha, batch 2 = beta.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("alpha.txt", &[1], "change alpha"),
-            plan_batch("beta.txt", &[1], "change beta"),
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -356,12 +347,10 @@ async fn commit_batches_two_files_into_one_commit() {
     let dir = with_repo(two_file_unstaged_repo);
 
     // Stub plan: one batch carrying both files — one commit for the pair.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![plan_multi_batch(
-            &[("alpha.txt", &[1]), ("beta.txt", &[1])],
-            "change both",
-        )],
-    };
+    let plan = plan(vec![plan_multi_batch(
+        &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+        "change both",
+    )]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -419,9 +408,7 @@ async fn commit_includes_binary_file_in_batch_plan() {
 
     // Stub plan carrying the whole binary file (no hunks to index). This is the
     // plan a correct model would emit — the bug is downstream of the planner.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![plan_batch("blob.bin", &[], "update binary")],
-    };
+    let plan = plan(vec![plan_batch("blob.bin", &[], "update binary")]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -456,9 +443,7 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
     git_in(dir.path(), &["commit", "-m", "add binary"]);
     std::fs::write(dir.path().join("blob.bin"), [9u8, 9, 9, 9]).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![plan_batch("blob.bin", &[], "update binary")],
-    };
+    let plan = plan(vec![plan_batch("blob.bin", &[], "update binary")]);
     let (planner, sent) = planner_capture(plan);
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(&git, deps(planner, messenger_fixed("chore: update blob"))).await;
@@ -496,9 +481,7 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
     // diff is mode-only (`old mode 100644` / `new mode 100755`), zero hunks.
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![plan_batch("script.sh", &[], "make script executable")],
-    };
+    let plan = plan(vec![plan_batch("script.sh", &[], "make script executable")]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
@@ -741,18 +724,12 @@ async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
 async fn commit_batch_loop_aborts_after_partial_commit() {
     let dir = with_repo(gh::init_test_repo);
 
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}c1\n");
-    commit_file(dir.path(), "tracked.txt", &base, "base");
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "c"]);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("tracked.txt", &[1], "change a"),
-            plan_batch("tracked.txt", &[2], "change c"),
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let (messenger, calls) = messenger_then_error(1); // batch 1 ok, batch 2 fails
     let git = Git::at(dir.path()).unwrap();
     let err = commit_run(&git, deps(planner_fixed(plan), messenger))
@@ -814,7 +791,7 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
             display: Display::with_cols(buf.clone(), 120),
             ..deps(
                 // Zero batches over real work — the most degenerate invalid plan.
-                planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
+                planner_fixed(plan(vec![])),
                 messenger,
             )
         },
@@ -852,11 +829,7 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
 
     // A base with two change sites far enough apart that git emits two
     // separate hunks (>= ~6 unchanged lines between them).
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}c1\n");
-    commit_file(dir.path(), "tracked.txt", &base, "base");
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "c"]);
 
     // Simulate lint-staged: the pre-commit hook re-stages the full file, so a
     // commit of hunk 1 actually lands both hunks.
@@ -870,12 +843,10 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            plan_batch("tracked.txt", &[1], "change a"),
-            plan_batch("tracked.txt", &[2], "change c"),
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
@@ -927,23 +898,14 @@ async fn commit_splits_one_file_across_three_batches() {
 
     // Three change sites, each padded far enough apart that git emits three
     // separate hunks.
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}b0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}b1\n{pad}c1\n");
-    commit_file(dir.path(), "tracked.txt", &base, "base");
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "b", "c"]);
 
     // Stub plan: split the single file's three hunks across three batches.
-    let mk = |h: usize| generator::BatchPlanBatch {
-        changes: vec![generator::BatchChange {
-            file: "tracked.txt".to_string(),
-            hunks: vec![h],
-        }],
-        reason: Some(format!("change {h}")),
-    };
-    let plan = generator::BatchPlanOutput {
-        batches: vec![mk(1), mk(2), mk(3)],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change 1"),
+        plan_batch("tracked.txt", &[2], "change 2"),
+        plan_batch("tracked.txt", &[3], "change 3"),
+    ]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
@@ -996,21 +958,15 @@ async fn commit_splits_one_file_across_three_batches() {
 async fn commit_batch_merges_same_file_changes_into_one_commit() {
     let dir = with_repo(gh::init_test_repo);
 
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}b0\n");
-    let changed = format!("a1\n{pad}b1\n");
-    commit_file(dir.path(), "tracked.txt", &base, "base");
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "b"]);
 
     // One batch, TWO changes entries for the same file with disjoint hunks.
     // `validate_batch_plan` accepts this (no duplicate hunk); the workflow
     // must treat it as one logical unit.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![plan_multi_batch(
-            &[("tracked.txt", &[1]), ("tracked.txt", &[2])],
-            "both edits",
-        )],
-    };
+    let plan = plan(vec![plan_multi_batch(
+        &[("tracked.txt", &[1]), ("tracked.txt", &[2])],
+        "both edits",
+    )]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
