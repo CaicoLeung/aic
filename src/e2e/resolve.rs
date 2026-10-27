@@ -191,13 +191,9 @@ async fn resolve_reports_llm_error_when_retry_fails() {
     );
 
     let buf = BufferWrite::default();
-    let display = Display::with(buf.clone());
     let err = resolve_run(
         &git,
-        ResolveDeps {
-            display,
-            ..resolve_deps(resolver, prompt_queue(vec![]))
-        },
+        resolve_deps_buf(resolver, prompt_queue(vec![]), buf.clone()),
     )
     .await
     .expect_err("must bail when the only file's resolution fails");
@@ -509,15 +505,7 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
     let prompt: Prompt = Box::new(|label: &str| Ok(label.contains("tracked.txt")));
 
     let buf = BufferWrite::default();
-    let display = Display::with(buf.clone());
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            display,
-            ..resolve_deps(resolver, prompt)
-        },
-    )
-    .await;
+    let result = resolve_run(&git, resolve_deps_buf(resolver, prompt, buf.clone())).await;
     assert_ok(&result, "mixed-blocker handoff should not error");
 
     // --- repo state: approved staged, the other three still blocking ---
@@ -655,10 +643,11 @@ async fn resolve_appends_the_step_ledger() {
     let buf = BufferWrite::default();
     let result = resolve_run(
         &git,
-        ResolveDeps {
-            display: Display::with(buf.clone()),
-            ..resolve_deps(resolver_returning("merged\n"), prompt_queue(vec![true]))
-        },
+        resolve_deps_buf(
+            resolver_returning("merged\n"),
+            prompt_queue(vec![true]),
+            buf.clone(),
+        ),
     )
     .await;
     assert!(result.is_ok(), "{result:?}");
@@ -692,10 +681,12 @@ async fn resolve_no_redact_omits_the_gate_step() {
     let result = resolve_run(
         &git,
         ResolveDeps {
-            resolve: resolver_returning("merged\n"),
-            prompt: prompt_queue(vec![true]),
-            display: Display::with(buf.clone()),
             redact: Redact::Off,
+            ..resolve_deps_buf(
+                resolver_returning("merged\n"),
+                prompt_queue(vec![true]),
+                buf.clone(),
+            )
         },
     )
     .await;
@@ -723,10 +714,7 @@ async fn resolve_redaction_refusal_shapes_the_failed_screen() {
     let buf = BufferWrite::default();
     let err = resolve_run(
         &git,
-        ResolveDeps {
-            display: Display::with(buf.clone()),
-            ..resolve_deps(unreachable_resolver(), prompt_queue(vec![]))
-        },
+        resolve_deps_buf(unreachable_resolver(), prompt_queue(vec![]), buf.clone()),
     )
     .await
     .expect_err("the gate must refuse the secret");
@@ -762,10 +750,11 @@ async fn resolve_failed_resolution_shapes_the_failed_screen() {
     let buf = BufferWrite::default();
     let err = resolve_run(
         &git,
-        ResolveDeps {
-            display: Display::with(buf.clone()),
-            ..resolve_deps(resolver_always_markers().0, prompt_queue(vec![]))
-        },
+        resolve_deps_buf(
+            resolver_always_markers().0,
+            prompt_queue(vec![]),
+            buf.clone(),
+        ),
     )
     .await
     .expect_err("persistent markers must bail");

@@ -5,21 +5,7 @@ use super::*;
 use crate::core::config::Source;
 use crate::llm::cli_agent::PRESETS;
 
-fn cfg(
-    backend: &str,
-    api_key: Option<&str>,
-    model: Option<&str>,
-    base_url: Option<&str>,
-) -> Config {
-    Config {
-        backend: Some(backend.to_string()),
-        api_key: api_key.map(String::from),
-        model: model.map(String::from),
-        base_url: base_url.map(String::from),
-        confirm_before_commit: None,
-        ..Default::default()
-    }
-}
+use crate::core::config::test_util::cfg;
 
 fn draft(
     provider: Option<Provider>,

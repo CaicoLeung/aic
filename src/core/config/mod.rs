@@ -969,3 +969,23 @@ pub fn run_use(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// Shared test fixture: a Config with only the switch-path fields populated.
+#[cfg(test)]
+pub(crate) mod test_util {
+    pub(crate) fn cfg(
+        backend: &str,
+        api_key: Option<&str>,
+        model: Option<&str>,
+        base_url: Option<&str>,
+    ) -> super::Config {
+        super::Config {
+            backend: Some(backend.to_string()),
+            api_key: api_key.map(String::from),
+            model: model.map(String::from),
+            base_url: base_url.map(String::from),
+            confirm_before_commit: None,
+            ..Default::default()
+        }
+    }
+}

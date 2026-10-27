@@ -1,20 +1,6 @@
 use super::*;
 
-fn cfg(
-    backend: &str,
-    api_key: Option<&str>,
-    model: Option<&str>,
-    base_url: Option<&str>,
-) -> Config {
-    Config {
-        backend: Some(backend.to_string()),
-        api_key: api_key.map(String::from),
-        model: model.map(String::from),
-        base_url: base_url.map(String::from),
-        confirm_before_commit: None,
-        ..Default::default()
-    }
-}
+use super::test_util::cfg;
 
 /// A Config whose only meaningful state is a CLI command plus the
 /// discriminator/key fields the switch paths manipulate.

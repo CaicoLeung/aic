@@ -409,6 +409,14 @@ pub fn resolve_deps(resolve: Resolver, prompt: Prompt) -> ResolveDeps {
     }
 }
 
+/// [`resolve_deps`] with `display` backed by `buf` instead of the quiet sink.
+pub fn resolve_deps_buf(resolve: Resolver, prompt: Prompt, buf: BufferWrite) -> ResolveDeps {
+    ResolveDeps {
+        display: Display::with(buf),
+        ..resolve_deps(resolve, prompt)
+    }
+}
+
 /// `tempfile::tempdir()` + run a `&Path`-taking fixture on it (e.g.
 /// `gh::init_test_repo`). Collapses the two-line setup pair every e2e test opens with.
 pub fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {

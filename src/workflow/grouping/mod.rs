@@ -310,14 +310,6 @@ pub fn group_same_scope(blocks: Vec<Block>) -> Vec<Block> {
             }
         }
     }
-    // A block that ended up with several changes is, by construction, a
-    // cross-file merge — tag it so its reason is honest even though the first
-    // member kept its original heuristic.
-    for b in &mut out {
-        if b.changes.len() > 1 {
-            b.heuristic = BlockHeuristic::SameScope;
-        }
-    }
     out
 }
 

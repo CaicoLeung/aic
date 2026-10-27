@@ -456,71 +456,32 @@ mod tests {
         const DARK: (u8, u8, u8) = (13, 17, 23); // #0d1117 (GitHub dark)
         const AA_LARGE: f64 = 3.0;
 
+        let check = |what: &str, rgb: (u8, u8, u8)| {
+            for (bg, theme) in [(WHITE, "white"), (DARK, "dark")] {
+                let ratio = contrast(rgb, bg);
+                assert!(ratio >= AA_LARGE, "{what} fails 3:1 on {theme}: {ratio:.2}");
+            }
+        };
         let mut checked = 0usize;
         for (_, rgb) in NAMED_PALETTE {
-            let on_white = contrast(rgb, WHITE);
-            let on_dark = contrast(rgb, DARK);
-            assert!(
-                on_white >= AA_LARGE,
-                "named color {rgb:?} fails 3:1 on white: {on_white:.2}"
-            );
-            assert!(
-                on_dark >= AA_LARGE,
-                "named color {rgb:?} fails 3:1 on dark: {on_dark:.2}"
-            );
+            check("named color", rgb);
             checked += 1;
         }
         for rgb in FALLBACK_PALETTE {
-            let on_white = contrast(rgb, WHITE);
-            let on_dark = contrast(rgb, DARK);
-            assert!(
-                on_white >= AA_LARGE,
-                "fallback color {rgb:?} fails 3:1 on white: {on_white:.2}"
-            );
-            assert!(
-                on_dark >= AA_LARGE,
-                "fallback color {rgb:?} fails 3:1 on dark: {on_dark:.2}"
-            );
+            check("fallback color", rgb);
             checked += 1;
         }
-        let on_white = contrast(NEUTRAL_GRAY, WHITE);
-        let on_dark = contrast(NEUTRAL_GRAY, DARK);
-        assert!(
-            on_white >= AA_LARGE,
-            "neutral gray fails 3:1 on white: {on_white:.2}"
-        );
-        assert!(
-            on_dark >= AA_LARGE,
-            "neutral gray fails 3:1 on dark: {on_dark:.2}"
-        );
+        check("neutral gray", NEUTRAL_GRAY);
         checked += 1;
 
         // Commit-id amber (the one palette color not keyed by a CommitType) —
         // guarded here so the headline contrast fix can't silently regress.
-        let on_white = contrast(COMMIT_ID_COLOR, WHITE);
-        let on_dark = contrast(COMMIT_ID_COLOR, DARK);
-        assert!(
-            on_white >= AA_LARGE,
-            "commit-id amber fails 3:1 on white: {on_white:.2}"
-        );
-        assert!(
-            on_dark >= AA_LARGE,
-            "commit-id amber fails 3:1 on dark: {on_dark:.2}"
-        );
+        check("commit-id amber", COMMIT_ID_COLOR);
         checked += 1;
 
         // Σ total-row cyan — guarded so the summation glyph's contrast can't
         // silently regress.
-        let on_white = contrast(SIGMA_COLOR, WHITE);
-        let on_dark = contrast(SIGMA_COLOR, DARK);
-        assert!(
-            on_white >= AA_LARGE,
-            "sigma cyan fails 3:1 on white: {on_white:.2}"
-        );
-        assert!(
-            on_dark >= AA_LARGE,
-            "sigma cyan fails 3:1 on dark: {on_dark:.2}"
-        );
+        check("sigma cyan", SIGMA_COLOR);
         checked += 1;
 
         // Guard against the palette arrays silently shrinking to [] and the

@@ -493,20 +493,22 @@ mod tests {
         BatchReview::Interactive { menu }
     }
 
+    fn plan(batches: Vec<BatchPlanBatch>) -> BatchPlanOutput {
+        BatchPlanOutput { batches }
+    }
+
     /// Merging folds two Batches into one at the earlier index: same-file
     /// hunk lists concatenate, other files append, and the reasons join with
     /// " · ". The argument order (1,0 vs 0,1) must not matter.
     #[test]
     fn merge_batches_coalesces_same_file_and_joins_reasons() {
-        let mut plan = BatchPlanOutput {
-            batches: vec![
-                batch(vec![change("a.rs", &[1, 2])], Some("imports")),
-                batch(
-                    vec![change("a.rs", &[3]), change("b.rs", &[1])],
-                    Some("docs"),
-                ),
-            ],
-        };
+        let mut plan = plan(vec![
+            batch(vec![change("a.rs", &[1, 2])], Some("imports")),
+            batch(
+                vec![change("a.rs", &[3]), change("b.rs", &[1])],
+                Some("docs"),
+            ),
+        ]);
         merge_batches(&mut plan, 1, 0).unwrap();
         assert_eq!(plan.batches.len(), 1, "two batches must fold into one");
         let merged = &plan.batches[0];
@@ -525,23 +527,19 @@ mod tests {
     /// None + None stays None.
     #[test]
     fn merge_batches_tolerates_missing_reasons() {
-        let mut plan = BatchPlanOutput {
-            batches: vec![
-                batch(vec![change("a.rs", &[1])], None),
-                batch(vec![change("b.rs", &[1])], Some("docs")),
-            ],
-        };
-        merge_batches(&mut plan, 0, 1).unwrap();
-        assert_eq!(plan.batches[0].reason.as_deref(), Some("docs"));
+        let mut p = plan(vec![
+            batch(vec![change("a.rs", &[1])], None),
+            batch(vec![change("b.rs", &[1])], Some("docs")),
+        ]);
+        merge_batches(&mut p, 0, 1).unwrap();
+        assert_eq!(p.batches[0].reason.as_deref(), Some("docs"));
 
-        let mut plan = BatchPlanOutput {
-            batches: vec![
-                batch(vec![change("a.rs", &[1])], None),
-                batch(vec![change("b.rs", &[1])], None),
-            ],
-        };
-        merge_batches(&mut plan, 0, 1).unwrap();
-        assert_eq!(plan.batches[0].reason, None);
+        let mut p = plan(vec![
+            batch(vec![change("a.rs", &[1])], None),
+            batch(vec![change("b.rs", &[1])], None),
+        ]);
+        merge_batches(&mut p, 0, 1).unwrap();
+        assert_eq!(p.batches[0].reason, None);
     }
 
     /// Self-merges and out-of-range indices are refused without mutating
@@ -549,12 +547,10 @@ mod tests {
     /// must not corrupt a plan.
     #[test]
     fn merge_batches_rejects_self_merge_and_out_of_range() {
-        let mut plan = BatchPlanOutput {
-            batches: vec![
-                batch(vec![change("a.rs", &[1])], None),
-                batch(vec![change("b.rs", &[1])], None),
-            ],
-        };
+        let mut plan = plan(vec![
+            batch(vec![change("a.rs", &[1])], None),
+            batch(vec![change("b.rs", &[1])], None),
+        ]);
         let err = merge_batches(&mut plan, 0, 0).expect_err("self-merge must fail");
         assert!(format!("{err:#}").contains("with itself"), "got: {err:#}");
         let err = merge_batches(&mut plan, 0, 9).expect_err("out-of-range must fail");
@@ -582,12 +578,10 @@ mod tests {
         let lines = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let display = Display::with(Capture(lines.clone()));
         let counts = vec![("a.rs".to_string(), 3)];
-        let plan = BatchPlanOutput {
-            batches: vec![batch(
-                vec![change(&"very/long/path/".repeat(10), &[1, 2, 3])],
-                Some(&"why ".repeat(20)),
-            )],
-        };
+        let plan = plan(vec![batch(
+            vec![change(&"very/long/path/".repeat(10), &[1, 2, 3])],
+            Some(&"why ".repeat(20)),
+        )]);
         assert_eq!(paint_plan(&display, &plan, &counts), 3);
         let rows = lines.lock().clone();
         assert_eq!(rows.len(), 3, "header + Batch row + trailing blank");
@@ -613,9 +607,7 @@ mod tests {
     #[test]
     fn review_plan_passes_through_when_disabled() {
         let counts = vec![("a.rs".to_string(), 1)];
-        let one = BatchPlanOutput {
-            batches: vec![batch(vec![change("a.rs", &[1])], None)],
-        };
+        let one = plan(vec![batch(vec![change("a.rs", &[1])], None)]);
         let out = review_plan(
             one,
             &counts,
@@ -635,9 +627,7 @@ mod tests {
     #[test]
     fn review_plan_single_batch_still_reaches_the_menu() {
         let counts = vec![("a.rs".to_string(), 1)];
-        let one = BatchPlanOutput {
-            batches: vec![batch(vec![change("a.rs", &[1])], None)],
-        };
+        let one = plan(vec![batch(vec![change("a.rs", &[1])], None)]);
         let err = review_plan(
             one,
             &counts,
@@ -658,15 +648,13 @@ mod tests {
     #[test]
     fn review_plan_merge_then_continue_returns_merged_plan() {
         let counts = vec![("a.rs".to_string(), 2), ("b.rs".to_string(), 1)];
-        let plan = BatchPlanOutput {
-            batches: vec![
-                batch(vec![change("a.rs", &[1])], Some("first hunk")),
-                batch(
-                    vec![change("a.rs", &[2]), change("b.rs", &[1])],
-                    Some("rest"),
-                ),
-            ],
-        };
+        let plan = plan(vec![
+            batch(vec![change("a.rs", &[1])], Some("first hunk")),
+            batch(
+                vec![change("a.rs", &[2]), change("b.rs", &[1])],
+                Some("rest"),
+            ),
+        ]);
         let out = review_plan(
             plan,
             &counts,
@@ -691,15 +679,13 @@ mod tests {
     #[test]
     fn review_plan_undo_restores_pre_merge_plan() {
         let counts = vec![("a.rs".to_string(), 2), ("b.rs".to_string(), 1)];
-        let plan = BatchPlanOutput {
-            batches: vec![
-                batch(vec![change("a.rs", &[1])], Some("first hunk")),
-                batch(
-                    vec![change("a.rs", &[2]), change("b.rs", &[1])],
-                    Some("rest"),
-                ),
-            ],
-        };
+        let plan = plan(vec![
+            batch(vec![change("a.rs", &[1])], Some("first hunk")),
+            batch(
+                vec![change("a.rs", &[2]), change("b.rs", &[1])],
+                Some("rest"),
+            ),
+        ]);
         let out = review_plan(
             plan,
             &counts,
@@ -724,12 +710,10 @@ mod tests {
     #[test]
     fn review_plan_abort_bails_with_no_commit_wording() {
         let counts = vec![("a.rs".to_string(), 1), ("b.rs".to_string(), 1)];
-        let plan = BatchPlanOutput {
-            batches: vec![
-                batch(vec![change("a.rs", &[1])], None),
-                batch(vec![change("b.rs", &[1])], None),
-            ],
-        };
+        let plan = plan(vec![
+            batch(vec![change("a.rs", &[1])], None),
+            batch(vec![change("b.rs", &[1])], None),
+        ]);
         let err = review_plan(
             plan,
             &counts,
