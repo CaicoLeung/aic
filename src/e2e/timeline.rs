@@ -13,8 +13,7 @@ use super::common::*;
 /// duration threshold, appending `· Xs`.
 #[tokio::test]
 async fn unstaged_run_appends_the_step_ledger() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
@@ -39,12 +38,8 @@ async fn unstaged_run_appends_the_step_ledger() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await;
@@ -66,8 +61,7 @@ async fn unstaged_run_appends_the_step_ledger() {
 /// or review steps, singular counts.
 #[tokio::test]
 async fn staged_run_appends_the_three_step_ledger() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     std::fs::write(dir.path().join("tracked.txt"), "diverged\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
 
@@ -76,12 +70,8 @@ async fn staged_run_appends_the_three_step_ledger() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display: Display::with(buf.clone()),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: staged"),
-            confirm: Confirm::Disabled,
+            ..deps(unreachable_planner(), messenger_fixed("feat: staged"))
         },
     )
     .await;
@@ -102,8 +92,7 @@ async fn staged_run_appends_the_three_step_ledger() {
 /// and the ledger — no "Redaction gate" line at all.
 #[tokio::test]
 async fn no_redact_run_has_no_gate_step() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     std::fs::write(dir.path().join("tracked.txt"), "diverged\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
 
@@ -135,8 +124,7 @@ async fn no_redact_run_has_no_gate_step() {
 /// patterns). Nothing erases, and the error still propagates.
 #[tokio::test]
 async fn redaction_refusal_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     std::fs::write(
         dir.path().join("secret.txt"),
         "-----BEGIN RSA PRIVATE KEY-----\nabc\n",
@@ -148,12 +136,8 @@ async fn redaction_refusal_shapes_the_failed_screen() {
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display: Display::with(buf.clone()),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
+            ..deps(unreachable_planner(), unreachable_messenger())
         },
     )
     .await
@@ -182,8 +166,7 @@ async fn redaction_refusal_shapes_the_failed_screen() {
 /// contract (still staged; re-run `aic`). Later steps are absent.
 #[tokio::test]
 async fn declined_batch_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
@@ -255,8 +238,7 @@ async fn declined_batch_shapes_the_failed_screen() {
 /// merge count when merges happened.
 #[tokio::test]
 async fn review_flow_completes_the_plan_step() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
@@ -310,8 +292,7 @@ async fn review_flow_completes_the_plan_step() {
 /// the nothing-staged hint, and the Run bails with the same clean wording.
 #[tokio::test]
 async fn review_abort_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
     let plan = plan_single_batch("alpha.txt", "change alpha");
 
     let buf = BufferWrite::default();
@@ -352,8 +333,7 @@ async fn review_abort_shapes_the_failed_screen() {
 /// story) and the durable caution row rides under it.
 #[tokio::test]
 async fn invalid_plan_completes_with_planned_verb_and_caution_row() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
     // An empty plan is invalid (real work exists) → deterministic regrouping.
     let plan = generator::BatchPlanOutput { batches: vec![] };
 

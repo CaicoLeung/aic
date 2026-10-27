@@ -6,23 +6,13 @@ use super::common::*;
 /// or the prompt.
 #[tokio::test]
 async fn resolve_clean_repo_is_a_noop() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let (resolver, seen) = resolver_recording();
     let prompt = prompt_queue(vec![]); // empty — must not be asked
     let git = Git::at(dir.path()).unwrap();
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt,
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
+    let result = resolve_run(&git, resolve_deps(resolver, prompt)).await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
     assert!(
         seen.lock().is_empty(),
@@ -36,23 +26,14 @@ async fn resolve_clean_repo_is_a_noop() {
 /// refusal path is a one-line test — a bail message naming the state, no
 /// Resolver call, and the repo left in its conflicted state.
 async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
+    let dir = with_repo(setup);
 
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
 
-    let err = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await
-    .expect_err("refused state must error, not succeed");
+    let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
+        .await
+        .expect_err("refused state must error, not succeed");
     let msg = format!("{err:#}");
     // Pin the literal "<label> state yet" phrase — a bare `contains("am")`
     // would false-pass on common words like "stream", and stopping at
@@ -86,22 +67,12 @@ async fn resolve_refuses_am_state() {
 /// finalize. Repo ends clean, file holds the resolution, no markers remain.
 #[tokio::test]
 async fn resolve_full_flow_finalizes_merge() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let resolver = resolver_returning("merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
+    let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
     assert!(result.is_ok(), "happy path should succeed: {:?}", result);
 
     assert!(is_clean(dir.path()), "merge must be finalized");
@@ -114,8 +85,7 @@ async fn resolve_full_flow_finalizes_merge() {
 /// markers; the merge is *not* finalized (git's `--continue` would block).
 #[tokio::test]
 async fn resolve_partial_approval_keeps_approved_staged() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_two_conflicts(dir.path());
+    let dir = with_repo(merge_two_conflicts);
 
     let resolver = resolver_returning("merged\n");
     // Path-based approval so the verdict follows the file regardless of the
@@ -124,21 +94,8 @@ async fn resolve_partial_approval_keeps_approved_staged() {
     let prompt: Prompt = Box::new(|label: &str| Ok(label.contains("tracked.txt")));
     let git = Git::at(dir.path()).unwrap();
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt,
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
-    assert!(
-        result.is_ok(),
-        "partial approval handoff should not error: {:?}",
-        result
-    );
+    let result = resolve_run(&git, resolve_deps(resolver, prompt)).await;
+    assert_ok(&result, "partial approval handoff should not error");
 
     assert!(
         !is_clean(dir.path()),
@@ -160,27 +117,13 @@ async fn resolve_partial_approval_keeps_approved_staged() {
 /// staged — partial progress is preserved (ADR 0005).
 #[tokio::test]
 async fn resolve_skips_binary_and_stages_text() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_text_and_binary(dir.path());
+    let dir = with_repo(merge_text_and_binary);
 
     let resolver = resolver_returning("merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
-    assert!(
-        result.is_ok(),
-        "binary skip should hand off, not error: {:?}",
-        result
-    );
+    let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
+    assert_ok(&result, "binary skip should hand off, not error");
 
     assert!(!is_clean(dir.path()), "binary conflict blocks finalize");
 
@@ -204,28 +147,14 @@ async fn resolve_skips_binary_and_stages_text() {
 /// first call, clean content on the retry. The file is resolved + finalized.
 #[tokio::test]
 async fn resolve_retries_after_markers_then_succeeds() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let (resolver, calls) =
         resolver_then("<<<<<<< HEAD\nbad\n=======\nworse\n>>>>>>> x\n", "merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
-    assert!(
-        result.is_ok(),
-        "retry-then-clean should succeed: {:?}",
-        result
-    );
+    let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
+    assert_ok(&result, "retry-then-clean should succeed");
 
     assert_eq!(*calls.lock(), 2, "exactly one retry (2 calls)");
     assert!(is_clean(dir.path()), "merge must be finalized after retry");
@@ -237,23 +166,14 @@ async fn resolve_retries_after_markers_then_succeeds() {
 /// "no files could be resolved" message.
 #[tokio::test]
 async fn resolve_gives_up_when_markers_persist() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let (resolver, calls) = resolver_always_markers();
     let git = Git::at(dir.path()).unwrap();
 
-    let err = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await
-    .expect_err("must bail when no file could be resolved");
+    let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
+        .await
+        .expect_err("must bail when no file could be resolved");
     assert!(
         format!("{err:#}").contains("no files could be resolved"),
         "expected give-up message, got: {err:#}"
@@ -273,8 +193,7 @@ async fn resolve_gives_up_when_markers_persist() {
 /// remain after retry". The retry-attempt error must not be masked.
 #[tokio::test]
 async fn resolve_reports_llm_error_when_retry_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let (resolver, calls) = resolver_then_error(
         "<<<<<<< HEAD\nbad\n=======\nworse\n>>>>>>> x\n",
@@ -287,10 +206,8 @@ async fn resolve_reports_llm_error_when_retry_fails() {
     let err = resolve_run(
         &git,
         ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![]),
             display,
-            redact: Redact::On,
+            ..resolve_deps(resolver, prompt_queue(vec![]))
         },
     )
     .await
@@ -328,8 +245,7 @@ async fn resolve_reports_llm_error_when_retry_fails() {
 /// finalize. The resolver must not be invoked.
 #[tokio::test]
 async fn resolve_offers_finalize_when_all_manual() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     // Resolve by hand + stage, leaving the repo in the Merge state with no
     // unmerged entries.
@@ -339,21 +255,8 @@ async fn resolve_offers_finalize_when_all_manual() {
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
-    assert!(
-        result.is_ok(),
-        "manual-finalize should succeed: {:?}",
-        result
-    );
+    let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
+    assert_ok(&result, "manual-finalize should succeed");
     assert!(
         seen.lock().is_empty(),
         "resolver must not run when nothing's unmerged"
@@ -372,8 +275,7 @@ async fn resolve_offers_finalize_when_all_manual() {
 /// decline would fail loudly instead of shipping green.
 #[tokio::test]
 async fn resolve_declines_finalize_when_all_manual() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     // Resolve by hand + stage, leaving the repo in the Merge state with no
     // unmerged entries — identical entry condition to the `yes` test.
@@ -399,21 +301,8 @@ async fn resolve_declines_finalize_when_all_manual() {
     let before = commit_count(dir.path());
 
     // Answer "finalize now?" with no — the only prompt on this path.
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![false]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
-    assert!(
-        result.is_ok(),
-        "declining finalize should not error: {:?}",
-        result
-    );
+    let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![false]))).await;
+    assert_ok(&result, "declining finalize should not error");
 
     // No finalize ran: the repo is still mid-merge, and no commit landed.
     assert_eq!(
@@ -469,16 +358,7 @@ async fn resolve_finalizes_clean(dir: &Path, expected: conflict::RepoState) {
 
     let resolver = resolver_returning("merged\n");
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
+    let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
     assert!(
         result.is_ok(),
         "{expected:?} resolve should succeed: {:?}",
@@ -499,8 +379,7 @@ async fn resolve_finalizes_clean(dir: &Path, expected: conflict::RepoState) {
 /// merely the `finalize_invocation` enum mapping (unit-tested in git.rs).
 #[tokio::test]
 async fn resolve_finalizes_cherry_pick() {
-    let dir = tempfile::tempdir().unwrap();
-    cherry_pick_conflict(dir.path());
+    let dir = with_repo(cherry_pick_conflict);
     resolve_finalizes_clean(dir.path(), conflict::RepoState::CherryPick).await;
 }
 
@@ -508,8 +387,7 @@ async fn resolve_finalizes_cherry_pick() {
 /// clears the `Revert` state in a real repo.
 #[tokio::test]
 async fn resolve_finalizes_revert() {
-    let dir = tempfile::tempdir().unwrap();
-    revert_conflict(dir.path());
+    let dir = with_repo(revert_conflict);
     resolve_finalizes_clean(dir.path(), conflict::RepoState::Revert).await;
 }
 
@@ -521,8 +399,7 @@ async fn resolve_finalizes_revert() {
 /// post-conditions in [`resolve_finalizes_clean`].
 #[tokio::test]
 async fn resolve_finalizes_cherry_pick_sequence() {
-    let dir = tempfile::tempdir().unwrap();
-    cherry_pick_sequence_conflict(dir.path());
+    let dir = with_repo(cherry_pick_sequence_conflict);
     resolve_finalizes_clean(dir.path(), conflict::RepoState::CherryPickSequence).await;
     // The clean first commit (adding extra.txt) must land before the second
     // hits its conflict — its presence proves the sequence advanced past A.
@@ -537,8 +414,7 @@ async fn resolve_finalizes_cherry_pick_sequence() {
 /// [`resolve_finalizes_clean`].
 #[tokio::test]
 async fn resolve_finalizes_revert_sequence() {
-    let dir = tempfile::tempdir().unwrap();
-    revert_sequence_conflict(dir.path());
+    let dir = with_repo(revert_sequence_conflict);
     resolve_finalizes_clean(dir.path(), conflict::RepoState::RevertSequence).await;
     // The clean first revert (removing fileP.txt) must land before the second
     // hits its conflict — its absence proves the sequence advanced past P.
@@ -551,8 +427,7 @@ async fn resolve_finalizes_revert_sequence() {
 /// resolution).
 #[tokio::test]
 async fn resolve_skips_delete_modify_conflict() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_delete_modify_conflict(dir.path());
+    let dir = with_repo(merge_delete_modify_conflict);
 
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
@@ -562,17 +437,9 @@ async fn resolve_skips_delete_modify_conflict() {
     assert_eq!(files[0].path, "tracked.txt");
     assert_eq!(files[0].kind, conflict::ConflictKind::DeleteModify);
 
-    let err = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await
-    .expect_err("delete/modify has no resolvable file");
+    let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
+        .await
+        .expect_err("delete/modify has no resolvable file");
     assert!(
         format!("{err:#}").contains("no files could be resolved"),
         "expected bail, got: {err:#}"
@@ -590,27 +457,13 @@ async fn resolve_skips_delete_modify_conflict() {
 /// the oversized file.
 #[tokio::test]
 async fn resolve_skips_oversized_and_stages_text() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_oversized_and_text(dir.path());
+    let dir = with_repo(merge_oversized_and_text);
 
     let resolver = resolver_returning("merged\n");
     let git = Git::at(dir.path()).unwrap();
 
-    let result = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await;
-    assert!(
-        result.is_ok(),
-        "oversized skip should hand off, not error: {:?}",
-        result
-    );
+    let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
+    assert_ok(&result, "oversized skip should hand off, not error");
 
     assert!(!is_clean(dir.path()), "oversized conflict blocks finalize");
 
@@ -638,23 +491,14 @@ async fn resolve_skips_oversized_and_stages_text() {
 /// not trigger the marker-retry path (only marker-laden `Ok` does).
 #[tokio::test]
 async fn resolve_llm_error_bails_when_only_file_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let (resolver, calls) = resolver_error();
     let git = Git::at(dir.path()).unwrap();
 
-    let err = resolve_run(
-        &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![]),
-            display: sink(),
-            redact: Redact::On,
-        },
-    )
-    .await
-    .expect_err("must bail when the LLM call fails");
+    let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
+        .await
+        .expect_err("must bail when the LLM call fails");
     assert!(
         format!("{err:#}").contains("no files could be resolved"),
         "expected bail, got: {err:#}"
@@ -680,8 +524,7 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
 /// three-way breakdown on a single line.
 #[tokio::test]
 async fn resolve_handoff_lists_all_three_blocker_kinds() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_mixed_blockers(dir.path());
+    let dir = with_repo(merge_mixed_blockers);
 
     // Fail exactly `third.txt` (its content carries the LLM_FAIL sentinel);
     // the other text files resolve to "merged\n".
@@ -696,18 +539,12 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
     let result = resolve_run(
         &git,
         ResolveDeps {
-            resolve: resolver,
-            prompt,
             display,
-            redact: Redact::On,
+            ..resolve_deps(resolver, prompt)
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "mixed-blocker handoff should not error: {:?}",
-        result
-    );
+    assert_ok(&result, "mixed-blocker handoff should not error");
 
     // --- repo state: approved staged, the other three still blocking ---
     assert!(
@@ -786,8 +623,7 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
 /// The repo is left untouched — still conflicted, nothing staged.
 #[tokio::test]
 async fn resolve_refuses_secret_in_conflicted_file_before_any_llm_call() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
     std::fs::write(
         dir.path().join("tracked.txt"),
         "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
@@ -797,14 +633,9 @@ async fn resolve_refuses_secret_in_conflicted_file_before_any_llm_call() {
     let git = Git::at(dir.path()).unwrap();
     let err = resolve_run(
         &git,
-        ResolveDeps {
-            resolve: unreachable_resolver(),
-            // Empty queue: the per-file apply prompt must never fire — if it
-            // does, the exhausted queue panics and fails this test loudly.
-            prompt: prompt_queue(vec![]),
-            display: sink(),
-            redact: Redact::On,
-        },
+        // Empty queue: the per-file apply prompt must never fire — if it
+        // does, the exhausted queue panics and fails this test loudly.
+        resolve_deps(unreachable_resolver(), prompt_queue(vec![])),
     )
     .await
     .expect_err("secret-shaped conflicted file must refuse the resolve");
@@ -833,8 +664,7 @@ async fn resolve_refuses_secret_in_conflicted_file_before_any_llm_call() {
 /// normally (issue #159).
 #[tokio::test]
 async fn resolve_no_redact_proceeds_past_the_gate() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
     std::fs::write(
         dir.path().join("tracked.txt"),
         "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
@@ -845,18 +675,12 @@ async fn resolve_no_redact_proceeds_past_the_gate() {
     let result = resolve_run(
         &git,
         ResolveDeps {
-            resolve: resolver_returning("merged\n"),
-            prompt: prompt_queue(vec![true]),
-            display: sink(),
             redact: Redact::Off,
+            ..resolve_deps(resolver_returning("merged\n"), prompt_queue(vec![true]))
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "--no-redact must resolve normally: {:?}",
-        result
-    );
+    assert_ok(&result, "--no-redact must resolve normally");
     assert!(is_clean(dir.path()), "merge must be finalized");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
 }
@@ -873,18 +697,15 @@ async fn resolve_no_redact_proceeds_past_the_gate() {
 /// machine can push a step over the 1 s duration threshold (`· Xs`).
 #[tokio::test]
 async fn resolve_appends_the_step_ledger() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let result = resolve_run(
         &git,
         ResolveDeps {
-            resolve: resolver_returning("merged\n"),
-            prompt: prompt_queue(vec![true]),
             display: Display::with(buf.clone()),
-            redact: Redact::On,
+            ..resolve_deps(resolver_returning("merged\n"), prompt_queue(vec![true]))
         },
     )
     .await;
@@ -913,8 +734,7 @@ async fn resolve_appends_the_step_ledger() {
 /// resolve sibling of `no_redact_run_has_no_gate_step`).
 #[tokio::test]
 async fn resolve_no_redact_omits_the_gate_step() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
@@ -947,8 +767,7 @@ async fn resolve_no_redact_omits_the_gate_step() {
 /// kind), and no later step's ledger line appears — the timeline stops there.
 #[tokio::test]
 async fn resolve_redaction_refusal_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
     std::fs::write(
         dir.path().join("tracked.txt"),
         "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
@@ -960,10 +779,8 @@ async fn resolve_redaction_refusal_shapes_the_failed_screen() {
     let err = resolve_run(
         &git,
         ResolveDeps {
-            resolve: unreachable_resolver(),
-            prompt: prompt_queue(vec![]),
             display: Display::with(buf.clone()),
-            redact: Redact::On,
+            ..resolve_deps(unreachable_resolver(), prompt_queue(vec![]))
         },
     )
     .await
@@ -998,18 +815,15 @@ async fn resolve_redaction_refusal_shapes_the_failed_screen() {
 /// ledger lines never appear.
 #[tokio::test]
 async fn resolve_failed_resolution_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let dir = with_repo(merge_conflict);
 
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
     let err = resolve_run(
         &git,
         ResolveDeps {
-            resolve: resolver_always_markers().0,
-            prompt: prompt_queue(vec![]),
             display: Display::with(buf.clone()),
-            redact: Redact::On,
+            ..resolve_deps(resolver_always_markers().0, prompt_queue(vec![]))
         },
     )
     .await

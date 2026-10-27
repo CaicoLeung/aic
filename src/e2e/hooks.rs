@@ -10,8 +10,7 @@ use super::common::*;
 /// in the repo's `.git/hooks`.
 #[tokio::test]
 async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // pre-commit drops a sentinel file in the worktree — proves the hook
     // executed during the Run.
@@ -32,21 +31,10 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
     let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: hook run"),
-            confirm: Confirm::Disabled,
-        },
+        deps(planner_fixed(plan), messenger_fixed("chore: hook run")),
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "Run with hooks installed should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "Run with hooks installed should succeed");
 
     // The change itself landed in the commit (the Run did not silently drop
     // the file while hooks ran).
@@ -79,8 +67,7 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
 /// regression back to libgit2, which would commit past the veto silently.
 #[tokio::test]
 async fn commit_run_hook_veto_aborts_with_index_intact() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     gh::install_hook(
         dir.path(),
@@ -96,14 +83,7 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
 
     let err = commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: vetoed"),
-            confirm: Confirm::Disabled,
-        },
+        deps(planner_fixed(plan), messenger_fixed("chore: vetoed")),
     )
     .await
     .expect_err("a vetoing pre-commit hook must abort the Run");
@@ -146,8 +126,7 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
 /// would change the surfaced text and fail loudly, not ship green.
 #[tokio::test]
 async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     gh::install_hook(
         dir.path(),
@@ -163,14 +142,7 @@ async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
 
     let err = commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: vetoed"),
-            confirm: Confirm::Disabled,
-        },
+        deps(planner_fixed(plan), messenger_fixed("chore: vetoed")),
     )
     .await
     .expect_err("a vetoing commit-msg hook must abort the Run");

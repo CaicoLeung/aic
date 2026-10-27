@@ -403,6 +403,43 @@ pub fn sink() -> Display {
     Display::with(BufferWrite::default())
 }
 
+/// Standard [`RunDeps`] for the commit-workflow tests: quiet sink, disabled
+/// review/confirm, redaction on, scripted planner and messenger. Sites that
+/// need a different field use struct-update over this (`..deps(p, m)`).
+pub fn deps(planner: BatchPlanner, messenger: CommitMessenger) -> RunDeps {
+    RunDeps {
+        review: BatchReview::Disabled,
+        redact: Redact::On,
+        display: sink(),
+        planner,
+        messenger,
+        confirm: Confirm::Disabled,
+    }
+}
+
+/// Standard [`ResolveDeps`]: quiet sink plus the scripted resolver and prompt.
+pub fn resolve_deps(resolve: Resolver, prompt: Prompt) -> ResolveDeps {
+    ResolveDeps {
+        resolve,
+        prompt,
+        display: sink(),
+        redact: Redact::On,
+    }
+}
+
+/// `tempfile::tempdir()` + run a `&Path`-taking fixture on it (e.g.
+/// `gh::init_test_repo`). Collapses the two-line setup pair every e2e test opens with.
+pub fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    dir
+}
+
+/// `assert!(result.is_ok(), "{msg}: {result:?}")` without the 4-line spread.
+pub fn assert_ok(result: &anyhow::Result<()>, msg: &str) {
+    assert!(result.is_ok(), "{msg}: {result:?}");
+}
+
 /// Assert the resolve hand-off wording captured in `buf`:
 ///   - the "not finalized" line exists and carries every `blocker` substring
 ///     (e.g. `"1 rejected"`, `"1 failed to resolve"`), and

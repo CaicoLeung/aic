@@ -36,8 +36,7 @@ fn two_batch_plan() -> generator::BatchPlanOutput {
 /// merged diff (one messenger call), not two per-Batch messages.
 #[tokio::test]
 async fn batch_review_merge_then_continue_commits_one_combined_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -45,14 +44,13 @@ async fn batch_review_merge_then_continue_commits_one_combined_commit() {
     commit_run(
         &git,
         RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            messenger: messenger_fixed("feat: combined change"),
-            confirm: Confirm::Disabled,
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
             },
+            ..deps(
+                planner_fixed(two_batch_plan()),
+                messenger_fixed("feat: combined change"),
+            )
         },
     )
     .await
@@ -73,8 +71,7 @@ async fn batch_review_merge_then_continue_commits_one_combined_commit() {
 /// committed, both changes exactly as they started.
 #[tokio::test]
 async fn batch_review_abort_stages_nothing_and_commits_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -82,15 +79,11 @@ async fn batch_review_abort_stages_nothing_and_commits_nothing() {
     let err = commit_run(
         &git,
         RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            // Abort precedes drafting — the messenger must never be called.
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Abort]),
             },
+            // Abort precedes drafting — the messenger must never be called.
+            ..deps(planner_fixed(two_batch_plan()), unreachable_messenger())
         },
     )
     .await
@@ -122,8 +115,7 @@ async fn batch_review_abort_stages_nothing_and_commits_nothing() {
 /// whole Run over a mistaken merge.
 #[tokio::test]
 async fn batch_review_undo_restores_the_two_batch_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -131,11 +123,6 @@ async fn batch_review_undo_restores_the_two_batch_plan() {
     commit_run(
         &git,
         RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            messenger: messenger_fixed("feat: separate change"),
-            confirm: Confirm::Disabled,
             review: BatchReview::Interactive {
                 menu: review_queue(vec![
                     ReviewChoice::Merge(0, 1),
@@ -143,6 +130,10 @@ async fn batch_review_undo_restores_the_two_batch_plan() {
                     ReviewChoice::Continue,
                 ]),
             },
+            ..deps(
+                planner_fixed(two_batch_plan()),
+                messenger_fixed("feat: separate change"),
+            )
         },
     )
     .await
@@ -161,8 +152,7 @@ async fn batch_review_undo_restores_the_two_batch_plan() {
 /// nothing is mergeable. Abort on it leaves everything untouched.
 #[tokio::test]
 async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -185,15 +175,11 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
     let err = commit_run(
         &git,
         RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(one_batch),
-            // Abort precedes drafting — the messenger must never be called.
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Abort]),
             },
+            // Abort precedes drafting — the messenger must never be called.
+            ..deps(planner_fixed(one_batch), unreachable_messenger())
         },
     )
     .await
@@ -223,8 +209,7 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
 /// without this pin.
 #[tokio::test]
 async fn batch_review_operates_on_the_deterministic_fallback_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     // Two single-hunk edits in different directories: the conservative
     // fallback keeps them as two batches, so a Merge choice proves the menu
     // held the fallback plan (a one-batch regroup could not merge).
@@ -283,8 +268,7 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
 /// rendering breaks the other when both are enabled.
 #[tokio::test]
 async fn batch_review_merge_then_confirm_commit_lands_the_combined_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();

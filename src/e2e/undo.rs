@@ -39,14 +39,7 @@ async fn run_two_batches(dir: &tempfile::TempDir, a: &str, b: &str) -> String {
 
     commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub"),
-            confirm: Confirm::Disabled,
-        },
+        deps(planner_fixed(plan), messenger_fixed("feat: stub")),
     )
     .await
     .unwrap();
@@ -59,8 +52,7 @@ async fn run_two_batches(dir: &tempfile::TempDir, a: &str, b: &str) -> String {
 /// byte for byte.
 #[tokio::test]
 async fn undo_resets_run_commits_and_unstages_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
@@ -100,8 +92,7 @@ async fn undo_resets_run_commits_and_unstages_changes() {
 /// Declining the confirmation changes nothing: same HEAD, same state file.
 #[tokio::test]
 async fn undo_declined_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
@@ -117,8 +108,7 @@ async fn undo_declined_changes_nothing() {
 /// No recorded Run → a clear refusal, not a crash or a silent success.
 #[test]
 fn undo_without_state_file_refuses() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let git = Git::at(dir.path()).unwrap();
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
@@ -133,8 +123,7 @@ fn undo_without_state_file_refuses() {
 /// cleared, so the next undo isn't stuck on it.
 #[test]
 fn undo_after_zero_commit_run_clears_stale_state() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let git = Git::at(dir.path()).unwrap();
     undo::record(&git, &git.head_sha().unwrap()).unwrap();
@@ -153,8 +142,7 @@ fn undo_after_zero_commit_run_clears_stale_state() {
 /// pre-staged files records, commits, and resets back cleanly.
 #[tokio::test]
 async fn undo_covers_staged_single_commit_run() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
@@ -163,14 +151,7 @@ async fn undo_covers_staged_single_commit_run() {
 
     commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: stub"),
-            confirm: Confirm::Disabled,
-        },
+        deps(unreachable_planner(), messenger_fixed("feat: stub")),
     )
     .await
     .unwrap();
@@ -196,8 +177,7 @@ async fn undo_covers_staged_single_commit_run() {
 /// strips them too; their changes still return to the working tree.
 #[tokio::test]
 async fn undo_prompt_discloses_commits_made_after_the_run() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     // The user's own commit after the Run — inside the reset's blast
@@ -242,8 +222,7 @@ async fn undo_prompt_discloses_commits_made_after_the_run() {
 /// the start-only proof cannot catch.
 #[tokio::test]
 async fn undo_refuses_when_run_tip_was_rewritten() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
@@ -266,8 +245,7 @@ async fn undo_refuses_when_run_tip_was_rewritten() {
 /// must disclose that instead of mislabeling every commit as the Run's own.
 #[test]
 fn undo_without_tip_discloses_unknown_split() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
@@ -301,8 +279,7 @@ fn undo_without_tip_discloses_unknown_split() {
 /// orphaning commits the user never meant to hand back.
 #[tokio::test]
 async fn undo_refuses_when_history_rewritten_past_start() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let git = Git::at(dir.path()).unwrap();
@@ -331,8 +308,7 @@ async fn undo_refuses_when_history_rewritten_past_start() {
 /// commit, not after the Run.
 #[tokio::test]
 async fn partial_run_is_undoable_for_landed_batches() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
@@ -361,18 +337,7 @@ async fn partial_run_is_undoable_for_landed_batches() {
     // before any commit, so an error on the second draft surfaces after
     // batch 1 has committed — the partial-failure contract under test.
     let (messenger, _calls) = messenger_then_error(1);
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger,
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await;
+    let result = commit_run(&git, deps(planner_fixed(plan), messenger)).await;
     assert!(result.is_err(), "partial run must error");
 
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 1);
@@ -387,8 +352,7 @@ async fn partial_run_is_undoable_for_landed_batches() {
 /// non-empty garbage shape through the ancestry proof.
 #[test]
 fn undo_with_malformed_state_file_refuses_without_mutation() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let git = Git::at(dir.path()).unwrap();
     let head = git.head_sha().unwrap();
 
@@ -414,8 +378,7 @@ fn undo_with_malformed_state_file_refuses_without_mutation() {
 /// one-Run-deep by design — the reset target is the latest start anchor.
 #[tokio::test]
 async fn undo_after_a_second_run_resets_only_the_latest_run() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let run1_start = run_two_batches(&dir, "one\n", "two\n").await;
 
     // Second Run over both files again — same two-batch shape, fresh edits.

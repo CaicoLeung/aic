@@ -13,8 +13,7 @@ use super::common::*;
 /// re-run can retry.
 #[tokio::test]
 async fn commit_confirm_abort_aborts_staged_single_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
@@ -24,16 +23,16 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
 
     let err = commit_run(
         &git,
+        // staged path must NOT plan,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(), // staged path must NOT plan,
-            messenger: messenger_fixed("feat: staged change"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                unreachable_planner(),
+                messenger_fixed("feat: staged change"),
+            )
         },
     )
     .await
@@ -124,8 +123,7 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
 /// line — output includes the preview block.
 #[tokio::test]
 async fn commit_confirm_commit_commits_staged_single_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
@@ -138,23 +136,19 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display,
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: staged change"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                unreachable_planner(),
+                messenger_fixed("feat: staged change"),
+            )
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "a confirmed commit should land: {:?}",
-        result
-    );
+    assert_ok(&result, "a confirmed commit should land");
 
     assert_eq!(
         commit_count(dir.path()),
@@ -195,8 +189,7 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
 /// shows after each draft, and the second draft is what lands.
 #[tokio::test]
 async fn commit_confirm_regenerate_then_commit_lands_new_message() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
@@ -210,23 +203,16 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display,
-            planner: unreachable_planner(),
-            messenger,
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(unreachable_planner(), messenger)
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "Regenerate then Commit should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "Regenerate then Commit should succeed");
 
     assert_eq!(
         commit_count(dir.path()),
@@ -265,8 +251,7 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
 /// menu [Regenerate, Commit] flow drafts twice and the second message lands.
 #[tokio::test]
 async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     std::fs::write(
         dir.path().join("tracked.txt"),
@@ -294,11 +279,7 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "--no-redact + Regenerate must complete the Run: {:?}",
-        result
-    );
+    assert_ok(&result, "--no-redact + Regenerate must complete the Run");
     assert_eq!(*calls.lock(), 2, "the redraft must reach the messenger");
     assert_eq!(commit_count(dir.path()), before + 1, "one commit lands");
     assert_eq!(
@@ -312,8 +293,7 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
 /// lands (subject + body).
 #[tokio::test]
 async fn commit_confirm_edit_then_commit_lands_edited_message() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
@@ -324,23 +304,15 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: draft"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
                 editor: editor_fixed("feat: edited", Some("edited body")),
             },
+            ..deps(unreachable_planner(), messenger_fixed("feat: draft"))
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "Edit then Commit should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "Edit then Commit should succeed");
 
     assert_eq!(
         commit_count(dir.path()),
@@ -358,8 +330,7 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
 /// cancel path), so the original message is what lands.
 #[tokio::test]
 async fn commit_confirm_edit_cancel_keeps_original_message() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
     git_in(dir.path(), &["add", "tracked.txt"]);
@@ -370,23 +341,15 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: draft"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
                 editor: editor_cancel(),
             },
+            ..deps(unreachable_planner(), messenger_fixed("feat: draft"))
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "a cancelled edit then Commit should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "a cancelled edit then Commit should succeed");
 
     assert_eq!(commit_count(dir.path()), before + 1, "the commit must land");
     assert_eq!(
@@ -401,8 +364,7 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
 /// stays staged.
 #[tokio::test]
 async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // One file, two change sites far enough apart that git emits two hunks.
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
@@ -437,15 +399,11 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("chore: stub"))
         },
     )
     .await
@@ -505,8 +463,7 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
 /// working tree ends clean.
 #[tokio::test]
 async fn commit_confirm_commits_every_batch() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     // One file per batch — batch 1 = alpha, batch 2 = beta.
     let plan = generator::BatchPlanOutput {
@@ -533,23 +490,15 @@ async fn commit_confirm_commits_every_batch() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("chore: stub"))
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "confirming every batch should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "confirming every batch should succeed");
 
     assert_eq!(
         commit_count(dir.path()),
@@ -577,8 +526,7 @@ async fn commit_confirm_commits_every_batch() {
 /// only the preview caller) fails here, where the per-call unit test cannot.
 #[tokio::test]
 async fn multi_file_batch_landed_line_shows_sigma_total() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     // One batch carrying both files — a genuine multi-file commit.
     let plan = generator::BatchPlanOutput {
@@ -603,16 +551,12 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display,
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: both"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("chore: both"))
         },
     )
     .await;
-    assert!(result.is_ok(), "multi-file batch should land: {:?}", result);
+    assert_ok(&result, "multi-file batch should land");
 
     let lines = buf.lines();
     assert!(
@@ -635,8 +579,7 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
 /// reports zero committed, and the declined hunk stays staged.
 #[tokio::test]
 async fn commit_confirm_abort_first_batch_commits_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
@@ -670,15 +613,11 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("chore: stub"))
         },
     )
     .await
