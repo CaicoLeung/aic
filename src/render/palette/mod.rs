@@ -230,8 +230,8 @@ pub fn failure() -> Style {
     Style::new().red().bold()
 }
 
-/// ⚠ glyph on attention headers and the "proposed commit:" frame —
-/// pending state, not an error.
+/// ⚠ glyph on attention headers, the `?` pending-confirmation marker (the
+/// commit preview's subject row, menu asks) — pending state, not an error.
 pub fn pending() -> Style {
     Style::new().yellow().bold()
 }

@@ -271,3 +271,22 @@ Second PTY-harness review pass, same day. Six fixes:
    the fallback ⚠ row front-loads its actionable half ("Regrouping
    deterministically — invalid batch plan (…)") because the frame's live
    rows truncate bare.
+
+## Amendment (2026-10-27): one `?`; yellow means attention, not work
+
+Third review pass — two palette-semantics fixes:
+
+1. **The preview drops its header row.** `commit_preview` used to stack two
+   ask-markers — `? proposed commit:` over `? <subject>` — while `?` also
+   marks menu asks. The subject row's single `?` carries the pending-ness
+   (body, footer, and the confirm menu around it supply the context), the
+   erase accounting drops a row, and the frame keeps the saved row in its
+   budget.
+2. **Active-work rows are glyph-only yellow.** The active step row, in-flight
+   sub-rows, and note rows painted glyph *and* label in `pending`
+   (yellow bold) — the loudest styling on screen reserved for transient
+   state, outshouting the durable record, and splitting yellow three ways
+   (work / ask / caution). Labels now render in `emphasis` (plain bold);
+   only the spinner glyph keeps the yellow. Yellow is left meaning "needs
+   your attention": the `?` pending/ask markers and the ⚠ rows. Motion
+   already says "working".
