@@ -540,6 +540,12 @@ pub(crate) mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        setup(dir.path());
+        dir
+    }
+
     /// The contract that replaced the hand-mirrored hint: every conflict state
     /// resolves to the exact command a user runs, derived from the single
     /// `RepoState` mapping (`finalize_invocation` for what aic runs,
@@ -657,8 +663,7 @@ pub(crate) mod tests {
 
     #[test]
     fn conflicted_files_classifies_content_conflict() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::git::tests::init_test_repo(dir.path());
+        let dir = with_repo(crate::git::tests::init_test_repo);
         make_content_conflict(dir.path());
 
         let git = Git::at(dir.path()).unwrap();

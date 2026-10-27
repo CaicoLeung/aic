@@ -440,6 +440,21 @@ pub fn assert_ok(result: &anyhow::Result<()>, msg: &str) {
     assert!(result.is_ok(), "{msg}: {result:?}");
 }
 
+/// Write `rel` with `contents`, stage it. The standard "workdir holds an
+/// unstaged change" opening; commit via [`commit_file`] when a base is needed.
+pub fn stage_file(dir: &Path, rel: &str, contents: &str) {
+    std::fs::write(dir.join(rel), contents).unwrap();
+    git_in(dir, &["add", rel]);
+}
+
+/// Write `rel` with `contents`, stage it, and commit with `msg` — the
+/// "establish a base commit" triple every split/hook test opens with.
+/// Binary contents: call `std::fs::write` + `git_in` twice as before.
+pub fn commit_file(dir: &Path, rel: &str, contents: &str, msg: &str) {
+    stage_file(dir, rel, contents);
+    git_in(dir, &["commit", "-m", msg]);
+}
+
 /// Assert the resolve hand-off wording captured in `buf`:
 ///   - the "not finalized" line exists and carries every `blocker` substring
 ///     (e.g. `"1 rejected"`, `"1 failed to resolve"`), and

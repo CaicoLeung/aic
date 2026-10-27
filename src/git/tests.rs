@@ -24,12 +24,17 @@ pub(crate) fn init_test_repo(dir: &Path) {
         .unwrap();
 }
 
+fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    dir
+}
+
 /// Core of the hunk-split feature: stage only some of a file's hunks via
 /// `git apply --cached`, then confirm the index holds exactly those hunks.
 #[test]
 fn stage_hunks_stages_only_selected_hunk() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     // A base with two change sites far enough apart that git emits two
     // separate hunks (>= ~6 unchanged lines between them).
@@ -69,8 +74,7 @@ fn stage_hunks_stages_only_selected_hunk() {
 
 #[test]
 fn run_git_delivers_stdin_and_captures_stdout() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
 
     // `git hash-object --stdin` hashes stdin and prints the object id to
@@ -84,8 +88,7 @@ fn run_git_delivers_stdin_and_captures_stdout() {
 
 #[test]
 fn run_git_applies_env() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
 
     // `git var GIT_AUTHOR_IDENT` honors GIT_AUTHOR_NAME from the
@@ -102,8 +105,7 @@ fn run_git_applies_env() {
 
 #[test]
 fn run_git_surfaces_git_stderr_on_failure() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
 
     // A well-formed patch for a file the index doesn't have: git refuses
@@ -135,8 +137,7 @@ fn run_git_surfaces_git_stderr_on_failure() {
 
 #[test]
 fn diff_workdir_returns_untracked_content() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     std::fs::write(dir.path().join("new_file.txt"), "new content\n").unwrap();
 
@@ -150,8 +151,7 @@ fn diff_workdir_returns_untracked_content() {
 
 #[test]
 fn diff_workdir_returns_modified_content() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "modified\n").unwrap();
 
@@ -165,8 +165,7 @@ fn diff_workdir_returns_modified_content() {
 
 #[test]
 fn diff_workdir_returns_deleted_content() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     std::fs::remove_file(dir.path().join("tracked.txt")).unwrap();
 
@@ -183,8 +182,7 @@ fn diff_workdir_returns_deleted_content() {
 /// NotFound for deleted files — breaking the whole unstaged-deletion flow.
 #[test]
 fn add_stages_working_tree_deletion() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     std::fs::remove_file(dir.path().join("tracked.txt")).unwrap();
 
@@ -210,8 +208,7 @@ fn add_stages_working_tree_deletion() {
 /// and the commit would report success while missing a file.
 #[test]
 fn add_rejects_untracked_absent_path() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     let git = Git::at(dir.path()).unwrap();
     let err = git
@@ -229,8 +226,7 @@ fn add_rejects_untracked_absent_path() {
 /// `Git::diff` after staging a removal.
 #[test]
 fn diff_returns_content_for_staged_deletion() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     {
         let repo = Repository::open(dir.path()).unwrap();
@@ -249,8 +245,7 @@ fn diff_returns_content_for_staged_deletion() {
 
 #[test]
 fn assert_commit_safe_blocks_mid_merge() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     crate::git::conflict::tests::make_content_conflict(dir.path());
 
     let git = Git::at(dir.path()).unwrap();
@@ -263,8 +258,7 @@ fn assert_commit_safe_blocks_mid_merge() {
 
 #[test]
 fn assert_commit_safe_blocks_staged_markers() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     // Repo state is Clean, but a staged file carries leftover markers.
     std::fs::write(
@@ -292,8 +286,7 @@ fn assert_commit_safe_blocks_staged_markers() {
 /// marker-laden blob ship; reading the index blob catches it.
 #[test]
 fn assert_commit_safe_scans_index_blob_not_worktree() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     // Stage a marker-laden version of a tracked file.
     std::fs::write(
@@ -349,8 +342,7 @@ pub(crate) fn install_hook(dir: &Path, name: &str, body: &str) {
 /// `Git::commit` shells out.
 #[test]
 fn commit_runs_pre_commit_and_commit_msg_hooks() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     // pre-commit drops a sentinel file — proves the hook executed.
     install_hook(dir.path(), "pre-commit", "echo ran > sentinel.txt");
@@ -409,8 +401,7 @@ fn commit_runs_pre_commit_and_commit_msg_hooks() {
 /// rather than slicing a fixed 7 chars ourselves.
 #[test]
 fn commit_returns_rev_parse_short_prefix() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
     let git = Git::at(dir.path()).unwrap();
@@ -433,8 +424,7 @@ fn commit_returns_rev_parse_short_prefix() {
 /// as commentary in interactive messages.
 #[test]
 fn commit_preserves_authored_body() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
     let git = Git::at(dir.path()).unwrap();
@@ -471,8 +461,7 @@ fn commit_preserves_authored_body() {
 /// refusal is reported, not swallowed.)
 #[test]
 fn commit_vetoed_by_hook_surfaces_stderr_and_lands_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     install_hook(
         dir.path(),
@@ -504,8 +493,7 @@ fn commit_vetoed_by_hook_surfaces_stderr_and_lands_nothing() {
 /// and the refusal carries git's own message.
 #[test]
 fn commit_refuses_when_nothing_staged() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
 
     let err = git
@@ -528,8 +516,7 @@ fn commit_refuses_when_nothing_staged() {
 /// hook-staged content *ships*.)
 #[test]
 fn commit_includes_hook_staged_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     // lint-staged-style: rewrite a file and stage it from the hook.
     install_hook(
@@ -562,8 +549,7 @@ fn commit_includes_hook_staged_changes() {
 /// file, and offers the recovery path instead of shipping silently.
 #[test]
 fn commit_reports_markers_staged_by_hook() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     install_hook(
         dir.path(),
@@ -603,8 +589,7 @@ fn commit_reports_markers_staged_by_hook() {
 /// empty string is a realistic input.
 #[test]
 fn commit_refuses_empty_message() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     std::fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
     let git = Git::at(dir.path()).unwrap();
@@ -634,8 +619,7 @@ fn commit_refuses_empty_message() {
 /// whole batch aborts. This is the splitting-a-file-into-a-module case.
 #[test]
 fn diff_workdir_returns_content_for_file_in_untracked_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
 
     // An untracked directory with a file inside — mirrors `src/e2e/`.
     let new_dir = dir.path().join("mymod");
@@ -670,8 +654,7 @@ fn diff_workdir_returns_content_for_file_in_untracked_dir() {
 /// preview footer and the ✓-line footer must agree.
 #[test]
 fn staged_and_committed_stats_match_the_landed_diff() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
 
     // New file with 3 lines, and a modified file: the seeded
@@ -705,8 +688,7 @@ fn staged_and_committed_stats_match_the_landed_diff() {
 /// the work the Run is about to plan, not the whole status.
 #[test]
 fn workdir_stats_counts_unstaged_churn_only() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
 
     // Stage an edit to the seeded tracked file, then edit it again in the
@@ -734,8 +716,7 @@ fn workdir_stats_counts_unstaged_churn_only() {
 /// is exactly such a root commit, seeded with `tracked.txt`.
 #[test]
 fn committed_stats_handles_root_commit_with_no_parent() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
 
     let stats = git.committed_stats(&["tracked.txt".to_string()]).unwrap();
@@ -780,8 +761,7 @@ fn staged_stats_treats_every_path_as_new_without_head() {
 /// the footer always accounts for every planned file.
 #[test]
 fn committed_stats_keeps_unmatched_path_at_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    init_test_repo(dir.path());
+    let dir = with_repo(init_test_repo);
     let git = Git::at(dir.path()).unwrap();
     // tracked.txt is the only file in HEAD; a path with no delta is kept.
     let stats = git

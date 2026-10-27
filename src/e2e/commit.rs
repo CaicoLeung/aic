@@ -234,9 +234,7 @@ async fn commit_splits_one_file_across_two_batches() {
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
     let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
     // Stub plan: split the single file's two hunks across two batches.
@@ -589,8 +587,7 @@ async fn commit_staged_files_in_one_commit() {
     // Modify a tracked file and stage it — the entry condition for the staged
     // single-commit path. A non-Rust file keeps this test focused on the
     // commit shape.
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -745,13 +742,10 @@ async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
     let dir = with_repo(gh::init_test_repo);
 
     // A second tracked file, so the staged set can mix both kinds.
-    std::fs::write(dir.path().join("other.txt"), "base\n").unwrap();
-    git_in(dir.path(), &["add", "other.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "other.txt", "base\n", "base");
 
     // Staged modification (tracked.txt) + staged deletion (other.txt).
-    std::fs::write(dir.path().join("tracked.txt"), "modified\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "modified\n");
     git_in(dir.path(), &["rm", "other.txt"]);
 
     let before = commit_count(dir.path());
@@ -801,9 +795,7 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
     let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
     let plan = generator::BatchPlanOutput {
@@ -926,9 +918,7 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
     let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
     // Simulate lint-staged: the pre-commit hook re-stages the full file, so a
@@ -1015,9 +1005,7 @@ async fn commit_splits_one_file_across_three_batches() {
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}b0\n{pad}c0\n");
     let changed = format!("a1\n{pad}b1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
     // Stub plan: split the single file's three hunks across three batches.
@@ -1086,9 +1074,7 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}b0\n");
     let changed = format!("a1\n{pad}b1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
     // One batch, TWO changes entries for the same file with disjoint hunks.
@@ -1147,9 +1133,7 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
 #[tokio::test]
 async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
     let dir = with_repo(gh::init_test_repo);
-    std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", "clean\n", "base");
     std::fs::write(
         dir.path().join("tracked.txt"),
         "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
@@ -1182,9 +1166,7 @@ async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
 #[tokio::test]
 async fn commit_run_no_redact_proceeds_past_the_gate() {
     let dir = with_repo(gh::init_test_repo);
-    std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", "clean\n", "base");
     std::fs::write(
         dir.path().join("tracked.txt"),
         "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
@@ -1214,15 +1196,12 @@ async fn commit_run_no_redact_proceeds_past_the_gate() {
 #[tokio::test]
 async fn commit_run_refuses_secret_in_staged_diff() {
     let dir = with_repo(gh::init_test_repo);
-    std::fs::write(dir.path().join("id_ed25519"), "placeholder\n").unwrap();
-    git_in(dir.path(), &["add", "id_ed25519"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-    std::fs::write(
-        dir.path().join("id_ed25519"),
+    commit_file(dir.path(), "id_ed25519", "placeholder\n", "base");
+    stage_file(
+        dir.path(),
+        "id_ed25519",
         "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
-    )
-    .unwrap();
-    git_in(dir.path(), &["add", "id_ed25519"]);
+    );
 
     let git = Git::at(dir.path()).unwrap();
     let err = commit_run(&git, deps(unreachable_planner(), unreachable_messenger()))

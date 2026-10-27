@@ -7,12 +7,18 @@ use git2::{DiffFormat, DiffLineType};
 use std::collections::HashMap;
 
 impl Git {
-    pub fn diff(&self, path: Option<&str>) -> anyhow::Result<String> {
-        let repo = &self.repo;
-        let head_tree = match repo.head() {
+    /// HEAD's tree, or `None` in a repo with no commits yet — every staged
+    /// path then counts as a new file.
+    fn head_tree(&self) -> anyhow::Result<Option<git2::Tree<'_>>> {
+        Ok(match self.repo.head() {
             Ok(r) => Some(r.peel_to_tree().context("failed to peel HEAD to tree")?),
             Err(_) => None,
-        };
+        })
+    }
+
+    pub fn diff(&self, path: Option<&str>) -> anyhow::Result<String> {
+        let repo = &self.repo;
+        let head_tree = self.head_tree()?;
 
         let mut opts = git2::DiffOptions::new();
         opts.include_untracked(true);
@@ -87,10 +93,7 @@ impl Git {
     /// what the next commit would land. Mirrors [`Git::diff`]'s head-less
     /// handling: with no HEAD, every staged path counts as a new file.
     pub fn staged_stats(&self, paths: &[String]) -> anyhow::Result<Vec<FileStats>> {
-        let head_tree = match self.repo.head() {
-            Ok(r) => Some(r.peel_to_tree().context("failed to peel HEAD to tree")?),
-            Err(_) => None,
-        };
+        let head_tree = self.head_tree()?;
         let mut opts = git2::DiffOptions::new();
         opts.include_untracked(true);
         let index = self.index()?;

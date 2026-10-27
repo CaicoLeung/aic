@@ -15,8 +15,7 @@ use super::common::*;
 async fn commit_confirm_abort_aborts_staged_single_commit() {
     let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -125,8 +124,7 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
 async fn commit_confirm_commit_commits_staged_single_commit() {
     let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
     let buf = BufferWrite::default();
@@ -191,8 +189,7 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
 async fn commit_confirm_regenerate_then_commit_lands_new_message() {
     let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
     let buf = BufferWrite::default();
@@ -253,12 +250,11 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
 async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
     let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(
-        dir.path().join("tracked.txt"),
+    stage_file(
+        dir.path(),
+        "tracked.txt",
         "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
-    )
-    .unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    );
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -295,8 +291,7 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
 async fn commit_confirm_edit_then_commit_lands_edited_message() {
     let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -332,8 +327,7 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
 async fn commit_confirm_edit_cancel_keeps_original_message() {
     let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -370,9 +364,7 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
     let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
     let plan = generator::BatchPlanOutput {
@@ -584,9 +576,7 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
     let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
     let plan = generator::BatchPlanOutput {
