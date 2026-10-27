@@ -249,9 +249,8 @@ fn legacy_config_path() -> Option<PathBuf> {
 
 impl Config {
     pub fn load() -> Result<Option<Self>> {
-        let path = match config_path() {
-            Some(p) => p,
-            None => return Ok(None),
+        let Some(path) = config_path() else {
+            return Ok(None);
         };
 
         if !path.exists() {
@@ -362,9 +361,8 @@ impl Config {
     /// Designed to be called once early in `main` on every invocation; the
     /// cost is a config read plus an exact fingerprint compare, negligible.
     pub fn migrate_if_stale() -> Result<Vec<String>> {
-        let mut config = match Self::load()? {
-            Some(c) => c,
-            None => return Ok(Vec::new()),
+        let Some(mut config) = Self::load()? else {
+            return Ok(Vec::new());
         };
         // Only migrate the active CLI backend's spec — a dormant CLI config
         // under `backend_kind = "api"` is none of our business until the user
@@ -372,18 +370,17 @@ impl Config {
         if config.backend_kind != Some(BackendKind::Cli) {
             return Ok(Vec::new());
         }
-        let command = match config.active_cli_command() {
-            Some(c) => c.to_string(),
-            None => return Ok(Vec::new()),
+        let Some(command) = config.active_cli_command() else {
+            return Ok(Vec::new());
         };
         let args = config
             .cli
             .args
             .clone()
             .unwrap_or_else(|| vec![crate::llm::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
-        let (name, new_args) = match crate::llm::cli_agent::cli_preset_migration(&command, &args) {
-            Some(m) => m,
-            None => return Ok(Vec::new()),
+        let Some((name, new_args)) = crate::llm::cli_agent::cli_preset_migration(command, &args)
+        else {
+            return Ok(Vec::new());
         };
         config.cli.args = Some(new_args);
         config.save()?;
@@ -420,13 +417,11 @@ impl Config {
     /// [`Self::migrate_if_stale`], so the file lands at its new path first and
     /// preset migration then runs on the relocated file.
     pub fn migrate_location() -> Result<Vec<String>> {
-        let new_path = match config_path() {
-            Some(p) => p,
-            None => return Ok(Vec::new()),
+        let Some(new_path) = config_path() else {
+            return Ok(Vec::new());
         };
-        let old_path = match legacy_config_path() {
-            Some(p) => p,
-            None => return Ok(Vec::new()),
+        let Some(old_path) = legacy_config_path() else {
+            return Ok(Vec::new());
         };
         // Same path (plain Linux, no XDG) — nothing to migrate.
         if old_path == new_path {

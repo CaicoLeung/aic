@@ -32,9 +32,8 @@ fn exe_is_in_cellar(exe: &std::path::Path) -> bool {
 /// replace the file behind Homebrew's back, desyncing `brew`'s recorded version
 /// and fighting `brew upgrade`. See `docs/adr/0001-self-update-homebrew-guard.md`.
 fn is_homebrew_install() -> bool {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
     };
     if exe_is_in_cellar(&exe) {
         return true;

@@ -530,10 +530,10 @@ impl Git {
             {
                 continue;
             }
-            let path = match entry.path() {
-                Ok(p) => p.to_string(),
-                Err(_) => continue,
+            let Ok(path) = entry.path() else {
+                continue;
             };
+            let path = path.to_string();
             // Stage-0 entry = the resolved/staged version. A conflicted repo is
             // already caught above, so any staged path here has a stage-0 entry.
             let Some(idx_entry) = index.get_path(Path::new(&path), 0) else {

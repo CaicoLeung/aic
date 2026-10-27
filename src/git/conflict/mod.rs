@@ -299,9 +299,8 @@ fn classify_worktree(repo: &Repository, path: &str) -> ConflictKind {
     let Some(workdir) = repo.workdir() else {
         return ConflictKind::Binary;
     };
-    let bytes = match fs::read(workdir.join(path)) {
-        Ok(b) => b,
-        Err(_) => return ConflictKind::DeleteModify,
+    let Ok(bytes) = fs::read(workdir.join(path)) else {
+        return ConflictKind::DeleteModify;
     };
     if bytes.contains(&0u8) {
         return ConflictKind::Binary;
