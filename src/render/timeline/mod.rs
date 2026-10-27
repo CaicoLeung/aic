@@ -250,8 +250,8 @@ pub fn format_duration(d: Duration) -> Option<String> {
 }
 
 /// The active step's live elapsed counter: integer seconds (`12s`), ADR 0018
-/// — coarser than [`format_duration`] because it ticks every frame, and
-/// joined to the row only once ≥ 1 s (a fast step never flashes `· 0s`).
+/// — coarser than [`format_duration`] because it ticks every frame. The
+/// join-at-≥1s rule lives in [`step_line`]; this only formats.
 pub fn format_elapsed(d: Duration) -> String {
     format!("{}s", d.as_secs())
 }
@@ -411,6 +411,18 @@ pub enum SubBody {
     Landed { hash: String, subject: String },
 }
 
+/// Clamp live-row text after its fixed chrome (ADR 0018's no-wrap
+/// contract): every live row spends the inset (4) plus its marker columns
+/// (`⠋ `, `✓` + space, `› `, `? `) before the text, and the painter's
+/// whole-frame repaint assumes one physical row per row — so the text
+/// clamps to `width − chrome` with `…` marking the cut. `width` is the
+/// budget the surface owns: frame rows the theme's prose width, sub-row
+/// callers the raw terminal width (flushed table rows budget to the real
+/// edge).
+pub(crate) fn clamp_row_text(text: &str, width: usize, chrome: usize) -> String {
+    clamp_to_width(text, width.saturating_sub(chrome))
+}
+
 /// One live sub-row at column 4 (ADR 0018): an in-flight label, a done row,
 /// or a landed-commit echo. No `[i/N]` numbering — rows land in happening
 /// order and every row of the step shares one shape: `⠋ Drafting f2.rs` /
@@ -425,12 +437,9 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
     match body {
         SubBody::InFlight(label) => {
             segs.push(styled("⠋ ", palette::pending()));
-            // Inset (4) + `⠋ ` (2) precede the label. Glyph-only yellow,
-            // matching the active step row.
-            segs.push(styled(
-                clamp_to_width(label, width.saturating_sub(6)),
-                palette::emphasis(),
-            ));
+            // Glyph-only yellow, matching the active step row; the text
+            // clamps to the no-wrap budget (inset 4 + `⠋ ` 2).
+            segs.push(styled(clamp_row_text(label, width, 6), palette::emphasis()));
         }
         SubBody::Done(text, duration) => {
             segs.push(styled("✓", palette::success()));
@@ -443,7 +452,7 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
                 None => 0,
             };
             // Inset (4) + `✓` (1) + the text's leading space (1).
-            let text = clamp_to_width(text, width.saturating_sub(6 + suffix));
+            let text = clamp_row_text(text, width, 6 + suffix);
             if !text.is_empty() {
                 segs.push(seg(format!(" {text}")));
             }
@@ -464,8 +473,7 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
             // no builder-side budget (prompt-capped at 72 chars, nothing
             // validates that). Clamping the plain subject before
             // `subject_segments` keeps the budget ANSI-blind.
-            let budget = width.saturating_sub(7 + display_width(hash));
-            let subject = clamp_to_width(subject, budget);
+            let subject = clamp_row_text(subject, width, 7 + display_width(hash));
             if !subject.is_empty() {
                 segs.push(seg(" "));
                 for (text, style) in palette::subject_segments(&subject) {
@@ -488,12 +496,11 @@ pub fn menu_rows(options: &[&str], selected: usize, theme: &Theme) -> (Vec<Strin
     // whole-frame repaint — options clamp to the theme's width (the
     // resolved prose width, always ≤ the raw terminal): inset (4) + the
     // cursor/indent column pair (2) precede every option.
-    let budget = theme.width.saturating_sub(6);
     let rows = options
         .iter()
         .enumerate()
         .map(|(i, opt)| {
-            let opt = clamp_to_width(opt, budget);
+            let opt = clamp_row_text(opt, theme.width, 6);
             if i == selected {
                 render(
                     &[
@@ -552,7 +559,7 @@ pub fn review_menu_rows(
 pub fn ask_row(question: &str, theme: &Theme) -> String {
     // Same no-wrap contract as `menu_rows`: inset (4) + `? ` (2) precede
     // the question.
-    let question = clamp_to_width(question, theme.width.saturating_sub(6));
+    let question = clamp_row_text(question, theme.width, 6);
     render(
         &[
             seg(MARGIN),
@@ -685,10 +692,36 @@ pub(crate) fn delta_suffix(stats: &[crate::git::FileStats]) -> String {
 
 /// One muted help row under a frame menu's options — the key hints the
 /// inquire fallback shows via `with_help_message`, so the frame path keeps
-/// parity (`↑/↓ select · Enter confirm · Esc or Ctrl-C aborts`).
+/// parity (`↑/↓ select · Enter confirm · Esc or Ctrl-C aborts`). Clamped
+/// like every other live row (inset 4 chrome) — a hint past the frame
+/// width would wrap and desync the whole-frame repaint.
 pub(crate) fn help_row(help: &str, theme: &Theme) -> String {
     render(
-        &[seg(MARGIN), seg(SUB_INDENT), styled(help, palette::muted())],
+        &[
+            seg(MARGIN),
+            seg(SUB_INDENT),
+            styled(clamp_row_text(help, theme.width, 4), palette::muted()),
+        ],
         theme,
     )
+}
+
+/// The full row set one frame menu paints per key read (ADR 0018): the
+/// optional ask row, the option rows ([`menu_rows`]), and the help row —
+/// exactly what `frame_menu` hands the painter each loop, so the built
+/// rows and the painted rows cannot drift (the original menu bug built
+/// rows every loop but never painted them; e2e's non-TTY buffer cannot
+/// see frame painting, so this assembly is the unit-testable seam).
+pub(crate) fn menu_frame_rows(
+    ask: Option<&str>,
+    options: &[&str],
+    selected: usize,
+    help: &str,
+    theme: &Theme,
+) -> Vec<String> {
+    let mut rows = ask.map(|q| vec![ask_row(q, theme)]).unwrap_or_default();
+    let (menu, _) = menu_rows(options, selected, theme);
+    rows.extend(menu);
+    rows.push(help_row(help, theme));
+    rows
 }

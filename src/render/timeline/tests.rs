@@ -509,3 +509,49 @@ fn delta_suffix_sums_and_survives_zero() {
     assert_eq!(delta_suffix(&[stats(3, 1), stats(5, 0)]), " · +8 −1");
     assert_eq!(delta_suffix(&[]), " · +0 −0");
 }
+
+/// `menu_frame_rows` is the single assembly `frame_menu` paints per key
+/// read (ADR 0018): the original menu bug built ask/options/help rows
+/// every loop but never handed them to the painter — every interactive
+/// menu rendered zero rows on a TTY. e2e's non-TTY buffer cannot see
+/// frame painting, so this pins the painted row set itself: the ask row
+/// leads, the `›` cursor marks the selection, the help row closes, and
+/// every row clamps to the frame width with `…` (the no-wrap contract).
+#[test]
+fn menu_frame_rows_compose_ask_options_and_help_in_order() {
+    let rows = menu_frame_rows(
+        Some("stage this hunk?"),
+        &["Commit", "Abort"],
+        0,
+        "↑/↓ select · Enter confirm · Esc aborts",
+        &THEME,
+    );
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert_eq!(rows[0], "    ? stage this hunk?");
+    assert_eq!(rows[1], "    › Commit");
+    assert_eq!(rows[2], "      Abort");
+    assert_eq!(rows[3], "    ↑/↓ select · Enter confirm · Esc aborts");
+}
+
+/// Without an ask the assembly is options + help only — the merge-pick
+/// prompts pass an ask, the confirm menu does not.
+#[test]
+fn menu_frame_rows_without_ask_skip_the_ask_row() {
+    let rows = menu_frame_rows(None, &["Commit", "Abort"], 1, "Esc aborts", &THEME);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows[0].contains("Commit") && !rows[0].contains('›'));
+    assert_eq!(rows[1], "    › Abort");
+}
+
+/// Every row of the assembly honors the no-wrap budget: at width 20 each
+/// row (ask, option, help) is at most 20 columns and the cut carries `…`.
+#[test]
+fn menu_frame_rows_clamp_every_row_to_the_frame_width() {
+    let long: String = "x".repeat(80);
+    let t = theme(20);
+    let rows = menu_frame_rows(Some(&long), &[&long], 0, &long, &t);
+    for row in &rows {
+        assert!(display_width(row) <= 20, "{row:?}");
+        assert!(row.ends_with('…'), "the cut must be marked: {row:?}");
+    }
+}

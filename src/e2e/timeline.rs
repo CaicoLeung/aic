@@ -351,7 +351,7 @@ async fn review_abort_shapes_the_failed_screen() {
 /// "Planned" verb as the happy path (the ⚠ caution row tells the fallback
 /// story) and the durable caution row rides under it.
 #[tokio::test]
-async fn invalid_plan_groups_deterministically_with_caution_row() {
+async fn invalid_plan_completes_with_planned_verb_and_caution_row() {
     let dir = tempfile::tempdir().unwrap();
     two_file_unstaged_repo(dir.path());
     // An empty plan is invalid (real work exists) → deterministic regrouping.

@@ -232,6 +232,13 @@ this amendment records both resolutions.
      column left). The pre-commit preview keeps its own (unfloored)
      geometry: it renders alone and is erased on confirm.
 
+   - **Σ on every footer.** The Σ total row renders unconditionally —
+     single-file entries included — so every footer of a Run carries the
+     same totals-first ratio bar; the σ column the shared grid always
+     reserved is now always drawn on (the old `> 1`-file gate left
+     single-file footers with no totals row while their σ column sat
+     blank). Grid geometry and the Run-wide counts floor are unchanged.
+
 ## Amendment (2026-10-27): menus paint; sub-rows and labels carry meaning
 
 Second PTY-harness review pass, same day. Six fixes:

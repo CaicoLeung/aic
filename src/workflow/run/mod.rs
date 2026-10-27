@@ -240,8 +240,9 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         // after it would land on a step the frame no longer renders.
         if let Some(err) = &fallback_err {
             // Outcome first: the row clamps at the text budget, so the
-            // actionable half ("regrouping deterministically") must lead —
-            // at 80 cols the prefix plus this suite's causes still fit whole.
+            // actionable half ("Regrouping deterministically") must lead —
+            // the e2e suite widens to 120 cols so its causes survive the
+            // clamp whole (at the default 80 the cause text is cut).
             frame.step_display(&display).warn(&format!(
                 "Regrouping deterministically — invalid batch plan ({err})"
             ));
