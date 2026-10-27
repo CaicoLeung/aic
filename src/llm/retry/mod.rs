@@ -218,6 +218,16 @@ mod tests {
         .await;
         (result, calls)
     }
+    fn assert_exhausted<T: std::fmt::Debug>(
+        result: Result<T, RetryError>,
+        msg: &str,
+        fatal_msg: &str,
+    ) -> RetryExhausted {
+        match result.expect_err(msg) {
+            RetryError::Exhausted(ex) => ex,
+            RetryError::Fatal(_) => panic!("{fatal_msg}"),
+        }
+    }
 
     // --- retry(): success after a retry ---
 
@@ -272,22 +282,19 @@ mod tests {
     async fn retry_exhausts_with_last_reason() {
         let (result, calls) =
             drive::<()>(|_| Err(RetryReason::Empty), RetryPolicy::transient()).await;
-        match result.expect_err("must give up after the retry budget") {
-            RetryError::Exhausted(RetryExhausted {
-                attempts,
-                last_reason,
-            }) => {
-                assert_eq!(
-                    attempts, 2,
-                    "exhaustion records the budget number of retries"
-                );
-                assert!(
-                    matches!(last_reason, RetryReason::Empty),
-                    "last_reason is the final retryable failure"
-                );
-            }
-            RetryError::Fatal(_) => panic!("budget-starved exhaustion must not be Fatal"),
-        }
+        let ex = assert_exhausted(
+            result,
+            "must give up after the retry budget",
+            "budget-starved exhaustion must not be Fatal",
+        );
+        assert_eq!(
+            ex.attempts, 2,
+            "exhaustion records the budget number of retries"
+        );
+        assert!(
+            matches!(ex.last_reason, RetryReason::Empty),
+            "last_reason is the final retryable failure"
+        );
         assert_eq!(
             calls, 3,
             "must stop after one first attempt plus the budget of retries"
@@ -316,16 +323,13 @@ mod tests {
     #[tokio::test]
     async fn once_policy_exhausts_after_single_retry() {
         let (result, calls) = drive::<()>(|_| Err(RetryReason::Markers), RetryPolicy::once()).await;
-        match result.expect_err("once() budget is 1") {
-            RetryError::Exhausted(RetryExhausted {
-                attempts,
-                last_reason,
-            }) => {
-                assert_eq!(attempts, 1);
-                assert!(matches!(last_reason, RetryReason::Markers));
-            }
-            RetryError::Fatal(_) => panic!("Markers is retryable, not Fatal"),
-        }
+        let ex = assert_exhausted(
+            result,
+            "once() budget is 1",
+            "Markers is retryable, not Fatal",
+        );
+        assert_eq!(ex.attempts, 1);
+        assert!(matches!(ex.last_reason, RetryReason::Markers));
         assert_eq!(calls, 2);
     }
 

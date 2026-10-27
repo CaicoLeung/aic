@@ -303,19 +303,11 @@ mod tests {
         // Every label is bound to a distinct choice — no positional coupling.
         let choices: Vec<_> = CONFIRM_ACTIONS.iter().map(|(_, c)| *c).collect();
         assert_eq!(choices.len(), 4);
-        assert_eq!(
-            choices
-                .iter()
-                .filter(|&&c| c == ConfirmChoice::Commit)
-                .count(),
-            1
-        );
-        assert_eq!(
-            choices
-                .iter()
-                .filter(|&&c| c == ConfirmChoice::Regenerate)
-                .count(),
-            1
-        );
+        for (i, c) in choices.iter().enumerate() {
+            assert!(
+                !choices[..i].contains(c),
+                "confirm choices must be distinct"
+            );
+        }
     }
 }

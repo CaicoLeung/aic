@@ -243,10 +243,6 @@ fn format_line(line: &git2::DiffLine, output: &mut String) {
 }
 
 fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {
-    if diff.deltas().len() == 0 {
-        return Ok(String::new());
-    }
-
     let mut output = String::new();
     diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
         format_line(&line, &mut output);
@@ -258,13 +254,6 @@ fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {
 }
 
 fn format_diff_for_path(diff: &git2::Diff, path: &str) -> anyhow::Result<String> {
-    let matched = diff
-        .deltas()
-        .any(|d| d.new_file().path().is_some_and(|p| p == Path::new(path)));
-    if !matched {
-        return Ok(String::new());
-    }
-
     let mut output = String::new();
     diff.print(DiffFormat::Patch, |delta, _hunk, line| {
         if delta.new_file().path().is_none_or(|p| p != Path::new(path)) {

@@ -67,18 +67,21 @@ async fn batch_review_abort_stages_nothing_and_commits_nothing() {
     .expect_err("aborting the Batch Review must abort the Run");
     err_contains(&err, &["aborted — no commit made"]);
 
+    assert_abort_untouched(&dir, before);
+}
+
+/// The abort contract both abort tests pin: no new commit, and the working
+/// tree left exactly as the Run found it (issue #157).
+fn assert_abort_untouched(dir: &tempfile::TempDir, before: usize) {
     assert_eq!(
         commit_count(dir.path()),
         before,
         "an aborted review must not create a commit"
     );
-    // Nothing staged, nothing committed: both changes stay unstaged exactly
-    // as the Run found them (issue #157's abort acceptance contract).
     assert_eq!(
         status_porcelain(dir.path()).trim_end(),
         " M alpha.txt\n M beta.txt",
-        "the working tree must be untouched, got: {:?}",
-        status_porcelain(dir.path())
+        "the working tree must be untouched"
     );
 }
 
@@ -138,16 +141,7 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
     .await
     .expect_err("aborting the single-Batch review must abort the Run");
     err_contains(&err, &["aborted — no commit made"]);
-    assert_eq!(
-        commit_count(dir.path()),
-        before,
-        "an aborted review must not create a commit"
-    );
-    assert_eq!(
-        status_porcelain(dir.path()).trim_end(),
-        " M alpha.txt\n M beta.txt",
-        "the working tree must be untouched"
-    );
+    assert_abort_untouched(&dir, before);
 }
 
 /// The review gate applies to whichever plan proceeds — the LLM's or the

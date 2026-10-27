@@ -26,17 +26,12 @@ use crate::render::display::Display;
 
 /// Stages one Batch at a time, tracking per-file which original hunk indices
 /// have already landed in earlier batches of the same Run.
+#[derive(Default)]
 pub struct Staging {
     /// Original (plan-time) hunk indices already committed per file. Storing
     /// original indices — never remapped positions — keeps the numbering the
     /// model saw stable for later batches.
     committed_hunks: HashMap<String, HashSet<usize>>,
-}
-
-impl Default for Staging {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Staging {
