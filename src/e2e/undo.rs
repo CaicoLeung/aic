@@ -18,24 +18,10 @@ async fn run_two_batches(dir: &tempfile::TempDir, a: &str, b: &str) -> String {
     std::fs::write(dir.path().join("a.txt"), a).unwrap();
     std::fs::write(dir.path().join("b.txt"), b).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "a.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "b.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add b".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("a.txt", &[1], "add a"),
+        plan_batch("b.txt", &[1], "add b"),
+    ]);
 
     commit_run(
         &git,
@@ -315,24 +301,10 @@ async fn partial_run_is_undoable_for_landed_batches() {
     std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
     std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "a.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "b.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add b".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("a.txt", &[1], "add a"),
+        plan_batch("b.txt", &[1], "add b"),
+    ]);
     // Drafts fan out concurrently (ADR 0014): both batches' messengers run
     // before any commit, so an error on the second draft surfaces after
     // batch 1 has committed — the partial-failure contract under test.

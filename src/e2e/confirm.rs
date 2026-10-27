@@ -367,24 +367,10 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
     commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
@@ -458,24 +444,10 @@ async fn commit_confirm_commits_every_batch() {
     let dir = with_repo(two_file_unstaged_repo);
 
     // One file per batch — batch 1 = alpha, batch 2 = beta.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
@@ -521,23 +493,12 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
     let dir = with_repo(two_file_unstaged_repo);
 
     // One batch carrying both files — a genuine multi-file commit.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                },
-            ],
-            reason: Some("both files together".into()),
-        }],
-    };
-    let git = Git::at(dir.path()).unwrap();
+    let plan = plan(vec![plan_multi_batch(
+        &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+        "both files together",
+    )]);
     let buf = BufferWrite::default();
+    let git = Git::at(dir.path()).unwrap();
     let display = Display::with(buf.clone());
 
     let result = commit_run(

@@ -255,8 +255,17 @@ mod tests {
     fn rejects_empty_batches() {
         let plan = BatchPlanOutput { batches: vec![] };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no batches"));
+        err_contains(&result, "no batches");
+    }
+
+    /// `is_err` + message-contains in one — the shape every rejection test
+    /// asserts. Panics with the full message so a mismatch is diagnosable.
+    fn err_contains(result: &anyhow::Result<()>, needle: &str) {
+        let msg = match result {
+            Ok(()) => panic!("expected an error containing {needle:?}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains(needle), "got: {msg}");
     }
 
     #[test]
@@ -268,8 +277,7 @@ mod tests {
             }],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no changes"));
+        err_contains(&result, "no changes");
     }
 
     #[test]
@@ -278,8 +286,7 @@ mod tests {
             batches: vec![batch(&[change("phantom.rs", &[])], "oops")],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown file"));
+        err_contains(&result, "unknown file");
     }
 
     #[test]
@@ -291,13 +298,7 @@ mod tests {
             ],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 2)]));
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("more than one batch")
-        );
+        err_contains(&result, "more than one batch");
     }
 
     #[test]
@@ -306,8 +307,7 @@ mod tests {
             batches: vec![batch(&[change("a.rs", &[5])], "oops")],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 2)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("only 2 hunk"));
+        err_contains(&result, "only 2 hunk");
     }
 
     #[test]
