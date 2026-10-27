@@ -6,11 +6,10 @@ use super::common::*;
 /// or the prompt.
 #[tokio::test]
 async fn resolve_clean_repo_is_a_noop() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
 
     let (resolver, seen) = resolver_recording();
     let prompt = prompt_queue(vec![]); // empty — must not be asked
-    let git = Git::at(dir.path()).unwrap();
 
     let result = resolve_run(&git, resolve_deps(resolver, prompt)).await;
     assert!(result.is_ok(), "clean repo should not error: {:?}", result);
@@ -26,10 +25,9 @@ async fn resolve_clean_repo_is_a_noop() {
 /// refusal path is a one-line test — a bail message naming the state, no
 /// Resolver call, and the repo left in its conflicted state.
 async fn assert_resolve_refused(setup: fn(&Path), label: &str) {
-    let dir = with_repo(setup);
+    let (dir, git) = with_git(setup);
 
     let (resolver, seen) = resolver_recording();
-    let git = Git::at(dir.path()).unwrap();
 
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
@@ -67,10 +65,9 @@ async fn resolve_refuses_am_state() {
 /// finalize. Repo ends clean, file holds the resolution, no markers remain.
 #[tokio::test]
 async fn resolve_full_flow_finalizes_merge() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let resolver = resolver_returning("merged\n");
-    let git = Git::at(dir.path()).unwrap();
 
     let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
     assert!(result.is_ok(), "happy path should succeed: {:?}", result);
@@ -85,14 +82,13 @@ async fn resolve_full_flow_finalizes_merge() {
 /// markers; the merge is *not* finalized (git's `--continue` would block).
 #[tokio::test]
 async fn resolve_partial_approval_keeps_approved_staged() {
-    let dir = with_repo(merge_two_conflicts);
+    let (dir, git) = with_git(merge_two_conflicts);
 
     let resolver = resolver_returning("merged\n");
     // Path-based approval so the verdict follows the file regardless of the
     // order `conflicted_files()` returns them in: approve tracked.txt, reject
     // second.txt. (A position-based queue would be order-dependent.)
     let prompt: Prompt = Box::new(|label: &str| Ok(label.contains("tracked.txt")));
-    let git = Git::at(dir.path()).unwrap();
 
     let result = resolve_run(&git, resolve_deps(resolver, prompt)).await;
     assert_ok(&result, "partial approval handoff should not error");
@@ -117,10 +113,9 @@ async fn resolve_partial_approval_keeps_approved_staged() {
 /// staged — partial progress is preserved (ADR 0005).
 #[tokio::test]
 async fn resolve_skips_binary_and_stages_text() {
-    let dir = with_repo(merge_text_and_binary);
+    let (dir, git) = with_git(merge_text_and_binary);
 
     let resolver = resolver_returning("merged\n");
-    let git = Git::at(dir.path()).unwrap();
 
     let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
     assert_ok(&result, "binary skip should hand off, not error");
@@ -147,11 +142,10 @@ async fn resolve_skips_binary_and_stages_text() {
 /// first call, clean content on the retry. The file is resolved + finalized.
 #[tokio::test]
 async fn resolve_retries_after_markers_then_succeeds() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let (resolver, calls) =
         resolver_then("<<<<<<< HEAD\nbad\n=======\nworse\n>>>>>>> x\n", "merged\n");
-    let git = Git::at(dir.path()).unwrap();
 
     let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
     assert_ok(&result, "retry-then-clean should succeed");
@@ -166,18 +160,14 @@ async fn resolve_retries_after_markers_then_succeeds() {
 /// "no files could be resolved" message.
 #[tokio::test]
 async fn resolve_gives_up_when_markers_persist() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let (resolver, calls) = resolver_always_markers();
-    let git = Git::at(dir.path()).unwrap();
 
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
         .expect_err("must bail when no file could be resolved");
-    assert!(
-        format!("{err:#}").contains("no files could be resolved"),
-        "expected give-up message, got: {err:#}"
-    );
+    err_contains(&err, "no files could be resolved");
     assert_eq!(*calls.lock(), 2, "one attempt + one retry");
     assert!(!is_clean(dir.path()), "merge must not be finalized");
     assert!(
@@ -193,13 +183,12 @@ async fn resolve_gives_up_when_markers_persist() {
 /// remain after retry". The retry-attempt error must not be masked.
 #[tokio::test]
 async fn resolve_reports_llm_error_when_retry_fails() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let (resolver, calls) = resolver_then_error(
         "<<<<<<< HEAD\nbad\n=======\nworse\n>>>>>>> x\n",
         "LLM unreachable on retry",
     );
-    let git = Git::at(dir.path()).unwrap();
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
@@ -212,10 +201,7 @@ async fn resolve_reports_llm_error_when_retry_fails() {
     )
     .await
     .expect_err("must bail when the only file's resolution fails");
-    assert!(
-        format!("{err:#}").contains("no files could be resolved"),
-        "expected bail, got: {err:#}"
-    );
+    err_contains(&err, "no files could be resolved");
     assert_eq!(*calls.lock(), 2, "one attempt + one retry");
 
     // The truthful reason: the retry failed, so markers do *not* remain.
@@ -425,10 +411,9 @@ async fn resolve_finalizes_revert_sequence() {
 /// resolution).
 #[tokio::test]
 async fn resolve_skips_delete_modify_conflict() {
-    let dir = with_repo(merge_delete_modify_conflict);
+    let (dir, git) = with_git(merge_delete_modify_conflict);
 
     let (resolver, seen) = resolver_recording();
-    let git = Git::at(dir.path()).unwrap();
 
     let files = git.conflict().conflicted_files().unwrap();
     assert_eq!(files.len(), 1);
@@ -438,10 +423,7 @@ async fn resolve_skips_delete_modify_conflict() {
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
         .expect_err("delete/modify has no resolvable file");
-    assert!(
-        format!("{err:#}").contains("no files could be resolved"),
-        "expected bail, got: {err:#}"
-    );
+    err_contains(&err, "no files could be resolved");
     assert!(
         seen.lock().is_empty(),
         "resolver must not run on a DeleteModify file"
@@ -455,10 +437,9 @@ async fn resolve_skips_delete_modify_conflict() {
 /// the oversized file.
 #[tokio::test]
 async fn resolve_skips_oversized_and_stages_text() {
-    let dir = with_repo(merge_oversized_and_text);
+    let (dir, git) = with_git(merge_oversized_and_text);
 
     let resolver = resolver_returning("merged\n");
-    let git = Git::at(dir.path()).unwrap();
 
     let result = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![true]))).await;
     assert_ok(&result, "oversized skip should hand off, not error");
@@ -489,18 +470,14 @@ async fn resolve_skips_oversized_and_stages_text() {
 /// not trigger the marker-retry path (only marker-laden `Ok` does).
 #[tokio::test]
 async fn resolve_llm_error_bails_when_only_file_fails() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let (resolver, calls) = resolver_error();
-    let git = Git::at(dir.path()).unwrap();
 
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
         .expect_err("must bail when the LLM call fails");
-    assert!(
-        format!("{err:#}").contains("no files could be resolved"),
-        "expected bail, got: {err:#}"
-    );
+    err_contains(&err, "no files could be resolved");
     assert_eq!(
         *calls.lock(),
         1,
@@ -522,7 +499,7 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
 /// three-way breakdown on a single line.
 #[tokio::test]
 async fn resolve_handoff_lists_all_three_blocker_kinds() {
-    let dir = with_repo(merge_mixed_blockers);
+    let (dir, git) = with_git(merge_mixed_blockers);
 
     // Fail exactly `third.txt` (its content carries the LLM_FAIL sentinel);
     // the other text files resolve to "merged\n".
@@ -530,7 +507,6 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
     // Approve tracked.txt, reject second.txt — path-based so it follows the
     // file regardless of the order conflicted_files() returns them in.
     let prompt: Prompt = Box::new(|label: &str| Ok(label.contains("tracked.txt")));
-    let git = Git::at(dir.path()).unwrap();
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
@@ -695,10 +671,9 @@ async fn resolve_no_redact_proceeds_past_the_gate() {
 /// machine can push a step over the 1 s duration threshold (`· Xs`).
 #[tokio::test]
 async fn resolve_appends_the_step_ledger() {
-    let dir = with_repo(merge_conflict);
+    let (_dir, git) = with_git(merge_conflict);
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
     let result = resolve_run(
         &git,
         ResolveDeps {
@@ -732,10 +707,9 @@ async fn resolve_appends_the_step_ledger() {
 /// resolve sibling of `no_redact_run_has_no_gate_step`).
 #[tokio::test]
 async fn resolve_no_redact_omits_the_gate_step() {
-    let dir = with_repo(merge_conflict);
+    let (_dir, git) = with_git(merge_conflict);
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
     let result = resolve_run(
         &git,
         ResolveDeps {
@@ -801,10 +775,7 @@ async fn resolve_redaction_refusal_shapes_the_failed_screen() {
         lines.iter().all(|l| !l.starts_with("  ✓ Resolve files")),
         "later steps never complete after a failure: {lines:?}"
     );
-    assert!(
-        format!("{err:#}").contains("secret-shaped"),
-        "the propagated error keeps its information: {err:#}"
-    );
+    err_contains(&err, "secret-shaped");
 }
 
 /// Persistent markers fail the Resolve step's screen (ADR 0018): the
@@ -813,10 +784,9 @@ async fn resolve_redaction_refusal_shapes_the_failed_screen() {
 /// ledger lines never appear.
 #[tokio::test]
 async fn resolve_failed_resolution_shapes_the_failed_screen() {
-    let dir = with_repo(merge_conflict);
+    let (_dir, git) = with_git(merge_conflict);
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
     let err = resolve_run(
         &git,
         ResolveDeps {
@@ -852,8 +822,5 @@ async fn resolve_failed_resolution_shapes_the_failed_screen() {
         lines.iter().all(|l| !l.starts_with("  ✓ Reviewed")),
         "later steps never complete after a failure: {lines:?}"
     );
-    assert!(
-        format!("{err:#}").contains("no files could be resolved"),
-        "the bail keeps its wording: {err:#}"
-    );
+    err_contains(&err, "no files could be resolved");
 }

@@ -1,6 +1,10 @@
 use super::*;
 use crate::render::markdown::LineKind;
 
+fn rows(ss: &[&str]) -> Vec<String> {
+    ss.iter().map(|s| s.to_string()).collect()
+}
+
 /// [`ThinkingView::push`] returns the current window: completed lines
 /// (blank ones dropped) in arrival order, oldest-first.
 #[test]
@@ -77,7 +81,7 @@ fn thinking_view_partial_counts_against_budget() {
 /// scrolls (the legacy behavior).
 #[test]
 fn frame_bytes_first_frame_paints_in_place() {
-    let (out, end_row) = frame_bytes(&["only".to_string()], 0, None, 24);
+    let (out, end_row) = frame_bytes(&rows(&["only"]), 0, None, 24);
     assert_eq!(out, format!("{HIDE}\r{CLR_LINE}only"));
     // the first frame never emits a newline: blank lines are unreclaimable.
     assert!(!out.contains('\n'), "first frame must not emit a newline");
@@ -92,7 +96,7 @@ fn frame_bytes_first_frame_paints_in_place() {
 /// write-all repaint fails here.
 #[test]
 fn frame_bytes_repaint_is_interleaved_clear_then_write() {
-    let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let rows = rows(&["a", "b", "c"]);
     let (out, end_row) = frame_bytes(&rows, 3, None, 24);
     // up to top (2 rows), then per row: CR + clear + write, descending.
     let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
@@ -110,7 +114,7 @@ fn frame_bytes_repaint_is_interleaved_clear_then_write() {
 /// cursor to the last live row, so a shrunken window leaves no ghosts.
 #[test]
 fn frame_bytes_shorter_frame_clears_stale_tail() {
-    let (out, end_row) = frame_bytes(&["a".to_string()], 3, None, 24);
+    let (out, end_row) = frame_bytes(&rows(&["a"]), 3, None, 24);
     let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}{UP}");
     assert_eq!(out, expected);
     assert_eq!(end_row, None);
@@ -120,7 +124,7 @@ fn frame_bytes_shorter_frame_clears_stale_tail() {
 /// each new row cleared then written in place as it appears.
 #[test]
 fn frame_bytes_taller_frame_descends_into_new_rows() {
-    let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let rows = rows(&["a", "b", "c"]);
     let (out, end_row) = frame_bytes(&rows, 1, None, 24);
     let expected = format!("\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
     assert_eq!(out, expected);
@@ -256,7 +260,7 @@ fn finish_leaves_no_blank_gap_above_next_output() {
 fn cursor_hidden_for_whole_stream_restored_only_at_finish() {
     // The first frame (prev_height 0) hides the cursor and never restores
     // it — the caret is gone for the entire stream.
-    let (first, _) = frame_bytes(&["only".to_string()], 0, None, 24);
+    let (first, _) = frame_bytes(&rows(&["only"]), 0, None, 24);
     assert!(first.starts_with(HIDE), "first frame must hide the cursor");
     assert!(
         !first.contains(SHOW),
@@ -265,7 +269,7 @@ fn cursor_hidden_for_whole_stream_restored_only_at_finish() {
 
     // A mid-stream repaint touches neither: the caret stays hidden, so its
     // position during the traversal can't smear across the repainted rows.
-    let (repaint, _) = frame_bytes(&["a".to_string(), "b".to_string()], 2, None, 24);
+    let (repaint, _) = frame_bytes(&rows(&["a", "b"]), 2, None, 24);
     assert!(
         !repaint.contains(HIDE) && !repaint.contains(SHOW),
         "a mid-stream repaint must not touch cursor visibility"
@@ -310,7 +314,7 @@ fn clear_frame_bytes_restores_cursor_for_zero_row_hidden_frame() {
 /// past the first, instead of collapsing.
 #[test]
 fn frame_bytes_scrolls_when_descending_past_bottom_margin() {
-    let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let rows = rows(&["a", "b", "c"]);
     let (out, end_row) = frame_bytes(&rows, 0, Some(24), 24);
     let expected = format!("{HIDE}\r{CLR_LINE}a\n\r{CLR_LINE}b\n\r{CLR_LINE}c");
     assert_eq!(out, expected);
@@ -328,7 +332,7 @@ fn frame_bytes_scrolls_when_descending_past_bottom_margin() {
 /// screen stays put and the cursor ends on the frame's bottom row.
 #[test]
 fn frame_bytes_fits_without_scroll_when_room_below() {
-    let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let rows = rows(&["a", "b", "c"]);
     let (out, end_row) = frame_bytes(&rows, 0, Some(10), 24);
     let expected = format!("{HIDE}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c");
     assert_eq!(out, expected);
@@ -340,12 +344,7 @@ fn frame_bytes_fits_without_scroll_when_room_below() {
 /// frame top, and the cursor reports the bottom row for the next paint.
 #[test]
 fn frame_bytes_growth_from_bottom_scrolls_once() {
-    let rows = vec![
-        "a".to_string(),
-        "b".to_string(),
-        "c".to_string(),
-        "d".to_string(),
-    ];
+    let rows = rows(&["a", "b", "c", "d"]);
     let (out, end_row) = frame_bytes(&rows, 3, Some(24), 24);
     let expected =
         format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}b{DOWN}\r{CLR_LINE}c\n\r{CLR_LINE}d");
@@ -358,7 +357,7 @@ fn frame_bytes_growth_from_bottom_scrolls_once() {
 /// lands on the correct — drifted — frame top.
 #[test]
 fn frame_bytes_shrink_after_scroll_clears_tail_and_reports_row() {
-    let (out, end_row) = frame_bytes(&["a".to_string()], 3, Some(24), 24);
+    let (out, end_row) = frame_bytes(&rows(&["a"]), 3, Some(24), 24);
     let expected = format!("{UP}{UP}\r{CLR_LINE}a{DOWN}\r{CLR_LINE}{DOWN}\r{CLR_LINE}{UP}{UP}");
     assert_eq!(out, expected);
     assert_eq!(end_row, Some(22));
@@ -481,16 +480,16 @@ fn thinking_view_partial_enters_at_running_fence_state() {
 /// didn't change the engine's contract.
 #[test]
 fn frame_bytes_repaints_whole_stack_of_timeline_and_window_rows() {
-    let rows: Vec<String> = vec![
-        "  ✓ Scanned 14 files".into(),
-        "  ✓ Redaction gate · clean".into(),
-        "  ⠋ Plan batches".into(),
-        "    │ ## Splitting decode changes".into(),
-        "    │ The hunk at line 40 shares context with…".into(),
-        String::new(),
-        "  · Draft messages".into(),
-        "  · Commit batches".into(),
-    ];
+    let rows = rows(&[
+        "  ✓ Scanned 14 files",
+        "  ✓ Redaction gate · clean",
+        "  ⠋ Plan batches",
+        "    │ ## Splitting decode changes",
+        "    │ The hunk at line 40 shares context with…",
+        "",
+        "  · Draft messages",
+        "  · Commit batches",
+    ]);
     let (bytes, end_row) = frame_bytes(&rows, 7, None, 24);
     let mut want = String::new();
     for _ in 0..6 {

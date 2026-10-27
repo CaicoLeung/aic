@@ -469,6 +469,22 @@ pub fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
     dir
 }
 
+/// [`with_repo`] plus the `Git` handle every resolve test opens next.
+pub fn with_git(setup: fn(&Path)) -> (tempfile::TempDir, Git) {
+    let dir = with_repo(setup);
+    let git = Git::at(dir.path()).unwrap();
+    (dir, git)
+}
+
+/// `assert!(format!("{err:#}").contains(needle))` with the formatted error in
+/// the panic message.
+pub fn err_contains(err: &anyhow::Error, needle: &str) {
+    assert!(
+        format!("{err:#}").contains(needle),
+        "error should contain {needle:?}: {err:#}"
+    );
+}
+
 /// `assert!(result.is_ok(), "{msg}: {result:?}")` without the 4-line spread.
 pub fn assert_ok(result: &anyhow::Result<()>, msg: &str) {
     assert!(result.is_ok(), "{msg}: {result:?}");
