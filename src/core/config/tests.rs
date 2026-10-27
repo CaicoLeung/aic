@@ -16,14 +16,24 @@ fn cfg(
     }
 }
 
+/// A Config whose only meaningful state is a CLI command plus the
+/// discriminator/key fields the switch paths manipulate.
+fn cli_cfg(kind: Option<BackendKind>, api_key: Option<&str>) -> Config {
+    Config {
+        backend_kind: kind,
+        api_key: api_key.map(str::to_string),
+        cli: CliConfig {
+            command: Some("claude".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 #[test]
 fn confirm_before_commit_defaults_off_and_respects_value() {
     assert!(!cfg("openai", None, None, None).confirm_before_commit());
     let on = Config {
-        backend: None,
-        api_key: None,
-        model: None,
-        base_url: None,
         confirm_before_commit: Some(true),
         ..Default::default()
     };
@@ -36,11 +46,6 @@ fn confirm_before_commit_defaults_off_and_respects_value() {
 fn review_batch_plan_defaults_off_and_respects_value() {
     assert!(!cfg("openai", None, None, None).review_batch_plan());
     let on = Config {
-        backend: None,
-        api_key: None,
-        model: None,
-        base_url: None,
-        confirm_before_commit: None,
         review_batch_plan: Some(true),
         ..Default::default()
     };
@@ -237,18 +242,13 @@ fn providers_bank_round_trips_through_toml() {
         api_key: Some("sk-live".into()),
         model: Some("gpt-5".into()),
         providers: vec![
-            ProviderProfile {
-                backend: "openai".into(),
-                api_key: Some("sk-live".into()),
-                model: Some("gpt-5".into()),
-                base_url: None,
-            },
-            ProviderProfile {
-                backend: "anthropic".into(),
-                api_key: Some("sk-ant".into()),
-                model: Some("claude-x".into()),
-                base_url: None,
-            },
+            ProviderProfile::new("openai", Some("sk-live".into()), Some("gpt-5".into()), None),
+            ProviderProfile::new(
+                "anthropic",
+                Some("sk-ant".into()),
+                Some("claude-x".into()),
+                None,
+            ),
         ],
         ..Default::default()
     };
@@ -586,14 +586,7 @@ fn resolve_backend_uses_discriminator_and_allows_dormant_fields() {
     assert_eq!(explicit_api.resolve_backend().unwrap(), BackendKind::Api);
 
     // Cli with a command resolves to Cli.
-    let cli = Config {
-        backend_kind: Some(BackendKind::Cli),
-        cli: CliConfig {
-            command: Some("claude".into()),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let cli = cli_cfg(Some(BackendKind::Cli), None);
     assert_eq!(cli.resolve_backend().unwrap(), BackendKind::Cli);
 
     // CLI selected but never configured — can't run.
@@ -611,30 +604,15 @@ fn resolve_backend_uses_discriminator_and_allows_dormant_fields() {
     // api_key kept from a previous switch resolves to Cli (api_key
     // dormant). Switching back restores them.
     assert_eq!(
-        Config {
-            backend_kind: Some(BackendKind::Api),
-            cli: CliConfig {
-                command: Some("claude".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .resolve_backend()
-        .unwrap(),
+        cli_cfg(Some(BackendKind::Api), None)
+            .resolve_backend()
+            .unwrap(),
         BackendKind::Api
     );
     assert_eq!(
-        Config {
-            backend_kind: Some(BackendKind::Cli),
-            cli: CliConfig {
-                command: Some("claude".into()),
-                ..Default::default()
-            },
-            api_key: Some("sk-x".into()),
-            ..Default::default()
-        }
-        .resolve_backend()
-        .unwrap(),
+        cli_cfg(Some(BackendKind::Cli), Some("sk-x"))
+            .resolve_backend()
+            .unwrap(),
         BackendKind::Cli
     );
 
@@ -643,18 +621,7 @@ fn resolve_backend_uses_discriminator_and_allows_dormant_fields() {
     // cannot lie about which Backend is active. A regression here would
     // silently reintroduce the invisible-mode confusion the discriminator
     // exists to fix.
-    assert!(
-        Config {
-            backend_kind: None,
-            cli: CliConfig {
-                command: Some("claude".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .resolve_backend()
-        .is_err()
-    );
+    assert!(cli_cfg(None, None).resolve_backend().is_err());
 }
 
 /// `CliConfig::to_spec` reads the stdout [`Encoding`] from the explicit

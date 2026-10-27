@@ -202,6 +202,33 @@ impl Step {
             ..Self::pending(label)
         }
     }
+
+    /// A completed step with the given summary headline (test construction).
+    #[cfg(test)]
+    pub(crate) fn completed(label: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            state: StepState::Completed,
+            summary: Some(summary.into()),
+            ..Self::pending(label)
+        }
+    }
+
+    /// A failed step with the given failure record (test construction).
+    #[cfg(test)]
+    pub(crate) fn failed(
+        label: impl Into<String>,
+        reason: impl Into<String>,
+        detail: Vec<String>,
+    ) -> Self {
+        Self {
+            state: StepState::Failed,
+            failure: Some(Failure {
+                reason: reason.into(),
+                detail,
+            }),
+            ..Self::pending(label)
+        }
+    }
 }
 
 /// Index of one Run Step in the timeline skeleton. Newtyped so a sub-row
@@ -268,6 +295,22 @@ fn completed_text(step: &Step) -> String {
     }
 }
 
+/// The failed step's headline: `label — reason`, or the bare label when the
+/// failure record is absent or its reason empty. Shared verbatim by the
+/// styled [`step_line`] path and the non-TTY [`plain_step_lines`] path.
+fn failed_headline(step: &Step) -> String {
+    let reason = step
+        .failure
+        .as_ref()
+        .map(|f| f.reason.as_str())
+        .unwrap_or_default();
+    if reason.is_empty() {
+        step.label.clone()
+    } else {
+        format!("{} — {reason}", step.label)
+    }
+}
+
 /// One step row (ADR 0018): `  <marker> <label>`, truncated never
 /// wrapped, no trailing spaces. All four states:
 ///
@@ -310,16 +353,7 @@ pub fn step_line(step: &Step, theme: &Theme) -> String {
             }
         }
         StepState::Failed => {
-            let reason = step
-                .failure
-                .as_ref()
-                .map(|f| f.reason.as_str())
-                .unwrap_or_default();
-            let headline = if reason.is_empty() {
-                step.label.clone()
-            } else {
-                format!("{} — {reason}", step.label)
-            };
+            let headline = failed_headline(step);
             segs.push(styled("✗ ", palette::failure()));
             segs.push(styled(headline, palette::failure()));
         }
@@ -596,16 +630,7 @@ pub fn plain_step_lines(step: &Step) -> Vec<String> {
         StepState::Pending | StepState::Active => Vec::new(),
         StepState::Completed => vec![format!("✓ {}", completed_text(step))],
         StepState::Failed => {
-            let reason = step
-                .failure
-                .as_ref()
-                .map(|f| f.reason.as_str())
-                .unwrap_or_default();
-            let headline = if reason.is_empty() {
-                step.label.clone()
-            } else {
-                format!("{} — {reason}", step.label)
-            };
+            let headline = failed_headline(step);
             let mut rows = vec![format!("✗ {headline}")];
             if let Some(f) = step.failure.as_ref() {
                 rows.extend(f.detail.iter().take(3).cloned());

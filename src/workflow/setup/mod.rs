@@ -101,17 +101,7 @@ fn show_screen(section: &str) -> Result<()> {
 // appears at the start of its menu row so items are scannable at a glance.
 // Marker vocabulary fixed by ADR 0018: a muted `·` section bullet for menu
 // rows, ✓/✗/⚠ for outcome rows — plain Unicode, no Nerd Font required.
-const ICON_PROVIDER: &str = "·";
-const ICON_API_KEY: &str = "·";
-const ICON_BASE_URL: &str = "·";
-const ICON_MODEL: &str = "·";
-const ICON_CONFIRM: &str = "·";
-const ICON_SAVE: &str = "·";
-const ICON_VERIFY: &str = "·";
-const ICON_DONE: &str = "·";
-const ICON_CLI: &str = "·";
-const ICON_BACKEND: &str = "·";
-const ICON_SELECT: &str = "·"; // "pick this" row marker
+const DOT: &str = "·"; // muted `·` section bullet for every menu row
 
 // Status markers for verify outcomes and the save line — same glyph family.
 const ICON_CHECK: &str = "✓";
@@ -320,8 +310,8 @@ enum ModeChoice {
 fn step_mode_choice() -> Result<ModeChoice> {
     show_screen("choose a backend")?;
     let items = vec![
-        format!("{ICON_PROVIDER} API provider — use an API key (OpenAI, Anthropic, Gemini, …)"),
-        format!("{ICON_CLI} CLI agent — reuse Claude Code / Codex / pi (no API key needed)"),
+        format!("{DOT} API provider — use an API key (OpenAI, Anthropic, Gemini, …)"),
+        format!("{DOT} CLI agent — reuse Claude Code / Codex / pi (no API key needed)"),
     ];
     Ok(match opt_nav("How should aic get its model?", &items, 0)? {
         OptNav::Value(0) => ModeChoice::Api,
@@ -341,8 +331,8 @@ fn step_mode_choice() -> Result<ModeChoice> {
 fn step_backend_choice(draft: &mut Draft) -> Result<bool> {
     show_screen("choose a backend")?;
     let items = vec![
-        format!("{ICON_PROVIDER} API provider — use an API key"),
-        format!("{ICON_CLI} CLI agent — reuse a coding-agent CLI (no API key)"),
+        format!("{DOT} API provider — use an API key"),
+        format!("{DOT} CLI agent — reuse a coding-agent CLI (no API key)"),
     ];
     let default = match draft.active_backend() {
         BackendKind::Api => 0,
@@ -405,19 +395,16 @@ fn cli_label(draft: &Draft) -> String {
 fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoice> {
     show_screen("main menu")?;
     let save_row = if dirty {
-        format!("{ICON_SAVE} Save & exit — unsaved changes")
+        format!("{DOT} Save & exit — unsaved changes")
     } else {
-        format!("{ICON_SAVE} Save & exit")
+        format!("{DOT} Save & exit")
     };
     let items = vec![
+        format!("{DOT} Backend — {}", draft.active_backend().display_name()),
+        format!("{DOT} AI provider — {}", provider_label(draft)),
+        format!("{DOT} CLI agent — {}", cli_label(draft)),
         format!(
-            "{ICON_BACKEND} Backend — {}",
-            draft.active_backend().display_name()
-        ),
-        format!("{ICON_PROVIDER} AI provider — {}", provider_label(draft)),
-        format!("{ICON_CLI} CLI agent — {}", cli_label(draft)),
-        format!(
-            "{ICON_CONFIRM} Confirm before commit — {}",
+            "{DOT} Confirm before commit — {}",
             yes_no(draft.confirm_before_commit)
         ),
         format!(

@@ -359,14 +359,7 @@ impl RunFrame {
     pub fn set_sub_row(&self, i: StepIdx, index: usize, body: &SubBody) {
         let mut st = self.0.lock().unwrap();
         let theme = st.theme();
-        // The raw terminal width — the budget a live row must fit.
-        // `sub_row` clamps its text to it, so no sub-row ever wraps to two
-        // physical rows (a wrapped live row would desync the painter's
-        // whole-frame repaint on every later tick).
-        let width = st
-            .paint
-            .as_ref()
-            .map_or_else(terminal_width, |p| p.raw_width);
+        let width = st.raw_width();
         let slots = &mut st.subs[i.0];
         while slots.len() < index {
             slots.push(None);
@@ -423,10 +416,7 @@ impl RunFrame {
             render(display);
             return;
         }
-        let width = st
-            .paint
-            .as_ref()
-            .map_or_else(terminal_width, |p| p.raw_width);
+        let width = st.raw_width();
         let sink = RowSink::default();
         let collected = Display::with_cols(sink.clone(), width);
         render(&collected);
@@ -578,6 +568,15 @@ impl FrameState {
             colors: self.paint.as_ref().is_some_and(|p| p.colors),
             width: self.paint.as_ref().map_or_else(terminal_width, |p| p.width),
         }
+    }
+
+    /// The raw terminal width — the budget a live row must fit (`sub_row`
+    /// clamps its text to it, so no sub-row ever wraps to two physical rows
+    /// and desyncs the painter's whole-frame repaint).
+    fn raw_width(&self) -> usize {
+        self.paint
+            .as_ref()
+            .map_or_else(terminal_width, |p| p.raw_width)
     }
 
     /// The active step's elapsed, excluding time spent at menus.

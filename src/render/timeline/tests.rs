@@ -42,9 +42,7 @@ fn step_line_active_carries_spinner_and_elapsed() {
 /// appends ` · 6.4s`; sub-second durations show nothing (ADR 0018).
 #[test]
 fn step_line_completed_shows_summary_and_duration_rule() {
-    let mut s = Step::pending("Plan batches");
-    s.state = StepState::Completed;
-    s.summary = Some("Planned 3 batches".into());
+    let mut s = Step::completed("Plan batches", "Planned 3 batches");
     s.duration = Some(Duration::from_millis(6400));
     assert_eq!(step_line(&s, &THEME), "  ✓ Planned 3 batches · 6.4s");
 
@@ -59,12 +57,7 @@ fn step_line_completed_shows_summary_and_duration_rule() {
 /// Failed marker is `✗`; the reason joins the label after ` — ` (ADR 0018).
 #[test]
 fn step_line_failed_joins_reason_after_em_dash() {
-    let mut s = Step::pending("Commit batches");
-    s.state = StepState::Failed;
-    s.failure = Some(Failure {
-        reason: "failed on batch 2 of 3".into(),
-        detail: vec![],
-    });
+    let s = Step::failed("Commit batches", "failed on batch 2 of 3", Vec::new());
     assert_eq!(
         step_line(&s, &THEME),
         "  ✗ Commit batches — failed on batch 2 of 3"
@@ -106,9 +99,7 @@ fn step_line_truncates_at_width_without_trailing_spaces() {
 /// output, one blank separator only when pending steps exist, then pending.
 #[test]
 fn timeline_frame_composes_completed_active_blank_pending() {
-    let mut scan = Step::pending("Scan changes");
-    scan.state = StepState::Completed;
-    scan.summary = Some("Scanned 14 files".into());
+    let scan = Step::completed("Scan changes", "Scanned 14 files");
 
     let mut plan = Step::active("Plan batches");
     plan.live_rows = vec!["    │ ## Splitting decode changes".into()];
@@ -144,21 +135,18 @@ fn timeline_frame_omits_separator_without_pending_steps() {
 /// as pending (ADR 0018).
 #[test]
 fn timeline_frame_failed_step_hides_all_later_steps() {
-    let mut scan = Step::pending("Scan changes");
-    scan.state = StepState::Completed;
-    scan.summary = Some("Scanned 14 files".into());
+    let scan = Step::completed("Scan changes", "Scanned 14 files");
 
-    let mut gate = Step::pending("Redaction gate");
-    gate.state = StepState::Failed;
-    gate.failure = Some(Failure {
-        reason: "secret-like content detected".into(),
-        detail: vec![
+    let gate = Step::failed(
+        "Redaction gate",
+        "secret-like content detected",
+        vec![
             "src/render/config.rs: hunk 2 looks like an API key; use --no-redact to bypass".into(),
             "row 2".into(),
             "row 3".into(),
             "row 4 must be dropped".into(),
         ],
-    });
+    );
     let plan = Step::pending("Plan batches");
     assert_eq!(
         timeline_frame(&[scan, gate, plan], &THEME),
@@ -177,9 +165,7 @@ fn timeline_frame_failed_step_hides_all_later_steps() {
 /// trailing blank when the block ends the frame.
 #[test]
 fn timeline_frame_durable_block_gets_one_blank_before_next_step() {
-    let mut commit = Step::pending("Commit batches");
-    commit.state = StepState::Completed;
-    commit.summary = Some("Committed 1 batch".into());
+    let mut commit = Step::completed("Commit batches", "Committed 1 batch");
     commit.durable_rows = vec!["    ✓ a1b2c3d feat: thing".into()];
 
     let tail = Step::pending("Nothing");
@@ -438,18 +424,15 @@ fn plain_step_lines_print_only_completed_and_failed() {
     assert!(plain_step_lines(&Step::pending("Draft messages")).is_empty());
     assert!(plain_step_lines(&Step::active("Plan batches")).is_empty());
 
-    let mut done = Step::pending("Plan batches");
-    done.state = StepState::Completed;
-    done.summary = Some("Planned 3 batches".into());
+    let mut done = Step::completed("Plan batches", "Planned 3 batches");
     done.duration = Some(Duration::from_millis(6400));
     assert_eq!(plain_step_lines(&done), vec!["✓ Planned 3 batches · 6.4s"]);
 
-    let mut failed = Step::pending("Commit batches");
-    failed.state = StepState::Failed;
-    failed.failure = Some(Failure {
-        reason: "aborted on batch 2 of 3".into(),
-        detail: vec!["declined".into(), "1 batch committed; re-run aic".into()],
-    });
+    let failed = Step::failed(
+        "Commit batches",
+        "aborted on batch 2 of 3",
+        vec!["declined".into(), "1 batch committed; re-run aic".into()],
+    );
     assert_eq!(
         plain_step_lines(&failed),
         vec![

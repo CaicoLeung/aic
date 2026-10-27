@@ -290,13 +290,13 @@ fn submenu_labels_show_effective_value() {
             ProviderEntry::Done
         ]
     );
-    assert_eq!(labels[0], format!("{ICON_API_KEY} API key — ••••••"));
-    assert_eq!(labels[1], format!("{ICON_MODEL} Model — deepseek-v4-pro"));
+    assert_eq!(labels[0], format!("{DOT} API key — ••••••"));
+    assert_eq!(labels[1], format!("{DOT} Model — deepseek-v4-pro"));
     assert_eq!(
         labels[2],
-        format!("{ICON_VERIFY} Verify — test this provider with a sample request")
+        format!("{DOT} Verify — test this provider with a sample request")
     );
-    assert_eq!(labels[3], format!("{ICON_DONE} Done — back to main menu"));
+    assert_eq!(labels[3], format!("{DOT} Done — back to main menu"));
 }
 
 #[test]
@@ -321,20 +321,20 @@ fn provider_choice_label_shows_chosen_model_for_selected_provider() {
     d.model = Some("deepseek-v4-pro".into());
     assert_eq!(
         provider_choice_label(Provider::DeepSeek, &d),
-        format!("{ICON_SELECT} DeepSeek  (deepseek-v4-pro)")
+        format!("{DOT} DeepSeek  (deepseek-v4-pro)")
     );
 
     // Other providers still show their default for comparison.
     assert_eq!(
         provider_choice_label(Provider::OpenAI, &d),
-        format!("{ICON_SELECT} OpenAI  (gpt-5-mini)")
+        format!("{DOT} OpenAI  (gpt-5-mini)")
     );
 
     // No chosen model -> the provider default for the selected provider.
     let d = draft(Some(Provider::DeepSeek), None, None, None);
     assert_eq!(
         provider_choice_label(Provider::DeepSeek, &d),
-        format!("{ICON_SELECT} DeepSeek  (deepseek-v4-flash)")
+        format!("{DOT} DeepSeek  (deepseek-v4-flash)")
     );
 
     // Selected provider with no default and a chosen model -> chosen model.
@@ -342,14 +342,14 @@ fn provider_choice_label_shows_chosen_model_for_selected_provider() {
     d.model = Some("meta-llama/llama-4-scout".into());
     assert_eq!(
         provider_choice_label(Provider::OpenRouter, &d),
-        format!("{ICON_SELECT} OpenRouter  (meta-llama/llama-4-scout)")
+        format!("{DOT} OpenRouter  (meta-llama/llama-4-scout)")
     );
 
     // Selected provider with no default and no chosen model -> the hint.
     let d = draft(Some(Provider::OpenRouter), None, None, None);
     assert_eq!(
         provider_choice_label(Provider::OpenRouter, &d),
-        format!("{ICON_SELECT} OpenRouter  (no default — you'll pick a model)")
+        format!("{DOT} OpenRouter  (no default — you'll pick a model)")
     );
 }
 

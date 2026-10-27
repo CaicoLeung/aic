@@ -74,9 +74,9 @@ impl CliRow {
     /// The text shown for this row in the [`opt_nav`] menu.
     fn label(&self) -> String {
         match self {
-            CliRow::Preset(name) => format!("{ICON_SELECT} {name}"),
-            CliRow::Verify => format!("{ICON_VERIFY} Verify (probe the CLI now)"),
-            CliRow::Done => format!("{ICON_DONE} Done — back to main menu"),
+            CliRow::Preset(name) => format!("{DOT} {name}"),
+            CliRow::Verify => format!("{DOT} Verify (probe the CLI now)"),
+            CliRow::Done => format!("{DOT} Done — back to main menu"),
         }
     }
 }

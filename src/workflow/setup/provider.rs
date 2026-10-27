@@ -76,12 +76,9 @@ fn preview_model(p: Provider, draft: &Draft) -> String {
 pub(super) fn provider_choice_label(p: Provider, draft: &Draft) -> String {
     let model = preview_model(p, draft);
     if model.is_empty() {
-        format!(
-            "{ICON_SELECT} {}  (no default — you'll pick a model)",
-            p.display()
-        )
+        format!("{DOT} {}  (no default — you'll pick a model)", p.display())
     } else {
-        format!("{ICON_SELECT} {}  ({model})", p.display())
+        format!("{DOT} {}  ({model})", p.display())
     }
 }
 /// A configurable field inside the AI-provider sub-menu.
@@ -141,14 +138,14 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
                 // seeded config value).
                 let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
                 entries.push(ProviderEntry::ApiKey);
-                labels.push(format!("{ICON_API_KEY} API key — {}", api_key_label(&key)));
+                labels.push(format!("{DOT} API key — {}", api_key_label(&key)));
             }
             Step::BaseUrl => {
                 let (url, source) =
                     resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
                 entries.push(ProviderEntry::BaseUrl);
                 labels.push(format!(
-                    "{ICON_BASE_URL} Base URL — {}",
+                    "{DOT} Base URL — {}",
                     base_url_label(url.as_deref(), source)
                 ));
             }
@@ -158,19 +155,16 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
                     p.default_model(),
                 );
                 entries.push(ProviderEntry::Model);
-                labels.push(format!(
-                    "{ICON_MODEL} Model — {}",
-                    model_label(&model, source)
-                ));
+                labels.push(format!("{DOT} Model — {}", model_label(&model, source)));
             }
         }
     }
     entries.push(ProviderEntry::Verify);
     labels.push(format!(
-        "{ICON_VERIFY} Verify — test this provider with a sample request"
+        "{DOT} Verify — test this provider with a sample request"
     ));
     entries.push(ProviderEntry::Done);
-    labels.push(format!("{ICON_DONE} Done — back to main menu"));
+    labels.push(format!("{DOT} Done — back to main menu"));
     (entries, labels)
 }
 /// Walk the provider-scoped path (Provider → key → base URL → model) until it
@@ -301,11 +295,11 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
                 vec![
                     format!("{ICON_CHECK} Keep current key ({})", mask_key(&key)),
                     format!("{ICON_PENCIL}  Enter a new key…"),
-                    format!("{ICON_SELECT} No API key (keyless server)"),
+                    format!("{DOT} No API key (keyless server)"),
                 ]
             } else {
                 vec![
-                    format!("{ICON_SELECT} No API key (keyless server)"),
+                    format!("{DOT} No API key (keyless server)"),
                     format!("{ICON_PENCIL}  Enter API key…"),
                 ]
             };
@@ -386,12 +380,12 @@ fn step_base_url(
             let items: Vec<String> = if has_url {
                 vec![
                     format!("{ICON_CHECK} Keep current URL ({current})"),
-                    format!("{ICON_SELECT} Use default ({default})"),
+                    format!("{DOT} Use default ({default})"),
                     format!("{ICON_PENCIL}  Enter custom URL…"),
                 ]
             } else {
                 vec![
-                    format!("{ICON_SELECT} Use default ({default})"),
+                    format!("{DOT} Use default ({default})"),
                     format!("{ICON_PENCIL}  Enter custom URL…"),
                 ]
             };
@@ -460,10 +454,7 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         ));
     }
 
-    let mut items: Vec<String> = models
-        .iter()
-        .map(|m| format!("{ICON_SELECT} {m}"))
-        .collect();
+    let mut items: Vec<String> = models.iter().map(|m| format!("{DOT} {m}")).collect();
     items.push(format!("{ICON_PENCIL}  Custom model…"));
     let custom_idx = items.len() - 1;
     let highlight = initial
