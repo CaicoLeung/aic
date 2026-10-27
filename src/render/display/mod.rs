@@ -616,35 +616,32 @@ impl Display {
     }
     /// Pre-commit confirmation preview (issue #78): the exact message that
     /// would be committed, framed as *pending* so it can't be mistaken for the
-    /// ✓ lines of already-landed batches — a yellow `?` marker on the header
-    /// and subject (the subject keeps its conventional-commit coloring, so the
-    /// draft previews the exact styling the ✓ line will use), gray body, and
-    /// the file-stats footer ([`Display::emit_file_stats`]). The preview's
-    /// own prefix rule: body hangs under the subject's message start (the
-    /// `? ` marker is the whole prefix, so 2 cols); the footer has no ref
-    /// line to key on, so its counts anchor at the margin — nudged 2 cols
-    /// right when the Σ row is present, so the glyph still lands under the
-    /// `?` — and names pin to the message start.
+    /// ✓ lines of already-landed batches — a single yellow `?` marker on the
+    /// subject row (the subject keeps its conventional-commit coloring, so
+    /// the draft previews the exact styling the ✓ line will use; no header
+    /// row — one `?` carries the pending-ness and the saved row stays in the
+    /// frame budget), gray body, and the file-stats footer
+    /// ([`Display::emit_file_stats`]). The preview's own prefix rule: body
+    /// hangs under the subject's message start (the `? ` marker is the whole
+    /// prefix, so 2 cols); the footer has no ref line to key on, so its
+    /// counts anchor at the margin — nudged 2 cols right when the Σ row is
+    /// present, so the glyph still lands under the `?` — and names pin to
+    /// the message start.
     ///
     /// Returns how many rows the preview occupies, so the caller can erase it
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
     /// a confirmed draft never lingers on screen.
     pub fn commit_preview(&self, message: &str, body: Option<&str>, stats: &[FileStats]) -> usize {
         let pending = palette::pending();
-        self.emit(&format!(
-            "{} {}",
-            self.styled("?", pending.clone()),
-            self.styled("proposed commit:", pending.clone())
-        ));
         // The preview rides the live frame, where a wrapped row would
         // desync the whole-frame repaint — same clamp as the landed entry.
         let budget = resolve_cols(self.cols).saturating_sub(LEFT_MARGIN + 2);
         self.emit(&format!(
             "{} {}",
-            self.styled("?", pending.clone()),
+            self.styled("?", pending),
             self.styled_subject(&clamp_to_width(message, budget))
         ));
-        let mut rows = 2;
+        let mut rows = 1;
         // `? ` — the preview subject's marker prefix: body hangs under the
         // message start (2 cols); the footer anchors its counts at the
         // margin (no ref line) — nudged 2 right on multi-file footers so

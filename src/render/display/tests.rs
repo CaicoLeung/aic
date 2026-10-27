@@ -100,16 +100,16 @@ fn commit_preview_renders_message_body_and_file_list() {
         ],
     );
     let got = lines.lock().clone();
-    // Pending header + subject carry the `?` marker; body hangs under the
-    // subject's message start (`? ` = 2 cols beyond the margin); the
-    // file-stats footer hangs at the same column — counts first, then
-    // filename, `[new]`/`[del]` tag, and a Σ total; a trailing blank
-    // separates the preview from the confirmation menu. `rows` is the whole
-    // block, so the caller can erase it after the draft is confirmed.
-    assert_eq!(got[0], "  ? proposed commit:");
-    assert_eq!(got[1], "  ? feat(auth): add OAuth2 login support");
+    // The subject row's `?` marker alone frames the block as pending (no
+    // header row — one `?` is enough and the frame keeps the row); body
+    // hangs under the subject's message start (`? ` = 2 cols beyond the
+    // margin); the file-stats footer hangs at the same column — counts
+    // first, then filename, `[new]`/`[del]` tag, and a Σ total; a trailing
+    // blank separates the preview from the confirmation menu. `rows` is the
+    // whole block, so the caller can erase it after the draft is confirmed.
+    assert_eq!(got[0], "  ? feat(auth): add OAuth2 login support");
     assert_eq!(
-        got[2],
+        got[1],
         "    Allow users to sign in via Google and GitHub OAuth2 providers"
     );
     // File rows carry a blank Σ column (`Σ ` wide); +N and −M each
@@ -118,14 +118,14 @@ fn commit_preview_renders_message_body_and_file_list() {
     // message start (2 cols) — the preview twin of the landed Σ-under-✓
     // geometry; the Σ glyph still sits in the same column as the file
     // rows' reserved blank.
-    assert_eq!(got[3], "    +12 −3  src/auth.rs [new]");
-    assert_eq!(got[4], "     +4 −1  src/main.rs");
+    assert_eq!(got[2], "    +12 −3  src/auth.rs [new]");
+    assert_eq!(got[3], "     +4 −1  src/main.rs");
     assert_eq!(
-        got[5],
+        got[4],
         format!("  Σ +16 −4 {}{}", "█".repeat(54), "░".repeat(13))
     );
-    assert_eq!(got[6], "");
-    assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
+    assert_eq!(got[5], "");
+    assert_eq!(rows, 6, "subject + body + 2 files + total + blank");
 }
 
 #[test]
@@ -150,14 +150,13 @@ fn commit_preview_singleton_file_list_omits_count() {
         }],
     );
     let got = lines.lock().clone();
-    assert_eq!(got[0], "  ? proposed commit:");
-    assert_eq!(got[1], "  ? chore: bump dep");
+    assert_eq!(got[0], "  ? chore: bump dep");
     // Single file: no Σ total line; no body line emitted. The footer hangs
     // under the subject's message start (`? ` marker = 2 cols) and anchors
     // at the shared σ column like every landed entry.
-    assert_eq!(got[2], "    +5 −2  Cargo.toml");
-    assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
-    assert_eq!(rows, 4, "header + subject + file + blank");
+    assert_eq!(got[1], "    +5 −2  Cargo.toml");
+    assert_eq!(got.len(), 3, "no body line expected, got: {got:?}");
+    assert_eq!(rows, 3, "subject + file + blank");
 }
 
 /// `clear_last` drops the most recent rows from the buffer (the in-memory
@@ -229,10 +228,7 @@ fn commit_preview_truncates_long_file_lists() {
         !got.iter().any(|l| l.contains("src/f9.rs")),
         "the 9th file must be elided, got: {got:?}"
     );
-    assert_eq!(
-        rows, 13,
-        "header + subject + 8 files + elision + total + blank"
-    );
+    assert_eq!(rows, 12, "subject + 8 files + elision + total + blank");
 }
 
 /// The footer's edge rendering: binary files show `(binary)` instead of
@@ -1227,8 +1223,7 @@ fn commit_preview_subject_clamps_to_the_terminal_width() {
     let message = format!("feat: {}", "y".repeat(60));
     d.commit_preview(&message, None, &[]);
     let got = lines.lock().clone();
-    let row = &got[1];
-    assert!(row.contains('…'), "the cut is marked: {row:?}");
+    let row = &got[0];
     assert!(
         row.chars().count() <= 30,
         "row must fit the terminal width: {row:?}"

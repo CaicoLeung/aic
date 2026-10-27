@@ -168,10 +168,11 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
     );
     assert!(worktree_is_empty(dir.path()), "working tree must be clean");
 
-    // The confirmed draft is erased — no residue next to the ✓ line.
+    // The confirmed draft is erased — no residue next to the ✓ line: a
+    // lingering draft would still carry its `? ` pending marker.
     let lines = buf.lines();
     assert!(
-        !lines.iter().any(|l| l.contains("proposed commit:")),
+        !lines.iter().any(|l| l.starts_with("  ? ")),
         "a confirmed draft must not linger, got: {lines:?}"
     );
     // The post-commit line is what remains — with the file-stats footer
@@ -237,10 +238,10 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
     // Each draft got its own preview (the messenger ran twice) and each was
     // erased once superseded or confirmed — only the landed ✓ line remains
     // (its subject legitimately contains the second-draft text; a lingering
-    // draft would still carry the "proposed commit:" header).
+    // draft would still carry its `? ` pending marker).
     let lines = buf.lines();
     assert!(
-        !lines.iter().any(|l| l.contains("proposed commit:")),
+        !lines.iter().any(|l| l.starts_with("  ? ")),
         "no draft may linger after the run, got: {lines:?}"
     );
     assert!(
