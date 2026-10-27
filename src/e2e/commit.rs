@@ -357,19 +357,10 @@ async fn commit_batches_two_files_into_one_commit() {
 
     // Stub plan: one batch carrying both files — one commit for the pair.
     let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                },
-            ],
-            reason: Some("change both".into()),
-        }],
+        batches: vec![plan_multi_batch(
+            &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+            "change both",
+        )],
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -1015,19 +1006,10 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
     // `validate_batch_plan` accepts this (no duplicate hunk); the workflow
     // must treat it as one logical unit.
     let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                },
-            ],
-            reason: Some("both edits".into()),
-        }],
+        batches: vec![plan_multi_batch(
+            &[("tracked.txt", &[1]), ("tracked.txt", &[2])],
+            "both edits",
+        )],
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();

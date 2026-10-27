@@ -243,6 +243,20 @@ pub fn plan_batch(file: &str, hunks: &[usize], reason: &str) -> generator::Batch
     }
 }
 
+/// One multi-file batch: `files` as (file, hunks) pairs sharing one `reason`.
+pub fn plan_multi_batch(files: &[(&str, &[usize])], reason: &str) -> generator::BatchPlanBatch {
+    generator::BatchPlanBatch {
+        changes: files
+            .iter()
+            .map(|&(file, hunks)| generator::BatchChange {
+                file: file.to_string(),
+                hunks: hunks.to_vec(),
+            })
+            .collect(),
+        reason: Some(reason.to_string()),
+    }
+}
+
 /// Messenger that succeeds for the first `ok_for` calls then errors, with a
 /// call counter. Drives the partial-failure path: an early batch commits, then
 /// a later batch's message step fails mid-loop.

@@ -146,19 +146,10 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
     let git = Git::at(dir.path()).unwrap();
 
     let one_batch = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                },
-            ],
-            reason: Some("everything".to_string()),
-        }],
+        batches: vec![plan_multi_batch(
+            &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+            "everything",
+        )],
     };
     let err = commit_run(
         &git,
