@@ -272,8 +272,11 @@ fn completed_text(step: &Step) -> String {
 /// wrapped, no trailing spaces. All four states:
 ///
 /// - pending — `·` muted marker + muted label;
-/// - active — `⠋` pending marker + pending label + optional ` · <n>s` elapsed
-///   detail in `neutral_gray`;
+/// - active — `⠋` pending marker + default-fg bold label + optional
+///   ` · <n>s` elapsed detail in `neutral_gray`. The glyph alone carries
+///   the yellow: a whole yellow-bold row would be the loudest thing on
+///   the screen, outshouting the durable record (motion already says
+///   "working"); yellow stays reserved for "needs your attention".
 /// - completed — `✓` success marker, default-fg summary, `neutral_gray` detail;
 /// - failed — `✗` failure marker + `label — reason` headline in `failure`.
 pub fn step_line(step: &Step, theme: &Theme) -> String {
@@ -285,7 +288,8 @@ pub fn step_line(step: &Step, theme: &Theme) -> String {
         }
         StepState::Active => {
             segs.push(styled("⠋ ", palette::pending()));
-            segs.push(styled(step.label.clone(), palette::pending()));
+            // Glyph-only yellow — see the state list above.
+            segs.push(styled(step.label.clone(), palette::emphasis()));
             // The live elapsed joins only from 1 s — matching the completed
             // state's < 1 s rule, so a fast step never flashes `· 0s`.
             if let Some(e) = step.active_elapsed
@@ -421,10 +425,11 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
     match body {
         SubBody::InFlight(label) => {
             segs.push(styled("⠋ ", palette::pending()));
-            // Inset (4) + `⠋ ` (2) precede the label.
+            // Inset (4) + `⠋ ` (2) precede the label. Glyph-only yellow,
+            // matching the active step row.
             segs.push(styled(
                 clamp_to_width(label, width.saturating_sub(6)),
-                palette::pending(),
+                palette::emphasis(),
             ));
         }
         SubBody::Done(text, duration) => {
@@ -541,14 +546,15 @@ pub fn ask_row(question: &str, theme: &Theme) -> String {
 }
 
 /// One transient live note row under the active step (ADR 0018's Re-generate
-/// loop): margin + sub-row indent + spinner glyph + label in `pending`.
+/// loop): margin + sub-row indent + spinner glyph + label — glyph-only
+/// yellow like every active-work row.
 pub fn note_row(label: &str, theme: &Theme) -> String {
     render(
         &[
             seg(MARGIN),
             seg(SUB_INDENT),
             styled("⠋ ", palette::pending()),
-            styled(label.to_string(), palette::pending()),
+            styled(label.to_string(), palette::emphasis()),
         ],
         theme,
     )
