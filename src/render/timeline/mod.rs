@@ -390,7 +390,8 @@ pub fn timeline_frame(steps: &[Step], theme: &Theme) -> Vec<String> {
 }
 
 /// The body of one live sub-row (ADR 0018): an in-flight label
-/// (`⠋ Generating commit message`) or a done row (`✓ [text] [· duration]`).
+/// (`⠋ Drafting f2.rs`), a done row (`✓ [text] [· duration]`), or a landed
+/// commit echo (`✓ a1b2c3d feat: first`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubBody {
     /// In-flight: spinner glyph + label in `pending`.
@@ -398,17 +399,23 @@ pub enum SubBody {
     /// Done: `✓` in `success`, optional default-fg text (file path, hash
     /// line), optional duration shown only when ≥ 1 s.
     Done(String, Option<Duration>),
+    /// A landed commit's in-frame echo: `✓` in `success`, the short hash in
+    /// amber bold, then the subject through the shared
+    /// [`palette::subject_segments`] — the same grammar the flushed Commit
+    /// entry renders, so the live row and the durable row of one batch read
+    /// identically (the pre-flush echo used to lose every color anchor).
+    Landed { hash: String, subject: String },
 }
 
-/// One live sub-row at column 4 (ADR 0018): an in-flight label or a done
-/// row. No `[i/N]` numbering — rows land in happening order and every row
-/// of the step shares one shape: `⠋ Generating commit message` /
-/// `✓ 6.2s` / `✓ a1b2c3d feat: first`. Text clamps to `width` (the
-/// terminal's raw column count; `…` marks the cut) so a live row can
-/// never wrap to two physical rows: sub-row text is the one frame content
-/// with no builder-side budget (commit subjects are prompt-capped at 72
-/// chars but nothing validates that), and the painter's whole-frame
-/// repaint assumes one physical row per row.
+/// One live sub-row at column 4 (ADR 0018): an in-flight label, a done row,
+/// or a landed-commit echo. No `[i/N]` numbering — rows land in happening
+/// order and every row of the step shares one shape: `⠋ Drafting f2.rs` /
+/// `✓ f2.rs · 6.2s` / `✓ a1b2c3d feat: first`. Text clamps to `width` (the
+/// terminal's raw column count; `…` marks the cut) so a live row can never
+/// wrap to two physical rows: sub-row text is the one frame content with no
+/// builder-side budget (commit subjects are prompt-capped at 72 chars but
+/// nothing validates that), and the painter's whole-frame repaint assumes
+/// one physical row per row.
 pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
     let mut segs = vec![seg(MARGIN), seg(SUB_INDENT)];
     match body {
@@ -438,6 +445,17 @@ pub fn sub_row(body: &SubBody, width: usize, theme: &Theme) -> String {
             if let Some(d) = dur {
                 let joiner = if text.is_empty() { " " } else { " · " };
                 segs.push(styled(format!("{joiner}{d}"), palette::neutral_gray()));
+            }
+        }
+        SubBody::Landed { hash, subject } => {
+            segs.push(styled("✓", palette::success()));
+            segs.push(styled(
+                format!(" {hash}"),
+                palette::commit_id_color().bold(),
+            ));
+            segs.push(seg(" "));
+            for (text, style) in palette::subject_segments(subject) {
+                segs.push(styled(text, style));
             }
         }
     }

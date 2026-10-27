@@ -248,6 +248,48 @@ fn sub_row_shows_done_duration() {
     );
 }
 
+/// A landed commit's echo shares the durable entry's grammar — hash then
+/// subject — so the live row and the flushed row read identically
+/// (colors-off: the styled test theme emits no ANSI).
+#[test]
+fn sub_row_landed_echoes_hash_and_styled_subject() {
+    assert_eq!(
+        sub_row(
+            &SubBody::Landed {
+                hash: "a1b2c3d".into(),
+                subject: "fix(auth): correct token check".into()
+            },
+            80,
+            &THEME
+        ),
+        "    ✓ a1b2c3d fix(auth): correct token check"
+    );
+    // Colon-less messages fall back to the full text, like the entry row.
+    assert_eq!(
+        sub_row(
+            &SubBody::Landed {
+                hash: "a1b2c3d".into(),
+                subject: "plain message".into()
+            },
+            80,
+            &THEME
+        ),
+        "    ✓ a1b2c3d plain message"
+    );
+}
+
+/// The active row's live elapsed joins only from 1 s — mirroring the
+/// completed state's rule — so a fast step never flashes `· 0s`.
+#[test]
+fn step_line_active_hides_sub_second_elapsed() {
+    let s = Step::active("Plan batches");
+    let s = Step {
+        active_elapsed: Some(Duration::from_millis(400)),
+        ..s
+    };
+    assert_eq!(step_line(&s, &THEME), "  ⠋ Plan batches");
+}
+
 /// A live sub-row clamps its text to the terminal width (`…` marking the
 /// cut, duration suffix kept inside the budget): sub-row text is the one
 /// frame content with no builder-side budget — commit subjects are
