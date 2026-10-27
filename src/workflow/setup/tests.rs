@@ -18,7 +18,6 @@ fn draft(
         api_key: api_key.map(String::from),
         model: model.map(String::from),
         base_url: base_url.map(String::from),
-        confirm_before_commit: None,
         ..Default::default()
     }
 }
@@ -437,7 +436,6 @@ fn draft_with_cli(command: Option<&str>) -> Draft {
         provider: Some(Provider::OpenAI),
         api_key: Some("sk-stale".into()),
         model: Some("gpt-5".into()),
-        base_url: None,
         confirm_before_commit: Some(true),
         cli: CliConfig {
             command: command.map(String::from),

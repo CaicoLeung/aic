@@ -237,12 +237,7 @@ pub fn messenger_sequence(messages: &[&str]) -> (CommitMessenger, Arc<Mutex<u32>
                 .get(n - 1)
                 .cloned()
                 .unwrap_or_else(|| panic!("messenger_sequence exhausted after {n} calls"));
-            Box::pin(async move {
-                Ok(generator::CommitOutput {
-                    message: msg,
-                    body: None,
-                })
-            })
+            Box::pin(async move { Ok(commit_output(&msg)) })
         },
     );
     (m, calls)
