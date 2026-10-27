@@ -207,12 +207,12 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
             },
-            redact: Redact::On,
             display: Display::with(buf.clone()),
             // Zero batches over real work — the most degenerate invalid plan.
-            planner: planner_fixed(plan(vec![])),
-            messenger: messenger_fixed("feat: combined fallback work"),
-            confirm: Confirm::Disabled,
+            ..deps(
+                planner_fixed(plan(vec![])),
+                messenger_fixed("feat: combined fallback work"),
+            )
         },
     )
     .await
@@ -254,14 +254,14 @@ async fn batch_review_merge_then_confirm_commit_lands_the_combined_commit() {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
             },
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            messenger: messenger_fixed("feat: combined change"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                planner_fixed(two_batch_plan()),
+                messenger_fixed("feat: combined change"),
+            )
         },
     )
     .await

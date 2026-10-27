@@ -597,14 +597,7 @@ async fn resolve_handoff_lists_all_three_blocker_kinds() {
 /// The repo is left untouched — still conflicted, nothing staged.
 #[tokio::test]
 async fn resolve_refuses_secret_in_conflicted_file_before_any_llm_call() {
-    let dir = with_repo(merge_conflict);
-    std::fs::write(
-        dir.path().join("tracked.txt"),
-        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
-    )
-    .unwrap();
-
-    let git = Git::at(dir.path()).unwrap();
+    let (dir, git) = with_git(merge_conflict_with_secret);
     let err = resolve_run(
         &git,
         // Empty queue: the per-file apply prompt must never fire — if it
@@ -614,19 +607,12 @@ async fn resolve_refuses_secret_in_conflicted_file_before_any_llm_call() {
     .await
     .expect_err("secret-shaped conflicted file must refuse the resolve");
 
-    let msg = format!("{err:#}");
-    assert!(msg.contains("tracked.txt"), "must name the file: {msg}");
-    assert!(
-        msg.contains("AWS access key ID"),
-        "must name the kind: {msg}"
-    );
-    assert!(
-        msg.contains("aic resolve --no-redact"),
-        "must name the resolve-scoped override: {msg}"
-    );
-    assert!(
-        !msg.contains("AKIAIOSFODNN7EXAMPLE"),
-        "the full secret must never print: {msg}"
+    assert_gate_refusal(
+        &err,
+        "tracked.txt",
+        "AWS access key ID",
+        "aic resolve --no-redact",
+        "AKIAIOSFODNN7EXAMPLE",
     );
     // Refusal leaves the repo exactly as it was: still unmerged, not staged.
     assert!(is_unmerged(dir.path(), "tracked.txt"));
@@ -638,14 +624,7 @@ async fn resolve_refuses_secret_in_conflicted_file_before_any_llm_call() {
 /// normally (issue #159).
 #[tokio::test]
 async fn resolve_no_redact_proceeds_past_the_gate() {
-    let dir = with_repo(merge_conflict);
-    std::fs::write(
-        dir.path().join("tracked.txt"),
-        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
-    )
-    .unwrap();
-
-    let git = Git::at(dir.path()).unwrap();
+    let (dir, git) = with_git(merge_conflict_with_secret);
     let result = resolve_run(
         &git,
         ResolveDeps {
@@ -739,15 +718,9 @@ async fn resolve_no_redact_omits_the_gate_step() {
 /// kind), and no later step's ledger line appears — the timeline stops there.
 #[tokio::test]
 async fn resolve_redaction_refusal_shapes_the_failed_screen() {
-    let dir = with_repo(merge_conflict);
-    std::fs::write(
-        dir.path().join("tracked.txt"),
-        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
-    )
-    .unwrap();
+    let (_dir, git) = with_git(merge_conflict_with_secret);
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
     let err = resolve_run(
         &git,
         ResolveDeps {

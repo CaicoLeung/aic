@@ -789,22 +789,20 @@ impl CliAgent {
         on_output: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<String> {
         let full_prompt = self.build_prompt(user_prompt, mode);
-        let args: Vec<String> = self
+        let args: Vec<String> = if self
             .spec
             .args
             .iter()
-            .map(|a| a.replace(PROMPT_PLACEHOLDER, &full_prompt))
-            .collect();
-        let contains_placeholder = self
-            .spec
-            .args
-            .iter()
-            .any(|a| a.contains(PROMPT_PLACEHOLDER));
-        let args = if contains_placeholder {
-            args
+            .any(|a| a.contains(PROMPT_PLACEHOLDER))
+        {
+            self.spec
+                .args
+                .iter()
+                .map(|a| a.replace(PROMPT_PLACEHOLDER, &full_prompt))
+                .collect()
         } else {
             // No placeholder: append the prompt as a trailing argument.
-            let mut v = args;
+            let mut v = self.spec.args.clone();
             v.push(full_prompt);
             v
         };

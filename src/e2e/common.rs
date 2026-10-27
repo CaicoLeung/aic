@@ -490,6 +490,32 @@ pub fn assert_ok(result: &anyhow::Result<()>, msg: &str) {
     assert!(result.is_ok(), "{msg}: {result:?}");
 }
 
+/// The standard commit-Run assertion pair: run `commit_run` over a fresh
+/// `Git` handle with `deps`, assert it succeeded, and assert exactly `n` new
+/// commits landed. Collapses the `commit_count` before / run / `assert_ok` /
+/// `assert_eq` quartet the commit-workflow tests repeat.
+pub async fn run_expect_commits(dir: &Path, deps: RunDeps, n: usize, msg: &str) {
+    let before = commit_count(dir);
+    let git = Git::at(dir).unwrap();
+    let result = commit_run(&git, deps).await;
+    assert_ok(&result, msg);
+    assert_eq!(commit_count(dir), before + n, "{msg}");
+}
+
+/// The Redaction Gate refusal quartet (issues #155 / #159): the error names
+/// `file`, names the pattern `kind`, names the `--no-redact` override `flag`,
+/// and never prints the `secret` itself.
+pub fn assert_gate_refusal(err: &anyhow::Error, file: &str, kind: &str, flag: &str, secret: &str) {
+    let msg = format!("{err:#}");
+    assert!(msg.contains(file), "must name the file: {msg}");
+    assert!(msg.contains(kind), "must name the kind: {msg}");
+    assert!(msg.contains(flag), "must name the override: {msg}");
+    assert!(
+        !msg.contains(secret),
+        "the full secret must never print: {msg}"
+    );
+}
+
 /// Write `rel` with `contents`, stage it. The standard "workdir holds an
 /// unstaged change" opening; commit via [`commit_file`] when a base is needed.
 pub fn stage_file(dir: &Path, rel: &str, contents: &str) {
@@ -564,6 +590,18 @@ pub fn git_out(dir: &Path, args: &[&str]) -> String {
 pub fn merge_conflict(dir: &Path) {
     gh::init_test_repo(dir);
     cf::make_content_conflict(dir);
+}
+
+/// [`merge_conflict`] plus an AWS-key-shaped token on the HEAD side of the
+/// conflict — the secret-shaped conflicted file the Redaction Gate tests
+/// (issue #159) refuse before any LLM call.
+pub fn merge_conflict_with_secret(dir: &Path) {
+    merge_conflict(dir);
+    std::fs::write(
+        dir.join("tracked.txt"),
+        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
+    )
+    .unwrap();
 }
 
 /// `init_test_repo` + two tracked files (`alpha.txt`, `beta.txt`) committed at

@@ -787,6 +787,13 @@ pub(crate) mod pty_tests {
     fn spawn_terminal(script: Script) -> (RawFd, RawFd, i32) {
         let (master, slave) = open_pty();
         make_raw(slave);
+        (master, slave, fork_terminal(master, slave, script))
+    }
+
+    /// Fork a child running `script` on `master` (after closing its copy of
+    /// `slave`); returns the child pid — the shared fork tail of both spawn
+    /// helpers.
+    fn fork_terminal(master: RawFd, slave: RawFd, script: Script) -> i32 {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed");
         if pid == 0 {
@@ -794,7 +801,7 @@ pub(crate) mod pty_tests {
             let code = terminal_script(master, script);
             unsafe { libc::_exit(code) };
         }
-        (master, slave, pid)
+        pid
     }
 
     fn reap(pid: i32) -> i32 {
@@ -829,14 +836,17 @@ pub(crate) mod pty_tests {
     /// (what [`spawn_terminal`] produces) would hide a missing restore.
     fn spawn_canonical_terminal(script: Script) -> (RawFd, RawFd, i32) {
         let (master, slave) = open_pty();
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork failed");
-        if pid == 0 {
-            unsafe { libc::close(slave) };
-            let code = terminal_script(master, script);
-            unsafe { libc::_exit(code) };
+        (master, slave, fork_terminal(master, slave, script))
+    }
+
+    /// Close both pty fds and reap the child, asserting a clean exit — the
+    /// shared teardown of every PTY test.
+    fn close_and_reap(master: RawFd, slave: RawFd, pid: i32) {
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
         }
-        (master, slave, pid)
+        assert_eq!(reap(pid), 0);
     }
 
     /// The full DSR round trip over a real PTY: the fake terminal sees the
@@ -845,11 +855,7 @@ pub(crate) mod pty_tests {
     fn dsr_query_roundtrip_over_pty() {
         let (master, slave, pid) = spawn_terminal(Script::Reply(b"\x1b[21;1R"));
         let row = query_cursor_row_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(row, Some(21));
     }
 
@@ -859,11 +865,7 @@ pub(crate) mod pty_tests {
     fn dsr_rejects_garbage_reply() {
         let (master, slave, pid) = spawn_terminal(Script::Reply(b"hello"));
         let row = query_cursor_row_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(row, None);
     }
 
@@ -873,11 +875,7 @@ pub(crate) mod pty_tests {
     fn dsr_times_out_without_reply() {
         let (master, slave, pid) = spawn_terminal(Script::Silent);
         let row = query_cursor_row_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(row, None);
     }
 
@@ -895,11 +893,7 @@ pub(crate) mod pty_tests {
             !poll_ready(slave, 0),
             "late reply leaked into the input queue — it would corrupt a later prompt read"
         );
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
     }
 
     /// Input already pending when the query starts is never consumed: the
@@ -913,11 +907,7 @@ pub(crate) mod pty_tests {
         assert_eq!(row, None, "a busy stdin must not be queried");
         // The byte is still pending — the pre-check did not consume it.
         assert!(poll_ready(slave, 2000), "pending input was swallowed");
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
     }
 
     /// The OSC 11 round trip over a real PTY: the fake terminal sees the
@@ -927,11 +917,7 @@ pub(crate) mod pty_tests {
         let (master, slave, pid) =
             spawn_terminal(Script::OscReply(b"\x1b]11;rgb:0d0d/1111/1717\x07"));
         let rgb = query_background_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(rgb, Some((13, 17, 23)));
     }
 
@@ -953,11 +939,7 @@ pub(crate) mod pty_tests {
         let row = query_cursor_row_core(slave);
         assert_eq!(row, None, "Silent script times out");
         let after = termios_of(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(
             after.c_lflag & libc::ICANON,
             before.c_lflag & libc::ICANON,

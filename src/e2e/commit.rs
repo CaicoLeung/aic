@@ -28,12 +28,7 @@ async fn commit_clean_repo_is_a_noop() {
 /// secret-shaped conflicted file. One invocation, one decision.
 #[tokio::test]
 async fn commit_run_no_redact_carries_into_the_resolve_handoff() {
-    let dir = with_repo(merge_conflict);
-    std::fs::write(
-        dir.path().join("tracked.txt"),
-        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
-    )
-    .unwrap();
+    let dir = with_repo(merge_conflict_with_secret);
 
     let git = Git::at(dir.path()).unwrap();
     let result = default_run(
@@ -237,21 +232,13 @@ async fn commit_splits_one_file_across_two_batches() {
         plan_batch("tracked.txt", &[1], "change a"),
         plan_batch("tracked.txt", &[2], "change c"),
     ]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(planner_fixed(plan), messenger_fixed("chore: stub")),
+        2,
+        "two batches must land two commits, one per batch",
     )
     .await;
-    assert_ok(&result, "two-batch split should succeed");
-
-    // One commit per batch — two new commits over the base.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 2,
-        "two batches must land two commits, one per batch"
-    );
     // Batch 1 (HEAD~1): only hunk 1 (a1) applied; hunk 2 (c1) still absent.
     let after_batch1 = file_at_ref(dir.path(), "HEAD~1", "tracked.txt");
     assert!(after_batch1.contains("a1"), "batch 1 must include hunk 1");
@@ -287,21 +274,13 @@ async fn commit_splits_two_files_across_two_batches() {
         plan_batch("alpha.txt", &[1], "change alpha"),
         plan_batch("beta.txt", &[1], "change beta"),
     ]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(planner_fixed(plan), messenger_fixed("chore: stub")),
+        2,
+        "two batches must land two commits, one per batch",
     )
     .await;
-    assert_ok(&result, "two-file two-batch split should succeed");
-
-    // One commit per batch — two new commits, neither file leaked into the other's.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 2,
-        "two batches must land two commits, one per batch"
-    );
     // Batch 1 (HEAD~1): only alpha changed; beta still at its base value.
     assert_eq!(
         file_at_ref(dir.path(), "HEAD~1", "alpha.txt"),
@@ -351,21 +330,13 @@ async fn commit_batches_two_files_into_one_commit() {
         &[("alpha.txt", &[1]), ("beta.txt", &[1])],
         "change both",
     )]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(planner_fixed(plan), messenger_fixed("chore: both files")),
+        1,
+        "a batch carrying two files must land a single commit, not two",
     )
     .await;
-    assert_ok(&result, "two-file single-batch Run should succeed");
-
-    // Exactly one new commit — not one per file.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "a batch carrying two files must land a single commit, not two"
-    );
     // That one commit's tree carries both files' changes.
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "alpha.txt"),
@@ -409,19 +380,13 @@ async fn commit_includes_binary_file_in_batch_plan() {
     // Stub plan carrying the whole binary file (no hunks to index). This is the
     // plan a correct model would emit — the bug is downstream of the planner.
     let plan = plan(vec![plan_batch("blob.bin", &[], "update binary")]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(planner_fixed(plan), messenger_fixed("chore: update blob")),
+        1,
+        "the binary change must land one commit",
     )
     .await;
-    assert_ok(&result, "binary batch should succeed");
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the binary change must land one commit"
-    );
     assert!(
         worktree_is_empty(dir.path()),
         "binary file must be committed, not left in the unstaged area"
@@ -482,22 +447,16 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let plan = plan(vec![plan_batch("script.sh", &[], "make script executable")]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(
             planner_fixed(plan),
             messenger_fixed("chmod: make script executable"),
         ),
+        1,
+        "the mode-only change must land one commit",
     )
     .await;
-    assert_ok(&result, "mode-only batch should succeed");
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the mode-only change must land one commit"
-    );
     assert!(
         worktree_is_empty(dir.path()),
         "mode-only change must be committed, not left unstaged"
@@ -521,26 +480,17 @@ async fn commit_staged_files_in_one_commit() {
     // commit shape.
     stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         // staged path must NOT plan,
         deps(
             unreachable_planner(),
             messenger_fixed("feat: staged change"),
         ),
+        1,
+        "the staged path must land exactly one commit",
     )
     .await;
-    assert_ok(&result, "staged single-commit Run should succeed");
-
-    // Exactly one new commit landed.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the staged path must land exactly one commit"
-    );
     // Its tree contains the staged change.
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "tracked.txt"),
@@ -579,26 +529,17 @@ async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
     gh::init_test_repo(dir.path());
     let (a_state, b_state) = partial_stage_two_hunk_file(dir.path());
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         // staged path must NOT plan,
         deps(
             unreachable_planner(),
             messenger_fixed("feat: staged hunk only"),
         ),
+        1,
+        "the staged path must land exactly one commit",
     )
     .await;
-    assert_ok(&result, "partially staged Run should succeed");
-
-    // Exactly one new commit, carrying only the staged hunk.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the staged path must land exactly one commit"
-    );
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "tracked.txt"),
         a_state,
@@ -634,24 +575,17 @@ async fn commit_staged_deletion_in_one_commit() {
     // nothing of it remains except in HEAD.
     git_in(dir.path(), &["rm", "tracked.txt"]);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(
             unreachable_planner(),
             messenger_fixed("feat: remove tracked file"),
         ),
+        1,
+        "the staged deletion must land as exactly one commit",
     )
     .await;
-    assert_ok(&result, "staged-deletion Run should succeed");
 
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the staged deletion must land as exactly one commit"
-    );
     assert!(
         !dir.path().join("tracked.txt").exists(),
         "the file must stay deleted"
@@ -680,24 +614,17 @@ async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
     stage_file(dir.path(), "tracked.txt", "modified\n");
     git_in(dir.path(), &["rm", "other.txt"]);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(
             unreachable_planner(),
             messenger_fixed("feat: mixed staged set"),
         ),
+        1,
+        "the mixed staged set must land as exactly one commit",
     )
     .await;
-    assert_ok(&result, "mixed staged-deletion Run should succeed");
 
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the mixed staged set must land as exactly one commit"
-    );
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "tracked.txt"),
         "modified\n",
@@ -777,14 +704,12 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
     std::fs::write(dir.path().join("src/a.rs"), "new a\n").unwrap();
     std::fs::write(dir.path().join("docs/b.md"), "new b\n").unwrap();
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
     let buf = BufferWrite::default();
     let (messenger, calls) =
         messenger_sequence(&["feat(a): fallback draft a", "docs(b): fallback draft b"]);
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             // 120 cols so the ⚠ row's clamp budget holds the whole cause —
             // `warn` truncates with `…` at the text width (ADR 0018).
@@ -795,9 +720,10 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
                 messenger,
             )
         },
+        2,
+        "fallback must complete the run",
     )
     .await;
-    assert_ok(&result, "fallback must complete the run");
 
     // The notice rendered: the user knows the LLM's plan was discarded.
     let lines = buf.lines();
@@ -810,7 +736,6 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
     // The fallback plan drove the normal loop: two batches, two drafts, two
     // commits, clean tree.
     assert_eq!(*calls.lock(), 2, "one draft per fallback batch");
-    assert_eq!(commit_count(dir.path()), before + 2);
     assert!(is_clean(dir.path()), "all work must be committed");
     assert!(notice.contains("no batches"), "the LLM's failure is named");
 }
@@ -847,29 +772,16 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
         plan_batch("tracked.txt", &[1], "change a"),
         plan_batch("tracked.txt", &[2], "change c"),
     ]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(
             planner_fixed(plan),
             messenger_fixed("feat: hook swallows the rest"),
         ),
+        1,
+        "exactly one commit must land — the second batch has nothing left to stage",
     )
     .await;
-    assert_ok(
-        &result,
-        "the Run must complete, not abort, when a hook commits more than the batch",
-    );
-
-    // Only batch 1 lands (it carries the whole file); the swallowed batch 2 is
-    // skipped rather than failing on a stale snapshot.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "exactly one commit must land — the second batch has nothing left to stage"
-    );
     // The hook's re-stage means both hunks are in that one commit.
     let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
     assert!(head.contains("a1"), "hunk 1 must be committed");
@@ -906,22 +818,13 @@ async fn commit_splits_one_file_across_three_batches() {
         plan_batch("tracked.txt", &[2], "change 2"),
         plan_batch("tracked.txt", &[3], "change 3"),
     ]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(planner_fixed(plan), messenger_fixed("chore: stub")),
+        3,
+        "three batches must land three commits, one per batch",
     )
     .await;
-    assert_ok(&result, "three-batch split should succeed");
-
-    // One commit per batch — three new commits over the base.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 3,
-        "three batches must land three commits, one per batch"
-    );
     // Each commit carries exactly its prefix of hunks — no leak forward, no
     // skip. HEAD~2 is batch 1 (a1 only), HEAD~1 adds batch 2 (b1), HEAD adds
     // batch 3 (c1).
@@ -967,26 +870,16 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
         &[("tracked.txt", &[1]), ("tracked.txt", &[2])],
         "both edits",
     )]);
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         deps(
             planner_fixed(plan),
             messenger_fixed("feat: same-file disjoint hunks"),
         ),
+        1,
+        "two changes entries for one file must merge into one commit",
     )
     .await;
-    assert_ok(&result, "one-batch same-file split should succeed");
-
-    // Exactly one commit — the two entries merge into one logical unit, never
-    // two, and the file is staged once rather than listed twice in the prompt.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "two changes entries for one file must merge into one commit"
-    );
     let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
     assert!(
         head.contains("a1") && head.contains("b1"),
@@ -1017,16 +910,12 @@ async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
         .await
         .expect_err("secret-shaped unstaged diff must refuse the Run");
 
-    let msg = format!("{err:#}");
-    assert!(msg.contains("tracked.txt"), "must name the file: {msg}");
-    assert!(
-        msg.contains("AWS access key ID"),
-        "must name the kind: {msg}"
-    );
-    assert!(msg.contains("--no-redact"), "must name the override: {msg}");
-    assert!(
-        !msg.contains("AKIAIOSFODNN7EXAMPLE"),
-        "the full secret must never print: {msg}"
+    assert_gate_refusal(
+        &err,
+        "tracked.txt",
+        "AWS access key ID",
+        "--no-redact",
+        "AKIAIOSFODNN7EXAMPLE",
     );
     // Nothing was staged or committed by the refused Run (init_test_repo's
     // initial commit + the base commit = 2).
@@ -1045,9 +934,8 @@ async fn commit_run_no_redact_proceeds_past_the_gate() {
     )
     .unwrap();
 
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             redact: Redact::Off,
             ..deps(
@@ -1055,10 +943,10 @@ async fn commit_run_no_redact_proceeds_past_the_gate() {
                 messenger_fixed("chore: rotate deploy key"),
             )
         },
+        1,
+        "exactly one new commit",
     )
     .await;
-    assert_ok(&result, "--no-redact must commit normally");
-    assert_eq!(commit_count(dir.path()), 3, "exactly one new commit");
     assert!(is_clean(dir.path()));
 }
 

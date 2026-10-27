@@ -74,15 +74,15 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(), // staged path must NOT plan,
-            messenger: messenger_fixed("feat: staged hunk only"),
+            // staged path must NOT plan,
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                unreachable_planner(),
+                messenger_fixed("feat: staged hunk only"),
+            )
         },
     )
     .await
@@ -263,15 +263,12 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger,
+            redact: Redact::Off,
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
-            redact: Redact::Off,
+            ..deps(unreachable_planner(), messenger)
         },
     )
     .await;
@@ -540,24 +537,10 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
 
