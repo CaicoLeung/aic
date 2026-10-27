@@ -459,7 +459,10 @@ mod tests {
         let check = |what: &str, rgb: (u8, u8, u8)| {
             for (bg, theme) in [(WHITE, "white"), (DARK, "dark")] {
                 let ratio = contrast(rgb, bg);
-                assert!(ratio >= AA_LARGE, "{what} fails 3:1 on {theme}: {ratio:.2}");
+                assert!(
+                    ratio >= AA_LARGE,
+                    "{what} {rgb:?} fails 3:1 on {theme}: {ratio:.2}"
+                );
             }
         };
         let mut checked = 0usize;

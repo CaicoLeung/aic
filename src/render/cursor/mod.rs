@@ -214,7 +214,7 @@ impl Drop for RawTermios {
 /// Upper bound on the bytes consumed for one DSR reply (`ESC[<row>;<col>R`).
 /// Generous over any real reply, but finite so a runaway/malformed stream
 /// can't pin the cursor-row query or its late-reply drain in an unbounded
-/// read. Shared by [`query_cursor_row_core`] and [`drain_dsr_reply`] so the
+/// read. Shared by [`query_cursor_row_core`] and [`drain_reply`] so the
 /// two stay in lockstep.
 const MAX_DSR_REPLY: usize = 32;
 
