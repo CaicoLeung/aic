@@ -230,6 +230,19 @@ pub fn messenger_fixed(msg: &str) -> CommitMessenger {
     )
 }
 
+/// One batch in a [`generator::BatchPlanOutput`]: `file` carrying `hunks`,
+/// explained by `reason`. Collapses the multi-line struct literals the
+/// multi-batch e2e tests build plans from.
+pub fn plan_batch(file: &str, hunks: &[usize], reason: &str) -> generator::BatchPlanBatch {
+    generator::BatchPlanBatch {
+        changes: vec![generator::BatchChange {
+            file: file.to_string(),
+            hunks: hunks.to_vec(),
+        }],
+        reason: Some(reason.to_string()),
+    }
+}
+
 /// Messenger that succeeds for the first `ok_for` calls then errors, with a
 /// call counter. Drives the partial-failure path: an early batch commits, then
 /// a later batch's message step fails mid-loop.

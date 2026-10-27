@@ -240,20 +240,8 @@ async fn commit_splits_one_file_across_two_batches() {
     // Stub plan: split the single file's two hunks across two batches.
     let plan = generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
+            plan_batch("tracked.txt", &[1], "change a"),
+            plan_batch("tracked.txt", &[2], "change c"),
         ],
     };
     let before = commit_count(dir.path());
@@ -304,20 +292,8 @@ async fn commit_splits_two_files_across_two_batches() {
     // Stub plan: one file per batch — batch 1 = alpha, batch 2 = beta.
     let plan = generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
+            plan_batch("alpha.txt", &[1], "change alpha"),
+            plan_batch("beta.txt", &[1], "change beta"),
         ],
     };
     let before = commit_count(dir.path());
@@ -453,13 +429,7 @@ async fn commit_includes_binary_file_in_batch_plan() {
     // Stub plan carrying the whole binary file (no hunks to index). This is the
     // plan a correct model would emit — the bug is downstream of the planner.
     let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: "blob.bin".to_string(),
-                hunks: vec![],
-            }],
-            reason: Some("update binary".into()),
-        }],
+        batches: vec![plan_batch("blob.bin", &[], "update binary")],
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -496,13 +466,7 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
     std::fs::write(dir.path().join("blob.bin"), [9u8, 9, 9, 9]).unwrap();
 
     let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: "blob.bin".to_string(),
-                hunks: vec![],
-            }],
-            reason: Some("update binary".into()),
-        }],
+        batches: vec![plan_batch("blob.bin", &[], "update binary")],
     };
     let (planner, sent) = planner_capture(plan);
     let git = Git::at(dir.path()).unwrap();
@@ -542,13 +506,7 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: "script.sh".to_string(),
-                hunks: vec![],
-            }],
-            reason: Some("make script executable".into()),
-        }],
+        batches: vec![plan_batch("script.sh", &[], "make script executable")],
     };
     let before = commit_count(dir.path());
     let git = Git::at(dir.path()).unwrap();
@@ -800,20 +758,8 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
+            plan_batch("tracked.txt", &[1], "change a"),
+            plan_batch("tracked.txt", &[2], "change c"),
         ],
     };
     let (messenger, calls) = messenger_then_error(1); // batch 1 ok, batch 2 fails
@@ -935,20 +881,8 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
+            plan_batch("tracked.txt", &[1], "change a"),
+            plan_batch("tracked.txt", &[2], "change c"),
         ],
     };
     let before = commit_count(dir.path());

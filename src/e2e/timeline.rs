@@ -17,20 +17,8 @@ async fn unstaged_run_appends_the_step_ledger() {
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
+            plan_batch("alpha.txt", &[1], "change alpha"),
+            plan_batch("beta.txt", &[1], "change beta"),
         ],
     };
     let buf = BufferWrite::default();
@@ -168,20 +156,8 @@ async fn declined_batch_shapes_the_failed_screen() {
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
+            plan_batch("alpha.txt", &[1], "change alpha"),
+            plan_batch("beta.txt", &[1], "change beta"),
         ],
     };
     let buf = BufferWrite::default();
@@ -240,20 +216,8 @@ async fn review_flow_completes_the_plan_step() {
 
     let plan = generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
+            plan_batch("alpha.txt", &[1], "change alpha"),
+            plan_batch("beta.txt", &[1], "change beta"),
         ],
     };
     let buf = BufferWrite::default();

@@ -13,20 +13,8 @@ use super::common::*;
 fn two_batch_plan() -> generator::BatchPlanOutput {
     generator::BatchPlanOutput {
         batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("alpha".to_string()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("beta".to_string()),
-            },
+            plan_batch("alpha.txt", &[1], "alpha"),
+            plan_batch("beta.txt", &[1], "beta"),
         ],
     }
 }
