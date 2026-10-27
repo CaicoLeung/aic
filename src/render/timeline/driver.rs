@@ -768,6 +768,12 @@ pub(crate) fn frame_menu(
         let mut all = ask_rows.clone();
         all.extend(rows);
         all.push(help.clone());
+        // Paint the menu rows before blocking on a key: without this the
+        // ask, the `›` cursor, and the key hints never reach the frame and
+        // the menu is invisible — reachable only by blind keys (the
+        // regression this call restores). Repaints dedupe when the frame is
+        // unchanged; only a selection move changes it.
+        frame.replace_live_tail(step, base, all);
         match term.read_key() {
             Ok(console::Key::ArrowUp) if !options.is_empty() => {
                 sel = (sel + options.len() - 1) % options.len();
