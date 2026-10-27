@@ -49,10 +49,9 @@ async fn batch_review_merge_then_continue_commits_one_combined_commit() {
 /// committed, both changes exactly as they started.
 #[tokio::test]
 async fn batch_review_abort_stages_nothing_and_commits_nothing() {
-    let dir = with_repo(two_file_unstaged_repo);
+    let (dir, git) = with_git(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
@@ -66,11 +65,7 @@ async fn batch_review_abort_stages_nothing_and_commits_nothing() {
     )
     .await
     .expect_err("aborting the Batch Review must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted — no commit made"),
-        "expected the clean abort wording, got: {msg}"
-    );
+    err_contains(&err, &["aborted — no commit made"]);
 
     assert_eq!(
         commit_count(dir.path()),
@@ -122,10 +117,9 @@ async fn batch_review_undo_restores_the_two_batch_plan() {
 /// nothing is mergeable. Abort on it leaves everything untouched.
 #[tokio::test]
 async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
-    let dir = with_repo(two_file_unstaged_repo);
+    let (dir, git) = with_git(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let one_batch = plan(vec![plan_multi_batch(
         &[("alpha.txt", &[1]), ("beta.txt", &[1])],
@@ -143,10 +137,7 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
     )
     .await
     .expect_err("aborting the single-Batch review must abort the Run");
-    assert!(
-        format!("{err:#}").contains("aborted — no commit made"),
-        "expected the clean abort wording, got: {err:#}"
-    );
+    err_contains(&err, &["aborted — no commit made"]);
     assert_eq!(
         commit_count(dir.path()),
         before,

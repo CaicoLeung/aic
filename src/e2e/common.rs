@@ -26,51 +26,48 @@ pub(super) use std::sync::Arc;
 // `Resolver` / `Prompt` fields. `BoxFuture`, `Resolver`, and `Prompt` are
 // re-used from `types` so the stub types stay identical to the seam's.
 
-pub fn resolver_returning(answer: &str) -> Resolver {
-    let answer = answer.to_string();
-    Box::new(
-        move |_content: String| -> BoxFuture<anyhow::Result<String>> {
-            let a = answer.clone();
-            Box::pin(async move { Ok(a) })
-        },
+type ScriptedStub<T> = (
+    Box<dyn Fn(String) -> BoxFuture<anyhow::Result<T>>>,
+    Arc<Mutex<u32>>,
+);
+
+/// Scripted seam stub: call `n` returns `steps[min(n-1, len-1)]`, so the
+/// final step repeats on every later call (and a single step never changes).
+/// Shared engine behind the resolver / messenger stub factories; returns the
+/// call counter those factories expose.
+fn scripted<T: Clone + Send + 'static>(steps: Vec<Result<T, String>>) -> ScriptedStub<T> {
+    let calls = Arc::new(Mutex::new(0u32));
+    let calls2 = calls.clone();
+    (
+        Box::new(move |_content: String| {
+            let n = {
+                let mut g = calls2.lock();
+                *g += 1;
+                *g as usize
+            };
+            let step = steps[n.min(steps.len()) - 1].clone();
+            Box::pin(async move { step.map_err(|m| anyhow::anyhow!("{m}")) })
+        }),
+        calls,
     )
+}
+
+pub fn resolver_returning(answer: &str) -> Resolver {
+    scripted(vec![Ok(answer.to_string())]).0
 }
 
 /// Resolver that returns a marker-laden string every call. Exercises the
 /// "markers remain after retry" skip path. Returns a call counter.
 pub fn resolver_always_markers() -> (Resolver, Arc<Mutex<u32>>) {
-    let calls = Arc::new(Mutex::new(0u32));
-    let calls2 = calls.clone();
-    let marker = "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\n".to_string();
-    let r: Resolver = Box::new(
-        move |_content: String| -> BoxFuture<anyhow::Result<String>> {
-            *calls2.lock() += 1;
-            let m = marker.clone();
-            Box::pin(async move { Ok(m) })
-        },
-    );
-    (r, calls)
+    scripted(vec![Ok(
+        "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\n".to_string()
+    )])
 }
 
 /// First call returns `first`, every later call returns `then`. Exercises the
 /// marker-retry path (LLM returns markers, retry returns clean).
 pub fn resolver_then(first: &str, then: &str) -> (Resolver, Arc<Mutex<u32>>) {
-    let calls = Arc::new(Mutex::new(0u32));
-    let calls2 = calls.clone();
-    let first = first.to_string();
-    let then = then.to_string();
-    let r: Resolver = Box::new(
-        move |_content: String| -> BoxFuture<anyhow::Result<String>> {
-            let n = {
-                let mut g = calls2.lock();
-                *g += 1;
-                *g
-            };
-            let out = if n == 1 { first.clone() } else { then.clone() };
-            Box::pin(async move { Ok(out) })
-        },
-    );
-    (r, calls)
+    scripted(vec![Ok(first.to_string()), Ok(then.to_string())])
 }
 
 /// First call returns marker-laden `first`; every later call errors with
@@ -79,29 +76,7 @@ pub fn resolver_then(first: &str, then: &str) -> (Resolver, Arc<Mutex<u32>>) {
 /// propagate as `Fatal` — the skip message reports the LLM error instead of
 /// masking it as "markers remain after retry". Includes a call counter.
 pub fn resolver_then_error(first: &str, error: &str) -> (Resolver, Arc<Mutex<u32>>) {
-    let calls = Arc::new(Mutex::new(0u32));
-    let calls2 = calls.clone();
-    let first = first.to_string();
-    let error = error.to_string();
-    let r: Resolver = Box::new(
-        move |_content: String| -> BoxFuture<anyhow::Result<String>> {
-            let n = {
-                let mut g = calls2.lock();
-                *g += 1;
-                *g
-            };
-            let first = first.clone();
-            let error = error.clone();
-            Box::pin(async move {
-                if n == 1 {
-                    Ok(first)
-                } else {
-                    Err(anyhow::anyhow!("{error}"))
-                }
-            })
-        },
-    );
-    (r, calls)
+    scripted(vec![Ok(first.to_string()), Err(error.to_string())])
 }
 
 /// Resolver that records every input it was called with (for asserting the
@@ -112,7 +87,7 @@ pub fn resolver_recording() -> (Resolver, Arc<Mutex<Vec<String>>>) {
     let r: Resolver = Box::new(
         move |content: String| -> BoxFuture<anyhow::Result<String>> {
             seen2.lock().push(content);
-            Box::pin(async move { Ok("resolved\n".to_string()) })
+            Box::pin(async { Ok("resolved\n".to_string()) })
         },
     );
     (r, seen)
@@ -122,15 +97,7 @@ pub fn resolver_recording() -> (Resolver, Arc<Mutex<Vec<String>>>) {
 /// error branch was actually reached (not a different skip path). Exercises
 /// the `skipped_failed` arm of the resolve loop.
 pub fn resolver_error() -> (Resolver, Arc<Mutex<u32>>) {
-    let calls = Arc::new(Mutex::new(0u32));
-    let calls2 = calls.clone();
-    let r: Resolver = Box::new(
-        move |_content: String| -> BoxFuture<anyhow::Result<String>> {
-            *calls2.lock() += 1;
-            Box::pin(async { Err(anyhow::anyhow!("LLM unreachable (stub)")) })
-        },
-    );
-    (r, calls)
+    scripted(vec![Err("LLM unreachable (stub)".to_string())])
 }
 
 /// Resolver that returns `"merged\n"` for every file *except* ones whose
@@ -213,21 +180,19 @@ pub fn plan_single_batch(file: &str, reason: &str) -> generator::BatchPlanOutput
     }
 }
 
+/// `generator::CommitOutput` with `message` and no body — the shape every
+/// messenger stub below yields.
+pub fn commit_output(msg: &str) -> generator::CommitOutput {
+    generator::CommitOutput {
+        message: msg.to_string(),
+        body: None,
+    }
+}
+
 /// Messenger that returns the same commit message regardless of input, so the
 /// batch loop's stage + commit mechanics are exercised without an LLM.
 pub fn messenger_fixed(msg: &str) -> CommitMessenger {
-    let msg = msg.to_string();
-    Box::new(
-        move |_diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-            let m = msg.clone();
-            Box::pin(async move {
-                Ok(generator::CommitOutput {
-                    message: m,
-                    body: None,
-                })
-            })
-        },
-    )
+    scripted(vec![Ok(commit_output(msg))]).0
 }
 
 /// One batch in a [`generator::BatchPlanOutput`]: `file` carrying `hunks`,
@@ -268,28 +233,11 @@ pub fn plan(batches: Vec<generator::BatchPlanBatch>) -> generator::BatchPlanOutp
 /// call counter. Drives the partial-failure path: an early batch commits, then
 /// a later batch's message step fails mid-loop.
 pub fn messenger_then_error(ok_for: usize) -> (CommitMessenger, Arc<Mutex<u32>>) {
-    let calls = Arc::new(Mutex::new(0u32));
-    let calls2 = calls.clone();
-    let m: CommitMessenger = Box::new(
-        move |_diff: String| -> BoxFuture<anyhow::Result<generator::CommitOutput>> {
-            let n = {
-                let mut g = calls2.lock();
-                *g += 1;
-                *g
-            };
-            Box::pin(async move {
-                if n <= ok_for as u32 {
-                    Ok(generator::CommitOutput {
-                        message: format!("ok {n}"),
-                        body: None,
-                    })
-                } else {
-                    Err(anyhow::anyhow!("messenger failure (stub)"))
-                }
-            })
-        },
-    );
-    (m, calls)
+    let mut steps: Vec<Result<generator::CommitOutput, String>> = (1..=ok_for)
+        .map(|n| Ok(commit_output(&format!("ok {n}"))))
+        .collect();
+    steps.push(Err("messenger failure (stub)".to_string()));
+    scripted(steps)
 }
 
 /// Messenger that returns each successive message in `messages`, with a call
@@ -476,13 +424,15 @@ pub fn with_git(setup: fn(&Path)) -> (tempfile::TempDir, Git) {
     (dir, git)
 }
 
-/// `assert!(format!("{err:#}").contains(needle))` with the formatted error in
-/// the panic message.
-pub fn err_contains(err: &anyhow::Error, needle: &str) {
-    assert!(
-        format!("{err:#}").contains(needle),
-        "error should contain {needle:?}: {err:#}"
-    );
+/// `assert!(format!("{err:#}").contains(needle))` for every needle, with the
+/// formatted error in the panic message.
+pub fn err_contains(err: &anyhow::Error, needles: &[&str]) {
+    for needle in needles {
+        assert!(
+            format!("{err:#}").contains(needle),
+            "error should contain {needle:?}: {err:#}"
+        );
+    }
 }
 
 /// `assert!(result.is_ok(), "{msg}: {result:?}")` without the 4-line spread.
@@ -639,42 +589,55 @@ pub fn unstaged_hunks(dir: &Path, letters: &[&str]) {
     std::fs::write(dir.join("tracked.txt"), content(1)).unwrap();
 }
 
+/// Branch `other`, commit each file's master-side contents, then the other
+/// side, then checkout master and merge — the shared body of the
+/// multi-conflict merge fixtures below (`files` are
+/// `(rel, master_contents, other_contents)`). Git args match the fixtures it
+/// replaced byte for byte; call sites run `gh::init_test_repo` (and any base
+/// commits) before it.
+pub fn diverge_merge(dir: &Path, files: &[(&str, &[u8], &[u8])]) {
+    let mut add = vec!["add"];
+    add.extend(files.iter().map(|(rel, _, _)| *rel));
+    git_in(dir, &["branch", "other"]);
+    for (rel, master, _) in files {
+        std::fs::write(dir.join(rel), master).unwrap();
+    }
+    git_in(dir, &add);
+    git_in(dir, &["commit", "-m", "master side"]);
+    git_in(dir, &["checkout", "other"]);
+    for (rel, _, other) in files {
+        std::fs::write(dir.join(rel), other).unwrap();
+    }
+    git_in(dir, &add);
+    git_in(dir, &["commit", "-m", "other side"]);
+    git_in(dir, &["checkout", "master"]);
+    git_in(dir, &["merge", "other"]);
+}
+
 /// Two content conflicts (`tracked.txt` modify/modify, `second.txt` add/add)
 /// in one merge. Repo ends in the Merge state.
 pub fn merge_two_conflicts(dir: &Path) {
     gh::init_test_repo(dir);
-    git_in(dir, &["branch", "other"]);
-    // master side
-    std::fs::write(dir.join("tracked.txt"), "master\n").unwrap();
-    std::fs::write(dir.join("second.txt"), "from master\n").unwrap();
-    git_in(dir, &["add", "tracked.txt", "second.txt"]);
-    git_in(dir, &["commit", "-m", "master side"]);
-    // other side
-    git_in(dir, &["checkout", "other"]);
-    std::fs::write(dir.join("tracked.txt"), "other\n").unwrap();
-    std::fs::write(dir.join("second.txt"), "from other\n").unwrap();
-    git_in(dir, &["add", "tracked.txt", "second.txt"]);
-    git_in(dir, &["commit", "-m", "other side"]);
-    git_in(dir, &["checkout", "master"]);
-    git_in(dir, &["merge", "other"]);
+    diverge_merge(
+        dir,
+        &[
+            ("tracked.txt", b"master\n", b"other\n"),
+            ("second.txt", b"from master\n", b"from other\n"),
+        ],
+    );
 }
 
 /// One text conflict (`tracked.txt`) and one binary conflict (`binary.bin`,
 /// NUL bytes diverged on both sides). Repo ends in the Merge state.
 pub fn merge_text_and_binary(dir: &Path) {
     gh::init_test_repo(dir);
-    git_in(dir, &["branch", "other"]);
-    std::fs::write(dir.join("tracked.txt"), "master\n").unwrap();
-    std::fs::write(dir.join("binary.bin"), [0u8, 1, 2]).unwrap();
-    git_in(dir, &["add", "tracked.txt", "binary.bin"]);
-    git_in(dir, &["commit", "-m", "master side"]);
-    git_in(dir, &["checkout", "other"]);
-    std::fs::write(dir.join("tracked.txt"), "other\n").unwrap();
-    std::fs::write(dir.join("binary.bin"), [0u8, 3, 4]).unwrap();
-    git_in(dir, &["add", "tracked.txt", "binary.bin"]);
-    git_in(dir, &["commit", "-m", "other side"]);
-    git_in(dir, &["checkout", "master"]);
-    git_in(dir, &["merge", "other"]);
+    diverge_merge(
+        dir,
+        &[
+            ("tracked.txt", b"master\n", b"other\n"),
+            ("binary.bin", &[0u8, 1, 2], &[0u8, 3, 4]),
+        ],
+    );
 }
 
 /// Rebase that conflicts: both branches change `tracked.txt` differently,
@@ -827,20 +790,18 @@ pub fn merge_delete_modify_conflict(dir: &Path) {
 /// the Merge state.
 pub fn merge_oversized_and_text(dir: &Path) {
     gh::init_test_repo(dir);
-    let big_base = make_lines("base", 2500);
-    commit_file(dir, "big.txt", &big_base, "add big base");
-    git_in(dir, &["branch", "other"]);
-    std::fs::write(dir.join("tracked.txt"), "master\n").unwrap();
-    std::fs::write(dir.join("big.txt"), make_lines("master", 2500)).unwrap();
-    git_in(dir, &["add", "tracked.txt", "big.txt"]);
-    git_in(dir, &["commit", "-m", "master side"]);
-    git_in(dir, &["checkout", "other"]);
-    std::fs::write(dir.join("tracked.txt"), "other\n").unwrap();
-    std::fs::write(dir.join("big.txt"), make_lines("other", 2500)).unwrap();
-    git_in(dir, &["add", "tracked.txt", "big.txt"]);
-    git_in(dir, &["commit", "-m", "other side"]);
-    git_in(dir, &["checkout", "master"]);
-    git_in(dir, &["merge", "other"]);
+    commit_file(dir, "big.txt", &make_lines("base", 2500), "add big base");
+    diverge_merge(
+        dir,
+        &[
+            ("tracked.txt", b"master\n", b"other\n"),
+            (
+                "big.txt",
+                make_lines("master", 2500).as_bytes(),
+                make_lines("other", 2500).as_bytes(),
+            ),
+        ],
+    );
 }
 
 /// Four conflicts in one merge, one of each disposition the resolve workflow
@@ -856,42 +817,15 @@ pub fn merge_oversized_and_text(dir: &Path) {
 /// in the Merge state.
 pub fn merge_mixed_blockers(dir: &Path) {
     gh::init_test_repo(dir);
-    git_in(dir, &["branch", "other"]);
-    // master side
-    std::fs::write(dir.join("tracked.txt"), "master\n").unwrap();
-    std::fs::write(dir.join("second.txt"), "from master\n").unwrap();
-    std::fs::write(dir.join("third.txt"), "LLM_FAIL master\n").unwrap();
-    std::fs::write(dir.join("binary.bin"), [0u8, 1, 2]).unwrap();
-    git_in(
+    diverge_merge(
         dir,
         &[
-            "add",
-            "tracked.txt",
-            "second.txt",
-            "third.txt",
-            "binary.bin",
+            ("tracked.txt", b"master\n", b"other\n"),
+            ("second.txt", b"from master\n", b"from other\n"),
+            ("third.txt", b"LLM_FAIL master\n", b"LLM_FAIL other\n"),
+            ("binary.bin", &[0u8, 1, 2], &[0u8, 3, 4]),
         ],
     );
-    git_in(dir, &["commit", "-m", "master side"]);
-    // other side
-    git_in(dir, &["checkout", "other"]);
-    std::fs::write(dir.join("tracked.txt"), "other\n").unwrap();
-    std::fs::write(dir.join("second.txt"), "from other\n").unwrap();
-    std::fs::write(dir.join("third.txt"), "LLM_FAIL other\n").unwrap();
-    std::fs::write(dir.join("binary.bin"), [0u8, 3, 4]).unwrap();
-    git_in(
-        dir,
-        &[
-            "add",
-            "tracked.txt",
-            "second.txt",
-            "third.txt",
-            "binary.bin",
-        ],
-    );
-    git_in(dir, &["commit", "-m", "other side"]);
-    git_in(dir, &["checkout", "master"]);
-    git_in(dir, &["merge", "other"]);
 }
 
 /// Hunk-level staging fixture (issue #150): commits a base, then stages

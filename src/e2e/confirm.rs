@@ -13,12 +13,11 @@ use super::common::*;
 /// re-run can retry.
 #[tokio::test]
 async fn commit_confirm_abort_aborts_staged_single_commit() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
 
     stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
@@ -36,11 +35,7 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
     )
     .await
     .expect_err("aborting the confirmation must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted — no commit made"),
-        "expected the 'no commit made' abort, got: {msg}"
-    );
+    err_contains(&err, &["aborted — no commit made"]);
 
     // No commit landed.
     assert_eq!(
@@ -64,12 +59,10 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
 /// so a re-run sees exactly the same partial staging.
 #[tokio::test]
 async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let (_a_state, b_state) = partial_stage_two_hunk_file(dir.path());
 
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
@@ -87,11 +80,7 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
     )
     .await
     .expect_err("aborting the confirmation must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted — no commit made"),
-        "expected the 'no commit made' abort, got: {msg}"
-    );
+    err_contains(&err, &["aborted — no commit made"]);
 
     // No commit landed.
     assert_eq!(
@@ -327,7 +316,7 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
 /// stays staged.
 #[tokio::test]
 async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
 
     // One file, two change sites far enough apart that git emits two hunks.
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
@@ -341,7 +330,6 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
         plan_batch("tracked.txt", &[2], "change c"),
     ]);
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
@@ -410,7 +398,7 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
 /// working tree ends clean.
 #[tokio::test]
 async fn commit_confirm_commits_every_batch() {
-    let dir = with_repo(two_file_unstaged_repo);
+    let (dir, git) = with_git(two_file_unstaged_repo);
 
     // One file per batch — batch 1 = alpha, batch 2 = beta.
     let plan = plan(vec![
@@ -418,7 +406,6 @@ async fn commit_confirm_commits_every_batch() {
         plan_batch("beta.txt", &[1], "change beta"),
     ]);
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let result = commit_run(
         &git,
@@ -459,7 +446,7 @@ async fn commit_confirm_commits_every_batch() {
 /// only the preview caller) fails here, where the per-call unit test cannot.
 #[tokio::test]
 async fn multi_file_batch_landed_line_shows_sigma_total() {
-    let dir = with_repo(two_file_unstaged_repo);
+    let (_dir, git) = with_git(two_file_unstaged_repo);
 
     // One batch carrying both files — a genuine multi-file commit.
     let plan = plan(vec![plan_multi_batch(
@@ -467,7 +454,7 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
         "both files together",
     )]);
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let display = Display::with(buf.clone());
 
     let result = commit_run(
@@ -501,7 +488,7 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
 /// reports zero committed, and the declined hunk stays staged.
 #[tokio::test]
 async fn commit_confirm_abort_first_batch_commits_nothing() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
 
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
@@ -514,7 +501,6 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
         plan_batch("tracked.txt", &[2], "change c"),
     ]);
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
@@ -528,15 +514,7 @@ async fn commit_confirm_abort_first_batch_commits_nothing() {
     )
     .await
     .expect_err("aborting batch 1 must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("declined on batch 1 of 2"),
-        "expected batch-1 decline, got: {msg}"
-    );
-    assert!(
-        msg.contains("0 batches committed"),
-        "expected 0 committed, got: {msg}"
-    );
+    err_contains(&err, &["declined on batch 1 of 2", "0 batches committed"]);
 
     assert_eq!(
         commit_count(dir.path()),

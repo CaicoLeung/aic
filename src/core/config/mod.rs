@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::llm::cli_agent::{cli_preset, is_preset};
+use crate::llm::cli_agent::{PROMPT_PLACEHOLDER, cli_preset, is_preset};
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, LLM, Provider};
 use crate::render::{oneshot, palette};
 
@@ -71,6 +71,15 @@ impl CliConfig {
             .filter(|s| !s.is_empty())
     }
 
+    /// The argv template to run: the stored `args`, or the `["{prompt}"]`
+    /// default when unset — the one read `to_spec`, `migrate_if_stale`,
+    /// and `aic list` share.
+    fn effective_args(&self) -> Vec<String> {
+        self.args
+            .clone()
+            .unwrap_or_else(|| vec![PROMPT_PLACEHOLDER.to_string()])
+    }
+
     /// Resolve this config into a runnable
     /// [`CliSpec`](crate::llm::cli_agent::CliSpec), applying the default args
     /// template (`["{prompt}"]`) and the default timeout. The stdout
@@ -86,10 +95,7 @@ impl CliConfig {
             .active_command()
             .expect("CliConfig::to_spec only called when a command is set")
             .to_string();
-        let args = self
-            .args
-            .clone()
-            .unwrap_or_else(|| vec![crate::llm::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
+        let args = self.effective_args();
         let timeout_secs = self
             .timeout_secs
             .unwrap_or(crate::llm::cli_agent::DEFAULT_TIMEOUT_SECS);
@@ -373,11 +379,7 @@ impl Config {
         let Some(command) = config.active_cli_command() else {
             return Ok(Vec::new());
         };
-        let args = config
-            .cli
-            .args
-            .clone()
-            .unwrap_or_else(|| vec![crate::llm::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
+        let args = config.cli.effective_args();
         let Some((name, new_args)) = crate::llm::cli_agent::cli_preset_migration(command, &args)
         else {
             return Ok(Vec::new());
@@ -766,12 +768,11 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
                 .active_cli_command()
                 .expect("cli backend implies command set");
             row(&mut lines, "Command", command.to_string(), Source::Config);
-            let (args, args_src) = match &c.cli.args {
-                Some(a) => (a.join(" "), Source::Config),
-                None => (
-                    crate::llm::cli_agent::PROMPT_PLACEHOLDER.to_string(),
-                    Source::Default,
-                ),
+            let args = c.cli.effective_args().join(" ");
+            let args_src = if c.cli.args.is_some() {
+                Source::Config
+            } else {
+                Source::Default
             };
             row(&mut lines, "Args", args, args_src);
             let (timeout, to_src) = match c.cli.timeout_secs {

@@ -75,15 +75,7 @@ async fn veto_aborts_with_index_intact(hook: &str, script: &str, blocked: &str) 
     )
     .await
     .expect_err("a vetoing hook must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains(blocked),
-        "the hook's stderr must surface, got: {msg}"
-    );
-    assert!(
-        msg.contains("aborted on batch 1 of 1"),
-        "the Run must abort cleanly at the batch boundary, got: {msg}"
-    );
+    err_contains(&err, &[blocked, "aborted on batch 1 of 1"]);
 
     // No commit landed; the staged index is intact — the batch's hunks are
     // still staged, ready for a re-run once the offending hook is fixed.

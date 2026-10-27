@@ -6,11 +6,10 @@ use super::common::*;
 /// nothing-to-commit notice and returns without calling the LLM or prompting.
 #[tokio::test]
 async fn commit_clean_repo_is_a_noop() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
 
     let (_resolver, seen) = resolver_recording();
     let _prompt = prompt_queue(vec![]); // empty — must not be asked
-    let git = Git::at(dir.path()).unwrap();
 
     let result = commit_run(&git, deps(unreachable_planner(), unreachable_messenger())).await;
     assert_ok(&result, "clean repo should not error");
@@ -28,9 +27,7 @@ async fn commit_clean_repo_is_a_noop() {
 /// secret-shaped conflicted file. One invocation, one decision.
 #[tokio::test]
 async fn commit_run_no_redact_carries_into_the_resolve_handoff() {
-    let dir = with_repo(merge_conflict_with_secret);
-
-    let git = Git::at(dir.path()).unwrap();
+    let (dir, git) = with_git(merge_conflict_with_secret);
     let result = default_run(
         &git,
         // resolve now? → yes, apply tracked.txt? → yes
@@ -57,10 +54,9 @@ async fn commit_run_no_redact_carries_into_the_resolve_handoff() {
 /// or the normal commit flow.
 #[tokio::test]
 async fn commit_run_auto_detect_aborts_when_user_declines() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let (resolver, seen) = resolver_recording();
-    let git = Git::at(dir.path()).unwrap();
 
     let err = default_run(
         &git,
@@ -69,11 +65,7 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
     )
     .await
     .expect_err("must abort when user declines resolve");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted") && msg.contains("mid-merge"),
-        "expected abort message, got: {msg}"
-    );
+    err_contains(&err, &["aborted", "mid-merge"]);
     assert!(seen.lock().is_empty(), "resolver must not run on decline");
     assert!(!is_clean(dir.path()));
 }
@@ -83,10 +75,9 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
 /// manual continuation instead of redirecting to a command that would refuse.
 #[tokio::test]
 async fn commit_run_rebase_state_aborts_with_manual_continuation() {
-    let dir = with_repo(rebase_conflict);
+    let (dir, git) = with_git(rebase_conflict);
 
     let (resolver, seen) = resolver_recording();
-    let git = Git::at(dir.path()).unwrap();
 
     let err = default_run(
         &git,
@@ -97,14 +88,10 @@ async fn commit_run_rebase_state_aborts_with_manual_continuation() {
     )
     .await
     .expect_err("rebase state must abort without offering resolve");
-    let msg = format!("{err:#}");
+    err_contains(&err, &["mid-rebase", "git rebase --continue"]);
     assert!(
-        msg.contains("mid-rebase") && msg.contains("git rebase --continue"),
-        "expected manual-continuation abort, got: {msg}"
-    );
-    assert!(
-        !msg.contains("aic resolve"),
-        "must not point at a command that refuses rebase: {msg}"
+        !format!("{err:#}").contains("aic resolve"),
+        "must not point at a command that refuses rebase: {err:#}"
     );
     assert!(seen.lock().is_empty(), "resolver must not run on rebase");
     assert!(!is_clean(dir.path()), "repo must be left untouched");
@@ -114,20 +101,15 @@ async fn commit_run_rebase_state_aborts_with_manual_continuation() {
 /// honest advice for rebase states: the manual continuation, not `aic resolve`.
 #[test]
 fn commit_guard_names_manual_continuation_for_rebase() {
-    let dir = with_repo(rebase_conflict);
-    let git = Git::at(dir.path()).unwrap();
+    let (_dir, git) = with_git(rebase_conflict);
 
     let err = git
         .assert_commit_safe()
         .expect_err("guard must refuse to commit mid-rebase");
-    let msg = format!("{err:#}");
+    err_contains(&err, &["mid-rebase", "git rebase --continue"]);
     assert!(
-        msg.contains("mid-rebase") && msg.contains("git rebase --continue"),
-        "expected manual-continuation hint, got: {msg}"
-    );
-    assert!(
-        !msg.contains("aic resolve"),
-        "must not point at a command that refuses rebase: {msg}"
+        !format!("{err:#}").contains("aic resolve"),
+        "must not point at a command that refuses rebase: {err:#}"
     );
 }
 
@@ -136,11 +118,10 @@ fn commit_guard_names_manual_continuation_for_rebase() {
 /// through the commit-workflow entry point.
 #[tokio::test]
 async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let resolver = resolver_returning("merged\n");
     // [0] = "resolve now?" yes, [1] = "apply tracked.txt?" yes
-    let git = Git::at(dir.path()).unwrap();
 
     let result = default_run(
         &git,
@@ -171,12 +152,11 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
 /// reports zero approved plus one rejected.
 #[tokio::test]
 async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
-    let dir = with_repo(merge_conflict);
+    let (dir, git) = with_git(merge_conflict);
 
     let resolver = resolver_returning("merged\n");
     // [0] = "resolve now?" yes (route into the resolve workflow),
     // [1] = "apply tracked.txt?" no (reject the only proposed resolution).
-    let git = Git::at(dir.path()).unwrap();
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
@@ -401,7 +381,7 @@ async fn commit_includes_binary_file_in_batch_plan() {
 /// computed then thrown away, never asserted. This captures what was sent.
 #[tokio::test]
 async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
 
     std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
     git_in(dir.path(), &["add", "blob.bin"]);
@@ -410,7 +390,6 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
 
     let plan = plan(vec![plan_batch("blob.bin", &[], "update binary")]);
     let (planner, sent) = planner_capture(plan);
-    let git = Git::at(dir.path()).unwrap();
     let result = commit_run(&git, deps(planner, messenger_fixed("chore: update blob"))).await;
     assert_ok(&result, "batch should succeed");
 
@@ -525,8 +504,7 @@ async fn commit_staged_files_in_one_commit() {
 /// capture. Setup via [`partial_stage_two_hunk_file`].
 #[tokio::test]
 async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let (a_state, b_state) = partial_stage_two_hunk_file(dir.path());
 
     run_expect_commits(
@@ -649,7 +627,7 @@ async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
 /// Guards the [important] partial-failure UX contract.
 #[tokio::test]
 async fn commit_batch_loop_aborts_after_partial_commit() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
 
     unstaged_hunks(dir.path(), &["a", "c"]);
 
@@ -658,20 +636,11 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
         plan_batch("tracked.txt", &[2], "change c"),
     ]);
     let (messenger, calls) = messenger_then_error(1); // batch 1 ok, batch 2 fails
-    let git = Git::at(dir.path()).unwrap();
     let err = commit_run(&git, deps(planner_fixed(plan), messenger))
         .await
         .expect_err("must abort when a later batch fails");
 
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted on batch 2"),
-        "expected batch-2 abort, got: {msg}"
-    );
-    assert!(
-        msg.contains("1 batch committed"),
-        "expected 1 committed, got: {msg}"
-    );
+    err_contains(&err, &["aborted on batch 2", "1 batch committed"]);
     assert_eq!(*calls.lock(), 2, "messenger called once per batch");
     // Batch 1 DID commit — its hunk is in HEAD despite the later failure; the
     // failed batch 2's hunk is staged but NOT committed.
@@ -897,7 +866,7 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
 /// file, the pattern kind, and the `--no-redact` override.
 #[tokio::test]
 async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
     commit_file(dir.path(), "tracked.txt", "clean\n", "base");
     std::fs::write(
         dir.path().join("tracked.txt"),
@@ -905,7 +874,6 @@ async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
     )
     .unwrap();
 
-    let git = Git::at(dir.path()).unwrap();
     let err = commit_run(&git, deps(unreachable_planner(), unreachable_messenger()))
         .await
         .expect_err("secret-shaped unstaged diff must refuse the Run");
@@ -955,7 +923,7 @@ async fn commit_run_no_redact_proceeds_past_the_gate() {
 /// initial payload the Run sends (issue #155), not just the batch plan.
 #[tokio::test]
 async fn commit_run_refuses_secret_in_staged_diff() {
-    let dir = with_repo(gh::init_test_repo);
+    let (dir, git) = with_git(gh::init_test_repo);
     commit_file(dir.path(), "id_ed25519", "placeholder\n", "base");
     stage_file(
         dir.path(),
@@ -963,16 +931,10 @@ async fn commit_run_refuses_secret_in_staged_diff() {
         "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
     );
 
-    let git = Git::at(dir.path()).unwrap();
     let err = commit_run(&git, deps(unreachable_planner(), unreachable_messenger()))
         .await
         .expect_err("secret-shaped staged diff must refuse the Run");
 
-    let msg = format!("{err:#}");
-    assert!(msg.contains("id_ed25519"), "must name the file: {msg}");
-    assert!(
-        msg.contains("private key block (PEM)"),
-        "must name the kind: {msg}"
-    );
+    err_contains(&err, &["id_ed25519", "private key block (PEM)"]);
     assert_eq!(commit_count(dir.path()), 2, "nothing committed");
 }

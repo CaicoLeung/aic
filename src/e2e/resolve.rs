@@ -167,7 +167,7 @@ async fn resolve_gives_up_when_markers_persist() {
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
         .expect_err("must bail when no file could be resolved");
-    err_contains(&err, "no files could be resolved");
+    err_contains(&err, &["no files could be resolved"]);
     assert_eq!(*calls.lock(), 2, "one attempt + one retry");
     assert!(!is_clean(dir.path()), "merge must not be finalized");
     assert!(
@@ -201,7 +201,7 @@ async fn resolve_reports_llm_error_when_retry_fails() {
     )
     .await
     .expect_err("must bail when the only file's resolution fails");
-    err_contains(&err, "no files could be resolved");
+    err_contains(&err, &["no files could be resolved"]);
     assert_eq!(*calls.lock(), 2, "one attempt + one retry");
 
     // The truthful reason: the retry failed, so markers do *not* remain.
@@ -423,7 +423,7 @@ async fn resolve_skips_delete_modify_conflict() {
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
         .expect_err("delete/modify has no resolvable file");
-    err_contains(&err, "no files could be resolved");
+    err_contains(&err, &["no files could be resolved"]);
     assert!(
         seen.lock().is_empty(),
         "resolver must not run on a DeleteModify file"
@@ -477,7 +477,7 @@ async fn resolve_llm_error_bails_when_only_file_fails() {
     let err = resolve_run(&git, resolve_deps(resolver, prompt_queue(vec![])))
         .await
         .expect_err("must bail when the LLM call fails");
-    err_contains(&err, "no files could be resolved");
+    err_contains(&err, &["no files could be resolved"]);
     assert_eq!(
         *calls.lock(),
         1,
@@ -748,7 +748,7 @@ async fn resolve_redaction_refusal_shapes_the_failed_screen() {
         lines.iter().all(|l| !l.starts_with("  ✓ Resolve files")),
         "later steps never complete after a failure: {lines:?}"
     );
-    err_contains(&err, "secret-shaped");
+    err_contains(&err, &["secret-shaped"]);
 }
 
 /// Persistent markers fail the Resolve step's screen (ADR 0018): the
@@ -795,5 +795,5 @@ async fn resolve_failed_resolution_shapes_the_failed_screen() {
         lines.iter().all(|l| !l.starts_with("  ✓ Reviewed")),
         "later steps never complete after a failure: {lines:?}"
     );
-    err_contains(&err, "no files could be resolved");
+    err_contains(&err, &["no files could be resolved"]);
 }

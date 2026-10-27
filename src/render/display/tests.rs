@@ -109,6 +109,33 @@ fn disp_cols(cols: usize) -> (Display, Arc<Mutex<Vec<String>>>) {
     )
 }
 
+/// `emit_file_stats` with the tail every plain-footer test repeats: the
+/// preview's prefix-free geometry (tick 0, hash 0, message 2), the
+/// text-width budget, and zeroed counts geometry.
+fn preview_footer(d: &Display, stats: &[FileStats]) -> usize {
+    d.emit_file_stats(
+        stats,
+        &SubjectOffsets {
+            tick: 0,
+            hash: 0,
+            message: 2,
+        },
+        d.text_width(),
+        CountsGeometry::ZERO,
+    )
+}
+
+/// One `commit_line` over a fresh truecolor sink with the process-global
+/// color state locked and forced — the emitted lines joined with `\n`,
+/// ready for truecolor substring asserts.
+fn styled_line(hash: &str, msg: &str) -> String {
+    let _locks = color_locks();
+    let _guard = ColorGuard::force();
+    let (d, lines) = disp(true);
+    d.commit_line(hash, msg, &[], CountsGeometry::ZERO);
+    lines.lock().join("\n")
+}
+
 #[test]
 fn commit_preview_renders_message_body_and_file_list() {
     let (d, lines) = disp(false);
@@ -239,7 +266,8 @@ fn commit_preview_truncates_long_file_lists() {
 #[test]
 fn file_stats_footer_marks_binary_and_deleted_files() {
     let (d, lines) = disp(false);
-    let rows = d.emit_file_stats(
+    let rows = preview_footer(
+        &d,
         &[
             FileStats {
                 new: true,
@@ -252,13 +280,6 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
                 ..fs("src/old.rs", 0, 12)
             },
         ],
-        &SubjectOffsets {
-            tick: 0,
-            hash: 0,
-            message: 2,
-        },
-        d.text_width(),
-        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
@@ -285,16 +306,7 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
 #[test]
 fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
     let (d, lines) = disp(false);
-    let rows = d.emit_file_stats(
-        &[fs("a.rs", 5, 0), fs("b.rs", 5, 0)],
-        &SubjectOffsets {
-            tick: 0,
-            hash: 0,
-            message: 2,
-        },
-        d.text_width(),
-        CountsGeometry::ZERO,
-    );
+    let rows = preview_footer(&d, &[fs("a.rs", 5, 0), fs("b.rs", 5, 0)]);
     let got = lines.lock().clone();
     // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
     // sits under the total's `0` of `+10`; both end at the same column.
@@ -313,7 +325,8 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
 #[test]
 fn file_stats_footer_stable_columns_when_all_files_binary() {
     let (d, lines) = disp(false);
-    let rows = d.emit_file_stats(
+    let rows = preview_footer(
+        &d,
         &[
             FileStats {
                 new: true,
@@ -327,13 +340,6 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
                 ..fs("data.bin", 0, 0)
             },
         ],
-        &SubjectOffsets {
-            tick: 0,
-            hash: 0,
-            message: 2,
-        },
-        d.text_width(),
-        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // New binary keeps `[new]` and shows its full size (`+2.0 KB`); the
@@ -356,7 +362,8 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
 #[test]
 fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
     let (d, lines) = disp(false);
-    let rows = d.emit_file_stats(
+    let rows = preview_footer(
+        &d,
         &[
             FileStats {
                 binary: true,
@@ -366,13 +373,6 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
             },
             fs("a.rs", 1, 0),
         ],
-        &SubjectOffsets {
-            tick: 0,
-            hash: 0,
-            message: 2,
-        },
-        d.text_width(),
-        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // base region (`+1` 2 + gap 1 + `−0` 2 = 5) widens to 17 for
@@ -396,7 +396,8 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
 fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
     let (d, lines) = disp(false);
     let long = "x".repeat(70);
-    let rows = d.emit_file_stats(
+    let rows = preview_footer(
+        &d,
         &[
             FileStats {
                 path: long.clone(),
@@ -407,13 +408,6 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
                 ..fs("a.rs", 1, 0)
             },
         ],
-        &SubjectOffsets {
-            tick: 0,
-            hash: 0,
-            message: 2,
-        },
-        d.text_width(),
-        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
@@ -665,11 +659,7 @@ fn plain_when_colors_disabled() {
 
 #[test]
 fn truecolor_when_colors_enabled() {
-    let (_env, _neon) = color_locks();
-    let _guard = ColorGuard::force();
-    let (d, lines) = disp(true);
-    d.commit_line("abc1234", "feat: add thing", &[], CountsGeometry::ZERO);
-    let joined = lines.lock().join("\n");
+    let joined = styled_line("abc1234", "feat: add thing");
     // hash #d97706 (bold), feat type green #15803d (bold), description
     // bold default fg.
     assert!(
@@ -692,16 +682,7 @@ fn truecolor_when_colors_enabled() {
 
 #[test]
 fn fix_type_gets_orange_color() {
-    let (_env, _neon) = color_locks();
-    let _guard = ColorGuard::force();
-    let (d, lines) = disp(true);
-    d.commit_line(
-        "def5678",
-        "fix(auth): correct token check",
-        &[],
-        CountsGeometry::ZERO,
-    );
-    let joined = lines.lock().join("\n");
+    let joined = styled_line("def5678", "fix(auth): correct token check");
     // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
     // readability — see types::NAMED_PALETTE).
     assert!(
@@ -743,22 +724,13 @@ fn scoped_commit_preserves_parens_plain() {
 /// test only pins the display wiring.
 #[test]
 fn each_type_renders_its_palette_color() {
-    let (_env, _neon) = color_locks();
-    let _guard = ColorGuard::force();
     for (type_str, rgb) in [
         ("feat", "21;128;61"),
         ("ci", "99;102;241"),
         ("chore", "15;118;110"),
         ("wip", "100;116;139"),
     ] {
-        let (d, lines) = disp(true);
-        d.commit_line(
-            "hash000",
-            &format!("{type_str}: msg"),
-            &[],
-            CountsGeometry::ZERO,
-        );
-        let joined = lines.lock().join("\n");
+        let joined = styled_line("hash000", &format!("{type_str}: msg"));
         assert!(
             joined.contains(rgb),
             "{type_str} should render color {rgb}: {joined:?}"
@@ -772,16 +744,7 @@ fn each_type_renders_its_palette_color() {
 /// read as "uncolored"). Stability/distribution is pinned in `types::tests`.
 #[test]
 fn unrecognized_type_gets_hash_fallback_color() {
-    let (_env, _neon) = color_locks();
-    let _guard = ColorGuard::force();
-    let (d, lines) = disp(true);
-    d.commit_line(
-        "ghi9012",
-        "blob: thing in progress",
-        &[],
-        CountsGeometry::ZERO,
-    );
-    let joined = lines.lock().join("\n");
+    let joined = styled_line("ghi9012", "blob: thing in progress");
     assert!(
         !joined.contains("107;114;128"),
         "unrecognized type must not collapse to neutral gray: {joined:?}"
@@ -805,11 +768,7 @@ fn unrecognized_type_gets_hash_fallback_color() {
 
 #[test]
 fn no_colon_message_gets_muted_gray() {
-    let (_env, _neon) = color_locks();
-    let _guard = ColorGuard::force();
-    let (d, lines) = disp(true);
-    d.commit_line("jkl3456", "no colon message", &[], CountsGeometry::ZERO);
-    let joined = lines.lock().join("\n");
+    let joined = styled_line("jkl3456", "no colon message");
     // No-colon messages have no type token to color → muted gray #6b7280
     // (darkened from the old #9ca3af for white-bg readability).
     assert!(
@@ -874,16 +833,7 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
     };
     for (cols, cells) in [(30, 8), (28, 6), (24, 0), (16, 0)] {
         let (d, lines) = disp_cols(cols);
-        d.emit_file_stats(
-            &stats(10),
-            &SubjectOffsets {
-                tick: 0,
-                hash: 0,
-                message: 2,
-            },
-            d.text_width(),
-            CountsGeometry::ZERO,
-        );
+        preview_footer(&d, &stats(10));
         let got = lines.lock().clone();
         let sigma = got.last().expect("Σ row present");
         let bar = if cells > 0 {

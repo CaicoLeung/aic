@@ -87,7 +87,7 @@ async fn undo_declined_changes_nothing() {
     let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     let err = undo::undo_run(&git, &|_| Ok(false)).unwrap_err();
-    err_contains(&err, "aborted");
+    err_contains(&err, &["aborted"]);
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 2);
     assert!(git.git_dir().join("aic/undo-run").exists());
 }
@@ -98,7 +98,7 @@ fn undo_without_state_file_refuses() {
     let (_dir, git) = with_git(gh::init_test_repo);
 
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    err_contains(&err, "no aic run to undo");
+    err_contains(&err, &["no aic run to undo"]);
 }
 
 /// A recorded start with zero commits since (the Run recorded, then its
@@ -111,8 +111,7 @@ fn undo_after_zero_commit_run_clears_stale_state() {
     undo::record(&git, &git.head_sha().unwrap()).unwrap();
 
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    err_contains(&err, "made no commits");
-    err_contains(&err, "stale state cleared");
+    err_contains(&err, &["made no commits", "stale state cleared"]);
     assert!(!git.git_dir().join("aic/undo-run").exists());
 }
 
@@ -202,7 +201,7 @@ async fn undo_refuses_when_run_tip_was_rewritten() {
     .unwrap();
 
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    err_contains(&err, "refusing to undo");
+    err_contains(&err, &["refusing to undo"]);
 }
 
 /// Without a tip anchor (a Run predating tip tracking, or a crash between
@@ -252,7 +251,7 @@ async fn undo_refuses_when_history_rewritten_past_start() {
     .unwrap();
 
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    err_contains(&err, "refusing to undo");
+    err_contains(&err, &["refusing to undo"]);
 }
 
 /// A Run that aborts mid-loop (batch 2's draft fails after batch 1
@@ -298,7 +297,7 @@ fn undo_with_malformed_state_file_refuses_without_mutation() {
 
     let err =
         undo::undo_run(&git, &|_| Ok(true)).expect_err("a garbage anchor must refuse, not succeed");
-    err_contains(&err, "malformed commit id");
+    err_contains(&err, &["malformed commit id"]);
 
     assert_eq!(git.head_sha().unwrap(), head, "no reset may happen");
     assert!(state.exists(), "the state file must be left for inspection");
