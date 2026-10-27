@@ -126,13 +126,11 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
 
     stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
-    let git = Git::at(dir.path()).unwrap();
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             display,
             confirm: Confirm::Interactive {
@@ -144,15 +142,10 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
                 messenger_fixed("feat: staged change"),
             )
         },
+        1,
+        "the confirmed staged commit must land",
     )
     .await;
-    assert_ok(&result, "a confirmed commit should land");
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the confirmed staged commit must land"
-    );
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: staged change",
@@ -191,14 +184,12 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
 
     stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
-    let git = Git::at(dir.path()).unwrap();
     let (messenger, calls) = messenger_sequence(&["feat: first draft", "feat: second draft"]);
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             display,
             confirm: Confirm::Interactive {
@@ -207,15 +198,10 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
             },
             ..deps(unreachable_planner(), messenger)
         },
+        1,
+        "exactly one commit must land",
     )
     .await;
-    assert_ok(&result, "Regenerate then Commit should succeed");
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "exactly one commit must land"
-    );
     assert_eq!(*calls.lock(), 2, "the messenger must run once per draft");
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
@@ -256,12 +242,10 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
         "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
     );
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
     let (messenger, calls) = messenger_sequence(&["feat: first draft", "feat: second draft"]);
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             redact: Redact::Off,
             confirm: Confirm::Interactive {
@@ -270,11 +254,11 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
             },
             ..deps(unreachable_planner(), messenger)
         },
+        1,
+        "one commit lands",
     )
     .await;
-    assert_ok(&result, "--no-redact + Regenerate must complete the Run");
     assert_eq!(*calls.lock(), 2, "the redraft must reach the messenger");
-    assert_eq!(commit_count(dir.path()), before + 1, "one commit lands");
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: second draft",
@@ -290,11 +274,8 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
 
     stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
@@ -302,15 +283,10 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
             },
             ..deps(unreachable_planner(), messenger_fixed("feat: draft"))
         },
+        1,
+        "the edited commit must land",
     )
     .await;
-    assert_ok(&result, "Edit then Commit should succeed");
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the edited commit must land"
-    );
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: edited\n\nedited body",
@@ -326,11 +302,8 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
 
     stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
@@ -338,11 +311,10 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
             },
             ..deps(unreachable_planner(), messenger_fixed("feat: draft"))
         },
+        1,
+        "the commit must land",
     )
     .await;
-    assert_ok(&result, "a cancelled edit then Commit should succeed");
-
-    assert_eq!(commit_count(dir.path()), before + 1, "the commit must land");
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: draft",

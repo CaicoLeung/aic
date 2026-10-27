@@ -24,11 +24,8 @@ fn two_batch_plan() -> generator::BatchPlanOutput {
 async fn batch_review_merge_then_continue_commits_one_combined_commit() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
@@ -38,15 +35,10 @@ async fn batch_review_merge_then_continue_commits_one_combined_commit() {
                 messenger_fixed("feat: combined change"),
             )
         },
+        1,
+        "a merged plan must land exactly one combined commit",
     )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "a merged plan must land exactly one combined commit"
-    );
+    .await;
     assert_eq!(file_at_ref(dir.path(), "HEAD", "alpha.txt"), "a1\n");
     assert_eq!(file_at_ref(dir.path(), "HEAD", "beta.txt"), "b1\n");
     assert!(worktree_is_empty(dir.path()), "both files fully committed");
@@ -103,11 +95,8 @@ async fn batch_review_abort_stages_nothing_and_commits_nothing() {
 async fn batch_review_undo_restores_the_two_batch_plan() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![
@@ -121,15 +110,10 @@ async fn batch_review_undo_restores_the_two_batch_plan() {
                 messenger_fixed("feat: separate change"),
             )
         },
+        2,
+        "undo must restore the original two-Batch plan",
     )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 2,
-        "undo must restore the original two-Batch plan"
-    );
+    .await;
     assert!(worktree_is_empty(dir.path()), "both files fully committed");
 }
 
@@ -197,12 +181,10 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
     std::fs::write(dir.path().join("src/a.rs"), "new a\n").unwrap();
     std::fs::write(dir.path().join("docs/b.md"), "new b\n").unwrap();
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
     let buf = BufferWrite::default();
 
-    commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
@@ -214,9 +196,10 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
                 messenger_fixed("feat: combined fallback work"),
             )
         },
+        1,
+        "the merged fallback plan must land exactly one commit",
     )
-    .await
-    .unwrap();
+    .await;
 
     // The fallback notice rendered, then the menu merged the fallback's two
     // batches into one commit carrying both files.
@@ -226,11 +209,6 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
             .iter()
             .any(|l| l.contains("Regrouping deterministically")),
         "expected the fallback notice before the review menu, got: {lines:?}"
-    );
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the merged fallback plan must land exactly one commit"
     );
     assert_eq!(file_at_ref(dir.path(), "HEAD", "src/a.rs"), "new a\n");
     assert_eq!(file_at_ref(dir.path(), "HEAD", "docs/b.md"), "new b\n");
@@ -245,11 +223,8 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
 async fn batch_review_merge_then_confirm_commit_lands_the_combined_commit() {
     let dir = with_repo(two_file_unstaged_repo);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
@@ -263,15 +238,10 @@ async fn batch_review_merge_then_confirm_commit_lands_the_combined_commit() {
                 messenger_fixed("feat: combined change"),
             )
         },
+        1,
+        "review merge + confirm Commit must land the one combined commit",
     )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "review merge + confirm Commit must land the one combined commit"
-    );
+    .await;
     assert_eq!(file_at_ref(dir.path(), "HEAD", "alpha.txt"), "a1\n");
     assert_eq!(file_at_ref(dir.path(), "HEAD", "beta.txt"), "b1\n");
     assert!(worktree_is_empty(dir.path()), "both files fully committed");
