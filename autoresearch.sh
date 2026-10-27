@@ -14,6 +14,9 @@ echo "== clippy (gate, must be warning-free) =="
 cargo clippy --all-targets --quiet -- -D warnings
 
 echo "== metrics =="
+cargo build --release --quiet
+BINARY_BYTES=$(wc -c < target/release/aic | tr -d ' ')
+echo "METRIC binary_bytes=$BINARY_BYTES"
 SRC_LOC=$(find src -name '*.rs' -print0 | xargs -0 wc -l | tail -1 | awk '{print $1}')
 echo "METRIC src_loc=$SRC_LOC"
 TEST_COUNT=$(cargo test 2>&1 | awk '/test result: ok/ {s+=$4} END {print s+0}')
