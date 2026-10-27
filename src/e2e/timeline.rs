@@ -62,8 +62,7 @@ async fn unstaged_run_appends_the_step_ledger() {
 #[tokio::test]
 async fn staged_run_appends_the_three_step_ledger() {
     let dir = with_repo(gh::init_test_repo);
-    std::fs::write(dir.path().join("tracked.txt"), "diverged\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "diverged\n");
 
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();
@@ -93,8 +92,7 @@ async fn staged_run_appends_the_three_step_ledger() {
 #[tokio::test]
 async fn no_redact_run_has_no_gate_step() {
     let dir = with_repo(gh::init_test_repo);
-    std::fs::write(dir.path().join("tracked.txt"), "diverged\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "diverged\n");
 
     let buf = BufferWrite::default();
     let git = Git::at(dir.path()).unwrap();

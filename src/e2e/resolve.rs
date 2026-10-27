@@ -249,8 +249,7 @@ async fn resolve_offers_finalize_when_all_manual() {
 
     // Resolve by hand + stage, leaving the repo in the Merge state with no
     // unmerged entries.
-    std::fs::write(dir.path().join("tracked.txt"), "hand-merged\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "hand-merged\n");
 
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
@@ -279,8 +278,7 @@ async fn resolve_declines_finalize_when_all_manual() {
 
     // Resolve by hand + stage, leaving the repo in the Merge state with no
     // unmerged entries — identical entry condition to the `yes` test.
-    std::fs::write(dir.path().join("tracked.txt"), "hand-merged\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "hand-merged\n");
 
     let (resolver, seen) = resolver_recording();
     let git = Git::at(dir.path()).unwrap();
