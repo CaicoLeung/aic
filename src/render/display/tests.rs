@@ -128,8 +128,11 @@ fn commit_preview_renders_message_body_and_file_list() {
     assert_eq!(rows, 6, "subject + body + 2 files + total + blank");
 }
 
+/// A single-file batch still carries the Σ total row: the row is gated on
+/// the footer existing, not on the file count, so a one-file commit shows
+/// the same totals-first ratio bar as its multi-file siblings.
 #[test]
-fn commit_preview_singleton_file_list_omits_count() {
+fn commit_preview_single_file_still_shows_sigma_total() {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
         colors: false,
@@ -151,12 +154,18 @@ fn commit_preview_singleton_file_list_omits_count() {
     );
     let got = lines.lock().clone();
     assert_eq!(got[0], "  ? chore: bump dep");
-    // Single file: no Σ total line; no body line emitted. The footer hangs
-    // under the subject's message start (`? ` marker = 2 cols) and anchors
-    // at the shared σ column like every landed entry.
+    // Single file, no body: the footer hangs under the subject's message
+    // start (`? ` marker = 2 cols) and anchors at the shared σ column like
+    // every landed entry — and still carries the Σ total row with its
+    // full-bleed ratio bar (text budget 76; fixed spend `Σ ` + the `+5 −2`
+    // region + the bar's gap = 8 → 68 cells; 5/7 of 68 rounds to 49 add).
     assert_eq!(got[1], "    +5 −2  Cargo.toml");
-    assert_eq!(got.len(), 3, "no body line expected, got: {got:?}");
-    assert_eq!(rows, 3, "subject + file + blank");
+    assert_eq!(
+        got[2],
+        format!("  Σ +5 −2 {}{}", "█".repeat(49), "░".repeat(19))
+    );
+    assert_eq!(got.len(), 4, "no body line expected, got: {got:?}");
+    assert_eq!(rows, 4, "subject + file + total + blank");
 }
 
 /// `clear_last` drops the most recent rows from the buffer (the in-memory
@@ -538,9 +547,12 @@ fn commit_line_renders_file_stats_footer() {
         got.iter().any(|l| l.contains("+7 −2   src/auth.rs [new]")),
         "committed line must show the footer, got: {got:?}"
     );
+    // Single file still carries the Σ total row (the footer gate is on
+    // existence, not file count); 68 cells, 7/9 of them add.
     assert!(
-        !got.iter().any(|l| l.contains("Σ")),
-        "single file must not get a total line, got: {got:?}"
+        got.iter()
+            .any(|l| *l == format!("  Σ +7 −2 {}{}", "█".repeat(53), "░".repeat(15))),
+        "single-file landed commit must show the Σ total row, got: {got:?}"
     );
 }
 
@@ -597,8 +609,8 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
 /// from the emitted subject line itself (char-counted — the ✓ marker is
 /// multi-byte, so a byte offset would overcount), so the asserts stay
 /// honest if the entry format changes. The commit body is NOT part of the
-/// entry (ADR 0018 redesign): exactly two rows — subject + file row. A
-/// single file keeps the footer Σ-less; the Σ-under-✓ anchor is pinned on
+/// entry (ADR 0018 redesign): exactly three rows — subject + file row +
+/// Σ row (single file included). The Σ-under-✓ anchor is pinned on
 /// the preview twin above and the Σ-row geometry tests below.
 #[test]
 fn commit_footer_hangs_under_subject_hash_without_delta() {
@@ -633,8 +645,8 @@ fn commit_footer_hangs_under_subject_hash_without_delta() {
     let hash_col = cols("abc1234");
     assert_eq!(
         got.len(),
-        2,
-        "entry = subject row + file row, no body: {got:?}"
+        3,
+        "entry = subject + file row + Σ row, no body: {got:?}"
     );
     assert!(
         got[0].ends_with("feat: add thing") && !got[0].contains("· +"),
@@ -650,6 +662,13 @@ fn commit_footer_hangs_under_subject_hash_without_delta() {
             " ".repeat(msg_col - hash_col - 2)
         ),
         "footer must hang under the commit ID: {got:?}"
+    );
+    // The Σ row lands under the ✓: fixed spend `Σ ` + region 5 + the
+    // bar's gap = 8 → 68 cells, all add (T = 1 added, 0 deleted).
+    assert_eq!(
+        got[2],
+        format!("  Σ +1 −0 {}", "█".repeat(68)),
+        "single-file entry keeps its Σ total row: {got:?}"
     );
 }
 
@@ -800,10 +819,20 @@ fn commit_line_region_floor_keeps_entries_aligned() {
     // Small entry: every field floored (plus 4, minus 3, region 8) and
     // anchored at the shared σ column (start 2) — its `+1` right-aligns
     // under the wide batch's `+152`, and names pin at the same column
-    // (14).
+    // (14). Each entry is now subject + file + Σ row, so the big entry's
+    // rows sit at 3/4/5.
     assert_eq!(got[1], "      +1      src/a.rs");
     // Big entry: own geometry equals the floor; identical name column.
-    assert_eq!(got[3], "    +152 −84  src/big.rs");
+    assert_eq!(got[4], "    +152 −84  src/big.rs");
+    // Both Σ rows ride the same floored region (8) and bar budget
+    // (76 − `Σ ` − region − gap = 65 cells): the small entry's totals
+    // right-align into the widened region and both bars start at the
+    // same column (152/236 of 65 rounds to 42 add cells).
+    assert_eq!(got[2], format!("  Σ   +1  −0 {}", "█".repeat(65)));
+    assert_eq!(
+        got[5],
+        format!("  Σ +152 −84 {}{}", "█".repeat(42), "░".repeat(23))
+    );
     let col = |l: &str, needle: &str| {
         l.find(needle)
             .map(|i| l[..i].chars().count())
@@ -811,7 +840,7 @@ fn commit_line_region_floor_keeps_entries_aligned() {
     };
     assert_eq!(
         col(&got[1], "src/a.rs"),
-        col(&got[3], "src/big.rs"),
+        col(&got[4], "src/big.rs"),
         "name columns must not drift between entries: {got:?}"
     );
 }

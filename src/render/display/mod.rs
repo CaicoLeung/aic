@@ -324,8 +324,8 @@ impl Display {
     /// as a blank column (`git diff --stat` never shows zeros); the Σ total
     /// row keeps both totals even at zero, like git's own summary line. Green `+N`, red
     /// `−M`, muted directories with emphasized basenames, a green-bold `[new]` / red-bold `[del]` tag,
-    /// and a bold-cyan `Σ +X −Y <bar>` total row when more than one
-    /// file (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
+    /// and a bold-cyan `Σ +X −Y <bar>` total row on every footer, single
+    /// file included (Commit entry v2, ADR 0018: the Diff bar — `█` addition / `░`
     /// deletion cells over text line counts only, shrinking then omitted on
     /// narrow terminals). Binary files render `(binary) <byte-delta>`
     /// right-aligned in the counts region, which widens to fit the widest
@@ -381,7 +381,7 @@ impl Display {
         let total_deleted: usize = stats.iter().map(|s| s.deleted).sum();
         // The Σ glyph's own cell width ("Σ ") — the σ column every footer
         // reserves left of the counts block (blank on file rows, drawn on
-        // the Σ row of multi-file footers).
+        // the footer's Σ row).
         let sigma_cell: usize = 2;
         // Binary rows carry the byte-size delta label `(binary) +12.3 KB`
         // (Commit entry v2, ADR 0018) — the counts region widens to the
@@ -410,10 +410,9 @@ impl Display {
         // Block anchor: start at the hash, slide left only as far as the
         // tick column (`SubjectOffsets::tick`) when the capped right edge
         // demands it. The Σ row's glyph needs 2 columns of its own left of
-        // the block — and so does every entry WITHOUT a Σ row: the σ
-        // column is part of the shared grid (file rows render it blank),
-        // and a Run-wide floor means single-file and multi-file entries
-        // must anchor identically or their name columns drift apart.
+        // the block — the σ column is part of the shared grid (file rows
+        // render it blank), so a Run-wide floor keeps every entry of a Run
+        // anchored identically and name columns cannot drift apart.
         let start = subject
             .hash
             .min(
@@ -559,59 +558,61 @@ impl Display {
             ));
             rows += 1;
         }
-        if stats.len() > 1 {
-            let plus = format!("+{total_added}");
-            let minus = format!("−{total_deleted}");
-            // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D <bar>` —
-            // the Diff bar trails the counts and fills EVERY remaining
-            // cell of the text budget (the same prose boundary every other
-            // Run surface wraps at — like the reasoning feed — not the
-            // terminal's real edge), so the row reads totals-first and the
-            // bar is the full-bleed ratio visual. Binary files contribute
-            // 0 to the text-line totals, so they never skew the ratio; an
-            // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
-            const MIN_BAR_CELLS: usize = 4;
-            // The row hangs under the subject (sigma_pad) before Σ even
-            // starts, so the pad must be inside the fixed spend: budgeting
-            // the bar from the raw `width` alone overshoots by the hang and
-            // wraps the row on the terminal (found by the PTY harness at
-            // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts
-            // + the bar's leading space complete the spend; every count is
-            // fixed-width, so the counts never truncate — only the bar
-            // shrinks, and it disappears below the floor.
-            let sigma_pad_width = start.saturating_sub(sigma_cell);
-            // The counts ride the same region as the file rows (lead pad +
-            // right-aligned columns) instead of their natural width, so
-            // under a Run-wide floor the Σ numbers still land under the
-            // per-file counts and the bar starts at the same column in
-            // every entry of the Run. Budget: the bar's leading space is
-            // the only spend beyond the fixed prefix, so the row ends
-            // exactly at the text boundary — margin 2 + the full capped
-            // text budget — never past it.
-            let fixed = sigma_pad_width + sigma_cell + counts_region + 1;
-            let cells = width.saturating_sub(fixed);
-            let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
-                diff_bar(total_added, total_deleted, cells)
-            } else {
-                (0, 0)
-            };
-            let bar = if add_cells + del_cells > 0 {
-                format!(
-                    " {}{}",
-                    self.styled(&"█".repeat(add_cells), green.clone()),
-                    self.styled(&"░".repeat(del_cells), red.clone())
-                )
-            } else {
-                String::new()
-            };
-            let sigma_pad = " ".repeat(sigma_pad_width);
-            self.emit(&format!(
-                "{sigma_pad}{} {lead}{}{bar}",
-                self.styled("Σ", sigma_color().bold()),
-                fmt_columns(&plus, &minus),
-            ));
-            rows += 1;
-        }
+        // The Σ total row renders on EVERY footer — single file included
+        // — so a one-file commit carries the same totals-first ratio bar
+        // as its multi-file siblings; the σ column the grid always
+        // reserved is now always drawn on.
+        let plus = format!("+{total_added}");
+        let minus = format!("−{total_deleted}");
+        // Commit entry v2 (ADR 0018 amendment 3): `Σ +A −D <bar>` —
+        // the Diff bar trails the counts and fills EVERY remaining
+        // cell of the text budget (the same prose boundary every other
+        // Run surface wraps at — like the reasoning feed — not the
+        // terminal's real edge), so the row reads totals-first and the
+        // bar is the full-bleed ratio visual. Binary files contribute
+        // 0 to the text-line totals, so they never skew the ratio; an
+        // all-binary footer (T = 0) omits the bar (`diff_bar` → (0,0)).
+        const MIN_BAR_CELLS: usize = 4;
+        // The row hangs under the subject (sigma_pad) before Σ even
+        // starts, so the pad must be inside the fixed spend: budgeting
+        // the bar from the raw `width` alone overshoots by the hang and
+        // wraps the row on the terminal (found by the PTY harness at
+        // 100 cols: a 103-column Σ row). Σ's own cell + gaps + counts
+        // + the bar's leading space complete the spend; every count is
+        // fixed-width, so the counts never truncate — only the bar
+        // shrinks, and it disappears below the floor.
+        let sigma_pad_width = start.saturating_sub(sigma_cell);
+        // The counts ride the same region as the file rows (lead pad +
+        // right-aligned columns) instead of their natural width, so
+        // under a Run-wide floor the Σ numbers still land under the
+        // per-file counts and the bar starts at the same column in
+        // every entry of the Run. Budget: the bar's leading space is
+        // the only spend beyond the fixed prefix, so the row ends
+        // exactly at the text boundary — margin 2 + the full capped
+        // text budget — never past it.
+        let fixed = sigma_pad_width + sigma_cell + counts_region + 1;
+        let cells = width.saturating_sub(fixed);
+        let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
+            diff_bar(total_added, total_deleted, cells)
+        } else {
+            (0, 0)
+        };
+        let bar = if add_cells + del_cells > 0 {
+            format!(
+                " {}{}",
+                self.styled(&"█".repeat(add_cells), green.clone()),
+                self.styled(&"░".repeat(del_cells), red.clone())
+            )
+        } else {
+            String::new()
+        };
+        let sigma_pad = " ".repeat(sigma_pad_width);
+        self.emit(&format!(
+            "{sigma_pad}{} {lead}{}{bar}",
+            self.styled("Σ", sigma_color().bold()),
+            fmt_columns(&plus, &minus),
+        ));
+        rows += 1;
         rows
     }
     /// Pre-commit confirmation preview (issue #78): the exact message that
@@ -624,9 +625,8 @@ impl Display {
     /// ([`Display::emit_file_stats`]). The preview's own prefix rule: body
     /// hangs under the subject's message start (the `? ` marker is the whole
     /// prefix, so 2 cols); the footer has no ref line to key on, so its
-    /// counts anchor at the margin — nudged 2 cols right when the Σ row is
-    /// present, so the glyph still lands under the `?` — and names pin to
-    /// the message start.
+    /// counts anchor at the margin — nudged 2 cols right so the Σ glyph
+    /// lands under the `?` — and names pin to the message start.
     ///
     /// Returns how many rows the preview occupies, so the caller can erase it
     /// with [`Display::clear_last`] once the draft is confirmed or replaced —
@@ -644,10 +644,9 @@ impl Display {
         let mut rows = 1;
         // `? ` — the preview subject's marker prefix: body hangs under the
         // message start (2 cols); the footer anchors its counts at the
-        // margin (no ref line) — nudged 2 right on multi-file footers so
-        // the Σ glyph lands under the `?` — with names pinned to the
-        // message start (see [`Self::subject_offsets`] for the landed
-        // twin's rule).
+        // margin (no ref line) — nudged 2 right so the Σ glyph lands under
+        // the `?` — with names pinned to the message start (see
+        // [`Self::subject_offsets`] for the landed twin's rule).
         const PREVIEW_OFFSETS: SubjectOffsets = SubjectOffsets {
             tick: 0,
             hash: 0,
