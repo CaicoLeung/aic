@@ -122,7 +122,7 @@ fn commit_preview_renders_message_body_and_file_list() {
     assert_eq!(got[4], "     +4 −1  src/main.rs");
     assert_eq!(
         got[5],
-        format!("  Σ +16 −4 {}{}", "█".repeat(53), "░".repeat(13))
+        format!("  Σ +16 −4 {}{}", "█".repeat(54), "░".repeat(13))
     );
     assert_eq!(got[6], "");
     assert_eq!(rows, 7, "header + subject + body + 2 files + total + blank");
@@ -274,7 +274,7 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
             message: 2,
         },
         d.text_width(),
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // A new binary file keeps its `[new]` tag (the binary label replaces
@@ -290,7 +290,7 @@ fn file_stats_footer_marks_binary_and_deleted_files() {
     // the 15-cell region (9-cell lead), trading 9 bar cells for the
     // alignment — the row still ends at the same budget edge. Spelled with
     // `repeat` so the pinned width cannot drift by a miscounted glyph.
-    assert_eq!(got[2], format!("  Σ          +0 −12 {}", "░".repeat(57)));
+    assert_eq!(got[2], format!("  Σ          +0 −12 {}", "░".repeat(58)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -334,7 +334,7 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
             message: 2,
         },
         d.text_width(),
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // `+5` right-aligns in a 3-wide column (sized to `+10`), so its `5`
@@ -344,7 +344,7 @@ fn file_stats_footer_aligns_total_wider_than_per_file_counts() {
     // total's `+10` column.
     assert_eq!(got[0], "     +5     a.rs");
     assert_eq!(got[1], "     +5     b.rs");
-    assert_eq!(got[2], format!("  Σ +10 −0 {}", "█".repeat(66)));
+    assert_eq!(got[2], format!("  Σ +10 −0 {}", "█".repeat(67)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -387,7 +387,7 @@ fn file_stats_footer_stable_columns_when_all_files_binary() {
             message: 2,
         },
         d.text_width(),
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // New binary keeps `[new]` and shows its full size (`+2.0 KB`); the
@@ -443,7 +443,7 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
             message: 2,
         },
         d.text_width(),
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // base region (`+1` 2 + gap 1 + `−0` 2 = 5) widens to 17 for
@@ -455,7 +455,7 @@ fn file_stats_footer_mixed_binary_keeps_columns_aligned() {
     // `█` bar).
     assert_eq!(got[0], "    (binary) +12.0 KB  x.bin");
     assert_eq!(got[1], "                +1     a.rs");
-    assert_eq!(got[2], format!("  Σ             +1 −0 {}", "█".repeat(55)));
+    assert_eq!(got[2], format!("  Σ             +1 −0 {}", "█".repeat(56)));
     assert_eq!(rows, 3, "2 files + total");
 }
 
@@ -500,7 +500,7 @@ fn file_stats_footer_truncates_long_names_to_keep_the_grid() {
             message: 2,
         },
         d.text_width(),
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // text_width is 76 (80 - 2 - 2); counts region = Σ (2) + `+1` (2) +
@@ -535,7 +535,7 @@ fn commit_line_renders_file_stats_footer() {
             old_size: 0,
             new_size: 0,
         }],
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     assert!(
@@ -585,7 +585,7 @@ fn commit_line_renders_sigma_row_for_multiple_files() {
                 new_size: 0,
             },
         ],
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     assert!(
@@ -624,7 +624,7 @@ fn commit_footer_hangs_under_subject_hash_without_delta() {
             old_size: 0,
             new_size: 0,
         }],
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     let cols = |needle: &str| {
@@ -696,7 +696,7 @@ fn commit_footer_wide_counts_grow_left_not_right() {
                 new_size: 0,
             },
         ],
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // Region 8 (`+152 −84` sized): block starts at the hash column (2),
@@ -707,7 +707,7 @@ fn commit_footer_wide_counts_grow_left_not_right() {
     // edge (no wrap): computed, not hand-counted glyphs.
     assert_eq!(
         got[3],
-        format!("  Σ +152 −84 {}{}", "█".repeat(41), "░".repeat(23))
+        format!("  Σ +152 −84 {}{}", "█".repeat(42), "░".repeat(23))
     );
 }
 
@@ -747,7 +747,7 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
                 new_size: 0,
             },
         ],
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     // Prefix-free geometry: tick at 0, hash at 2, message at 10. Region 5
@@ -759,7 +759,7 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
     assert_eq!(got[2], "    +5      src/b.rs");
     assert_eq!(
         got[3],
-        format!("  Σ +8 −1 {}{}", "█".repeat(60), "░".repeat(7))
+        format!("  Σ +8 −1 {}{}", "█".repeat(60), "░".repeat(8))
     );
 }
 
@@ -767,9 +767,11 @@ fn commit_footer_sigma_hangs_under_the_tick_marker() {
 /// floors its counts grid with [`counts_geometry`] over the Run's WHOLE
 /// diff, so a 1-digit batch landing beside a 3-digit sibling keeps the
 /// same columns — the small batch's counts right-align into the widened
-/// region and its name column matches the wide batch's exactly. Without
-/// the floor, each entry sizes to its own digits and the flushed table's
-/// names/count columns drift apart across entries.
+/// region and its name column matches the wide batch's exactly. Every
+/// field of the geometry is floored (plus/minus/region): a region-only
+/// floor still let per-entry minus widths shift the `+` column's edge.
+/// Without the floor, each entry sizes to its own digits and the flushed
+/// table's names/count columns drift apart across entries.
 #[test]
 fn commit_line_region_floor_keeps_entries_aligned() {
     let mk = |path: &str, added: usize, deleted: usize| FileStats {
@@ -783,8 +785,13 @@ fn commit_line_region_floor_keeps_entries_aligned() {
         new_size: 0,
     };
     let run = vec![mk("src/big.rs", 152, 84), mk("src/a.rs", 1, 0)];
-    let floor = counts_geometry(&run).region;
-    assert_eq!(floor, 8, "`+152 −84` sizes the Run-wide region");
+    let floor = counts_geometry(&run);
+    assert_eq!(floor.region, 8, "`+152 −84` sizes the Run-wide region");
+    assert_eq!(
+        (floor.plus, floor.minus),
+        (4, 3),
+        "…and the `+`/`−` columns inside it: `+152`/`−84` are the widest"
+    );
 
     let lines = Arc::new(Mutex::new(Vec::new()));
     let d = Display::with(Buf {
@@ -794,10 +801,11 @@ fn commit_line_region_floor_keeps_entries_aligned() {
     d.commit_line("abc1234", "feat: small", &[mk("src/a.rs", 1, 0)], floor);
     d.commit_line("def5678", "feat: big", &[mk("src/big.rs", 152, 84)], floor);
     let got = lines.lock().clone();
-    // Small entry: region floored to 8 and anchored at the shared σ column
-    // (start 2) — its `+1` block right-aligns into the wide region, names
-    // pin at the same column as the wide entry (14).
-    assert_eq!(got[1], "       +1     src/a.rs");
+    // Small entry: every field floored (plus 4, minus 3, region 8) and
+    // anchored at the shared σ column (start 2) — its `+1` right-aligns
+    // under the wide batch's `+152`, and names pin at the same column
+    // (14).
+    assert_eq!(got[1], "      +1      src/a.rs");
     // Big entry: own geometry equals the floor; identical name column.
     assert_eq!(got[3], "    +152 −84  src/big.rs");
     let col = |l: &str, needle: &str| {
@@ -819,7 +827,7 @@ fn plain_when_colors_disabled() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line("abc1234", "feat: add thing", &[], 0);
+    d.commit_line("abc1234", "feat: add thing", &[], CountsGeometry::ZERO);
     let got = lines.lock().clone();
     // No ANSI escapes. Type prefix "feat" is present, followed by
     // ": add thing". Subject carries the 2-col left margin; empty stats →
@@ -838,7 +846,7 @@ fn truecolor_when_colors_enabled() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("abc1234", "feat: add thing", &[], 0);
+    d.commit_line("abc1234", "feat: add thing", &[], CountsGeometry::ZERO);
     let joined = lines.lock().join("\n");
     // hash #d97706 (bold), feat type green #15803d (bold), description
     // bold default fg.
@@ -869,7 +877,12 @@ fn fix_type_gets_orange_color() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", &[], 0);
+    d.commit_line(
+        "def5678",
+        "fix(auth): correct token check",
+        &[],
+        CountsGeometry::ZERO,
+    );
     let joined = lines.lock().join("\n");
     // fix type should be orange #ea580c (re-toned from #fbbf24 for white-bg
     // readability — see types::NAMED_PALETTE).
@@ -896,7 +909,12 @@ fn scoped_commit_preserves_parens_plain() {
         colors: false,
         lines: lines.clone(),
     });
-    d.commit_line("def5678", "fix(auth): correct token check", &[], 0);
+    d.commit_line(
+        "def5678",
+        "fix(auth): correct token check",
+        &[],
+        CountsGeometry::ZERO,
+    );
     let got = lines.lock().clone();
     // Exact visible text — catches the dropped-paren regression directly.
     // Subject carries a 2-col left margin.
@@ -924,7 +942,12 @@ fn each_type_renders_its_palette_color() {
             colors: true,
             lines: lines.clone(),
         });
-        d.commit_line("hash000", &format!("{type_str}: msg"), &[], 0);
+        d.commit_line(
+            "hash000",
+            &format!("{type_str}: msg"),
+            &[],
+            CountsGeometry::ZERO,
+        );
         let joined = lines.lock().join("\n");
         assert!(
             joined.contains(rgb),
@@ -946,7 +969,12 @@ fn unrecognized_type_gets_hash_fallback_color() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("ghi9012", "blob: thing in progress", &[], 0);
+    d.commit_line(
+        "ghi9012",
+        "blob: thing in progress",
+        &[],
+        CountsGeometry::ZERO,
+    );
     let joined = lines.lock().join("\n");
     assert!(
         !joined.contains("107;114;128"),
@@ -978,7 +1006,7 @@ fn no_colon_message_gets_muted_gray() {
         colors: true,
         lines: lines.clone(),
     });
-    d.commit_line("jkl3456", "no colon message", &[], 0);
+    d.commit_line("jkl3456", "no colon message", &[], CountsGeometry::ZERO);
     let joined = lines.lock().join("\n");
     // No-colon messages have no type token to color → muted gray #6b7280
     // (darkened from the old #9ca3af for white-bg readability).
@@ -1056,7 +1084,7 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
             },
         ]
     };
-    for (cols, cells) in [(30, 7), (28, 5), (24, 0), (16, 0)] {
+    for (cols, cells) in [(30, 8), (28, 6), (24, 0), (16, 0)] {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let d = Display::with_cols(
             Buf {
@@ -1073,7 +1101,7 @@ fn sigma_bar_shrinks_then_omits_on_narrow_terminals() {
                 message: 2,
             },
             d.text_width(),
-            0,
+            CountsGeometry::ZERO,
         );
         let got = lines.lock().clone();
         let sigma = got.last().expect("Σ row present");
@@ -1138,15 +1166,15 @@ fn sigma_bar_ends_at_the_text_boundary_never_the_terminal_edge() {
             message: 10,
         },
         d.text_width(),
-        0,
+        CountsGeometry::ZERO,
     );
     let got = lines.lock().clone();
     let sigma = got.last().expect("Σ row present");
     assert!(sigma.contains('█'), "bar present: {sigma:?}");
     assert_eq!(
         sigma.chars().count(),
-        97,
-        "the Σ row ends at the capped text boundary (margin 2 + 95 of the 96-col budget), never at the terminal edge: {sigma:?}"
+        98,
+        "the Σ row ends exactly at the capped text boundary (margin 2 + the full 96-col text budget), never at the terminal edge: {sigma:?}"
     );
 }
 
@@ -1167,7 +1195,7 @@ fn commit_line_subject_clamps_to_the_terminal_width() {
         40,
     );
     let message = format!("feat: {}", "x".repeat(60));
-    d.commit_line("abc1234", &message, &[], 0);
+    d.commit_line("abc1234", &message, &[], CountsGeometry::ZERO);
     let got = lines.lock().clone();
     let row = &got[0];
     // Budget 28 (40 − margin 2 − `✓ ` 2 − hash 7 − space 1): the subject

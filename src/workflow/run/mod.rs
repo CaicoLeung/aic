@@ -31,6 +31,7 @@ use crate::git::staging;
 use crate::llm::generator;
 use crate::llm::redact::{self, Redact};
 use crate::render::cursor;
+use crate::render::display::CountsGeometry;
 use crate::render::display::Display;
 use crate::render::display::counts_geometry;
 use crate::render::markdown::LoadingNotice;
@@ -185,11 +186,11 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 scan_delta
             ),
         );
-        // Run-wide counts-grid width: every Commit entry footer of this Run
-        // floors its `+N`/`−M` region with this value — computed over the
+        // Run-wide counts-grid geometry: every Commit entry footer of this
+        // Run floors its `+N`/`−M` columns with it — computed over the
         // WHOLE unstaged diff up front — so per-batch digit counts can't
         // drift the flushed table's columns.
-        let region = counts_geometry(&scan_stats).region;
+        let counts_floor = counts_geometry(&scan_stats);
 
         // Redaction Gate, first payload site (issue #155, ADR 0017): the
         // raw per-file diffs feed every LLM payload of this branch — the
@@ -349,7 +350,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                         undo_start: undo_start.clone(),
                         sub: (count > 1).then_some(i + 1),
                         draft,
-                        region,
+                        counts_floor,
                     },
                     &messenger,
                     &confirm,
@@ -446,10 +447,11 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 scan_delta
             ),
         );
-        // Run-wide counts-grid width (see the unstaged branch): the staged
-        // branch lands one entry, so the floor equals its own geometry —
-        // kept for symmetry with the shared `commit_line` contract.
-        let region = counts_geometry(&scan_stats).region;
+        // Run-wide counts-grid geometry (see the unstaged branch): the
+        // staged branch lands one entry, so the floor equals its own
+        // geometry — kept for symmetry with the shared `commit_line`
+        // contract.
+        let counts_floor = counts_geometry(&scan_stats);
 
         if let Some(rs) = redact_step {
             frame.activate(rs);
@@ -502,7 +504,7 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 undo_start: undo_start.clone(),
                 sub: None,
                 draft,
-                region,
+                counts_floor,
             },
             &messenger,
             &confirm,
@@ -544,10 +546,10 @@ struct DraftedCommit {
     /// step (ADR 0018 amendment 3) — the in-frame echo of the entry that
     /// just flushed above it, appended in landing order.
     sub: Option<usize>,
-    /// Run-wide counts-grid width ([`counts_geometry`] over the Run's whole
-    /// diff): floors this entry's footer region so every entry of a
-    /// multi-batch Run shares identical `+N`/`−M` columns.
-    region: usize,
+    /// Run-wide counts geometry ([`counts_geometry`] over the Run's whole
+    /// diff): floors this entry's footer so every entry of a multi-batch
+    /// Run shares identical `+N`/`−M` columns.
+    counts_floor: CountsGeometry,
     draft: generator::CommitOutput,
 }
 
@@ -563,7 +565,7 @@ async fn generate_and_commit(
     let DraftedCommit {
         undo_start,
         sub,
-        region,
+        counts_floor,
         draft,
     } = drafted;
     // The first draft was produced up front by the caller (the unstaged
@@ -611,7 +613,9 @@ async fn generate_and_commit(
     // repaints the frame below it — entries never ride the frame, so the
     // frame stays shorter than the terminal and whole-frame repaint never
     // scrolls. Off a terminal the rows go straight through the step display.
-    frame.flush(display, |d| d.commit_line(&hash, &message, &landed, region));
+    frame.flush(display, |d| {
+        d.commit_line(&hash, &message, &landed, counts_floor)
+    });
     if let Some(index) = sub
         && let Some(step) = frame.active_index()
     {

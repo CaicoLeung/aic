@@ -213,10 +213,17 @@ impl Display {
     /// `stats` render on the [`Self::text_width`] budget: the same prose
     /// boundary every other Run surface wraps at, so the Σ Diff bar's
     /// right edge is where text ends, not the terminal's real edge.
-    /// `region_floor` is the Run-wide counts width ([`counts_geometry`])
-    /// so every entry of a multi-batch Run shares one counts grid —
-    /// batch-local digit counts can't drift the columns.
-    pub fn commit_line(&self, hash: &str, message: &str, stats: &[FileStats], region_floor: usize) {
+    /// `floor` is the Run-wide counts geometry ([`counts_geometry`] over
+    /// the Run's whole diff) so every entry of a multi-batch Run shares
+    /// one counts grid — batch-local digit counts can't drift the
+    /// columns. `pub(crate)`: callers are the Run flow and its tests.
+    pub(crate) fn commit_line(
+        &self,
+        hash: &str,
+        message: &str,
+        stats: &[FileStats],
+        floor: CountsGeometry,
+    ) {
         // Main line: ✓ <hash> <message> — one full-width table row per
         // landed batch (ADR 0018 redesign). Commit ID: amber #d97706, bold
         // so the short token qualifies as WCAG AA Large (3:1) on both
@@ -237,7 +244,7 @@ impl Display {
         // File rows + Σ anchor at the hash with names pinned to the message
         // start, on the shared text budget.
         let subject = Self::subject_offsets(hash);
-        self.emit_file_stats(stats, &subject, self.text_width(), region_floor);
+        self.emit_file_stats(stats, &subject, self.text_width(), floor);
     }
 
     /// Subject-prefix geometry, as [`SubjectOffsets`]: the marker sits at
@@ -366,7 +373,7 @@ impl Display {
         stats: &[FileStats],
         subject: &SubjectOffsets,
         width: usize,
-        region_floor: usize,
+        floor: CountsGeometry,
     ) -> usize {
         if stats.is_empty() {
             return 0;
@@ -402,28 +409,23 @@ impl Display {
         // (Commit entry v2, ADR 0018) — the counts region widens to the
         // widest binary label and the lead pad keeps the name column
         // aligned across text, binary, and Σ rows.
-        let binary_label = |s: &FileStats| {
-            if s.binary {
-                format!("(binary) {}", format_bytes_delta(s.old_size, s.new_size))
-            } else {
-                String::new()
-            }
-        };
         // Column widths come from [`counts_geometry`] — one shared pure
-        // derivation, so the Run can compute the same region over ALL its
-        // files and floor every entry's footer with it: a batch whose
-        // counts are all 1-digit must not render a narrower grid than its
-        // siblings.
+        // derivation — with every field floored by the Run-wide geometry:
+        // flooring the region total alone is not enough, because
+        // per-entry minus widths still size where the `+` column's right
+        // edge lands. A batch whose counts are all 1-digit renders with
+        // its siblings' plus, minus, AND region widths, so no column of
+        // the flushed table drifts across entries.
         let geo = counts_geometry(stats);
-        let plus_width = geo.plus;
-        let minus_width = geo.minus;
+        let plus_width = geo.plus.max(floor.plus);
+        let minus_width = geo.minus.max(floor.minus);
         let sep = if plus_width > 0 && minus_width > 0 {
             1
         } else {
             0
         };
         let base_region = plus_width + sep + minus_width;
-        let counts_region = geo.region.max(region_floor);
+        let counts_region = geo.region.max(floor.region).max(base_region);
         let lead = " ".repeat(counts_region - base_region);
         // Fixed 2-column gutter between the counts block and the names.
         let name_gap: usize = 2;
@@ -604,11 +606,11 @@ impl Display {
             // right-aligned columns) instead of their natural width, so
             // under a Run-wide floor the Σ numbers still land under the
             // per-file counts and the bar starts at the same column in
-            // every entry of the Run. Budget: spend + 1 breathing cell —
-            // the pinned "margin 2 + 95 of the 96-col budget" edge (ADR
-            // 0018 amendment 3, verified by the PTY harness), so the row
-            // ends one cell short of the text budget, never past it.
-            let fixed = sigma_pad_width + sigma_cell + counts_region + 2;
+            // every entry of the Run. Budget: the bar's leading space is
+            // the only spend beyond the fixed prefix, so the row ends
+            // exactly at the text boundary — margin 2 + the full capped
+            // text budget — never past it.
+            let fixed = sigma_pad_width + sigma_cell + counts_region + 1;
             let cells = width.saturating_sub(fixed);
             let (add_cells, del_cells) = if cells >= MIN_BAR_CELLS {
                 diff_bar(total_added, total_deleted, cells)
@@ -679,7 +681,12 @@ impl Display {
         if let Some(b) = body {
             rows += self.emit_body(b, PREVIEW_OFFSETS.message);
         }
-        rows += self.emit_file_stats(stats, &PREVIEW_OFFSETS, self.text_width(), 0);
+        rows += self.emit_file_stats(
+            stats,
+            &PREVIEW_OFFSETS,
+            self.text_width(),
+            CountsGeometry::ZERO,
+        );
         self.emit_blank();
         rows + 1
     }
@@ -795,15 +802,7 @@ pub(crate) fn counts_geometry(stats: &[FileStats]) -> CountsGeometry {
     let base = plus + sep + minus;
     let region = stats
         .iter()
-        .map(|s| {
-            if s.binary {
-                format!("(binary) {}", format_bytes_delta(s.old_size, s.new_size))
-                    .chars()
-                    .count()
-            } else {
-                0
-            }
-        })
+        .map(|s| binary_label(s).chars().count())
         .max()
         .unwrap_or(0)
         .max(base);
@@ -822,6 +821,29 @@ pub(crate) struct CountsGeometry {
     pub(crate) plus: usize,
     pub(crate) minus: usize,
     pub(crate) region: usize,
+}
+
+impl CountsGeometry {
+    /// The all-zero floor: the caller keeps its own per-entry geometry.
+    /// The pre-commit preview passes this — it renders alone and is
+    /// erased on confirm, so it never shares a table with siblings.
+    pub(crate) const ZERO: Self = Self {
+        plus: 0,
+        minus: 0,
+        region: 0,
+    };
+}
+
+/// A binary file's counts-region label (Commit entry v2, ADR 0018):
+/// `(binary) <byte-delta>`. One home shared by the row renderer and
+/// [`counts_geometry`]'s region width, so the label and the width it
+/// sizes can never drift apart. Pure.
+fn binary_label(s: &FileStats) -> String {
+    if s.binary {
+        format!("(binary) {}", format_bytes_delta(s.old_size, s.new_size))
+    } else {
+        String::new()
+    }
 }
 
 /// Format a blob-size delta for a binary per-file row (ADR 0018): sign
