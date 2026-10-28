@@ -186,3 +186,45 @@ async fn direct_models(url: &str, api_key: &str) -> Result<Vec<String>> {
         .with_context(|| format!("GET {url} returned an unparseable body"))?;
     Ok(listing.data.into_iter().map(|m| m.id).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server that accepts the TCP connection but never responds must not
+    /// stall `list_models` past the 5 s cap — the wizard's Busy screen rides
+    /// on this bound. Regression for the fetch-hang report: the timer has to
+    /// fire even while the inner reqwest future parks on the socket read.
+    #[test]
+    fn list_models_caps_a_never_responding_server() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                // hold the connection open, never write a byte
+                let mut conn = conn.unwrap();
+                let mut buf = [0u8; 512];
+                let _ = conn.read(&mut buf);
+                std::thread::park();
+            }
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let url = format!("http://{addr}/v1");
+        let out = rt.block_on(list_models(
+            Provider::OpenAiCompatible,
+            "sk-test",
+            Some(&url),
+        ));
+        assert!(out.is_err(), "hang must surface as Err, got {out:?}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(8),
+            "5 s cap must bound the call, took {:?}",
+            start.elapsed()
+        );
+    }
+}
