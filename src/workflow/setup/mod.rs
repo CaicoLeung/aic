@@ -355,15 +355,14 @@ fn wizard(deps: &SetupDeps) -> Result<Option<Config>> {
                 highlight = 2;
             }
             MenuChoice::Confirm => {
-                if run_confirm_flow(&existing, &mut draft)? {
-                    return Ok(None); // Ctrl-C on the confirmation toggle
-                }
+                // R2: Enter on the toggle row flips it in place and the
+                // redrawn menu shows the new on/off — no on/off sub-screen.
+                draft.confirm_before_commit = Some(!draft.confirm_before_commit.unwrap_or(false));
                 highlight = 3;
             }
             MenuChoice::Review => {
-                if run_review_flow(&existing, &mut draft)? {
-                    return Ok(None); // Ctrl-C on the review toggle
-                }
+                // R2: same in-place flip for the review gate (issue #157).
+                draft.review_batch_plan = Some(!draft.review_batch_plan.unwrap_or(false));
                 highlight = 4;
             }
             MenuChoice::Save => return Ok(Some(finalize::finalize(draft))),
@@ -517,77 +516,5 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
         OptNav::Value(_) => unreachable!("menu has exactly six entries"),
         OptNav::Back => Ok(MenuChoice::Esc),
         OptNav::Cancel => Ok(MenuChoice::Cancel),
-    }
-}
-
-/// Run the confirmation-toggle sub-flow (issue #78). Returns `true` on
-/// Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
-fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    step_toggle(
-        "commit confirmation",
-        "Require confirmation before each commit?",
-        toggle_initial(
-            draft.confirm_before_commit,
-            existing.as_ref().and_then(|c| c.confirm_before_commit),
-        ),
-        draft,
-        |d, v| d.confirm_before_commit = Some(v),
-    )
-}
-
-/// Run the review-toggle sub-flow (issue #157). Same contract as
-/// [`run_confirm_flow`].
-fn run_review_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    step_toggle(
-        "batch review",
-        "Review the batch plan before drafting?",
-        toggle_initial(
-            draft.review_batch_plan,
-            existing.as_ref().and_then(|c| c.review_batch_plan),
-        ),
-        draft,
-        |d, v| d.review_batch_plan = Some(v),
-    )
-}
-
-/// Initial value for a toggle step (both gates share it): the in-session
-/// draft choice first, then the existing config's value, else `false`
-/// (default off). Not provider-dependent, so no `field_initial`-style
-/// provider guard is needed.
-fn toggle_initial(draft_val: Option<bool>, existing_val: Option<bool>) -> bool {
-    draft_val.or(existing_val).unwrap_or(false)
-}
-
-/// The shared Yes/No toggle step behind both opt-in workflow gates (issues
-/// #78 and #157): one arrow-keyed option list — never typed input, so the
-/// user keeps their hands off the keyboard — writing the choice back
-/// through `set`. One step serves both gates so the two can't drift apart.
-/// Returns `true` only on a hard cancel (Ctrl-C / closed stdin, which ends
-/// the whole setup); a made choice and Esc-as-back both return `false` —
-/// every non-cancel path lands back on the menu.
-fn step_toggle(
-    screen: &str,
-    prompt: &str,
-    initial: bool,
-    draft: &mut Draft,
-    set: fn(&mut Draft, bool),
-) -> Result<bool> {
-    show_screen(screen)?;
-    let items = vec!["on".to_string(), "off".to_string()];
-    let default_idx = usize::from(!initial);
-    match opt_nav(prompt, &items, default_idx)? {
-        OptNav::Value(0) => {
-            set(draft, true);
-            Ok(false)
-        }
-        OptNav::Value(1) => {
-            set(draft, false);
-            Ok(false)
-        }
-        // Same guard style as `step_menu` and `step_mode`: exactly two rows
-        // exist, so any other index is a scripted-seam bug, not a silent "no".
-        OptNav::Value(_) => unreachable!("toggle has exactly two entries"),
-        OptNav::Back => Ok(false),
-        OptNav::Cancel => Ok(true),
     }
 }

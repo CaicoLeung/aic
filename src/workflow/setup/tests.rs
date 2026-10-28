@@ -389,27 +389,6 @@ fn finalize_carries_review_batch_plan() {
     assert_eq!(out.review_batch_plan, Some(true));
 }
 
-/// [`toggle_initial`] (both gates share it) prefers the in-session draft
-/// choice, then the existing config's value, else defaults off.
-#[test]
-fn toggle_initial_prefers_draft_then_existing_then_off() {
-    let existing = Some(Config {
-        review_batch_plan: Some(true),
-        ..Default::default()
-    });
-
-    // No draft, existing true -> true; no draft, no existing -> off.
-    assert!(toggle_initial(
-        None,
-        existing.as_ref().and_then(|c| c.review_batch_plan)
-    ));
-    assert!(!toggle_initial(None, None));
-
-    // Draft choice wins over existing, either way.
-    assert!(!toggle_initial(Some(false), Some(true)));
-    assert!(toggle_initial(Some(true), None));
-}
-
 fn draft_with_cli(command: Option<&str>) -> Draft {
     Draft {
         backend_kind: command.map(|_| BackendKind::Cli),
