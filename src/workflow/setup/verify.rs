@@ -168,8 +168,7 @@ fn show_verify_result(
     result: Result<String>,
 ) -> Result<()> {
     let term = Term::stderr();
-    term.clear_screen()?;
-    term.move_cursor_to(0, 0)?;
+    super::clear_frame(&term);
     oneshot::stderr_line(
         &format!("Verify — {} ({model})", p.display()),
         palette::plain(),
@@ -235,8 +234,7 @@ pub(super) fn probe_cli(draft: &Draft) -> Result<String> {
 /// carries a human hint).
 fn show_cli_verify_result(result: Result<String>) -> Result<()> {
     let term = Term::stderr();
-    term.clear_screen()?;
-    term.move_cursor_to(0, 0)?;
+    super::clear_frame(&term);
     oneshot::stderr_line("Verify — CLI agent", palette::plain());
     eprintln!();
     show_outcome(
@@ -272,8 +270,7 @@ pub(super) enum FailExit {
 /// Pure UI: the caller owns the probe loop and the status bookkeeping.
 pub(super) fn failure_exit(header: &str, error: &str, causes: &[&str]) -> Result<FailExit> {
     let term = Term::stderr();
-    term.clear_screen()?;
-    term.move_cursor_to(0, 0)?;
+    super::clear_frame(&term);
     oneshot::stderr_line(header, palette::plain());
     eprintln!();
     oneshot::stderr_line(

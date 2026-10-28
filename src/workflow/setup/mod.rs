@@ -92,6 +92,7 @@ impl AltScreen {
         let capable = true;
         let entered = term.is_term() && capable;
         if entered {
+            ALT_SCREEN.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = term.write_str("\x1b[?1049h");
         }
         Self { entered }
@@ -101,10 +102,21 @@ impl AltScreen {
 impl Drop for AltScreen {
     fn drop(&mut self) {
         if self.entered {
-            let _ = console::Term::stderr().write_str("\x1b[?1049l");
+            // Purge first: emulators that keep alt-screen scrollback would
+            // otherwise splice the wizard's frames into the restored
+            // screen's history.
+            let _ = console::Term::stderr().write_str("\x1b[3J\x1b[?1049l");
+            ALT_SCREEN.store(false, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
+
+/// Whether the wizard's alternate screen is active. Session-scoped flag so
+/// [`clear_frame`] — called from free functions that cannot see the guard —
+/// knows the scrollback purge is safe (outside the alt screen it would
+/// erase the *user's* shell history). Same shape as the two documented
+/// render statics (ADR 0018 amendment), setup-local.
+static ALT_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 mod cli_flow;
 mod finalize;
@@ -168,15 +180,26 @@ pub fn run_setup() -> Result<()> {
     }
 }
 
-/// Clear the terminal and render the setup header, so each menu or prompt
-/// occupies a clean screen instead of leaving previous selections in the
-/// scrollback.
+/// Clear the current wizard frame: erase the viewport, home the cursor and —
+/// inside the wizard's alternate screen — purge the scrollback buffer
+/// (`ESC[3J`). The purge is what keeps emulators that retain alt-screen
+/// scrollback (iTerm2 default, kitty/tmux opt-in) from stacking cleared
+/// frames into the user's history; xterm-style terminals ignore it. Never
+/// purge outside the alt screen — that would erase the user's shell
+/// history.
+pub(super) fn clear_frame(term: &Term) {
+    let _ = term.clear_screen();
+    let _ = term.move_cursor_to(0, 0);
+    if ALT_SCREEN.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = term.write_str("\x1b[3J");
+    }
+}
+
 fn show_screen(section: &str) -> Result<()> {
     // stderr: all interactive chrome shares inquire's stream, so a piped
     // stdout carries only real results (the save path's "Saved to" line).
     let term = Term::stderr();
-    term.clear_screen()?;
-    term.move_cursor_to(0, 0)?;
+    clear_frame(&term);
     oneshot::stderr_line(&format!("aic setup — {section}"), palette::plain());
     oneshot::stderr_detail(
         "↑/↓ move · Enter confirm · Esc back/cancel · Ctrl-C cancel",
