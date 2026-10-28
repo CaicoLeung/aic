@@ -1,6 +1,6 @@
 # ADR 0013: Streaming-markdown renderer dependencies
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by ADR 0020 (the TUI-framework ban is narrowed: ratatui + crossterm are permitted for full-screen surfaces; the inline Run renderer stays raw-ANSI)
 - **Date:** 2026-08-14
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR 0018: Run timeline — upfront Step list over a whole-frame repaint engine
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by ADR 0020 (the Run timeline model is frozen as-is; full-screen surfaces are a separate ratatui substrate)
 - **Date:** 2026-10-25
 
 ## Context
