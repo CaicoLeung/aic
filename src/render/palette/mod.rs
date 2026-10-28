@@ -323,6 +323,13 @@ pub fn badge(name: &str) -> Style {
     rgb_style(fallback_palette()[fallback_palette_index(name)])
 }
 
+/// The badge role's theme-aware RGB triple — the TUI twin
+/// (`render::tui::style::badge`) reads this so both renderers hash into the
+/// same WCAG-guarded table. Pure.
+pub(crate) fn badge_rgb(name: &str) -> (u8, u8, u8) {
+    fallback_palette()[fallback_palette_index(name)]
+}
+
 /// A conventional-commit subject as styled segments — the single source both
 /// subject renderers consume so a subject reads identically everywhere: the
 /// panel engine's `styled_subject` (landed entries, previews) and the

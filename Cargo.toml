@@ -55,6 +55,8 @@ inquire = "0.9"
 # self_update; `rustls` pinned explicitly so the fetch keeps TLS even in a
 # --no-default-features build that drops self_update.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
