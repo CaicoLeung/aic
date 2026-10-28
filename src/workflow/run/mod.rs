@@ -394,20 +394,20 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                         i
                     );
                 }
-                let mut detail = vec![format!("{e:#}")];
-                detail.extend(remediation);
+                // Headline + remediation only: the error chain prints once,
+                // in full, after the frame ends (main's boundary report) —
+                // an in-frame copy is width-capped to one row and would only
+                // duplicate it.
                 frame.fail(
                     &display,
                     commit_step,
                     Failure {
                         reason: format!("failed on batch {} of {count}", i + 1),
-                        detail,
+                        detail: remediation.to_vec(),
                     },
                 );
                 anyhow::bail!(
-                    "aborted on batch {} of {} after {} {batch_word} committed.\n\
-                     The remaining changes are still staged in the index.\n\
-                     re-run `aic` to continue: {e:#}",
+                    "aborted on batch {} of {} after {} {batch_word} committed: {e:#}",
                     i + 1,
                     count,
                     i
@@ -516,7 +516,17 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
                 anyhow::bail!("aborted — no commit made");
             }
             Err(e) => {
-                frame.fail(&display, commit_step, Failure::from_error("failed", &e));
+                // Headline only: the chain prints once, in full, after the
+                // frame ends (main's boundary report) — not truncated
+                // in-frame.
+                frame.fail(
+                    &display,
+                    commit_step,
+                    Failure {
+                        reason: "failed".into(),
+                        detail: vec![],
+                    },
+                );
                 return Err(e);
             }
         }

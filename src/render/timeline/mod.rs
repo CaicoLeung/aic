@@ -356,7 +356,10 @@ pub fn step_line(step: &Step, theme: &Theme) -> String {
 
 /// The failed step's detail rows under the headline (ADR 0018): first line
 /// in `failure`, subsequent lines muted remediation, capped to 3 rows,
-/// truncated never wrapped.
+/// truncated never wrapped. Each detail is flattened to ONE physical line
+/// by [`one_line`] — details often carry a multi-line error chain (git's
+/// own stderr from a vetoing hook), and a row that embeds `\n` desyncs the
+/// painter's whole-frame repaint (one physical row per row).
 fn failure_detail_rows(step: &Step, theme: &Theme) -> Vec<String> {
     let Some(failure) = step.failure.as_ref() else {
         return Vec::new();
@@ -373,11 +376,19 @@ fn failure_detail_rows(step: &Step, theme: &Theme) -> Vec<String> {
                 palette::muted()
             };
             render(
-                &[seg(MARGIN), seg(SUB_INDENT), styled(line.clone(), style)],
+                &[seg(MARGIN), seg(SUB_INDENT), styled(one_line(line), style)],
                 theme,
             )
         })
         .collect()
+}
+
+/// Collapse newlines, tabs, and whitespace runs to single spaces: failure
+/// detail rows are single physical lines on both render paths (the styled
+/// frame and the plain non-TTY ledger share the string), whatever
+/// multi-line error chain a caller stuffs into [`Failure::detail`].
+pub(crate) fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The whole visible frame (ADR 0018, the one layout rule): completed step
@@ -626,7 +637,7 @@ pub fn plain_step_lines(step: &Step) -> Vec<String> {
             let headline = failed_headline(step);
             let mut rows = vec![format!("✗ {headline}")];
             if let Some(f) = step.failure.as_ref() {
-                rows.extend(f.detail.iter().take(3).cloned());
+                rows.extend(f.detail.iter().take(3).map(|l| one_line(l)));
             }
             rows
         }
