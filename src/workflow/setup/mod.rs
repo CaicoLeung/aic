@@ -72,19 +72,27 @@ impl SetupDeps {
 /// `run_setup`'s caller: save, Esc-cancel, Ctrl-C (inquire surfaces it as
 /// an error the `?` propagates), and panics.
 ///
-/// ponytail: gated on `colors_enabled_stderr` as the VT-capability proxy —
-/// under `NO_COLOR` on a VT terminal the wizard degrades to the old
-/// stacked-scrollback behavior rather than risk printing raw escapes on a
-/// VT-less console (old conhost). Gate on a real VT probe if that bites.
+/// ponytail: VT detection is `stderr is a TTY` on Unix (any POSIX terminal
+/// speaks the escapes) and the console crate's color path on Windows (its
+/// VT-activation proxy) — a hypothetical VT-less Unix tty or old conhost
+/// degrades to the old stacked-scrollback behavior, never garbage.
 struct AltScreen {
     entered: bool,
 }
 
 impl AltScreen {
     fn enter() -> Self {
-        let entered = console::colors_enabled_stderr();
+        let term = console::Term::stderr();
+        // Unix: any TTY speaks the escapes. Windows: only when the console
+        // crate has VT processing active (its color path) — old conhost
+        // would print the sequences as text.
+        #[cfg(windows)]
+        let capable = console::colors_enabled_stderr();
+        #[cfg(unix)]
+        let capable = true;
+        let entered = term.is_term() && capable;
         if entered {
-            let _ = console::Term::stderr().write_str("\x1b[?1049h");
+            let _ = term.write_str("\x1b[?1049h");
         }
         Self { entered }
     }
