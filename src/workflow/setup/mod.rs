@@ -65,6 +65,39 @@ impl SetupDeps {
     }
 }
 
+/// Enter the terminal's alternate screen buffer on creation and leave it on
+/// drop, so the whole wizard occupies one window and never touches the
+/// user's scrollback — every intermediate menu frame lives (and dies) in
+/// the buffer `show_screen` clears. Leaves on every path that unwinds to
+/// `run_setup`'s caller: save, Esc-cancel, Ctrl-C (inquire surfaces it as
+/// an error the `?` propagates), and panics.
+///
+/// ponytail: gated on `colors_enabled_stderr` as the VT-capability proxy —
+/// under `NO_COLOR` on a VT terminal the wizard degrades to the old
+/// stacked-scrollback behavior rather than risk printing raw escapes on a
+/// VT-less console (old conhost). Gate on a real VT probe if that bites.
+struct AltScreen {
+    entered: bool,
+}
+
+impl AltScreen {
+    fn enter() -> Self {
+        let entered = console::colors_enabled_stderr();
+        if entered {
+            let _ = console::Term::stderr().write_str("\x1b[?1049h");
+        }
+        Self { entered }
+    }
+}
+
+impl Drop for AltScreen {
+    fn drop(&mut self) {
+        if self.entered {
+            let _ = console::Term::stderr().write_str("\x1b[?1049l");
+        }
+    }
+}
+
 mod cli_flow;
 mod finalize;
 mod provider;
@@ -98,8 +131,12 @@ pub fn run_setup() -> Result<()> {
         );
         anyhow::bail!("cannot run interactive setup without a TTY");
     }
-
     let deps = SetupDeps::real();
+    // One window for the whole session: the alternate screen buffer keeps
+    // every intermediate menu out of the user's scrollback; dropping the
+    // guard restores the shell exactly as it was, and the save/cancel
+    // notice lands in the normal buffer afterwards.
+    let _alt = AltScreen::enter();
     match wizard(&deps)? {
         Some(config) => {
             config.save()?;
