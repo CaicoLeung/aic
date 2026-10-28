@@ -20,7 +20,7 @@ cargo test           # unit tests live inline in src/ (#[cfg(test)] modules)
 
 - **No merge commits.** Keep the branch linear — rebase on `main` instead of merging it in. Merge commits are rejected at merge time.
 - **Conventional Commits** for commit messages (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, ...) — aic writes these itself, so the project stays consistent with its own tool.
-- **Commit-msg gate.** `.githooks/commit-msg` validates the Conventional Commits shape (type, optional scope, subject ≤ 100 chars, wrapped body) at commit time. Enable once per clone: `git config core.hooksPath .githooks`
+- **Commit-msg gate.** `cargo-commitlint` (rules in `commitlint.toml`) validates every message at commit time — type/scope/subject rules, 100-char caps, body wrapping; Merge/Revert bypassed. Enable once per clone: `git config core.hooksPath .githooks` (hook skips gracefully until `cargo install cargo-commitlint`); lint history with `cargo commitlint check --from origin/main`
 
 ## Before submitting a PR
 

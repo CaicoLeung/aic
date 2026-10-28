@@ -1,0 +1,48 @@
+# Conventional Commits rules for cargo-commitlint (CONTRIBUTING.md).
+# Checked at commit time by .githooks/commit-msg; run manually with
+#   cargo commitlint check --from origin/main
+ignores = ["^Merge ", "^Revert "]
+defaultIgnores = true
+
+[rules.type-enum]
+level = 2
+applicable = "always"
+value = ["feat", "fix", "perf", "refactor", "docs", "test", "ci", "chore", "build", "style", "revert"]
+
+[rules.type-case]
+level = 2
+applicable = "always"
+value = ["lower-case"]
+
+[rules.type-empty]
+level = 2
+applicable = "never"
+value = "."
+
+[rules.scope-case]
+level = 2
+applicable = "always"
+value = ["lower-case"]
+
+[rules.subject-empty]
+level = 2
+applicable = "never"
+
+[rules.subject-full-stop]
+level = 2
+applicable = "never"
+value = "."
+
+[rules.header-max-length]
+level = 2
+applicable = "always"
+value = 100
+
+[rules.body-leading-blank]
+level = 2
+applicable = "always"
+
+[rules.body-max-line-length]
+level = 2
+applicable = "always"
+value = 100

@@ -1,33 +1,15 @@
 #!/usr/bin/env bash
-# Conventional Commits gate (CONTRIBUTING.md). Rejects a commit whose
-# message does not follow the spec. Installed via:
-#   git config core.hooksPath .githooks
+# Conventional Commits gate — delegates to cargo-commitlint (commitlint.toml).
+# Enable once per clone: git config core.hooksPath .githooks
+# Bypass once: COMMITLINT_SKIP=1 git commit ...
 set -uo pipefail
-
 msg_file="$1"
-header=$(head -n 1 "$msg_file")
 
-fail() { echo "commit-msg: $1" >&2; echo "commit-msg: expected: type(scope)!: subject — types: feat fix perf refactor docs test ci chore build style revert" >&2; exit 1; }
-
-# Allow git-generated messages (revert, merges) — policy targets authored commits.
-case "$header" in
-  "Merge "*|"Revert "*) exit 0 ;;
-esac
-
-[ -n "$header" ] || fail "empty header"
-
-# type(scope)!: subject
-pattern='^(feat|fix|perf|refactor|docs|test|ci|chore|build|style|revert)(\([a-z0-9][a-z0-9._/-]*\))?!?: .+'
-[[ "$header" =~ $pattern ]] || fail "header does not match Conventional Commits: '$header'"
-
-# Subject length cap (git-cliff / GitHub display).
-((${#header} <= 100)) || fail "header longer than 100 chars (${#header})"
-
-# Body: every non-empty line wrapped; blank line after header required if a body exists.
-total=$(wc -l < "$msg_file" | tr -d ' ')
-if ((total > 1)); then
-  sed -n '2p' "$msg_file" | grep -q '^[[:space:]]*$' || fail "blank line required between header and body"
-  awk 'NR > 2 && length($0) > 100 { exit 1 }' "$msg_file" || fail "body line exceeds 100 chars"
+# Binary missing on a fresh clone: warn, don't block (install with
+# `cargo install cargo-commitlint`).
+if ! command -v cargo-commitlint >/dev/null 2>&1; then
+  echo "commit-msg: cargo-commitlint not found — skipping check (cargo install cargo-commitlint)" >&2
+  exit 0
 fi
 
-exit 0
+exec cargo commitlint check < "$msg_file"
