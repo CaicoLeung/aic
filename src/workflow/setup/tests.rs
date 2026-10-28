@@ -199,7 +199,8 @@ fn submenu_labels_reflect_value_and_source() {
 
 #[test]
 fn provider_submenu_entries_follow_applicability() {
-    // OpenAI: API key + Model + Verify + Done (no base URL).
+    // OpenAI: API key + Model + Done (no base URL). No manual Verify row —
+    // the probe runs automatically on Done (R3).
     let d = draft(Some(Provider::OpenAI), None, None, None);
     let (entries, _) = provider_submenu_items(&d);
     assert_eq!(
@@ -207,12 +208,11 @@ fn provider_submenu_entries_follow_applicability() {
         vec![
             ProviderEntry::ApiKey,
             ProviderEntry::Model,
-            ProviderEntry::Verify,
             ProviderEntry::Done
         ]
     );
 
-    // Ollama: Base URL + Model + Verify + Done (no API key).
+    // Ollama: Base URL + Model + Done (no API key).
     let d = draft(Some(Provider::Ollama), None, None, None);
     let (entries, _) = provider_submenu_items(&d);
     assert_eq!(
@@ -220,12 +220,11 @@ fn provider_submenu_entries_follow_applicability() {
         vec![
             ProviderEntry::BaseUrl,
             ProviderEntry::Model,
-            ProviderEntry::Verify,
             ProviderEntry::Done
         ]
     );
 
-    // OpenAI-compatible: API key + Base URL + Model + Verify + Done.
+    // OpenAI-compatible: API key + Base URL + Model + Done.
     let d = draft(Some(Provider::OpenAiCompatible), None, None, None);
     let (entries, _) = provider_submenu_items(&d);
     assert_eq!(
@@ -234,7 +233,6 @@ fn provider_submenu_entries_follow_applicability() {
             ProviderEntry::ApiKey,
             ProviderEntry::BaseUrl,
             ProviderEntry::Model,
-            ProviderEntry::Verify,
             ProviderEntry::Done
         ]
     );
@@ -257,17 +255,12 @@ fn submenu_labels_show_effective_value() {
         vec![
             ProviderEntry::ApiKey,
             ProviderEntry::Model,
-            ProviderEntry::Verify,
             ProviderEntry::Done
         ]
     );
     assert_eq!(labels[0], format!("{DOT} API key — ••••••"));
     assert_eq!(labels[1], format!("{DOT} Model — deepseek-v4-pro"));
-    assert_eq!(
-        labels[2],
-        format!("{DOT} Verify — test this provider with a sample request")
-    );
-    assert_eq!(labels[3], format!("{DOT} Done — back to main menu"));
+    assert_eq!(labels[2], format!("{DOT} Done — back to main menu"));
 }
 
 #[test]
@@ -672,26 +665,16 @@ fn cli_menu_rows_have_no_unmappable_header() {
     // Regression: the CLI-agent menu once had a "Choose a preset:" *label*
     // as row 0 with no action — selecting it panicked the TUI. Now every
     // row is an actionable CliRow paired with its label, so there is no
-    // separate index to leave unmapped. There is also no "Custom command…"
-    // row: a free-form command has no decoder for its stdout envelope, so
-    // it would silently run in plain-text mode — only the presets
-    // (see [`PRESETS`]) are offered.
-    for command_set in [false, true] {
-        let rows = cli_menu_rows(command_set);
-        // Row 0 must be a real preset, never a bare label.
-        assert!(
-            matches!(rows.first(), Some(CliRow::Preset(_))),
-            "row 0 must be an actionable preset, not a header (command_set={command_set})"
-        );
-        // Presets lead, then (only when set) Verify, then Done — every
-        // expected variant present, nothing extra, and no Custom row.
-        assert_eq!(rows.len(), PRESETS.len() + usize::from(command_set) + 1);
-        assert!(!rows.contains(&CliRow::Verify) || command_set);
-        assert_eq!(rows.contains(&CliRow::Verify), command_set);
-        assert!(rows.contains(&CliRow::Done));
-        // Done is always last.
-        assert!(matches!(rows.last(), Some(CliRow::Done)));
-    }
+    // separate index to leave unmapped. There is no "Custom command…" row
+    // (a free-form command has no decoder) and no manual Verify row (R3 —
+    // the probe runs automatically when the flow completes).
+    let rows = cli_menu_rows();
+    // Row 0 must be a real preset, never a bare label.
+    assert!(matches!(rows.first(), Some(CliRow::Preset(_))));
+    // Presets lead, then Done — nothing else, regardless of whether a
+    // command is already set (Done just re-probes when one is, R3).
+    assert_eq!(rows.len(), PRESETS.len() + 1);
+    assert!(matches!(rows.last(), Some(CliRow::Done)));
 }
 
 // --- Dynamic model listing (ADR 0019) ------------------------------------
@@ -712,6 +695,9 @@ fn fetch_stub(results: Vec<Vec<String>>) -> (std::sync::Arc<parking_lot::Mutex<u
                 *n += 1;
                 queue.lock().remove(0)
             }),
+            // Verify probes the wizard flows never trigger in these tests.
+            verify_provider: Box::new(|_| panic!("verify_provider not scripted")),
+            verify_cli: Box::new(|_| panic!("verify_cli not scripted")),
         },
     )
 }
@@ -797,4 +783,46 @@ fn cache_key_separates_provider_base_and_key() {
     // Different key *length* changes the mask, hence the key.
     assert_ne!(a, cache_key(Provider::OpenAI, None, "sk-12345678"));
     assert_eq!(a, cache_key(Provider::OpenAI, None, "sk-123456789"));
+}
+
+// --- Auto-verify on Done (R3) ---------------------------------------------
+
+/// The top-menu status line (R3) reads the latest probe: nothing verified,
+/// a pass, or a failure — each with the probed target's label.
+#[test]
+fn verify_status_label_reads_latest_probe() {
+    assert_eq!(verify_status_label(&None), "not verified");
+    assert_eq!(
+        verify_status_label(&Some(VerifyStatus::pass("openai".into()))),
+        format!("{ICON_CHECK} openai")
+    );
+    assert_eq!(
+        verify_status_label(&Some(VerifyStatus::fail("claude".into()))),
+        format!("{ICON_CROSS} claude")
+    );
+}
+
+/// A provider probe against an incomplete draft fails validation — the
+/// Run-path setup hint, not an opaque provider error — without touching the
+/// network: `validate` rejects the draft before any request is built. This
+/// is the Err that drives the failure screen when Done is reached with a
+/// missing key or model.
+#[test]
+fn provider_probe_reports_validation_hint_without_network() {
+    // Key-requiring provider with neither key nor model set.
+    let d = draft(Some(Provider::OpenAI), None, None, None);
+    let err = super::verify::probe_provider(&d).unwrap_err().to_string();
+    assert!(
+        err.contains("aic setup"),
+        "validation error must point at setup, got: {err}"
+    );
+}
+
+/// A CLI probe with no configured command errs instead of spawning
+/// anything (the defensive guard; callers only auto-verify once a command
+/// is set).
+#[test]
+fn cli_probe_without_command_errs_cleanly() {
+    let d = draft(None, None, None, None);
+    assert!(super::verify::probe_cli(&d).is_err());
 }

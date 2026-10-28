@@ -4,7 +4,6 @@
 //! and the provider path read independently.
 
 use super::finalize::{field_initial, mask_key, switch_provider};
-use super::verify::step_verify;
 use super::*;
 use crate::core::config::{Source, resolve_base_url, resolve_field};
 use crate::llm::BaseUrlRequirement;
@@ -88,7 +87,6 @@ pub(super) enum ProviderEntry {
     ApiKey,
     BaseUrl,
     Model,
-    Verify,
     Done,
 }
 
@@ -159,10 +157,6 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
             }
         }
     }
-    entries.push(ProviderEntry::Verify);
-    labels.push(format!(
-        "{DOT} Verify — test this provider with a sample request"
-    ));
     entries.push(ProviderEntry::Done);
     labels.push(format!("{DOT} Done — back to main menu"));
     (entries, labels)
@@ -204,14 +198,36 @@ pub(super) fn run_provider_flow(
                         ProviderEntry::Model => {
                             step_model(deps, existing, existing_provider, draft)?
                         }
-                        ProviderEntry::Verify => step_verify(draft)?,
                         // Soft required gate (ADR 0019 §7): `Done` routes into
                         // the Model step until a model is chosen, so a saved
                         // API config always records one.
                         ProviderEntry::Done if draft.effective_model().is_empty() => {
                             step_model(deps, existing, existing_provider, draft)?
                         }
-                        ProviderEntry::Done => return Ok(false),
+                        // R3 auto-verify: completing the provider flow probes
+                        // the effective draft immediately. Pass or saved-
+                        // anyway returns to the menu; Edit stays in this
+                        // sub-menu; Ctrl-C cancels setup.
+                        ProviderEntry::Done => {
+                            let p = draft.provider.unwrap_or_default();
+                            let target = p.display().to_lowercase();
+                            let header =
+                                format!("Verify — {} ({})", p.display(), draft.effective_model());
+                            return match verify::auto_verify(
+                                draft,
+                                &target,
+                                &deps.verify_provider,
+                                &verify::show_provider_success,
+                                &header,
+                                &[
+                                    "Common causes: wrong API key, model name, base URL, or network.",
+                                ],
+                            )? {
+                                None => Ok(true),
+                                Some(verify::Verified::Edit) => continue,
+                                Some(_) => Ok(false),
+                            };
+                        }
                     };
                     // Any non-cancel outcome returns to the sub-menu; the field
                     // steps manage their own Esc-back-to-options internally.

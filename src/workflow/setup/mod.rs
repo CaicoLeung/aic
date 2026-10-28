@@ -34,21 +34,33 @@ pub(super) struct SetupDeps {
     /// missing key — the Model step then degrades to required free text and
     /// never blocks (ADR 0019 §4).
     pub fetch_models: FetchModels,
+    /// Probe the API-provider backend with the draft's effective values
+    /// (R3 auto-verify): `Ok(reply)` on success, `Err` with the provider /
+    /// validation error otherwise.
+    pub verify_provider: VerifyProbe,
+    /// Probe the CLI-agent backend the same way (R3 auto-verify).
+    pub verify_cli: VerifyProbe,
 }
 
 /// The one R1 seam: a boxed listing fetch, injectable for hermetic tests.
 pub(super) type FetchModels = Box<dyn Fn(Provider, &str, Option<&str>) -> Vec<String>>;
 
+/// An R3 seam: one boxed backend probe (`&Draft` → reply or error).
+pub(super) type VerifyProbe = Box<dyn Fn(&Draft) -> Result<String>>;
+
 impl SetupDeps {
-    /// Production wiring: the real listing fetch, driven on a dedicated
-    /// nested runtime under the spinner (the `verify::probe` pattern). Any
-    /// error collapses to an empty list — the degrade contract above.
+    /// Production wiring: the real listing fetch and verify probes, driven
+    /// on a dedicated nested runtime under a spinner (the `verify::probe`
+    /// pattern). The listing collapses any error to an empty list — the
+    /// degrade contract above.
     fn real() -> Self {
         Self {
             fetch_models: Box::new(|provider, api_key, base_url| {
                 let label = format!("Fetching {} models…", provider.display());
                 verify::probe(&label, list_models(provider, api_key, base_url)).unwrap_or_default()
             }),
+            verify_provider: Box::new(verify::probe_provider),
+            verify_cli: Box::new(verify::probe_cli),
         }
     }
 }
@@ -153,7 +165,7 @@ enum Nav {
 /// the user can edit one entry without losing the others. Seeded from the
 /// existing config ([`finalize::seed_draft`]) so untouched fields survive saving.
 #[derive(Default, Clone)]
-struct Draft {
+pub(super) struct Draft {
     /// Which Backend this session has chosen (ADR 0011). `None` ⇒ not yet
     /// chosen; [`Draft::active_backend`] defaults it to [`BackendKind::Api`].
     /// Set by the mode-first screen or a radio switch; drives [`finalize::finalize`].
@@ -184,6 +196,45 @@ struct Draft {
     /// provider + base URL + masked key — any change re-fetches. Never
     /// persisted; a fresh wizard run starts cold.
     model_cache: HashMap<String, Vec<String>>,
+    /// Latest auto-verify outcome (R3): which backend target was probed and
+    /// whether it passed. `None` ⇒ not verified this session. Shown as the
+    /// status line above the top-level menu; a completed sub-flow re-probes
+    /// and overwrites it.
+    verify_status: Option<VerifyStatus>,
+}
+
+/// One auto-verify probe outcome (R3): the probed target's short label
+/// (`openai`, `claude`) and whether it passed.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct VerifyStatus {
+    pub(super) target: String,
+    pub(super) passed: bool,
+}
+
+impl VerifyStatus {
+    pub(super) fn pass(target: String) -> Self {
+        Self {
+            target,
+            passed: true,
+        }
+    }
+
+    pub(super) fn fail(target: String) -> Self {
+        Self {
+            target,
+            passed: false,
+        }
+    }
+}
+
+/// The top-menu status line for the latest auto-verify (R3): `✓ target`,
+/// `✗ target`, or `not verified` before any probe ran. Pure.
+pub(super) fn verify_status_label(status: &Option<VerifyStatus>) -> String {
+    match status {
+        None => "not verified".to_string(),
+        Some(s) if s.passed => format!("{ICON_CHECK} {}", s.target),
+        Some(s) => format!("{ICON_CROSS} {}", s.target),
+    }
 }
 
 impl Draft {
@@ -267,7 +318,7 @@ fn wizard(deps: &SetupDeps) -> Result<Option<Config>> {
             }
             ModeChoice::Cli => {
                 draft.backend_kind = Some(BackendKind::Cli);
-                if cli_flow::run_cli_flow(&mut draft)? {
+                if cli_flow::run_cli_flow(deps, &mut draft)? {
                     return Ok(None);
                 }
             }
@@ -298,7 +349,7 @@ fn wizard(deps: &SetupDeps) -> Result<Option<Config>> {
                 highlight = 1;
             }
             MenuChoice::CliAgent => {
-                if cli_flow::run_cli_flow(&mut draft)? {
+                if cli_flow::run_cli_flow(deps, &mut draft)? {
                     return Ok(None); // Ctrl-C inside the CLI-agent path
                 }
                 highlight = 2;
@@ -430,7 +481,13 @@ fn cli_label(draft: &Draft) -> String {
 /// session has changes [`finalize::draft_dirty`] would not write back as
 /// identical, so the cost of cancelling is visible before the user pays it.
 fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoice> {
-    show_screen("main menu")?;
+    // R3: the latest auto-verify outcome rides above the menu as a status
+    // line — informational, not a selectable row (toggles don't probe).
+    oneshot::stderr_detail(
+        &format!("Verify: {}", verify_status_label(&draft.verify_status)),
+        palette::muted(),
+    );
+    eprintln!();
     let save_row = if dirty {
         format!("{DOT} Save & exit — unsaved changes")
     } else {

@@ -1,14 +1,18 @@
 //! The CLI-agent backend sub-flow of the setup wizard: the preset picker
-//! and its rows. The verify probe itself lives in [`super::verify`].
+//! and its rows. The verify probe itself lives in [`super::verify`] and runs
+//! automatically when the flow completes (R3).
 
-use super::verify::{pause_done, smoke_check, step_verify_cli};
+use super::verify::{Verified, auto_verify, pause_done, smoke_check};
 use super::*;
 use crate::llm::cli_agent::{PRESETS, cli_preset};
 use crate::render::{oneshot, palette};
 
 /// Configure the CLI-agent backend: pick a preset (claude/codex/pi/opencode/
-/// omp/gemini/cursor/windsurf/copilot/trae/qwen), write it to config, and
-/// (for a streamed preset) offer a connectivity probe.
+/// omp/gemini/cursor/windsurf/copilot/trae/qwen) and write it to config.
+/// Completing the flow — choosing a preset, or `Done` with a command already
+/// set — auto-runs the connectivity probe (R3); a failed probe offers
+/// Edit (re-enter the picker) / Retry / Save anyway, and the outcome lands
+/// on the top menu's status line.
 /// Custom commands are intentionally not offered — every streaming backend
 /// needs a dedicated decoder for its stdout envelope (claude `stream-json`,
 /// pi `--mode json`, opencode `--format json`), and a free-form command has
@@ -16,10 +20,10 @@ use crate::render::{oneshot, palette};
 /// and no clean answer extraction. The other Backend's fields are kept
 /// dormant by `finalize`, so configuring a CLI here does not wipe an
 /// API-provider config. Returns `true` only on Ctrl-C (cancel setup).
-pub(super) fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
+pub(super) fn run_cli_flow(deps: &SetupDeps, draft: &mut Draft) -> Result<bool> {
     loop {
         show_screen("CLI agent")?;
-        let rows = cli_menu_rows(draft.active_cli_command().is_some());
+        let rows = cli_menu_rows();
         let labels: Vec<String> = rows.iter().map(CliRow::label).collect();
         match opt_nav("CLI agent backend", &labels, 0)? {
             OptNav::Back => return Ok(false),
@@ -36,21 +40,44 @@ pub(super) fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
                         encoding: Some(spec.encoding),
                     };
                     pause_done()?;
+                    return auto_verify_cli(deps, draft);
+                }
+                // Done with a configured CLI re-probes it (R3); with nothing
+                // configured there is nothing to probe — straight to the menu.
+                Some(CliRow::Done) => {
+                    if draft.active_cli_command().is_some() {
+                        return auto_verify_cli(deps, draft);
+                    }
                     return Ok(false);
                 }
-                Some(CliRow::Verify) => {
-                    if step_verify_cli(draft)? == Nav::Cancel {
-                        return Ok(true);
-                    }
-                    continue;
-                }
-                Some(CliRow::Done) => return Ok(false),
                 // `opt_nav` only ever returns an index inside `labels`, so an
                 // out-of-range row cannot occur in practice; re-show the menu
                 // rather than panic if it ever does.
                 None => continue,
             },
         }
+    }
+}
+
+/// One auto-verify pass for the CLI backend (R3). `Edit` re-enters the
+/// preset picker; any settled outcome returns to the top menu with the
+/// status recorded. Returns `true` only on Ctrl-C.
+fn auto_verify_cli(deps: &SetupDeps, draft: &mut Draft) -> Result<bool> {
+    let target = draft.active_cli_command().unwrap_or("cli").to_string();
+    match auto_verify(
+        draft,
+        &target,
+        &deps.verify_cli,
+        &super::verify::show_cli_success,
+        "Verify — CLI agent",
+        &[
+            "Common causes: the CLI is not installed, not",
+            "authenticated, or timed out. Run the CLI once to log in.",
+        ],
+    )? {
+        None => Ok(true),
+        Some(Verified::Edit) => run_cli_flow(deps, draft),
+        Some(_) => Ok(false),
     }
 }
 
@@ -64,8 +91,6 @@ pub(super) fn run_cli_flow(draft: &mut Draft) -> Result<bool> {
 pub(super) enum CliRow {
     /// A named preset (an entry of [`PRESETS`]).
     Preset(&'static str),
-    /// Probe install + auth now — only present when a command is set.
-    Verify,
     /// Return to the main menu.
     Done,
 }
@@ -75,20 +100,17 @@ impl CliRow {
     fn label(&self) -> String {
         match self {
             CliRow::Preset(name) => format!("{DOT} {name}"),
-            CliRow::Verify => format!("{DOT} Verify (probe the CLI now)"),
             CliRow::Done => format!("{DOT} Done — back to main menu"),
         }
     }
 }
 
-/// Build the CLI-agent menu rows in presentation order. `command_set` gates the
-/// Verify row, which only makes sense once a CLI is configured. A label row is
-/// deliberately absent — every row is an actionable [`CliRow`].
-pub(super) fn cli_menu_rows(command_set: bool) -> Vec<CliRow> {
+/// Build the CLI-agent menu rows in presentation order: the presets, then
+/// `Done`. The manual Verify row is gone (R3) — the probe runs automatically
+/// when the flow completes. A label row is deliberately absent — every row
+/// is an actionable [`CliRow`].
+pub(super) fn cli_menu_rows() -> Vec<CliRow> {
     let mut rows: Vec<CliRow> = PRESETS.iter().copied().map(CliRow::Preset).collect();
-    if command_set {
-        rows.push(CliRow::Verify);
-    }
     rows.push(CliRow::Done);
     rows
 }
