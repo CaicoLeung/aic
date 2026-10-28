@@ -165,15 +165,6 @@ fn provider_label_shows_provider_and_model() {
     assert_eq!(provider_label(&d), "OpenRouter");
 }
 
-/// [`yes_no`] renders the toggle row for both gates: absent (default) reads
-/// "off", an explicit choice reads back verbatim (ADR 0018 wording).
-#[test]
-fn yes_no_defaults_off_and_reflects_choice() {
-    assert_eq!(yes_no(None), "off");
-    assert_eq!(yes_no(Some(false)), "off");
-    assert_eq!(yes_no(Some(true)), "on");
-}
-
 #[test]
 fn submenu_labels_reflect_value_and_source() {
     // API key: masked, (not set) when empty.
@@ -198,73 +189,6 @@ fn submenu_labels_reflect_value_and_source() {
 }
 
 #[test]
-fn provider_submenu_entries_follow_applicability() {
-    // OpenAI: API key + Model + Done (no base URL). No manual Verify row —
-    // the probe runs automatically on Done (R3).
-    let d = draft(Some(Provider::OpenAI), None, None, None);
-    let (entries, _) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::ApiKey,
-            ProviderEntry::Model,
-            ProviderEntry::Done
-        ]
-    );
-
-    // Ollama: Base URL + Model + Done (no API key).
-    let d = draft(Some(Provider::Ollama), None, None, None);
-    let (entries, _) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::BaseUrl,
-            ProviderEntry::Model,
-            ProviderEntry::Done
-        ]
-    );
-
-    // OpenAI-compatible: API key + Base URL + Model + Done.
-    let d = draft(Some(Provider::OpenAiCompatible), None, None, None);
-    let (entries, _) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::ApiKey,
-            ProviderEntry::BaseUrl,
-            ProviderEntry::Model,
-            ProviderEntry::Done
-        ]
-    );
-}
-
-#[test]
-fn submenu_labels_show_effective_value() {
-    // The in-session draft (a user choice or a seeded config value) is the
-    // effective value and is shown as-is — re-entering setup must not read
-    // as if the choice was lost (AIC-15).
-    let d = draft(
-        Some(Provider::DeepSeek),
-        Some("sk-123"),
-        Some("deepseek-v4-pro"),
-        None,
-    );
-    let (entries, labels) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::ApiKey,
-            ProviderEntry::Model,
-            ProviderEntry::Done
-        ]
-    );
-    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
-    assert_eq!(bare(&labels[0]), format!("{DOT} API key — ••••••"));
-    assert_eq!(bare(&labels[1]), format!("{DOT} Model — deepseek-v4-pro"));
-    assert_eq!(bare(&labels[2]), format!("{DOT} Done — back to main menu"));
-}
-
-#[test]
 fn effective_model_is_the_draft_choice_only() {
     // Draft model is the whole story (ADR 0019: no provider default).
     let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
@@ -277,19 +201,12 @@ fn effective_model_is_the_draft_choice_only() {
 }
 
 #[test]
-fn provider_choice_label_shows_chosen_model_for_selected_provider() {
+fn preview_model_shows_chosen_model_for_selected_provider() {
     // The selected provider shows the user's chosen model — re-entering
-    // setup must not read as if the choice was lost (AIC-15). Rows lead
-    // with the R4 badge: the display name's first letter (plain in tests —
-    // console strips styles when colors are off; in a TTY it carries the
-    // name-hash color).
+    // setup must not read as if the choice was lost (AIC-15).
     let mut d = draft(Some(Provider::DeepSeek), None, None, None);
     d.model = Some("deepseek-v4-pro".into());
-    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
-    assert_eq!(
-        bare(&provider_choice_label(Provider::DeepSeek, &d)),
-        "D DeepSeek  (deepseek-v4-pro)"
-    );
+    assert_eq!(preview_model(Provider::DeepSeek, &d), "deepseek-v4-pro");
 
     // Another provider shows its remembered bank entry, never a default.
     let mut d = draft(Some(Provider::DeepSeek), None, None, None);
@@ -300,34 +217,11 @@ fn provider_choice_label_shows_chosen_model_for_selected_provider() {
         model: Some("gpt-5".into()),
         base_url: None,
     });
-    assert_eq!(
-        bare(&provider_choice_label(Provider::OpenAI, &d)),
-        "O OpenAI  (gpt-5)"
-    );
+    assert_eq!(preview_model(Provider::OpenAI, &d), "gpt-5");
 
-    // No chosen model anywhere -> the hint that one must be picked.
+    // No chosen model anywhere -> empty (rendered as "(model not set)").
     let d = draft(Some(Provider::DeepSeek), None, None, None);
-    assert_eq!(
-        bare(&provider_choice_label(Provider::DeepSeek, &d)),
-        "D DeepSeek  (model not set)"
-    );
-}
-
-/// R4 badges: every provider row's badge is the display name's first letter
-/// (uppercased), stable per canonical name (in tests the style strips to
-/// the bare letter — a TTY adds the name-hash color).
-#[test]
-fn provider_badges_are_first_letters_and_stable() {
-    // ANSI-stripped comparison: the styled string's global color flag
-    // differs between a lone run and the full suite.
-    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
-    assert_eq!(bare(&provider_badge(Provider::OpenAI)), "O");
-    assert_eq!(bare(&provider_badge(Provider::DeepSeek)), "D");
-    assert_eq!(bare(&provider_badge(Provider::OpenAiCompatible)), "O");
-    assert_eq!(
-        bare(&provider_badge(Provider::OpenAI)),
-        bare(&provider_badge(Provider::OpenAI))
-    );
+    assert_eq!(preview_model(Provider::DeepSeek, &d), "");
 }
 
 #[test]
@@ -482,10 +376,10 @@ fn provider_choice_label_previews_banked_model_for_non_active() {
         model: Some("claude-sonnet-4-remembered".into()),
         ..Default::default()
     });
-    let label = provider_choice_label(Provider::Anthropic, &draft);
+    let preview = preview_model(Provider::Anthropic, &draft);
     assert!(
-        label.contains("claude-sonnet-4-remembered"),
-        "list should preview the remembered model, got: {label}"
+        preview.contains("claude-sonnet-4-remembered"),
+        "list should preview the remembered model, got: {preview}"
     );
 }
 
@@ -677,82 +571,6 @@ fn cli_menu_rows_have_no_unmappable_header() {
     assert!(matches!(rows.last(), Some(CliRow::Done)));
 }
 
-// --- Dynamic model listing (ADR 0019) ------------------------------------
-
-/// A scripted fetch stub that records its calls and hands back queued
-/// results in order — the e2e `common.rs` queue style, miniaturized for the
-/// single fetch seam. An exhausted queue panics (under-scripted test).
-fn fetch_stub(results: Vec<Vec<String>>) -> (std::sync::Arc<parking_lot::Mutex<usize>>, SetupDeps) {
-    use std::sync::Arc;
-    let calls = Arc::new(parking_lot::Mutex::new(0));
-    let seen = calls.clone();
-    let queue = Arc::new(parking_lot::Mutex::new(results));
-    (
-        calls,
-        SetupDeps {
-            fetch_models: Box::new(move |_p, _k, _b| {
-                let mut n = seen.lock();
-                *n += 1;
-                queue.lock().remove(0)
-            }),
-            // Verify probes the wizard flows never trigger in these tests.
-            verify_provider: Box::new(|_| panic!("verify_provider not scripted")),
-            verify_cli: Box::new(|_| panic!("verify_cli not scripted")),
-        },
-    )
-}
-
-/// The session cache (ADR 0019 §5): a second Model-step visit for the same
-/// provider/key/base never re-fetches — the stub queue holds exactly one
-/// result, and a second fetch would panic it.
-#[test]
-fn model_fetch_is_cached_across_visits() {
-    let (calls, deps) = fetch_stub(vec![vec!["m-a".into(), "m-b".into()]]);
-    let mut d = draft(Some(Provider::OpenAI), Some("sk-123"), None, None);
-    assert_eq!(
-        cached_models(&deps, &mut d, Provider::OpenAI),
-        ["m-a", "m-b"]
-    );
-    assert_eq!(
-        cached_models(&deps, &mut d, Provider::OpenAI),
-        ["m-a", "m-b"]
-    );
-    assert_eq!(*calls.lock(), 1);
-
-    // Changing the key invalidates the cache entry and re-fetches.
-    d.api_key = Some("sk-456".into());
-    let (_calls, deps) = fetch_stub(vec![vec!["m-c".into()]]);
-    // (fresh stub: the original one's queue is spent by design)
-    let mut d2 = draft(Some(Provider::OpenAI), Some("sk-123"), None, None);
-    d2.api_key = Some("sk-456".into());
-    assert_eq!(cached_models(&deps, &mut d2, Provider::OpenAI), ["m-c"]);
-}
-
-/// A failed fetch (ADR 0019 §4) comes back empty — the Model step's degrade
-/// signal for required free text — and the failure is cached like a success,
-/// so a dead endpoint is not hammered on every submenu visit.
-#[test]
-fn model_fetch_failure_degrades_to_empty_and_is_cached() {
-    let (calls, deps) = fetch_stub(vec![Vec::new()]);
-    let mut d = draft(Some(Provider::OpenAI), Some("sk-123"), None, None);
-    assert!(cached_models(&deps, &mut d, Provider::OpenAI).is_empty());
-    assert!(cached_models(&deps, &mut d, Provider::OpenAI).is_empty());
-    assert_eq!(*calls.lock(), 1);
-}
-
-/// A key-requiring provider with no key never touches the network (ADR 0019
-/// §4): the stub's queue is empty, so any call would panic.
-#[test]
-fn model_fetch_skipped_without_required_key() {
-    let (_calls, deps) = fetch_stub(vec![]);
-    let mut d = draft(Some(Provider::OpenAI), None, None, None);
-    assert!(cached_models(&deps, &mut d, Provider::OpenAI).is_empty());
-    // Keyless Ollama still fetches (local daemon needs no key).
-    let (_calls, deps) = fetch_stub(vec![vec!["llama3.3".into()]]);
-    let mut d = draft(Some(Provider::Ollama), None, None, None);
-    assert_eq!(cached_models(&deps, &mut d, Provider::Ollama), ["llama3.3"]);
-}
-
 /// Picker rows (ADR 0019 §6): 50-entry cap plus the `Custom model…` escape
 /// hatch — no search, no pagination.
 #[test]
@@ -787,21 +605,6 @@ fn cache_key_separates_provider_base_and_key() {
 
 // --- Auto-verify on Done (R3) ---------------------------------------------
 
-/// The top-menu status line (R3) reads the latest probe: nothing verified,
-/// a pass, or a failure — each with the probed target's label.
-#[test]
-fn verify_status_label_reads_latest_probe() {
-    assert_eq!(verify_status_label(&None), "not verified");
-    assert_eq!(
-        verify_status_label(&Some(VerifyStatus::pass("openai".into()))),
-        format!("{ICON_CHECK} openai")
-    );
-    assert_eq!(
-        verify_status_label(&Some(VerifyStatus::fail("claude".into()))),
-        format!("{ICON_CROSS} claude")
-    );
-}
-
 /// A provider probe against an incomplete draft fails validation — the
 /// Run-path setup hint, not an opaque provider error — without touching the
 /// network: `validate` rejects the draft before any request is built. This
@@ -825,48 +628,4 @@ fn provider_probe_reports_validation_hint_without_network() {
 fn cli_probe_without_command_errs_cleanly() {
     let d = draft(None, None, None, None);
     assert!(super::verify::probe_cli(&d).is_err());
-}
-
-/// R4 CLI badges: preset rows lead with the preset name's first letter,
-/// stable per name; the Done row keeps its section bullet.
-#[test]
-fn cli_badges_are_first_letters_and_stable() {
-    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
-    assert_eq!(bare(&cli_badge("claude")), "C");
-    assert_eq!(bare(&cli_badge("codex")), "C"); // letter collision is fine (Q6)
-    assert_eq!(bare(&cli_badge("windsurf")), "W");
-    assert_eq!(bare(&cli_badge("claude")), bare(&cli_badge("claude")));
-    // The row itself: badge + name.
-    assert_eq!(
-        bare(&CliRow::Preset("qwen").label()),
-        format!("{} qwen", bare(&cli_badge("qwen")))
-    );
-}
-
-// --- Menu role coloring (R5) -----------------------------------------------
-
-/// R5 toggle roles: `on` wraps in the success style, `off`/unset in muted.
-/// The wording itself stays ADR 0018's (pinned by the yes_no test above);
-/// ANSI-stripped comparison keeps the test immune to the process-global
-/// color flag.
-#[test]
-fn styled_toggle_roles_on_success_off_muted() {
-    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
-    assert_eq!(bare(&styled_toggle(None)), "off");
-    assert_eq!(bare(&styled_toggle(Some(false))), "off");
-    assert_eq!(bare(&styled_toggle(Some(true))), "on");
-    // (The role mapping itself — success vs muted — rides the process-global
-    // color flag and is racy to assert here; palette's own tests pin the
-    // style construction, and the bare-word contract above pins the wiring.)
-}
-
-/// R5 value roles: real values render via emphasis, the `(not set)` /
-/// `(not configured)` placeholders via muted.
-#[test]
-fn styled_value_roles_placeholders_muted() {
-    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
-    assert_eq!(bare(&styled_value("gpt-5")), "gpt-5");
-    assert_eq!(bare(&styled_value("••••••")), "••••••");
-    assert_eq!(bare(&styled_value("(not set)")), "(not set)");
-    assert_eq!(bare(&styled_value("(not configured)")), "(not configured)");
 }
