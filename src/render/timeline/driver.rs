@@ -689,7 +689,16 @@ impl DisplayWrite for RowSink {
         buf.truncate(keep);
     }
     fn colors_enabled(&self) -> bool {
-        console::colors_enabled_stderr()
+        // Tests must stay TTY-independent: `--nocapture` in a color terminal
+        // would otherwise leak ANSI codes into pinned assertions.
+        #[cfg(test)]
+        {
+            false
+        }
+        #[cfg(not(test))]
+        {
+            console::colors_enabled_stderr()
+        }
     }
 }
 

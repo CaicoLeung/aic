@@ -808,7 +808,7 @@ impl CliAgent {
             Encoding::PiStreamJson => (Box::new(PiDecoder::new()), "pi --mode json"),
             Encoding::OpenCodeJson => (Box::new(OpenCodeDecoder::new()), "opencode --format json"),
             Encoding::CodexJson => (Box::new(CodexDecoder::new()), "codex --json"),
-            Encoding::Plain => unreachable!(),
+            Encoding::Plain => unreachable!(), // handled by the early return above
         };
         self.run_streamed(&spec, timeout, dec.as_mut(), on_output, envelope)
             .await

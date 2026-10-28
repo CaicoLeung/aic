@@ -4,6 +4,9 @@
 # Bypass once: COMMITLINT_SKIP=1 git commit ...
 set -uo pipefail
 msg_file="$1"
+if [ "${COMMITLINT_SKIP:-0}" = "1" ]; then
+  exit 0
+fi
 
 # Binary missing on a fresh clone: warn, don't block (install with
 # `cargo install cargo-commitlint`).
