@@ -96,13 +96,29 @@ pub(super) enum CliRow {
 }
 
 impl CliRow {
-    /// The text shown for this row in the [`opt_nav`] menu.
-    fn label(&self) -> String {
+    /// The text shown for this row in the [`opt_nav`] menu. Preset rows
+    /// lead with the R4 badge: the preset name's first letter, colored by a
+    /// stable hash of the name (ADR 0018 amendment); inline ANSI is safe,
+    /// inquire's frame renderer is ANSI-aware.
+    pub(super) fn label(&self) -> String {
         match self {
-            CliRow::Preset(name) => format!("{DOT} {name}"),
+            CliRow::Preset(name) => format!("{} {name}", cli_badge(name)),
             CliRow::Done => format!("{DOT} Done — back to main menu"),
         }
     }
+}
+
+/// The R4 badge cell for one CLI-agent row: the preset name's first letter,
+/// uppercased, bolded, and colored via [`palette::badge`] hashed on the
+/// name. Pure — returns the styled string.
+pub(super) fn cli_badge(name: &str) -> String {
+    let letter = name
+        .chars()
+        .next()
+        .unwrap_or('·')
+        .to_uppercase()
+        .to_string();
+    palette::badge(name).bold().apply_to(letter).to_string()
 }
 
 /// Build the CLI-agent menu rows in presentation order: the presets, then

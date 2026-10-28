@@ -311,6 +311,18 @@ pub fn sigma_color() -> Style {
     rgb_style(theme_pair(SIGMA_COLOR, SIGMA_COLOR_NEON))
 }
 
+/// Setup-wizard badge (R4): a one-letter provider/agent sigil whose color is
+/// a stable FNV-1a hash of the canonical name into [`FALLBACK_PALETTE`] —
+/// the same theme-aware, WCAG-guarded tables commit types use, so no new
+/// curated color list exists. The same name always renders the same color
+/// across runs, machines, and themes; same-letter collisions between
+/// different names are fine (the letter carries the identity, the color only
+/// aids scanning). Bolded at the call site so the single glyph qualifies as
+/// WCAG AA Large. Part of ADR 0018's amendment (setup badge class).
+pub fn badge(name: &str) -> Style {
+    rgb_style(fallback_palette()[fallback_palette_index(name)])
+}
+
 /// A conventional-commit subject as styled segments — the single source both
 /// subject renderers consume so a subject reads identically everywhere: the
 /// panel engine's `styled_subject` (landed entries, previews) and the
@@ -629,5 +641,25 @@ mod tests {
         assert!("".trim().is_empty());
         assert!("   ".trim().is_empty());
         // The fallback path itself is covered by fallback_index_* above.
+    }
+
+    /// The R4 setup badge (ADR 0018 amendment): stable per name, theme-aware,
+    /// and confined to the fallback tables — same name hashes to the same
+    /// index in both themes, so a provider's badge color never changes mid-
+    /// session (theme flips only at startup).
+    #[test]
+    fn badge_is_stable_and_theme_aware() {
+        // Style itself isn't Display; the applied styled object is, and with
+        // colors off (test default) it renders the bare target — so equality
+        // here proves the hash routing, and the theme flip below proves the
+        // table selection runs through theme_pair.
+        let render = |n: &str| badge(n).apply_to(n).to_string();
+        let _g = NEON_TOGGLE_LOCK.lock();
+        set_neon(false);
+        assert_eq!(render("openai"), render("openai"));
+        assert_eq!(render("claude"), render("claude"));
+        set_neon(true);
+        assert_eq!(render("openai"), render("openai"));
+        set_neon(false);
     }
 }

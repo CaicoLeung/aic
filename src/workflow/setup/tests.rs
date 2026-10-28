@@ -277,14 +277,17 @@ fn effective_model_is_the_draft_choice_only() {
 
 #[test]
 fn provider_choice_label_shows_chosen_model_for_selected_provider() {
-    // The selected provider shows the user's chosen model, not the bare
-    // default — re-entering setup must not read as if the choice was lost
-    // (AIC-15).
+    // The selected provider shows the user's chosen model — re-entering
+    // setup must not read as if the choice was lost (AIC-15). Rows lead
+    // with the R4 badge: the display name's first letter (plain in tests —
+    // console strips styles when colors are off; in a TTY it carries the
+    // name-hash color).
     let mut d = draft(Some(Provider::DeepSeek), None, None, None);
     d.model = Some("deepseek-v4-pro".into());
+    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
     assert_eq!(
-        provider_choice_label(Provider::DeepSeek, &d),
-        format!("{DOT} DeepSeek  (deepseek-v4-pro)")
+        bare(&provider_choice_label(Provider::DeepSeek, &d)),
+        "D DeepSeek  (deepseek-v4-pro)"
     );
 
     // Another provider shows its remembered bank entry, never a default.
@@ -297,15 +300,32 @@ fn provider_choice_label_shows_chosen_model_for_selected_provider() {
         base_url: None,
     });
     assert_eq!(
-        provider_choice_label(Provider::OpenAI, &d),
-        format!("{DOT} OpenAI  (gpt-5)")
+        bare(&provider_choice_label(Provider::OpenAI, &d)),
+        "O OpenAI  (gpt-5)"
     );
 
     // No chosen model anywhere -> the hint that one must be picked.
     let d = draft(Some(Provider::DeepSeek), None, None, None);
     assert_eq!(
-        provider_choice_label(Provider::DeepSeek, &d),
-        format!("{DOT} DeepSeek  (model not set)")
+        bare(&provider_choice_label(Provider::DeepSeek, &d)),
+        "D DeepSeek  (model not set)"
+    );
+}
+
+/// R4 badges: every provider row's badge is the display name's first letter
+/// (uppercased), stable per canonical name (in tests the style strips to
+/// the bare letter — a TTY adds the name-hash color).
+#[test]
+fn provider_badges_are_first_letters_and_stable() {
+    // ANSI-stripped comparison: the styled string's global color flag
+    // differs between a lone run and the full suite.
+    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
+    assert_eq!(bare(&provider_badge(Provider::OpenAI)), "O");
+    assert_eq!(bare(&provider_badge(Provider::DeepSeek)), "D");
+    assert_eq!(bare(&provider_badge(Provider::OpenAiCompatible)), "O");
+    assert_eq!(
+        bare(&provider_badge(Provider::OpenAI)),
+        bare(&provider_badge(Provider::OpenAI))
     );
 }
 
@@ -804,4 +824,20 @@ fn provider_probe_reports_validation_hint_without_network() {
 fn cli_probe_without_command_errs_cleanly() {
     let d = draft(None, None, None, None);
     assert!(super::verify::probe_cli(&d).is_err());
+}
+
+/// R4 CLI badges: preset rows lead with the preset name's first letter,
+/// stable per name; the Done row keeps its section bullet.
+#[test]
+fn cli_badges_are_first_letters_and_stable() {
+    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
+    assert_eq!(bare(&cli_badge("claude")), "C");
+    assert_eq!(bare(&cli_badge("codex")), "C"); // letter collision is fine (Q6)
+    assert_eq!(bare(&cli_badge("windsurf")), "W");
+    assert_eq!(bare(&cli_badge("claude")), bare(&cli_badge("claude")));
+    // The row itself: badge + name.
+    assert_eq!(
+        bare(&CliRow::Preset("qwen").label()),
+        format!("{} qwen", bare(&cli_badge("qwen")))
+    );
 }

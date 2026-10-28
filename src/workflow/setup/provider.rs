@@ -7,6 +7,7 @@ use super::finalize::{field_initial, mask_key, switch_provider};
 use super::*;
 use crate::core::config::{Source, resolve_base_url, resolve_field};
 use crate::llm::BaseUrlRequirement;
+use crate::render::palette;
 
 /// Screen label shared by every screen in the provider flow — a const so the
 /// section title can't drift across the flow's `show_screen` call sites.
@@ -73,13 +74,31 @@ fn preview_model(p: Provider, draft: &Draft) -> String {
 /// than nothing — otherwise re-entering setup makes the selection read as
 /// lost (AIC-15). For every other provider, show its remembered bank entry
 /// if one exists (ADR 0019: there is no default to fall back to).
+/// The row leads with the R4 badge: the display name's first letter,
+/// colored by a stable hash of the canonical name (ADR 0018 amendment) —
+/// inline ANSI is safe, inquire's frame renderer is ANSI-aware.
 pub(super) fn provider_choice_label(p: Provider, draft: &Draft) -> String {
     let model = preview_model(p, draft);
+    let badge = provider_badge(p);
     if model.is_empty() {
-        format!("{DOT} {}  (model not set)", p.display())
+        format!("{badge} {}  (model not set)", p.display())
     } else {
-        format!("{DOT} {}  ({model})", p.display())
+        format!("{badge} {}  ({model})", p.display())
     }
+}
+
+/// The R4 badge cell for one provider row: its display name's first letter,
+/// uppercased, bolded, and colored via [`palette::badge`] hashed on the
+/// canonical name. Pure — returns the styled string.
+pub(super) fn provider_badge(p: Provider) -> String {
+    let letter = p
+        .display()
+        .chars()
+        .next()
+        .unwrap_or('·')
+        .to_uppercase()
+        .to_string();
+    palette::badge(p.name()).bold().apply_to(letter).to_string()
 }
 /// A configurable field inside the AI-provider sub-menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

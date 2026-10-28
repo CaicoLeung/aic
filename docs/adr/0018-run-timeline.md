@@ -297,3 +297,18 @@ Third review pass — two palette-semantics fixes:
    only the spinner glyph keeps the yellow. Yellow is left meaning "needs
    your attention": the `?` pending/ask markers and the ⚠ rows. Motion
    already says "working".
+
+## Amendment (2026-10-28): setup badge class — hashed letter sigils
+
+The setup wizard's provider and CLI-agent pickers (ADR 0007 inquire menus,
+outside the Run timeline) now lead each row with a one-letter badge: the
+display name's first letter, bolded, colored by `palette::badge` — an FNV-1a
+hash of the canonical name into the existing guarded `FALLBACK_PALETTE`
+tables (classic + neon twins, same WCAG guard as commit types). This extends
+the marker system with a *class*, not new vocabulary glyphs: the timeline's
+fixed set (`·` ✓ ✗ ⚠) is unchanged, the letters are plain ASCII, and no
+Nerd Font is required. Same name → same color across runs and themes;
+same-letter collisions between names are accepted (the letter carries
+identity, the color only aids scanning). Inline ANSI in option strings is
+safe: inquire 0.9.4's frame renderer is ANSI-aware. `Done` rows and
+non-picker menus keep the muted `·` bullet.
