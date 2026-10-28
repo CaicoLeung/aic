@@ -19,9 +19,40 @@ use console::Term;
 use std::io::{self, IsTerminal};
 
 use crate::core::config::{BackendKind, CliConfig, Config, ProviderProfile, config_path};
-use crate::llm::Provider;
+use crate::llm::{Provider, list_models};
 use crate::render::{oneshot, palette};
 use crate::workflow::input::{OptNav, TextAct, opt_nav, prompt_text, prompt_yes_no};
+use std::collections::HashMap;
+
+/// The wizard's injected seams (ADR 0019) — the operations `cargo test`
+/// cannot run hermetically. Production wires real implementations; tests
+/// script results. Shaped after [`crate::workflow::RunDeps`]: one purposeful
+/// bundle, not a provider trait hierarchy.
+pub(super) struct SetupDeps {
+    /// Fetch a provider's live model list (`provider`, effective `api_key`,
+    /// effective `base_url`). An empty return means failure / offline /
+    /// missing key — the Model step then degrades to required free text and
+    /// never blocks (ADR 0019 §4).
+    pub fetch_models: FetchModels,
+}
+
+/// The one R1 seam: a boxed listing fetch, injectable for hermetic tests.
+pub(super) type FetchModels = Box<dyn Fn(Provider, &str, Option<&str>) -> Vec<String>>;
+
+impl SetupDeps {
+    /// Production wiring: the real listing fetch, driven on a dedicated
+    /// nested runtime under the spinner (the `verify::probe` pattern). Any
+    /// error collapses to an empty list — the degrade contract above.
+    fn real() -> Self {
+        Self {
+            fetch_models: Box::new(|provider, api_key, base_url| {
+                let label = format!("Fetching {} models…", provider.display());
+                verify::probe(&label, list_models(provider, api_key, base_url)).unwrap_or_default()
+            }),
+        }
+    }
+}
+
 mod cli_flow;
 mod finalize;
 mod provider;
@@ -56,7 +87,8 @@ pub fn run_setup() -> Result<()> {
         anyhow::bail!("cannot run interactive setup without a TTY");
     }
 
-    match wizard()? {
+    let deps = SetupDeps::real();
+    match wizard(&deps)? {
         Some(config) => {
             config.save()?;
             let path = config_path().context("could not determine config path")?;
@@ -148,6 +180,10 @@ struct Draft {
     /// top-level fields (for pre-bank configs), and written back on save via
     /// [`finalize::finalize`].
     known_providers: Vec<ProviderProfile>,
+    /// Fetched model lists this session (ADR 0019), keyed by
+    /// provider + base URL + masked key — any change re-fetches. Never
+    /// persisted; a fresh wizard run starts cold.
+    model_cache: HashMap<String, Vec<String>>,
 }
 
 impl Draft {
@@ -165,16 +201,16 @@ impl Draft {
         self.backend_kind.unwrap_or(BackendKind::Api)
     }
 
-    /// The model the selected provider will actually use, for display: the
-    /// in-session draft choice (seeded from the existing config in
-    /// [`finalize::seed_draft`]) first, else the provider default. Empty when the
-    /// provider has no default (OpenRouter, OpenAI-compatible).
-    fn effective_model(&self, p: Provider) -> String {
+    /// The model the selected provider will use, for display: the in-session
+    /// draft choice (seeded from the existing config in
+    /// [`finalize::seed_draft`]). Empty when none is chosen — there is no
+    /// default model (ADR 0019); the provider flow gates `Done` on it.
+    fn effective_model(&self) -> String {
         self.model
             .as_deref()
             .filter(|m| !m.is_empty())
             .map(String::from)
-            .unwrap_or_else(|| p.default_model().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -206,7 +242,7 @@ enum MenuChoice {
 /// only its own fields and returns to the
 /// menu; both backends keep their configured content, so switching the active
 /// Backend never wipes what was entered for the other.
-fn wizard() -> Result<Option<Config>> {
+fn wizard(deps: &SetupDeps) -> Result<Option<Config>> {
     let existing = Config::load().unwrap_or(None);
     let existing_provider = existing
         .as_ref()
@@ -225,7 +261,7 @@ fn wizard() -> Result<Option<Config>> {
         match step_mode_choice()? {
             ModeChoice::Api => {
                 draft.backend_kind = Some(BackendKind::Api);
-                if provider::run_provider_flow(&existing, existing_provider, &mut draft)? {
+                if provider::run_provider_flow(deps, &existing, existing_provider, &mut draft)? {
                     return Ok(None);
                 }
             }
@@ -256,7 +292,7 @@ fn wizard() -> Result<Option<Config>> {
                 highlight = 0;
             }
             MenuChoice::Provider => {
-                if provider::run_provider_flow(&existing, existing_provider, &mut draft)? {
+                if provider::run_provider_flow(deps, &existing, existing_provider, &mut draft)? {
                     return Ok(None); // Ctrl-C inside the provider path
                 }
                 highlight = 1;
@@ -347,10 +383,11 @@ fn step_backend_choice(draft: &mut Draft) -> Result<bool> {
     Ok(false)
 }
 /// `AI provider` menu row: the current provider and the model that would be
-/// used (the chosen one, else the provider default). The API backend always
-/// resolves to a provider — OpenAI by default, matching [`finalize::finalize`] — so the
-/// row never reads `(not set)` while API is the active backend. `(not set)`
-/// stays correct only for the CLI backend, which ignores the provider.
+/// used (the chosen one; there is no default model — ADR 0019). The API
+/// backend always resolves to a provider — OpenAI by default, matching
+/// [`finalize::finalize`] — so the row never reads `(not set)` while API is
+/// the active backend. `(not set)` stays correct only for the CLI backend,
+/// which ignores the provider.
 fn provider_label(draft: &Draft) -> String {
     let p = match draft.provider {
         Some(p) => p,
@@ -360,7 +397,7 @@ fn provider_label(draft: &Draft) -> String {
         None if draft.active_backend() == BackendKind::Api => Provider::default(),
         None => return "(not set)".to_string(),
     };
-    let model = draft.effective_model(p);
+    let model = draft.effective_model();
     if model.is_empty() {
         p.display().to_string()
     } else {

@@ -46,13 +46,14 @@ pub(super) fn applicable_steps(p: Provider) -> Vec<Step> {
     steps
 }
 /// One provider's preview model for the `Choose your AI provider` list: the
-/// active draft choice first, then the remembered bank entry, then the
-/// provider default. The detail sub-menu reads the same bank (via
-/// [`step_provider`]'s restore-on-switch into `draft.model`), so the list and
-/// the detail never disagree on which model a provider will use.
+/// active draft choice first, then the remembered bank entry. There is no
+/// default model (ADR 0019) — a provider with neither reads `(model not
+/// set)`. The detail sub-menu reads the same bank (via [`step_provider`]'s
+/// restore-on-switch into `draft.model`), so the list and the detail never
+/// disagree on which model a provider will use.
 fn preview_model(p: Provider, draft: &Draft) -> String {
     if draft.provider == Some(p) {
-        return draft.effective_model(p);
+        return draft.effective_model();
     }
     draft
         .known_providers
@@ -64,19 +65,19 @@ fn preview_model(p: Provider, draft: &Draft) -> String {
                 .filter(|m| !m.is_empty())
                 .map(String::from)
         })
-        .unwrap_or_else(|| p.default_model().to_string())
+        .unwrap_or_default()
 }
 
 /// One row in the provider picker (the screen *before* this provider's
 /// submenu). For the currently selected provider, show the model the user
-/// actually chose (`draft.model`, seeded from the existing config) rather than
-/// the bare default — otherwise re-entering setup makes the selection read as
-/// lost (AIC-15). For every other provider, show its default so the options
-/// stay comparable at a glance.
+/// actually chose (`draft.model`, seeded from the existing config) rather
+/// than nothing — otherwise re-entering setup makes the selection read as
+/// lost (AIC-15). For every other provider, show its remembered bank entry
+/// if one exists (ADR 0019: there is no default to fall back to).
 pub(super) fn provider_choice_label(p: Provider, draft: &Draft) -> String {
     let model = preview_model(p, draft);
     if model.is_empty() {
-        format!("{DOT} {}  (no default — you'll pick a model)", p.display())
+        format!("{DOT} {}  (model not set)", p.display())
     } else {
         format!("{DOT} {}  ({model})", p.display())
     }
@@ -111,16 +112,13 @@ pub(super) fn base_url_label(url: Option<&str>, source: Source) -> String {
     }
 }
 
-/// `Model` sub-menu row: the effective model (config > provider default),
-/// annotated with its source.
-pub(super) fn model_label(model: &str, source: Source) -> String {
+/// `Model` sub-menu row: the chosen model, or "(not set)". There is no
+/// default model (ADR 0019), so no source annotation exists for it.
+pub(super) fn model_label(model: &str) -> String {
     if model.is_empty() {
         return "(not set)".to_string();
     }
-    match source {
-        Source::Default => format!("{model} (default)"),
-        _ => model.to_string(),
-    }
+    model.to_string()
 }
 
 /// The AI-provider sub-menu: one entry per applicable field (based on the
@@ -151,12 +149,13 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
                 ));
             }
             Step::Model => {
-                let (model, source) = resolve_field(
-                    draft.model.as_deref().filter(|m| !m.is_empty()),
-                    p.default_model(),
-                );
+                let model = draft
+                    .model
+                    .as_deref()
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or("");
                 entries.push(ProviderEntry::Model);
-                labels.push(format!("{DOT} Model — {}", model_label(&model, source)));
+                labels.push(format!("{DOT} Model — {}", model_label(model)));
             }
         }
     }
@@ -178,6 +177,7 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
 /// provider choice returns to the main menu. Returns `true` on Ctrl-C (cancel
 /// the whole setup); `false` returns to the main menu.
 pub(super) fn run_provider_flow(
+    deps: &SetupDeps,
     existing: &Option<Config>,
     existing_provider: Option<Provider>,
     draft: &mut Draft,
@@ -201,8 +201,16 @@ pub(super) fn run_provider_flow(
                         ProviderEntry::BaseUrl => {
                             step_base_url(existing, existing_provider, draft)?
                         }
-                        ProviderEntry::Model => step_model(existing, existing_provider, draft)?,
+                        ProviderEntry::Model => {
+                            step_model(deps, existing, existing_provider, draft)?
+                        }
                         ProviderEntry::Verify => step_verify(draft)?,
+                        // Soft required gate (ADR 0019 §7): `Done` routes into
+                        // the Model step until a model is chosen, so a saved
+                        // API config always records one.
+                        ProviderEntry::Done if draft.effective_model().is_empty() => {
+                            step_model(deps, existing, existing_provider, draft)?
+                        }
                         ProviderEntry::Done => return Ok(false),
                     };
                     // Any non-cancel outcome returns to the sub-menu; the field
@@ -433,15 +441,20 @@ fn step_base_url(
     }
 }
 
-fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft) -> Result<Nav> {
+fn step_model(
+    deps: &SetupDeps,
+    existing: &Option<Config>,
+    ep: Option<Provider>,
+    draft: &mut Draft,
+) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before model");
-    let default_model = provider.default_model();
-    let models = provider.models();
     let initial = field_initial(draft.model.as_deref(), existing, ep, draft.provider, |c| {
         c.model.as_ref()
     });
+    let models = cached_models(deps, draft, provider);
 
-    // No curated list (OpenRouter, OpenAI-compatible) -> required free text.
+    // Fetch failed / offline / no key: required free text — never a block
+    // (ADR 0019 §4).
     if models.is_empty() {
         show_screen(PROVIDER_SCREEN)?;
         return Ok(text_nav(
@@ -455,19 +468,12 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
         ));
     }
 
-    let mut items: Vec<String> = models.iter().map(|m| format!("{DOT} {m}")).collect();
-    items.push(format!("{ICON_PENCIL}  Custom model…"));
+    let items = picker_rows(&models);
     let custom_idx = items.len() - 1;
     let highlight = initial
         .as_deref()
-        .and_then(|v| models.iter().position(|m| *m == v))
-        .unwrap_or_else(|| {
-            if default_model.is_empty() {
-                0
-            } else {
-                models.iter().position(|m| *m == default_model).unwrap_or(0)
-            }
-        });
+        .and_then(|v| models.iter().position(|m| m == v))
+        .unwrap_or(0);
 
     loop {
         show_screen(PROVIDER_SCREEN)?;
@@ -489,16 +495,74 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
                 }
             }
             OptNav::Value(i) => {
-                let m = models[i];
-                draft.model = if !default_model.is_empty() && m == default_model {
-                    None
-                } else {
-                    Some(m.to_string())
-                };
+                // The choice is always recorded — "picked the default" no
+                // longer collapses to `None` (ADR 0019 §7).
+                draft.model = Some(models[i].clone());
                 return Ok(Nav::Next);
             }
             OptNav::Back => return Ok(Nav::Back),
             OptNav::Cancel => return Ok(Nav::Cancel),
         }
     }
+}
+
+/// Cache key for one fetched model list (ADR 0019 §5): provider + effective
+/// base URL + masked key, so changing any of them re-fetches. Pure.
+/// ponytail: masked key — two same-length keys collide and reuse a stale
+/// list until any field changes; hash the raw key if that ever bites.
+pub(super) fn cache_key(provider: Provider, base_url: Option<&str>, api_key: &str) -> String {
+    format!(
+        "{}|{}|{}",
+        provider.name(),
+        base_url.unwrap_or(""),
+        mask_key(api_key)
+    )
+}
+
+/// The provider's live model list, through the session cache (ADR 0019 §5):
+/// a cache hit never re-fetches; a miss fetches once and stores even the
+/// empty failure result (retrying every submenu visit would hammer a dead
+/// endpoint). Keyed providers with no key skip the fetch entirely — it could
+/// only 401.
+pub(super) fn cached_models(
+    deps: &SetupDeps,
+    draft: &mut Draft,
+    provider: Provider,
+) -> Vec<String> {
+    let api_key = draft
+        .api_key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .unwrap_or("");
+    let base_url = resolve_base_url(
+        draft.base_url.as_deref().filter(|u| !u.is_empty()),
+        &provider,
+    )
+    .0;
+    let key = cache_key(provider, base_url.as_deref(), api_key);
+    if let Some(models) = draft.model_cache.get(&key) {
+        return models.clone();
+    }
+    let models = if provider.requires_key() && api_key.is_empty() {
+        Vec::new()
+    } else {
+        (deps.fetch_models)(provider, api_key, base_url.as_deref())
+    };
+    draft.model_cache.insert(key, models.clone());
+    models
+}
+
+/// Picker rows over a fetched list (ADR 0019 §6): already sorted by the
+/// fetcher, capped at the first 50 — no search, no pagination — plus the
+/// `Custom model…` escape hatch. Pure.
+pub(super) fn picker_rows(models: &[String]) -> Vec<String> {
+    // ponytail: first-50 truncation; add search/pagination if providers
+    // start shipping lists where 50 isn't enough to find anything.
+    let mut items: Vec<String> = models
+        .iter()
+        .take(50)
+        .map(|m| format!("{DOT} {m}"))
+        .collect();
+    items.push(format!("{ICON_PENCIL}  Custom model…"));
+    items
 }

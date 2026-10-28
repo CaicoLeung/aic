@@ -138,15 +138,16 @@ fn seed_draft_carries_review_batch_plan() {
 #[test]
 fn provider_label_defaults_to_openai_for_api_backend() {
     // API backend (the default) with no provider chosen shows the OpenAI
-    // default + its default model, mirroring `finalize` — never "(not set)"
-    // while API is active.
+    // default provider, mirroring `finalize` — never "(not set)" while API
+    // is active. No model is chosen, and there is no default model
+    // (ADR 0019), so the row carries the provider alone.
     let d = draft(None, None, None, None);
-    assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+    assert_eq!(provider_label(&d), "OpenAI");
 
     // Explicit API backend, still no provider -> same default.
     let mut d = draft(None, None, None, None);
     d.backend_kind = Some(BackendKind::Api);
-    assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+    assert_eq!(provider_label(&d), "OpenAI");
 
     // CLI backend ignores the provider -> "(not set)" until one is set.
     let mut d = draft(None, None, None, None);
@@ -156,13 +157,10 @@ fn provider_label_defaults_to_openai_for_api_backend() {
 
 #[test]
 fn provider_label_shows_provider_and_model() {
-    // Explicit model wins.
+    // Explicit model rides along.
     let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
     assert_eq!(provider_label(&d), "OpenAI · gpt-5");
-    // No explicit model -> provider default.
-    let d = draft(Some(Provider::OpenAI), None, None, None);
-    assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
-    // Provider with no default model -> just the provider name.
+    // No model chosen -> provider name only (no default to show).
     let d = draft(Some(Provider::OpenRouter), None, None, None);
     assert_eq!(provider_label(&d), "OpenRouter");
 }
@@ -182,13 +180,10 @@ fn submenu_labels_reflect_value_and_source() {
     assert_eq!(api_key_label("sk-123"), "••••••");
     assert_eq!(api_key_label(""), "(not set)");
 
-    // Model: value, (default) when provider-default-sourced, (not set) when empty.
-    assert_eq!(model_label("gpt-5", Source::Config), "gpt-5");
-    assert_eq!(
-        model_label("deepseek-v4-flash", Source::Default),
-        "deepseek-v4-flash (default)"
-    );
-    assert_eq!(model_label("", Source::Default), "(not set)");
+    // Model: value, (not set) when empty — no source annotation exists
+    // (ADR 0019: no default model).
+    assert_eq!(model_label("gpt-5"), "gpt-5");
+    assert_eq!(model_label(""), "(not set)");
 
     // Base URL: value, annotated by source, (not set) when none.
     assert_eq!(
@@ -276,16 +271,15 @@ fn submenu_labels_show_effective_value() {
 }
 
 #[test]
-fn effective_model_prefers_draft_then_default() {
-    // Draft model wins over the provider default.
+fn effective_model_is_the_draft_choice_only() {
+    // Draft model is the whole story (ADR 0019: no provider default).
     let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
-    assert_eq!(d.effective_model(Provider::OpenAI), "gpt-5");
-    // No draft model -> provider default.
+    assert_eq!(d.effective_model(), "gpt-5");
+    // No model chosen -> empty, whatever the provider.
     let d = draft(Some(Provider::OpenAI), None, None, None);
-    assert_eq!(d.effective_model(Provider::OpenAI), "gpt-5-mini");
-    // Provider with no default -> empty string.
+    assert_eq!(d.effective_model(), "");
     let d = draft(Some(Provider::OpenRouter), None, None, None);
-    assert_eq!(d.effective_model(Provider::OpenRouter), "");
+    assert_eq!(d.effective_model(), "");
 }
 
 #[test]
@@ -300,32 +294,25 @@ fn provider_choice_label_shows_chosen_model_for_selected_provider() {
         format!("{DOT} DeepSeek  (deepseek-v4-pro)")
     );
 
-    // Other providers still show their default for comparison.
+    // Another provider shows its remembered bank entry, never a default.
+    let mut d = draft(Some(Provider::DeepSeek), None, None, None);
+    d.model = Some("deepseek-v4-pro".into());
+    d.known_providers.push(ProviderProfile {
+        backend: "openai".into(),
+        api_key: None,
+        model: Some("gpt-5".into()),
+        base_url: None,
+    });
     assert_eq!(
         provider_choice_label(Provider::OpenAI, &d),
-        format!("{DOT} OpenAI  (gpt-5-mini)")
+        format!("{DOT} OpenAI  (gpt-5)")
     );
 
-    // No chosen model -> the provider default for the selected provider.
+    // No chosen model anywhere -> the hint that one must be picked.
     let d = draft(Some(Provider::DeepSeek), None, None, None);
     assert_eq!(
         provider_choice_label(Provider::DeepSeek, &d),
-        format!("{DOT} DeepSeek  (deepseek-v4-flash)")
-    );
-
-    // Selected provider with no default and a chosen model -> chosen model.
-    let mut d = draft(Some(Provider::OpenRouter), None, None, None);
-    d.model = Some("meta-llama/llama-4-scout".into());
-    assert_eq!(
-        provider_choice_label(Provider::OpenRouter, &d),
-        format!("{DOT} OpenRouter  (meta-llama/llama-4-scout)")
-    );
-
-    // Selected provider with no default and no chosen model -> the hint.
-    let d = draft(Some(Provider::OpenRouter), None, None, None);
-    assert_eq!(
-        provider_choice_label(Provider::OpenRouter, &d),
-        format!("{DOT} OpenRouter  (no default — you'll pick a model)")
+        format!("{DOT} DeepSeek  (model not set)")
     );
 }
 
@@ -705,4 +692,109 @@ fn cli_menu_rows_have_no_unmappable_header() {
         // Done is always last.
         assert!(matches!(rows.last(), Some(CliRow::Done)));
     }
+}
+
+// --- Dynamic model listing (ADR 0019) ------------------------------------
+
+/// A scripted fetch stub that records its calls and hands back queued
+/// results in order — the e2e `common.rs` queue style, miniaturized for the
+/// single fetch seam. An exhausted queue panics (under-scripted test).
+fn fetch_stub(results: Vec<Vec<String>>) -> (std::sync::Arc<parking_lot::Mutex<usize>>, SetupDeps) {
+    use std::sync::Arc;
+    let calls = Arc::new(parking_lot::Mutex::new(0));
+    let seen = calls.clone();
+    let queue = Arc::new(parking_lot::Mutex::new(results));
+    (
+        calls,
+        SetupDeps {
+            fetch_models: Box::new(move |_p, _k, _b| {
+                let mut n = seen.lock();
+                *n += 1;
+                queue.lock().remove(0)
+            }),
+        },
+    )
+}
+
+/// The session cache (ADR 0019 §5): a second Model-step visit for the same
+/// provider/key/base never re-fetches — the stub queue holds exactly one
+/// result, and a second fetch would panic it.
+#[test]
+fn model_fetch_is_cached_across_visits() {
+    let (calls, deps) = fetch_stub(vec![vec!["m-a".into(), "m-b".into()]]);
+    let mut d = draft(Some(Provider::OpenAI), Some("sk-123"), None, None);
+    assert_eq!(
+        cached_models(&deps, &mut d, Provider::OpenAI),
+        ["m-a", "m-b"]
+    );
+    assert_eq!(
+        cached_models(&deps, &mut d, Provider::OpenAI),
+        ["m-a", "m-b"]
+    );
+    assert_eq!(*calls.lock(), 1);
+
+    // Changing the key invalidates the cache entry and re-fetches.
+    d.api_key = Some("sk-456".into());
+    let (_calls, deps) = fetch_stub(vec![vec!["m-c".into()]]);
+    // (fresh stub: the original one's queue is spent by design)
+    let mut d2 = draft(Some(Provider::OpenAI), Some("sk-123"), None, None);
+    d2.api_key = Some("sk-456".into());
+    assert_eq!(cached_models(&deps, &mut d2, Provider::OpenAI), ["m-c"]);
+}
+
+/// A failed fetch (ADR 0019 §4) comes back empty — the Model step's degrade
+/// signal for required free text — and the failure is cached like a success,
+/// so a dead endpoint is not hammered on every submenu visit.
+#[test]
+fn model_fetch_failure_degrades_to_empty_and_is_cached() {
+    let (calls, deps) = fetch_stub(vec![Vec::new()]);
+    let mut d = draft(Some(Provider::OpenAI), Some("sk-123"), None, None);
+    assert!(cached_models(&deps, &mut d, Provider::OpenAI).is_empty());
+    assert!(cached_models(&deps, &mut d, Provider::OpenAI).is_empty());
+    assert_eq!(*calls.lock(), 1);
+}
+
+/// A key-requiring provider with no key never touches the network (ADR 0019
+/// §4): the stub's queue is empty, so any call would panic.
+#[test]
+fn model_fetch_skipped_without_required_key() {
+    let (_calls, deps) = fetch_stub(vec![]);
+    let mut d = draft(Some(Provider::OpenAI), None, None, None);
+    assert!(cached_models(&deps, &mut d, Provider::OpenAI).is_empty());
+    // Keyless Ollama still fetches (local daemon needs no key).
+    let (_calls, deps) = fetch_stub(vec![vec!["llama3.3".into()]]);
+    let mut d = draft(Some(Provider::Ollama), None, None, None);
+    assert_eq!(cached_models(&deps, &mut d, Provider::Ollama), ["llama3.3"]);
+}
+
+/// Picker rows (ADR 0019 §6): 50-entry cap plus the `Custom model…` escape
+/// hatch — no search, no pagination.
+#[test]
+fn picker_rows_cap_at_fifty_and_append_custom() {
+    let models: Vec<String> = (0..80).map(|i| format!("model-{i:02}")).collect();
+    let rows = picker_rows(&models);
+    assert_eq!(rows.len(), 51);
+    assert_eq!(rows[0], format!("{DOT} model-00"));
+    assert_eq!(rows[49], format!("{DOT} model-49"));
+    assert_eq!(rows[50], format!("{ICON_PENCIL}  Custom model…"));
+    // A short list passes through untouched.
+    let rows = picker_rows(&["a".to_string(), "b".to_string()]);
+    assert_eq!(rows.len(), 3);
+}
+
+/// The cache key (ADR 0019 §5) folds provider, base URL, and masked key:
+/// any one changing must produce a different key. Equal-length keys mask
+/// identically (`••••••`) — that collision is the accepted ceiling of a
+/// masked key (never holds raw key material), noted at `cache_key`.
+#[test]
+fn cache_key_separates_provider_base_and_key() {
+    let a = cache_key(Provider::OpenAI, None, "sk-123456789");
+    assert_ne!(a, cache_key(Provider::Mistral, None, "sk-123456789"));
+    assert_ne!(
+        a,
+        cache_key(Provider::OpenAI, Some("http://h:1"), "sk-123456789")
+    );
+    // Different key *length* changes the mask, hence the key.
+    assert_ne!(a, cache_key(Provider::OpenAI, None, "sk-12345678"));
+    assert_eq!(a, cache_key(Provider::OpenAI, None, "sk-123456789"));
 }

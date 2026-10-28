@@ -50,6 +50,7 @@ dependencies = [
  "inquire",
  "libc",
  "parking_lot",
+ "reqwest 0.13.5",
  "rig",
  "schemars 1.2.3",
  "self_update",

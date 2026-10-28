@@ -100,7 +100,7 @@ fn validate_requires_base_url_and_model() {
     let msg = format!("{:#}", r.validate().unwrap_err());
     assert!(msg.contains("base URL"), "got: {msg}");
 
-    // OpenRouter has no default model — an empty model fails with a hint.
+    // No provider has a default model (ADR 0019) — an empty model fails with a hint.
     let r = ResolvedConfig::from_parts("openrouter".into(), "k".into(), String::new(), None);
     let msg = format!("{:#}", r.validate().unwrap_err());
     assert!(msg.contains("model"), "got: {msg}");

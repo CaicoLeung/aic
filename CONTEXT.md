@@ -86,12 +86,12 @@ The endpoint a Provider sends requests to. Optional and overridable (env/config)
 _Avoid_: endpoint, server, URL
 
 **OpenAI-compatible provider**:
-A generic Provider that routes through the OpenAI client against a user-supplied Base URL, for servers that speak the OpenAI chat-completions API (LM Studio, vLLM, gateways). Has no Default Model — the user must supply one.
+A generic Provider that routes through the OpenAI client against a user-supplied Base URL, for servers that speak the OpenAI chat-completions API (LM Studio, vLLM, gateways). Like every Provider, its model must be set explicitly.
 _Avoid_: custom provider, generic provider, passthrough
 
-**Default Model**:
-The model used for a Provider when the user has not set one (env/config). Chosen for speed and cost, since aic's workload (commit messages) is lightweight.
-_Avoid_: fallback model, base model
+**Model listing**:
+The live model list aic fetches from the active Provider's `/models`-style endpoint during setup (ADR 0019), offered in the Model picker. There is no Default Model — a Model is explicitly required for every Provider; when the listing fails or is unavailable, the picker degrades to free-text entry.
+_Avoid_: model cache (that's the session-scoped copy), default model (retired term)
 
 ### Backends
 

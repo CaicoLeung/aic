@@ -68,12 +68,14 @@ pub(super) fn pause_done() -> Result<()> {
     Ok(())
 }
 
-/// Drive `fut` under the Verify spinner label on a dedicated current-thread
-/// Tokio runtime. `block_in_place` parks the outer multi-thread task; the
-/// nested current-thread runtime then drives the async probe future. Without
+/// Drive `fut` under a spinner label on a dedicated current-thread Tokio
+/// runtime. `block_in_place` parks the outer multi-thread task; the nested
+/// current-thread runtime then drives the async future. Without
 /// `block_in_place`, `Runtime::block_on` panics inside an active runtime.
-fn probe(label: &str, fut: impl Future<Output = Result<String>>) -> Result<String> {
-    tokio::task::block_in_place(|| -> Result<String> {
+/// Shared by the Verify probes and the wizard's model-listing fetch
+/// (ADR 0019), so every setup-time network touch runs the same way.
+pub(super) fn probe<T>(label: &str, fut: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::task::block_in_place(|| -> Result<T> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -96,15 +98,12 @@ fn probe(label: &str, fut: impl Future<Output = Result<String>>) -> Result<Strin
 /// without panicking.
 pub(super) fn step_verify(draft: &Draft) -> Result<Nav> {
     let p = draft.provider.unwrap_or_default();
-    // Effective values: the draft (a user edit or the seeded config value),
-    // then the default.
+    // Effective values: the draft (a user edit or the seeded config value).
+    // There is no default model (ADR 0019) — an empty one fails `validate`
+    // below with the setup hint.
     let api_key = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "").0;
     let base_url = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p).0;
-    let model = resolve_field(
-        draft.model.as_deref().filter(|m| !m.is_empty()),
-        p.default_model(),
-    )
-    .0;
+    let model = resolve_field(draft.model.as_deref().filter(|m| !m.is_empty()), "").0;
     let resolved = ResolvedConfig::from_parts(
         p.name().to_string(),
         api_key,
