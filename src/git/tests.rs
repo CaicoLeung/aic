@@ -36,9 +36,17 @@ pub(crate) fn with_git(setup: fn(&Path)) -> (tempfile::TempDir, Git) {
     (dir, git)
 }
 
-/// `format!("{err:#}").contains(needle)` without the 4-line spread.
-fn err_contains(err: &anyhow::Error, needle: &str) -> bool {
-    format!("{err:#}").contains(needle)
+/// Assert the rendered error (`{:#}`, context chain included) contains every
+/// needle — the single home shared with the e2e suite and the generator's
+/// rejection tests. Panics with the full message so a mismatch is diagnosable.
+pub(crate) fn err_contains(err: &anyhow::Error, needles: &[&str]) {
+    let msg = format!("{err:#}");
+    for needle in needles {
+        assert!(
+            msg.contains(needle),
+            "error should contain {needle:?}: {msg}"
+        );
+    }
 }
 
 /// Core of the hunk-split feature: stage only some of a file's hunks via
@@ -212,10 +220,7 @@ fn add_rejects_untracked_absent_path() {
     let err = git
         .add(&["does-not-exist.txt"])
         .expect_err("add should reject an absent, untracked path");
-    assert!(
-        err_contains(&err, "did not match any tracked or working-tree file"),
-        "error should explain the pathspec mismatch, got: {err:#}"
-    );
+    err_contains(&err, &["did not match any tracked or working-tree file"]);
 }
 
 /// Guard: `Git::diff` (tree-to-index) must return content for a staged
@@ -245,10 +250,7 @@ fn assert_commit_safe_blocks_mid_merge() {
     let (dir, git) = with_git(init_test_repo);
     crate::git::conflict::tests::make_content_conflict(dir.path());
     let err = git.assert_commit_safe().expect_err("must abort mid-merge");
-    assert!(
-        err_contains(&err, "mid-merge"),
-        "expected mid-merge message, got: {err:#}"
-    );
+    err_contains(&err, &["mid-merge"]);
 }
 
 #[test]
@@ -267,10 +269,7 @@ fn assert_commit_safe_blocks_staged_markers() {
     let err = git
         .assert_commit_safe()
         .expect_err("must abort on staged markers");
-    assert!(
-        err_contains(&err, "conflict markers"),
-        "expected marker message, got: {err:#}"
-    );
+    err_contains(&err, &["conflict markers"]);
 }
 
 /// Regression: the guard must scan the staged *blob*, not the worktree
@@ -297,10 +296,7 @@ fn assert_commit_safe_scans_index_blob_not_worktree() {
     let err = git
         .assert_commit_safe()
         .expect_err("guard must read the staged blob, not the worktree");
-    assert!(
-        err_contains(&err, "conflict markers"),
-        "expected marker message from staged blob, got: {err:#}"
-    );
+    err_contains(&err, &["conflict markers"]);
 }
 
 /// Make a hook file executable so git will actually invoke it. git skips a
@@ -466,10 +462,7 @@ fn commit_vetoed_by_hook_surfaces_stderr_and_lands_nothing() {
     let err = git
         .commit("chore: vetoed".into(), None)
         .expect_err("a vetoing pre-commit hook must abort Git::commit");
-    assert!(
-        err_contains(&err, "blocked by policy"),
-        "the hook's stderr must surface, got: {err:#}"
-    );
+    err_contains(&err, &["blocked by policy"]);
 
     let after = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
     assert_eq!(before, after, "a vetoed commit must not move HEAD");
@@ -486,10 +479,7 @@ fn commit_refuses_when_nothing_staged() {
     let err = git
         .commit("chore: nothing".into(), None)
         .expect_err("git must refuse a commit with nothing staged");
-    assert!(
-        err_contains(&err, "nothing to commit"),
-        "git's refusal must surface, got: {err:#}"
-    );
+    err_contains(&err, &["nothing to commit"]);
     let count = git
         .run_git(&["rev-list", "--count", "HEAD"], None, &[])
         .unwrap();
@@ -582,10 +572,7 @@ fn commit_refuses_empty_message() {
     let err = git
         .commit(String::new(), None)
         .expect_err("an empty message must abort the commit");
-    assert!(
-        err_contains(&err, "empty commit message"),
-        "git's refusal must surface, got: {err:#}"
-    );
+    err_contains(&err, &["empty commit message"]);
 
     let after = git.run_git(&["rev-parse", "HEAD"], None, &[]).unwrap();
     assert_eq!(before, after, "no commit may land with an empty message");

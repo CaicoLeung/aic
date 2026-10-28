@@ -220,6 +220,7 @@ mod tests {
     use super::*;
 
     use super::test_util::{batch, change, plan};
+    use crate::git::tests::err_contains;
 
     fn counts(items: &[(&str, usize)]) -> Vec<(String, usize)> {
         items
@@ -271,17 +272,7 @@ mod tests {
     fn rejects_empty_batches() {
         let plan = BatchPlanOutput { batches: vec![] };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        err_contains(&result, "no batches");
-    }
-
-    /// `is_err` + message-contains in one — the shape every rejection test
-    /// asserts. Panics with the full message so a mismatch is diagnosable.
-    fn err_contains(result: &anyhow::Result<()>, needle: &str) {
-        let msg = match result {
-            Ok(()) => panic!("expected an error containing {needle:?}"),
-            Err(e) => e.to_string(),
-        };
-        assert!(msg.contains(needle), "got: {msg}");
+        err_contains(&result.unwrap_err(), &["no batches"]);
     }
 
     #[test]
@@ -293,7 +284,7 @@ mod tests {
             }],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        err_contains(&result, "no changes");
+        err_contains(&result.unwrap_err(), &["no changes"]);
     }
 
     #[test]
@@ -302,7 +293,7 @@ mod tests {
             batches: vec![batch(vec![change("phantom.rs", &[])], Some("oops"))],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        err_contains(&result, "unknown file");
+        err_contains(&result.unwrap_err(), &["unknown file"]);
     }
 
     #[test]
@@ -314,7 +305,7 @@ mod tests {
             ],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 2)]));
-        err_contains(&result, "more than one batch");
+        err_contains(&result.unwrap_err(), &["more than one batch"]);
     }
 
     #[test]
@@ -323,7 +314,7 @@ mod tests {
             batches: vec![batch(vec![change("a.rs", &[5])], Some("oops"))],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 2)]));
-        err_contains(&result, "only 2 hunk");
+        err_contains(&result.unwrap_err(), &["only 2 hunk"]);
     }
 
     #[test]
@@ -332,11 +323,10 @@ mod tests {
             batches: vec![batch(vec![change("a.rs", &[1])], Some("partial"))],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 3)]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Missing:"));
-        assert!(msg.contains("a.rs:hunk 2"));
-        assert!(msg.contains("a.rs:hunk 3"));
+        err_contains(
+            &result.unwrap_err(),
+            &["Missing:", "a.rs:hunk 2", "a.rs:hunk 3"],
+        );
     }
 
     /// A zero-hunk file (binary/mode/rename) carried whole in one batch with

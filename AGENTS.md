@@ -90,7 +90,7 @@ scripts/smoke-test-providers.sh          # optional: real provider calls, gated 
 
 ## Runtime/Tooling Preferences
 
-- Rust **stable** channel (`rust-toolchain.toml`, not minor-pinned); edition 2024; MSRV 1.88 (`rust-version`).
+- Rust **stable** channel (`rust-toolchain.toml`, not minor-pinned); edition 2024; MSRV 1.99 (`rust-version`).
 - Cargo only: single package, no workspace, **no feature flags**, no justfile/Makefile.
 - Release builds use `[profile.dist]` (thin LTO, strip); output at `target/dist/aic`. Releases run through cargo-dist + GitHub Actions — never manually.
 - Windows is a first-class CI test target; keep code and tests cross-platform (guard Unix-only bits with `#[cfg(unix)]`).

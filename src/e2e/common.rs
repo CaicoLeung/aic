@@ -8,7 +8,7 @@ pub(super) use crate::git::conflict;
 pub(super) use crate::git::conflict::tests as cf;
 pub(super) use crate::git::tests as gh;
 pub(super) use crate::llm::generator;
-pub(super) use crate::llm::generator::test_util::{batch, change};
+pub(super) use crate::llm::generator::test_util::{batch, change, plan};
 pub(super) use crate::llm::redact::Redact;
 pub(super) use crate::render::display::{Display, DisplayWrite};
 pub(super) use crate::workflow::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
@@ -203,11 +203,6 @@ pub fn plan_multi_batch(files: &[(&str, &[usize])], reason: &str) -> generator::
     )
 }
 
-/// A [`generator::BatchPlanOutput`] wrapping `batches` — the envelope every
-/// plan assembled from [`plan_batch`] / [`plan_multi_batch`] needs, including
-/// the empty (invalid) plan the fallback tests feed [`planner_fixed`].
-pub(super) use crate::llm::generator::test_util::plan;
-
 /// Messenger that succeeds for the first `ok_for` calls then errors, with a
 /// call counter. Drives the partial-failure path: an early batch commits, then
 /// a later batch's message step fails mid-loop.
@@ -394,18 +389,7 @@ pub fn resolve_deps_buf(resolve: Resolver, prompt: Prompt, buf: BufferWrite) -> 
 // `tempfile::tempdir()` + run a `&Path`-taking fixture on it (`with_repo`),
 // plus the `Git` handle every resolve test opens next (`with_git`) — defined
 // once in `crate::git::tests`, shared with the unit tests there.
-pub(super) use crate::git::tests::{with_git, with_repo};
-
-/// `assert!(format!("{err:#}").contains(needle))` for every needle, with the
-/// formatted error in the panic message.
-pub fn err_contains(err: &anyhow::Error, needles: &[&str]) {
-    for needle in needles {
-        assert!(
-            format!("{err:#}").contains(needle),
-            "error should contain {needle:?}: {err:#}"
-        );
-    }
-}
+pub(super) use crate::git::tests::{err_contains, with_git, with_repo};
 
 /// `assert!(result.is_ok(), "{msg}: {result:?}")` without the 4-line spread.
 pub fn assert_ok(result: &anyhow::Result<()>, msg: &str) {

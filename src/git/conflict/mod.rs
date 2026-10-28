@@ -535,14 +535,9 @@ fn finalize_hint(state: RepoState) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::git::tests::with_repo;
     use std::path::Path;
     use std::process::Command;
-
-    fn with_repo(setup: fn(&Path)) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        setup(dir.path());
-        dir
-    }
 
     /// The contract that replaced the hand-mirrored hint: every conflict state
     /// resolves to the exact command a user runs, derived from the single
