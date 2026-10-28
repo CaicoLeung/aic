@@ -42,7 +42,7 @@ Key patterns (explicitly call out when touching code):
 | `src/e2e/` | `#[cfg(test)]` integration suite (real git tempdirs, stubbed LLM/UI) |
 | `docs/adr/` | 16 numbered ADRs with supersession chain — read before non-trivial changes |
 | `docs/agents/` | Agent ops: issue-tracker protocol (`gh` CLI), triage labels, domain-doc rules |
-| `scripts/` | Release automation (prepare-release, release, release_lib + tests) and provider smoke test |
+| `scripts/` | Release automation (prepare-release, release, release_lib + tests), provider smoke test, and `autoresearch.sh` (src-LOC / binary-size / test-count metrics for Rust-upgrade passes; metrics only print when test + clippy gates pass) |
 | `demo/` | VHS tapes + sim scripts rendering the README GIFs |
 
 ## Development Commands
