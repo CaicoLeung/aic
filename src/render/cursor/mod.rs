@@ -214,7 +214,7 @@ impl Drop for RawTermios {
 /// Upper bound on the bytes consumed for one DSR reply (`ESC[<row>;<col>R`).
 /// Generous over any real reply, but finite so a runaway/malformed stream
 /// can't pin the cursor-row query or its late-reply drain in an unbounded
-/// read. Shared by [`query_cursor_row_core`] and [`drain_dsr_reply`] so the
+/// read. Shared by [`query_cursor_row_core`] and [`drain_reply`] so the
 /// two stay in lockstep.
 const MAX_DSR_REPLY: usize = 32;
 
@@ -234,15 +234,32 @@ fn read_byte(fd: std::os::fd::RawFd) -> Option<u8> {
 /// caller checks `isatty` and that stderr is a terminal). Split from
 /// [`query_cursor_row`] so the full I/O path — pre-check, raw mode, byte
 /// loop, late-reply drain — is testable over a PTY without touching the test
-/// process's real stdin/stderr.
-///
-/// Input-safety contract, in order:
+/// process's real stdin/stderr. See [`tty_query`] for the shared
+/// input-safety contract.
+#[cfg(unix)]
+fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
+    tty_query(
+        fd,
+        b"\x1b[6n",
+        MAX_DSR_REPLY,
+        dsr_byte_ok,
+        |resp| resp.last() == Some(&b'R'),
+        parse_dsr,
+        b'R',
+    )
+}
+
+/// The shared raw-mode tty probe core behind [`query_cursor_row_core`] and
+/// [`query_background_core`]: write `query` to the tty, read the reply
+/// byte-by-byte under a 200 ms deadline (poll in 50 ms slices), and hand the
+/// accumulated bytes to `parse` once `done` fires. Input-safety contract,
+/// in order:
 ///
 /// 1. **Never consume input that was pending before the query.** If anything
 ///    is already buffered (the user started typing, or a previous read leaked
 ///    bytes), the query is skipped entirely — those bytes are the user's, not
 ///    ours to eat.
-/// 2. **Bail the moment a byte can't continue a DSR reply.** Raw mode lasts
+/// 2. **Bail the moment a byte can't continue the reply.** Raw mode lasts
 ///    only as long as the reply is actually arriving; a keypress (or Ctrl-C)
 ///    landing mid-window ends the query immediately and restores the
 ///    terminal, so the raw window is a few milliseconds, not the full
@@ -254,11 +271,20 @@ fn read_byte(fd: std::os::fd::RawFd) -> Option<u8> {
 ///    actually shows up — bytes are never read speculatively past the first
 ///    one, which must be ESC to be a reply at all.
 #[cfg(unix)]
-fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
+fn tty_query<T>(
+    fd: std::os::fd::RawFd,
+    query: &[u8],
+    max: usize,
+    byte_ok: impl Fn(&[u8], u8) -> bool,
+    done: impl Fn(&[u8]) -> bool,
+    parse: impl Fn(&[u8]) -> Option<T>,
+    terminator: u8,
+) -> Option<T> {
     use std::time::Instant;
 
     // 1. Skip if input is already pending: consumed bytes are lost, so a
-    //    quiet queue is a precondition, not an optimization.
+    //    quiet queue is a precondition, not an optimization. The query goes
+    //    to the same tty the reply comes back on.
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -267,9 +293,6 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
     if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
         return None;
     }
-    // The query goes to the same tty the reply comes back on: for a terminal
-    // stdin (the only path that reaches here) that is the user's screen.
-    let query = b"\x1b[6n";
     if unsafe { libc::write(fd, query.as_ptr().cast(), query.len()) } != query.len() as isize {
         return None;
     }
@@ -280,57 +303,44 @@ fn query_cursor_row_core(fd: std::os::fd::RawFd) -> Option<usize> {
     // [`RawTermios::enter`] for the mode flags (canonical off, OPOST kept).
     let _raw = RawTermios::enter(fd)?;
     let deadline = Instant::now() + Duration::from_millis(200);
-    let mut resp: Vec<u8> = Vec::with_capacity(16);
+    let mut resp: Vec<u8> = Vec::with_capacity(max);
     let result = loop {
         if Instant::now() >= deadline {
             break None;
         }
-        let ready = unsafe { libc::poll(&mut pfd, 1, 50) };
-        if ready <= 0 {
+        if unsafe { libc::poll(&mut pfd, 1, 50) } <= 0 {
             continue;
         }
         let Some(byte) = read_byte(fd) else {
             break None;
         };
-        // 2. A byte that can't be part of `ESC[<row>;<col>R` is not the reply
-        //    (user input, or garbage): bail immediately instead of waiting
-        //    out the deadline in raw mode.
-        if !dsr_byte_ok(&resp, byte) {
+        // 2. A byte that can't be part of the reply is not the reply (user
+        //    input, or garbage): bail immediately instead of waiting out the
+        //    deadline in raw mode.
+        if !byte_ok(&resp, byte) {
             break None;
         }
         resp.push(byte);
-        if byte == b'R' {
-            break parse_dsr(&resp);
+        if done(&resp) {
+            break parse(&resp);
         }
-        if resp.len() > MAX_DSR_REPLY {
+        if resp.len() > max {
             break None;
         }
     };
-    // 3. Late-reply drain, still in raw mode. A reply that straggles past the
-    //    deadline would otherwise sit in the kernel queue and surface as
+    // 3. Late-reply drain, still in raw mode. A reply that straggles past
+    //    the deadline would otherwise sit in the kernel queue and surface as
     //    garbage in a later prompt read (canonical mode holds it until a
-    //    newline that never comes — the worst kind of leak), so a short grace
-    //    waits for its first byte. A partial reply (`resp` holds a real
-    //    ESC-led prefix) drains straight to its closing `R`; a query that
-    //    never saw its first byte only consumes a byte once one actually
-    //    arrives, and only when it is ESC — a non-ESC byte ends the drain
-    //    immediately (that one keystroke, typed in the millisecond race
-    //    between pre-check and reply, is lost — the alternative, an undrained
-    //    reply corrupting the next prompt read, is worse).
+    //    newline that never comes — the worst kind of leak), so a short
+    //    grace waits for its first byte. A partial reply (`resp` holds a
+    //    real ESC-led prefix) drains straight to its closing `terminator`; a
+    //    query that never saw its first byte only consumes a byte once one
+    //    actually arrives, and only when it is ESC — a non-ESC byte ends the
+    //    drain immediately (that one keystroke, typed in the millisecond
+    //    race between pre-check and reply, is lost — the alternative, an
+    //    undrained reply corrupting the next prompt read, is worse).
     if result.is_none() {
-        let drain_deadline = Instant::now() + DRAIN_GRACE;
-        if resp.is_empty() {
-            while Instant::now() < drain_deadline {
-                if unsafe { libc::poll(&mut pfd, 1, 10) } > 0 {
-                    if read_byte(fd) == Some(b'\x1b') {
-                        drain_dsr_reply(fd);
-                    }
-                    break;
-                }
-            }
-        } else {
-            drain_dsr_reply(fd);
-        }
+        drain_straggler(fd, &mut pfd, &resp, max, terminator);
     }
     // `_raw` restores termios as it goes out of scope here — the guard's
     // Drop is the single restore point, so every path (timeout, garbage,
@@ -356,12 +366,12 @@ fn dsr_byte_ok(resp: &[u8], b: u8) -> bool {
     }
 }
 
-/// Consume the remainder of a DSR reply from `fd` (still in raw mode) so it
-/// cannot leak into later stdin reads: reads until the closing `R`, a reply-
+/// Consume the remainder of a reply (still in raw mode) so it cannot leak
+/// into later stdin reads: reads until the closing `terminator`, a reply-
 /// shaped byte budget, or a short grace — whichever first. Only called once
 /// the reply is known to be in flight (an ESC-led prefix was seen).
 #[cfg(unix)]
-fn drain_dsr_reply(fd: std::os::fd::RawFd) {
+fn drain_reply(fd: std::os::fd::RawFd, max: usize, terminator: u8) {
     use std::time::Instant;
 
     // Same budget as the outer wait-for-first-byte ([`DRAIN_GRACE`]): both
@@ -375,7 +385,7 @@ fn drain_dsr_reply(fd: std::os::fd::RawFd) {
         revents: 0,
     };
     let mut n = 0usize;
-    while Instant::now() < deadline && n < MAX_DSR_REPLY {
+    while Instant::now() < deadline && n < max {
         if unsafe { libc::poll(&mut pfd, 1, 10) } <= 0 {
             break;
         }
@@ -383,7 +393,37 @@ fn drain_dsr_reply(fd: std::os::fd::RawFd) {
             break;
         };
         n += 1;
-        if byte == b'R' {
+        if byte == terminator {
+            break;
+        }
+    }
+}
+
+/// Drain a straggler reply so it can't surface in a later prompt read: a
+/// partial reply (`resp` holds a real ESC-led prefix) drains straight to its
+/// closing `terminator`; a query that never saw its first byte only consumes
+/// a byte once one actually arrives, and only when it is ESC — a non-ESC
+/// byte ends the drain immediately (that one keystroke, typed in the
+/// millisecond race between pre-check and reply, is lost — the alternative,
+/// an undrained reply corrupting the next prompt read, is worse).
+#[cfg(unix)]
+fn drain_straggler(
+    fd: std::os::fd::RawFd,
+    pfd: &mut libc::pollfd,
+    resp: &[u8],
+    max: usize,
+    terminator: u8,
+) {
+    if !resp.is_empty() {
+        drain_reply(fd, max, terminator);
+        return;
+    }
+    let drain_deadline = std::time::Instant::now() + DRAIN_GRACE;
+    while std::time::Instant::now() < drain_deadline {
+        if unsafe { libc::poll(pfd, 1, 10) } > 0 {
+            if read_byte(fd) == Some(b'\x1b') {
+                drain_reply(fd, max, terminator);
+            }
             break;
         }
     }
@@ -419,15 +459,7 @@ const MAX_OSC_REPLY: usize = 40;
 /// prefix is exact, then hex digits, `/`, or a terminator.
 fn osc11_byte_ok(resp: &[u8], b: u8) -> bool {
     match resp.len() {
-        0 => b == b'\x1b',
-        1 => b == b']',
-        2 => b == b'1',
-        3 => b == b'1',
-        4 => b == b';',
-        5 => b == b'r',
-        6 => b == b'g',
-        7 => b == b'b',
-        8 => b == b':',
+        n @ 0..=8 => b == b"\x1b]11;rgb:"[n],
         _ => b.is_ascii_hexdigit() || b == b'/' || b == b'\x07' || b == b'\x1b' || b == b'\\',
     }
 }
@@ -491,96 +523,19 @@ pub(crate) fn background_is_dark() -> bool {
 }
 
 /// The OSC 11 query itself, against an already-validated tty fd — the
-/// sibling of [`query_cursor_row_core`] with the same three-part
-/// input-safety contract (quiet-queue precondition, immediate bail on a
-/// non-reply byte, late-reply drain).
+/// sibling of [`query_cursor_row_core`]. See [`tty_query`] for the shared
+/// input-safety contract.
 #[cfg(unix)]
 fn query_background_core(fd: std::os::fd::RawFd) -> Option<(u8, u8, u8)> {
-    use std::time::Instant;
-
-    let mut pfd = libc::pollfd {
+    tty_query(
         fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // 1. Pending input is the user's, not ours to eat.
-    if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
-        return None;
-    }
-    let query = b"\x1b]11;?\x07";
-    if unsafe { libc::write(fd, query.as_ptr().cast(), query.len()) } != query.len() as isize {
-        return None;
-    }
-    let _raw = RawTermios::enter(fd)?;
-    let deadline = Instant::now() + Duration::from_millis(200);
-    let mut resp: Vec<u8> = Vec::with_capacity(MAX_OSC_REPLY);
-    let result = loop {
-        if Instant::now() >= deadline {
-            break None;
-        }
-        if unsafe { libc::poll(&mut pfd, 1, 50) } <= 0 {
-            continue;
-        }
-        let Some(byte) = read_byte(fd) else {
-            break None;
-        };
-        // 2. Anything that can't be the reply ends the probe immediately —
-        // raw mode lasts milliseconds, not the deadline.
-        if !osc11_byte_ok(&resp, byte) {
-            break None;
-        }
-        resp.push(byte);
-        if byte == b'\x07' || resp.ends_with(b"\x1b\\") {
-            break parse_osc11(&resp);
-        }
-        if resp.len() > MAX_OSC_REPLY {
-            break None;
-        }
-    };
-    // 3. Drain a straggler so it can't surface in a later prompt read.
-    if result.is_none() {
-        let drain_deadline = Instant::now() + DRAIN_GRACE;
-        if resp.is_empty() {
-            while Instant::now() < drain_deadline {
-                if unsafe { libc::poll(&mut pfd, 1, 10) } > 0 {
-                    if read_byte(fd) == Some(b'\x1b') {
-                        drain_osc_reply(fd);
-                    }
-                    break;
-                }
-            }
-        } else {
-            drain_osc_reply(fd);
-        }
-    }
-    result
-}
-
-/// The OSC sibling of [`drain_dsr_reply`]: consume the rest of a reply
-/// known to be in flight until a terminator, byte budget, or grace.
-#[cfg(unix)]
-fn drain_osc_reply(fd: std::os::fd::RawFd) {
-    use std::time::Instant;
-
-    let deadline = Instant::now() + DRAIN_GRACE;
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let mut n = 0usize;
-    while Instant::now() < deadline && n < MAX_OSC_REPLY {
-        if unsafe { libc::poll(&mut pfd, 1, 10) } <= 0 {
-            break;
-        }
-        let Some(byte) = read_byte(fd) else {
-            break;
-        };
-        n += 1;
-        if byte == b'\x07' {
-            break;
-        }
-    }
+        b"\x1b]11;?\x07",
+        MAX_OSC_REPLY,
+        osc11_byte_ok,
+        |resp| resp.last() == Some(&b'\x07') || resp.ends_with(b"\x1b\\"),
+        parse_osc11,
+        b'\x07',
+    )
 }
 
 #[cfg(test)]
@@ -808,6 +763,13 @@ pub(crate) mod pty_tests {
     fn spawn_terminal(script: Script) -> (RawFd, RawFd, i32) {
         let (master, slave) = open_pty();
         make_raw(slave);
+        (master, slave, fork_terminal(master, slave, script))
+    }
+
+    /// Fork a child running `script` on `master` (after closing its copy of
+    /// `slave`); returns the child pid — the shared fork tail of both spawn
+    /// helpers.
+    fn fork_terminal(master: RawFd, slave: RawFd, script: Script) -> i32 {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed");
         if pid == 0 {
@@ -815,7 +777,7 @@ pub(crate) mod pty_tests {
             let code = terminal_script(master, script);
             unsafe { libc::_exit(code) };
         }
-        (master, slave, pid)
+        pid
     }
 
     fn reap(pid: i32) -> i32 {
@@ -850,14 +812,17 @@ pub(crate) mod pty_tests {
     /// (what [`spawn_terminal`] produces) would hide a missing restore.
     fn spawn_canonical_terminal(script: Script) -> (RawFd, RawFd, i32) {
         let (master, slave) = open_pty();
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork failed");
-        if pid == 0 {
-            unsafe { libc::close(slave) };
-            let code = terminal_script(master, script);
-            unsafe { libc::_exit(code) };
+        (master, slave, fork_terminal(master, slave, script))
+    }
+
+    /// Close both pty fds and reap the child, asserting a clean exit — the
+    /// shared teardown of every PTY test.
+    fn close_and_reap(master: RawFd, slave: RawFd, pid: i32) {
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
         }
-        (master, slave, pid)
+        assert_eq!(reap(pid), 0);
     }
 
     /// The full DSR round trip over a real PTY: the fake terminal sees the
@@ -866,11 +831,7 @@ pub(crate) mod pty_tests {
     fn dsr_query_roundtrip_over_pty() {
         let (master, slave, pid) = spawn_terminal(Script::Reply(b"\x1b[21;1R"));
         let row = query_cursor_row_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(row, Some(21));
     }
 
@@ -880,11 +841,7 @@ pub(crate) mod pty_tests {
     fn dsr_rejects_garbage_reply() {
         let (master, slave, pid) = spawn_terminal(Script::Reply(b"hello"));
         let row = query_cursor_row_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(row, None);
     }
 
@@ -894,11 +851,7 @@ pub(crate) mod pty_tests {
     fn dsr_times_out_without_reply() {
         let (master, slave, pid) = spawn_terminal(Script::Silent);
         let row = query_cursor_row_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(row, None);
     }
 
@@ -916,11 +869,7 @@ pub(crate) mod pty_tests {
             !poll_ready(slave, 0),
             "late reply leaked into the input queue — it would corrupt a later prompt read"
         );
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
     }
 
     /// Input already pending when the query starts is never consumed: the
@@ -934,11 +883,7 @@ pub(crate) mod pty_tests {
         assert_eq!(row, None, "a busy stdin must not be queried");
         // The byte is still pending — the pre-check did not consume it.
         assert!(poll_ready(slave, 2000), "pending input was swallowed");
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
     }
 
     /// The OSC 11 round trip over a real PTY: the fake terminal sees the
@@ -948,11 +893,7 @@ pub(crate) mod pty_tests {
         let (master, slave, pid) =
             spawn_terminal(Script::OscReply(b"\x1b]11;rgb:0d0d/1111/1717\x07"));
         let rgb = query_background_core(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(rgb, Some((13, 17, 23)));
     }
 
@@ -974,11 +915,7 @@ pub(crate) mod pty_tests {
         let row = query_cursor_row_core(slave);
         assert_eq!(row, None, "Silent script times out");
         let after = termios_of(slave);
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
-        assert_eq!(reap(pid), 0);
+        close_and_reap(master, slave, pid);
         assert_eq!(
             after.c_lflag & libc::ICANON,
             before.c_lflag & libc::ICANON,

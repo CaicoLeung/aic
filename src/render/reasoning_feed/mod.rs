@@ -182,6 +182,12 @@ mod tests {
         sink.0.lock().clone()
     }
 
+    fn fake() -> (FakeSink, Arc<Mutex<Vec<String>>>) {
+        let sink = FakeSink::default();
+        let record = sink.0.clone();
+        (sink, record)
+    }
+
     #[test]
     fn loading_notice_none_under_grace() {
         assert_eq!(
@@ -212,9 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_paints_on_delta_then_finishes() {
-        let sink = FakeSink::default();
-        let record = sink.0.clone();
-        let mut sink = sink;
+        let (mut sink, record) = fake();
 
         // The tap fires once, then yields so the repaint loop processes the
         // channel before completion.
@@ -235,9 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_finishes_even_when_backend_is_silent() {
-        let sink = FakeSink::default();
-        let record = sink.0.clone();
-        let mut sink = sink;
+        let (mut sink, record) = fake();
 
         // No reasoning delta at all — a non-streaming backend that returns whole.
         let res: anyhow::Result<i32> =
@@ -254,9 +256,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn run_paints_loading_frame_while_backend_is_silent() {
-        let sink = FakeSink::default();
-        let record = sink.0.clone();
-        let mut sink = sink;
+        let (mut sink, record) = fake();
 
         // A silent backend: no reasoning delta ever arrives, so every steady
         // tick takes the `!got_output` arm and paints a loading frame. The tap
@@ -291,9 +291,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn run_refreshes_after_first_delta_then_finishes() {
-        let sink = FakeSink::default();
-        let record = sink.0.clone();
-        let mut sink = sink;
+        let (mut sink, record) = fake();
 
         // One delta latches `got_output`, then the model stays silent past a
         // tick so the steady-tick arm repaints via `refresh` (not loading).

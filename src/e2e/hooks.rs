@@ -10,8 +10,7 @@ use super::common::*;
 /// in the repo's `.git/hooks`.
 #[tokio::test]
 async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
     // pre-commit drops a sentinel file in the worktree — proves the hook
     // executed during the Run.
@@ -28,25 +27,12 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
     // split test, minus the split.
     std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
     let plan = plan_single_batch("tracked.txt", "hook test");
-
-    let git = Git::at(dir.path()).unwrap();
     let result = commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: hook run"),
-            confirm: Confirm::Disabled,
-        },
+        deps(planner_fixed(plan), messenger_fixed("chore: hook run")),
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "Run with hooks installed should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "Run with hooks installed should succeed");
 
     // The change itself landed in the commit (the Run did not silently drop
     // the file while hooks ran).
@@ -72,6 +58,39 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
     );
 }
 
+/// Shared body of the two hook-veto tests: install a vetoing `hook`, run a
+/// one-batch commit, and pin the recoverable-state contract — the hook's own
+/// stderr surfaces, the abort names the batch boundary, nothing lands, and
+/// the batch's hunks stay staged.
+async fn veto_aborts_with_index_intact(hook: &str, script: &str, blocked: &str) {
+    let (dir, git) = with_git(gh::init_test_repo);
+    gh::install_hook(dir.path(), hook, script);
+    std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
+    let plan = plan_single_batch("tracked.txt", "hook veto");
+    let before = commit_count(dir.path());
+
+    let err = commit_run(
+        &git,
+        deps(planner_fixed(plan), messenger_fixed("chore: vetoed")),
+    )
+    .await
+    .expect_err("a vetoing hook must abort the Run");
+    err_contains(&err, &[blocked, "aborted on batch 1 of 1"]);
+
+    // No commit landed; the staged index is intact — the batch's hunks are
+    // still staged, ready for a re-run once the offending hook is fixed.
+    assert_eq!(
+        commit_count(dir.path()),
+        before,
+        "a vetoed Run must not create a commit"
+    );
+    let staged = git.diff(Some("tracked.txt")).unwrap();
+    assert!(
+        staged.contains("changed by hook test"),
+        "staged hunks must survive the veto; staged diff:\n{staged}"
+    );
+}
+
 /// Issue #20 AC2: a hook that vetoes the commit aborts the Run cleanly with
 /// the hook's own message, and lands nothing — the staged index survives
 /// intact. `git commit` refuses before writing the commit object, so the
@@ -79,56 +98,12 @@ async fn commit_run_runs_pre_commit_and_commit_msg_hooks() {
 /// regression back to libgit2, which would commit past the veto silently.
 #[tokio::test]
 async fn commit_run_hook_veto_aborts_with_index_intact() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-
-    gh::install_hook(
-        dir.path(),
+    veto_aborts_with_index_intact(
         "pre-commit",
         "echo 'blocked by policy' >&2; exit 1",
-    );
-
-    std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
-    let plan = plan_single_batch("tracked.txt", "hook veto");
-
-    let git = Git::at(dir.path()).unwrap();
-    let before = commit_count(dir.path());
-
-    let err = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: vetoed"),
-            confirm: Confirm::Disabled,
-        },
+        "blocked by policy",
     )
-    .await
-    .expect_err("a vetoing pre-commit hook must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("blocked by policy"),
-        "the hook's stderr must surface, got: {msg}"
-    );
-    assert!(
-        msg.contains("aborted on batch 1 of 1"),
-        "the Run must abort cleanly at the batch boundary, got: {msg}"
-    );
-
-    // No commit landed.
-    assert_eq!(
-        commit_count(dir.path()),
-        before,
-        "a vetoed Run must not create a commit"
-    );
-    // The staged index is intact: the batch's hunks are still staged.
-    let staged = git.diff(Some("tracked.txt")).unwrap();
-    assert!(
-        staged.contains("changed by hook test"),
-        "staged hunks must survive the veto; staged diff:\n{staged}"
-    );
+    .await;
 }
 
 /// Issue #30: a `commit-msg` veto aborts the Run the same way a `pre-commit`
@@ -146,55 +121,10 @@ async fn commit_run_hook_veto_aborts_with_index_intact() {
 /// would change the surfaced text and fail loudly, not ship green.
 #[tokio::test]
 async fn commit_run_commit_msg_veto_aborts_with_index_intact() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-
-    gh::install_hook(
-        dir.path(),
+    veto_aborts_with_index_intact(
         "commit-msg",
         "echo 'blocked by commit-msg policy' >&2; exit 1",
-    );
-
-    std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
-    let plan = plan_single_batch("tracked.txt", "hook veto");
-
-    let git = Git::at(dir.path()).unwrap();
-    let before = commit_count(dir.path());
-
-    let err = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: vetoed"),
-            confirm: Confirm::Disabled,
-        },
+        "blocked by commit-msg policy",
     )
-    .await
-    .expect_err("a vetoing commit-msg hook must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("blocked by commit-msg policy"),
-        "the commit-msg hook's stderr must surface, got: {msg}"
-    );
-    assert!(
-        msg.contains("aborted on batch 1 of 1"),
-        "the Run must abort cleanly at the batch boundary, got: {msg}"
-    );
-
-    // No commit landed — git refused before writing the commit object.
-    assert_eq!(
-        commit_count(dir.path()),
-        before,
-        "a vetoed Run must not create a commit"
-    );
-    // The staged index is intact: the batch's hunks are still staged, ready
-    // for a re-run once the offending hook is fixed.
-    let staged = git.diff(Some("tracked.txt")).unwrap();
-    assert!(
-        staged.contains("changed by hook test"),
-        "staged hunks must survive the commit-msg veto; staged diff:\n{staged}"
-    );
+    .await;
 }

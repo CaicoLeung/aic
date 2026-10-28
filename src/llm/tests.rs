@@ -1,6 +1,15 @@
 use super::*;
 use crate::llm::cli_agent::{CliSpec, Encoding};
 
+fn cli(command: &str, encoding: Encoding) -> LlmConfig {
+    LlmConfig::Cli(CliSpec {
+        command: command.into(),
+        args: vec!["-p".into(), "{prompt}".into()],
+        timeout_secs: 10,
+        encoding,
+    })
+}
+
 #[test]
 fn cold_start_program_behind_the_backend_seam() {
     // The loading frame crosses ONE seam: cold_start_program composes the
@@ -8,20 +17,10 @@ fn cold_start_program_behind_the_backend_seam() {
     // A live-token-streaming CLI (claude/pi) labels the cold-start notice;
     // anything else (whole-at-completion codex/opencode, plain, or the
     // API/rig path) returns None → the silent notice.
-    let claude = LlmConfig::Cli(CliSpec {
-        command: "claude".into(),
-        args: vec!["-p".into(), "{prompt}".into()],
-        timeout_secs: 10,
-        encoding: Encoding::ClaudeStreamJson,
-    });
+    let claude = cli("claude", Encoding::ClaudeStreamJson);
     assert_eq!(claude.cold_start_program().as_deref(), Some("claude"));
 
-    let pi = LlmConfig::Cli(CliSpec {
-        command: "pi".into(),
-        args: vec!["-p".into(), "{prompt}".into()],
-        timeout_secs: 10,
-        encoding: Encoding::PiStreamJson,
-    });
+    let pi = cli("pi", Encoding::PiStreamJson);
     assert_eq!(pi.cold_start_program().as_deref(), Some("pi"));
 
     // codex reasons whole-at-completion (no live stream) → None.
@@ -127,11 +126,13 @@ fn new_provider_metadata_is_complete() {
 
     // API keys: cloud providers require one; Ollama and the openai-compatible
     // escape hatch do not.
+    assert!(Provider::OpenAI.requires_key());
     assert!(Provider::Xai.requires_key());
     assert!(Provider::Mistral.requires_key());
     assert!(Provider::OpenRouter.requires_key());
     assert!(Provider::Perplexity.requires_key());
     assert!(Provider::Together.requires_key());
+    assert!(!Provider::Ollama.requires_key());
     assert!(!Provider::OpenAiCompatible.requires_key());
 
     // Defaults: fast, low-cost models; the routers have none by design.
@@ -147,26 +148,15 @@ fn new_provider_metadata_is_complete() {
 
     // Base URL: built-in endpoints for the five; required for the escape
     // hatch (config `base_url`).
-    assert_eq!(
-        Provider::Xai.base_url_requirement(),
-        BaseUrlRequirement::None
-    );
-    assert_eq!(
-        Provider::Mistral.base_url_requirement(),
-        BaseUrlRequirement::None
-    );
-    assert_eq!(
-        Provider::OpenRouter.base_url_requirement(),
-        BaseUrlRequirement::None
-    );
-    assert_eq!(
-        Provider::Perplexity.base_url_requirement(),
-        BaseUrlRequirement::None
-    );
-    assert_eq!(
-        Provider::Together.base_url_requirement(),
-        BaseUrlRequirement::None
-    );
+    for p in [
+        Provider::Xai,
+        Provider::Mistral,
+        Provider::OpenRouter,
+        Provider::Perplexity,
+        Provider::Together,
+    ] {
+        assert_eq!(p.base_url_requirement(), BaseUrlRequirement::None);
+    }
     assert_eq!(
         Provider::OpenAiCompatible.base_url_requirement(),
         BaseUrlRequirement::Required
@@ -183,13 +173,6 @@ fn new_provider_metadata_is_complete() {
 }
 
 #[test]
-fn routers_have_no_default_model() {
-    // OpenRouter and the OpenAI-compatible escape hatch require an explicit model.
-    assert!(Provider::OpenRouter.default_model().is_empty());
-    assert!(Provider::OpenAiCompatible.default_model().is_empty());
-}
-
-#[test]
 fn base_url_requirements() {
     assert_eq!(
         Provider::OpenAI.base_url_requirement(),
@@ -199,18 +182,6 @@ fn base_url_requirements() {
         Provider::Ollama.base_url_requirement(),
         BaseUrlRequirement::Optional(OLLAMA_DEFAULT_BASE_URL)
     );
-    assert_eq!(
-        Provider::OpenAiCompatible.base_url_requirement(),
-        BaseUrlRequirement::Required
-    );
-}
-
-#[test]
-fn ollama_and_openai_compatible_do_not_require_keys() {
-    assert!(!Provider::Ollama.requires_key());
-    assert!(!Provider::OpenAiCompatible.requires_key());
-    assert!(Provider::OpenAI.requires_key());
-    assert!(Provider::Xai.requires_key());
 }
 
 /// [`LLMAgent::provider_error`] collapses an error chain to one line: the

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Conventional Commits gate — delegates to cargo-commitlint (commitlint.toml).
+# Enable once per clone: git config core.hooksPath .githooks
+# Bypass once: COMMITLINT_SKIP=1 git commit ...
+set -uo pipefail
+msg_file="$1"
+if [ "${COMMITLINT_SKIP:-0}" = "1" ]; then
+  exit 0
+fi
+
+# Binary missing on a fresh clone: warn, don't block (install with
+# `cargo install cargo-commitlint`).
+if ! command -v cargo-commitlint >/dev/null 2>&1; then
+  echo "commit-msg: cargo-commitlint not found — skipping check (cargo install cargo-commitlint)" >&2
+  exit 0
+fi
+
+exec cargo commitlint check < "$msg_file"

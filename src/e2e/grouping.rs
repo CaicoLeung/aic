@@ -47,10 +47,7 @@ fn group_files(git: &Git, paths: &[&str]) -> Vec<GroupFile> {
 /// deterministic plan instead.
 #[test]
 fn grouped_plan_stages_and_commits_every_block() {
-    let dir = tempfile::tempdir().unwrap();
-    repo_with_scattered_edits(dir.path());
-
-    let git = Git::at(dir.path()).unwrap();
+    let (dir, git) = with_git(repo_with_scattered_edits);
     let files = group_files(&git, &["a.rs", "b.rs", "Cargo.toml"]);
     let blocks = group(&files, &GroupingConfig::default());
 
@@ -112,10 +109,7 @@ fn grouped_plan_stages_and_commits_every_block() {
 /// own hunk-folding rather than pinning a magic pad length.
 #[test]
 fn adjacency_collapses_or_splits_a_multi_hunk_file() {
-    let dir = tempfile::tempdir().unwrap();
-    repo_with_scattered_edits(dir.path());
-
-    let git = Git::at(dir.path()).unwrap();
+    let (_dir, git) = with_git(repo_with_scattered_edits);
     let mut files = group_files(&git, &["a.rs"]);
     let a = files.remove(0);
     let hunk_count = a.hunks.len();

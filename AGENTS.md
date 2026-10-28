@@ -42,7 +42,7 @@ Key patterns (explicitly call out when touching code):
 | `src/e2e/` | `#[cfg(test)]` integration suite (real git tempdirs, stubbed LLM/UI) |
 | `docs/adr/` | 16 numbered ADRs with supersession chain — read before non-trivial changes |
 | `docs/agents/` | Agent ops: issue-tracker protocol (`gh` CLI), triage labels, domain-doc rules |
-| `scripts/` | Release automation (prepare-release, release, release_lib + tests) and provider smoke test |
+| `scripts/` | Release automation (prepare-release, release, release_lib + tests), provider smoke test, and `autoresearch.sh` (src-LOC / binary-size / test-count metrics for Rust-upgrade passes; metrics only print when test + clippy gates pass) |
 | `demo/` | VHS tapes + sim scripts rendering the README GIFs |
 
 ## Development Commands
@@ -90,7 +90,7 @@ scripts/smoke-test-providers.sh          # optional: real provider calls, gated 
 
 ## Runtime/Tooling Preferences
 
-- Rust **stable** channel (`rust-toolchain.toml`, not minor-pinned); edition 2024; MSRV 1.88 (`rust-version`).
+- Rust **stable** channel (`rust-toolchain.toml`, not minor-pinned); edition 2024; MSRV 1.99 (`rust-version`).
 - Cargo only: single package, no workspace, **no feature flags**, no justfile/Makefile.
 - Release builds use `[profile.dist]` (thin LTO, strip); output at `target/dist/aic`. Releases run through cargo-dist + GitHub Actions — never manually.
 - Windows is a first-class CI test target; keep code and tests cross-platform (guard Unix-only bits with `#[cfg(unix)]`).

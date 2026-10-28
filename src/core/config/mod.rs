@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::llm::cli_agent::{cli_preset, is_preset};
+use crate::llm::cli_agent::{PROMPT_PLACEHOLDER, cli_preset, is_preset};
 use crate::llm::{BaseUrlRequirement, DEFAULT_PROVIDER, LLM, Provider};
 use crate::render::{oneshot, palette};
 
@@ -71,6 +71,15 @@ impl CliConfig {
             .filter(|s| !s.is_empty())
     }
 
+    /// The argv template to run: the stored `args`, or the `["{prompt}"]`
+    /// default when unset — the one read `to_spec`, `migrate_if_stale`,
+    /// and `aic list` share.
+    fn effective_args(&self) -> Vec<String> {
+        self.args
+            .clone()
+            .unwrap_or_else(|| vec![PROMPT_PLACEHOLDER.to_string()])
+    }
+
     /// Resolve this config into a runnable
     /// [`CliSpec`](crate::llm::cli_agent::CliSpec), applying the default args
     /// template (`["{prompt}"]`) and the default timeout. The stdout
@@ -86,10 +95,7 @@ impl CliConfig {
             .active_command()
             .expect("CliConfig::to_spec only called when a command is set")
             .to_string();
-        let args = self
-            .args
-            .clone()
-            .unwrap_or_else(|| vec![crate::llm::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
+        let args = self.effective_args();
         let timeout_secs = self
             .timeout_secs
             .unwrap_or(crate::llm::cli_agent::DEFAULT_TIMEOUT_SECS);
@@ -249,9 +255,8 @@ fn legacy_config_path() -> Option<PathBuf> {
 
 impl Config {
     pub fn load() -> Result<Option<Self>> {
-        let path = match config_path() {
-            Some(p) => p,
-            None => return Ok(None),
+        let Some(path) = config_path() else {
+            return Ok(None);
         };
 
         if !path.exists() {
@@ -362,9 +367,8 @@ impl Config {
     /// Designed to be called once early in `main` on every invocation; the
     /// cost is a config read plus an exact fingerprint compare, negligible.
     pub fn migrate_if_stale() -> Result<Vec<String>> {
-        let mut config = match Self::load()? {
-            Some(c) => c,
-            None => return Ok(Vec::new()),
+        let Some(mut config) = Self::load()? else {
+            return Ok(Vec::new());
         };
         // Only migrate the active CLI backend's spec — a dormant CLI config
         // under `backend_kind = "api"` is none of our business until the user
@@ -372,18 +376,13 @@ impl Config {
         if config.backend_kind != Some(BackendKind::Cli) {
             return Ok(Vec::new());
         }
-        let command = match config.active_cli_command() {
-            Some(c) => c.to_string(),
-            None => return Ok(Vec::new()),
+        let Some(command) = config.active_cli_command() else {
+            return Ok(Vec::new());
         };
-        let args = config
-            .cli
-            .args
-            .clone()
-            .unwrap_or_else(|| vec![crate::llm::cli_agent::PROMPT_PLACEHOLDER.to_string()]);
-        let (name, new_args) = match crate::llm::cli_agent::cli_preset_migration(&command, &args) {
-            Some(m) => m,
-            None => return Ok(Vec::new()),
+        let args = config.cli.effective_args();
+        let Some((name, new_args)) = crate::llm::cli_agent::cli_preset_migration(command, &args)
+        else {
+            return Ok(Vec::new());
         };
         config.cli.args = Some(new_args);
         config.save()?;
@@ -420,13 +419,11 @@ impl Config {
     /// [`Self::migrate_if_stale`], so the file lands at its new path first and
     /// preset migration then runs on the relocated file.
     pub fn migrate_location() -> Result<Vec<String>> {
-        let new_path = match config_path() {
-            Some(p) => p,
-            None => return Ok(Vec::new()),
+        let Some(new_path) = config_path() else {
+            return Ok(Vec::new());
         };
-        let old_path = match legacy_config_path() {
-            Some(p) => p,
-            None => return Ok(Vec::new()),
+        let Some(old_path) = legacy_config_path() else {
+            return Ok(Vec::new());
         };
         // Same path (plain Linux, no XDG) — nothing to migrate.
         if old_path == new_path {
@@ -598,7 +595,7 @@ impl ResolvedConfig {
 
         let provider = Provider::from_name(&backend);
 
-        let (api_key, api_key_source) = resolve_api_key(cfg.api_key.as_deref());
+        let (api_key, api_key_source) = resolve_field(cfg.api_key.as_deref(), "");
 
         let (model, model_source) = resolve_field(cfg.model.as_deref(), provider.default_model());
 
@@ -720,16 +717,6 @@ pub(crate) fn resolve_field(config_value: Option<&str>, default: &str) -> (Strin
     (default.to_string(), Source::Default)
 }
 
-/// Resolve the API key by precedence: config file > none. Environment
-/// variables are not consulted (the config file is the single source of
-/// truth). `pub(crate)` for the same setup-wizard reason as [`resolve_field`].
-pub(crate) fn resolve_api_key(config_value: Option<&str>) -> (String, Source) {
-    if let Some(v) = config_value {
-        return (v.to_string(), Source::Config);
-    }
-    (String::new(), Source::Default)
-}
-
 /// Resolve the base URL by precedence: config file > provider default.
 /// Environment variables are not consulted. `pub(crate)` for the same
 /// setup-wizard reason as [`resolve_field`].
@@ -758,6 +745,11 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
         .transpose()?
         .unwrap_or(BackendKind::Api);
     let mut lines = vec![("Backend".to_string(), kind.display_name().to_string())];
+    // Every resolved row shares the "(value (source: X))" shape — one push
+    // helper keeps the table wording in one place.
+    let row = |lines: &mut Vec<(String, String)>, key: &str, value: String, src| {
+        lines.push((key.to_string(), format!("{value} (source: {src})")));
+    };
     match kind {
         BackendKind::Cli => {
             // resolve_backend guarantees a command is set for the CLI backend.
@@ -765,53 +757,37 @@ fn list_lines(config: Option<&Config>) -> Result<Vec<(String, String)>> {
             let command = c
                 .active_cli_command()
                 .expect("cli backend implies command set");
-            lines.push((
-                "Command".to_string(),
-                format!("{command} (source: {})", Source::Config),
-            ));
-            let (args, args_src) = match &c.cli.args {
-                Some(a) => (a.join(" "), Source::Config),
-                None => (
-                    crate::llm::cli_agent::PROMPT_PLACEHOLDER.to_string(),
-                    Source::Default,
-                ),
+            row(&mut lines, "Command", command.to_string(), Source::Config);
+            let args = c.cli.effective_args().join(" ");
+            let args_src = if c.cli.args.is_some() {
+                Source::Config
+            } else {
+                Source::Default
             };
-            lines.push(("Args".to_string(), format!("{args} (source: {args_src})")));
+            row(&mut lines, "Args", args, args_src);
             let (timeout, to_src) = match c.cli.timeout_secs {
                 Some(t) => (t, Source::Config),
                 None => (crate::llm::cli_agent::DEFAULT_TIMEOUT_SECS, Source::Default),
             };
-            lines.push((
-                "Timeout".to_string(),
-                format!("{timeout}s (source: {to_src})"),
-            ));
+            row(&mut lines, "Timeout", format!("{timeout}s"), to_src);
         }
         BackendKind::Api => {
             let resolved = ResolvedConfig::resolve(config);
-            lines.push((
-                "Provider".to_string(),
-                format!("{} (source: {})", resolved.backend, resolved.backend_source),
-            ));
-            lines.push((
-                "Model".to_string(),
-                format!("{} (source: {})", resolved.model, resolved.model_source),
-            ));
-            lines.push((
-                "API key".to_string(),
-                format!(
-                    "{} (source: {})",
-                    resolved.mask_api_key(),
-                    resolved.api_key_source
-                ),
-            ));
-            lines.push((
-                "Base URL".to_string(),
-                format!(
-                    "{} (source: {})",
-                    resolved.base_url.as_deref().unwrap_or("(none)"),
-                    resolved.base_url_source
-                ),
-            ));
+            let r = &resolved;
+            row(
+                &mut lines,
+                "Provider",
+                r.backend.to_string(),
+                r.backend_source,
+            );
+            row(&mut lines, "Model", r.model.to_string(), r.model_source);
+            row(&mut lines, "API key", r.mask_api_key(), r.api_key_source);
+            row(
+                &mut lines,
+                "Base URL",
+                r.base_url.as_deref().unwrap_or("(none)").to_string(),
+                r.base_url_source,
+            );
             let saved: Vec<&str> = config
                 .map(|c| c.providers.iter().map(|p| p.backend.as_str()).collect())
                 .unwrap_or_default();
@@ -993,3 +969,23 @@ pub fn run_use(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// Shared test fixture: a Config with only the switch-path fields populated.
+#[cfg(test)]
+pub(crate) mod test_util {
+    pub(crate) fn cfg(
+        backend: &str,
+        api_key: Option<&str>,
+        model: Option<&str>,
+        base_url: Option<&str>,
+    ) -> super::Config {
+        super::Config {
+            backend: Some(backend.to_string()),
+            api_key: api_key.map(String::from),
+            model: model.map(String::from),
+            base_url: base_url.map(String::from),
+            confirm_before_commit: None,
+            ..Default::default()
+        }
+    }
+}

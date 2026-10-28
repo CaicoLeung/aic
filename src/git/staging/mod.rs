@@ -26,17 +26,12 @@ use crate::render::display::Display;
 
 /// Stages one Batch at a time, tracking per-file which original hunk indices
 /// have already landed in earlier batches of the same Run.
+#[derive(Default)]
 pub struct Staging {
     /// Original (plan-time) hunk indices already committed per file. Storing
     /// original indices — never remapped positions — keeps the numbering the
     /// model saw stable for later batches.
     committed_hunks: HashMap<String, HashSet<usize>>,
-}
-
-impl Default for Staging {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Staging {
@@ -217,6 +212,17 @@ fn map_planned_hunks(
 mod tests {
     use super::*;
 
+    fn maps(
+        planned: &[usize],
+        committed: &HashSet<usize>,
+        cur: usize,
+        want_original: &[usize],
+        want_current: &[usize],
+    ) {
+        let m = map_planned_hunks(planned, committed, cur).unwrap();
+        assert_eq!(m.original, want_original);
+        assert_eq!(m.current, want_current);
+    }
     #[test]
     fn map_planned_hunks_splits_original_and_current_indices() {
         // Hunks 1-2 already committed → plan's 3-7 survive as original 3-7 and
@@ -224,27 +230,25 @@ mod tests {
         // something is committed; conflating them is the bug this struct exists
         // to prevent, so assert both.
         let committed: HashSet<usize> = [1usize, 2].into_iter().collect();
-        let m = map_planned_hunks(&[3, 4, 5, 6, 7], &committed, 5).unwrap();
-        assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
-        assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
+        maps(
+            &[3, 4, 5, 6, 7],
+            &committed,
+            5,
+            &[3, 4, 5, 6, 7],
+            &[1, 2, 3, 4, 5],
+        );
 
         // Empty planned hunks = every hunk of the file; the original count is
         // reconstructed as current + already-committed.
-        let m = map_planned_hunks(&[], &committed, 5).unwrap();
-        assert_eq!(m.original, vec![3, 4, 5, 6, 7]);
-        assert_eq!(m.current, vec![1, 2, 3, 4, 5]);
+        maps(&[], &committed, 5, &[3, 4, 5, 6, 7], &[1, 2, 3, 4, 5]);
 
         // Nothing committed yet → both views pass through unchanged.
-        let m = map_planned_hunks(&[1, 2], &HashSet::new(), 2).unwrap();
-        assert_eq!(m.original, vec![1, 2]);
-        assert_eq!(m.current, vec![1, 2]);
+        maps(&[1, 2], &HashSet::new(), 2, &[1, 2], &[1, 2]);
 
         // Interleaved committed hunks are dropped and current positions
         // recomputed.
         let committed: HashSet<usize> = [1usize, 3, 5].into_iter().collect();
-        let m = map_planned_hunks(&[2, 4, 6], &committed, 3).unwrap();
-        assert_eq!(m.original, vec![2, 4, 6]);
-        assert_eq!(m.current, vec![1, 2, 3]);
+        maps(&[2, 4, 6], &committed, 3, &[2, 4, 6], &[1, 2, 3]);
 
         // The regression: three hunks of one file, split across three batches
         // with NO hook. After batch 1 commits original hunk 1, batch 2's hunk

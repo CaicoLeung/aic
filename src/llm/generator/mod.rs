@@ -5,7 +5,7 @@ use crate::llm::prompt::PromptConfig;
 
 pub struct Generator {}
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CommitOutput {
     pub message: String,
     pub body: Option<String>,
@@ -188,23 +188,39 @@ fn prompts_for_run(hint: Option<&str>) -> PromptConfig {
     }
 }
 
+/// Shared builders for Batch-plan unit tests across modules (mirrors
+/// `core::config::test_util`).
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_util {
+    use super::{BatchChange, BatchPlanBatch, BatchPlanOutput};
 
-    fn change(file: &str, hunks: &[usize]) -> BatchChange {
+    /// One whole-file-or-hunks change to `file`.
+    pub(crate) fn change(file: &str, hunks: &[usize]) -> BatchChange {
         BatchChange {
             file: file.to_string(),
             hunks: hunks.to_vec(),
         }
     }
 
-    fn batch(changes: &[BatchChange], reason: &str) -> BatchPlanBatch {
+    /// One batch of changes with an optional reason.
+    pub(crate) fn batch(changes: Vec<BatchChange>, reason: Option<&str>) -> BatchPlanBatch {
         BatchPlanBatch {
-            changes: changes.to_vec(),
-            reason: Some(reason.to_string()),
+            changes,
+            reason: reason.map(String::from),
         }
     }
+
+    /// A whole plan from batches.
+    pub(crate) fn plan(batches: Vec<BatchPlanBatch>) -> BatchPlanOutput {
+        BatchPlanOutput { batches }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use super::test_util::{batch, change, plan};
+    use crate::git::tests::err_contains;
 
     fn counts(items: &[(&str, usize)]) -> Vec<(String, usize)> {
         items
@@ -215,9 +231,7 @@ mod tests {
 
     #[test]
     fn valid_whole_file_in_single_batch() {
-        let plan = BatchPlanOutput {
-            batches: vec![batch(&[change("a.rs", &[])], "add feature")],
-        };
+        let plan = plan(vec![batch(vec![change("a.rs", &[])], Some("add feature"))]);
         assert!(validate_batch_plan(&plan, &counts(&[("a.rs", 2)])).is_ok());
     }
 
@@ -225,8 +239,8 @@ mod tests {
     fn valid_multiple_files_in_batches() {
         let plan = BatchPlanOutput {
             batches: vec![
-                batch(&[change("a.rs", &[])], "fix bug"),
-                batch(&[change("b.rs", &[])], "add feature"),
+                batch(vec![change("a.rs", &[])], Some("fix bug")),
+                batch(vec![change("b.rs", &[])], Some("add feature")),
             ],
         };
         assert!(validate_batch_plan(&plan, &counts(&[("a.rs", 1), ("b.rs", 1)])).is_ok());
@@ -238,10 +252,13 @@ mod tests {
     fn valid_one_file_split_across_batches() {
         let plan = BatchPlanOutput {
             batches: vec![
-                batch(&[change("display.rs", &[1])], "feat: restyle commit line"),
                 batch(
-                    &[change("display.rs", &[2, 3])],
-                    "refactor: drop batch summary",
+                    vec![change("display.rs", &[1])],
+                    Some("feat: restyle commit line"),
+                ),
+                batch(
+                    vec![change("display.rs", &[2, 3])],
+                    Some("refactor: drop batch summary"),
                 ),
             ],
         };
@@ -255,8 +272,7 @@ mod tests {
     fn rejects_empty_batches() {
         let plan = BatchPlanOutput { batches: vec![] };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no batches"));
+        err_contains(&result.unwrap_err(), &["no batches"]);
     }
 
     #[test]
@@ -268,59 +284,49 @@ mod tests {
             }],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no changes"));
+        err_contains(&result.unwrap_err(), &["no changes"]);
     }
 
     #[test]
     fn rejects_unknown_file() {
         let plan = BatchPlanOutput {
-            batches: vec![batch(&[change("phantom.rs", &[])], "oops")],
+            batches: vec![batch(vec![change("phantom.rs", &[])], Some("oops"))],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown file"));
+        err_contains(&result.unwrap_err(), &["unknown file"]);
     }
 
     #[test]
     fn rejects_overlapping_hunk_across_batches() {
         let plan = BatchPlanOutput {
             batches: vec![
-                batch(&[change("a.rs", &[1, 2])], "batch 1"),
-                batch(&[change("a.rs", &[2])], "batch 2"),
+                batch(vec![change("a.rs", &[1, 2])], Some("batch 1")),
+                batch(vec![change("a.rs", &[2])], Some("batch 2")),
             ],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 2)]));
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("more than one batch")
-        );
+        err_contains(&result.unwrap_err(), &["more than one batch"]);
     }
 
     #[test]
     fn rejects_out_of_range_hunk() {
         let plan = BatchPlanOutput {
-            batches: vec![batch(&[change("a.rs", &[5])], "oops")],
+            batches: vec![batch(vec![change("a.rs", &[5])], Some("oops"))],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 2)]));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("only 2 hunk"));
+        err_contains(&result.unwrap_err(), &["only 2 hunk"]);
     }
 
     #[test]
     fn rejects_uncovered_hunk() {
         let plan = BatchPlanOutput {
-            batches: vec![batch(&[change("a.rs", &[1])], "partial")],
+            batches: vec![batch(vec![change("a.rs", &[1])], Some("partial"))],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 3)]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Missing:"));
-        assert!(msg.contains("a.rs:hunk 2"));
-        assert!(msg.contains("a.rs:hunk 3"));
+        err_contains(
+            &result.unwrap_err(),
+            &["Missing:", "a.rs:hunk 2", "a.rs:hunk 3"],
+        );
     }
 
     /// A zero-hunk file (binary/mode/rename) carried whole in one batch with
@@ -328,7 +334,7 @@ mod tests {
     #[test]
     fn accepts_zero_hunk_binary_file_referenced_whole() {
         let plan = BatchPlanOutput {
-            batches: vec![batch(&[change("blob.bin", &[])], "update binary")],
+            batches: vec![batch(vec![change("blob.bin", &[])], Some("update binary"))],
         };
         assert!(
             validate_batch_plan(&plan, &counts(&[("blob.bin", 0)])).is_ok(),
@@ -344,7 +350,7 @@ mod tests {
     fn rejects_zero_hunk_binary_file_omitted() {
         // One real text file committed, the binary file dropped entirely.
         let plan = BatchPlanOutput {
-            batches: vec![batch(&[change("a.rs", &[])], "add feature")],
+            batches: vec![batch(vec![change("a.rs", &[])], Some("add feature"))],
         };
         let result = validate_batch_plan(&plan, &counts(&[("a.rs", 1), ("blob.bin", 0)]));
         assert!(result.is_err());
@@ -361,8 +367,8 @@ mod tests {
     fn accepts_zero_hunk_file_grouped_with_text() {
         let plan = BatchPlanOutput {
             batches: vec![batch(
-                &[change("a.rs", &[1]), change("blob.bin", &[])],
-                "add feature with asset",
+                vec![change("a.rs", &[1]), change("blob.bin", &[])],
+                Some("add feature with asset"),
             )],
         };
         assert!(

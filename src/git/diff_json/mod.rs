@@ -56,6 +56,8 @@ pub(crate) fn plan_batch_diff_json(
 mod tests {
     use super::*;
 
+    use crate::llm::generator::test_util::{batch, change};
+
     /// A two-hunk single-file workdir diff whose hunks add distinct tokens
     /// (`alpha` / `beta`) so slicing can be told apart from the whole file.
     fn two_hunk_diff() -> &'static str {
@@ -75,16 +77,6 @@ index 1..2 100644\n\
  ctx\n"
     }
 
-    fn batch(file: &str, hunks: &[usize]) -> generator::BatchPlanBatch {
-        generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: file.to_string(),
-                hunks: hunks.to_vec(),
-            }],
-            reason: None,
-        }
-    }
-
     /// Pull the single file's scoped diff out of the `staged_files` JSON so a
     /// test asserts on hunk content, not on the envelope shape.
     fn only_diff(json: &str) -> String {
@@ -97,7 +89,8 @@ index 1..2 100644\n\
     #[test]
     fn plan_batch_diff_json_slices_selected_hunks() {
         let raw_diffs = HashMap::from([("f.rs".to_string(), two_hunk_diff().to_string())]);
-        let json = plan_batch_diff_json(&batch("f.rs", &[2]), &raw_diffs).unwrap();
+        let json =
+            plan_batch_diff_json(&batch(vec![change("f.rs", &[2])], None), &raw_diffs).unwrap();
         let diff = only_diff(&json);
         assert!(diff.contains("beta"), "selected hunk 2 must be present");
         assert!(!diff.contains("alpha"), "unselected hunk 1 must be absent");
@@ -107,7 +100,8 @@ index 1..2 100644\n\
     #[test]
     fn plan_batch_diff_json_empty_hunks_keeps_whole_file() {
         let raw_diffs = HashMap::from([("f.rs".to_string(), two_hunk_diff().to_string())]);
-        let json = plan_batch_diff_json(&batch("f.rs", &[]), &raw_diffs).unwrap();
+        let json =
+            plan_batch_diff_json(&batch(vec![change("f.rs", &[])], None), &raw_diffs).unwrap();
         let diff = only_diff(&json);
         assert!(diff.contains("alpha") && diff.contains("beta"));
     }
@@ -117,7 +111,7 @@ index 1..2 100644\n\
     #[test]
     fn plan_batch_diff_json_missing_file_errors() {
         let raw_diffs = HashMap::<String, String>::new();
-        let err = plan_batch_diff_json(&batch("ghost.rs", &[]), &raw_diffs)
+        let err = plan_batch_diff_json(&batch(vec![change("ghost.rs", &[])], None), &raw_diffs)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no plan-time diff"), "unexpected error: {err}");

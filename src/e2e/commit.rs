@@ -6,26 +6,13 @@ use super::common::*;
 /// nothing-to-commit notice and returns without calling the LLM or prompting.
 #[tokio::test]
 async fn commit_clean_repo_is_a_noop() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
     let (_resolver, seen) = resolver_recording();
     let _prompt = prompt_queue(vec![]); // empty — must not be asked
-    let git = Git::at(dir.path()).unwrap();
 
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await;
-    assert!(result.is_ok(), "clean repo should not error: {:?}", result);
+    let result = commit_run(&git, deps(unreachable_planner(), unreachable_messenger())).await;
+    assert_ok(&result, "clean repo should not error");
     assert!(
         seen.lock().is_empty(),
         "LLM resolver must not run when there are no changes"
@@ -40,38 +27,23 @@ async fn commit_clean_repo_is_a_noop() {
 /// secret-shaped conflicted file. One invocation, one decision.
 #[tokio::test]
 async fn commit_run_no_redact_carries_into_the_resolve_handoff() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
-    std::fs::write(
-        dir.path().join("tracked.txt"),
-        "<<<<<<< HEAD\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n=======\nclean\n>>>>>>> other\n",
-    )
-    .unwrap();
-
-    let git = Git::at(dir.path()).unwrap();
+    let (dir, git) = with_git(merge_conflict_with_secret);
     let result = default_run(
         &git,
+        // resolve now? → yes, apply tracked.txt? → yes
         ResolveDeps {
-            resolve: resolver_returning("merged\n"),
-            // resolve now? → yes, apply tracked.txt? → yes
-            prompt: prompt_queue(vec![true, true]),
-            display: sink(),
             redact: Redact::Off,
+            ..resolve_deps(
+                resolver_returning("merged\n"),
+                prompt_queue(vec![true, true]),
+            )
         },
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
+        deps(unreachable_planner(), unreachable_messenger()),
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "handoff must honor the invocation's no-redact intent: {:?}",
-        result
+    assert_ok(
+        &result,
+        "handoff must honor the invocation's no-redact intent",
     );
     assert!(is_clean(dir.path()), "merge must be finalized");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
@@ -82,36 +54,18 @@ async fn commit_run_no_redact_carries_into_the_resolve_handoff() {
 /// or the normal commit flow.
 #[tokio::test]
 async fn commit_run_auto_detect_aborts_when_user_declines() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let (dir, git) = with_git(merge_conflict);
 
     let (resolver, seen) = resolver_recording();
-    let git = Git::at(dir.path()).unwrap();
 
     let err = default_run(
         &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![false]),
-            display: sink(),
-            redact: Redact::On,
-        },
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
+        resolve_deps(resolver, prompt_queue(vec![false])),
+        deps(unreachable_planner(), unreachable_messenger()),
     )
     .await
     .expect_err("must abort when user declines resolve");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted") && msg.contains("mid-merge"),
-        "expected abort message, got: {msg}"
-    );
+    err_contains(&err, &["aborted", "mid-merge"]);
     assert!(seen.lock().is_empty(), "resolver must not run on decline");
     assert!(!is_clean(dir.path()));
 }
@@ -121,41 +75,23 @@ async fn commit_run_auto_detect_aborts_when_user_declines() {
 /// manual continuation instead of redirecting to a command that would refuse.
 #[tokio::test]
 async fn commit_run_rebase_state_aborts_with_manual_continuation() {
-    let dir = tempfile::tempdir().unwrap();
-    rebase_conflict(dir.path());
+    let (dir, git) = with_git(rebase_conflict);
 
     let (resolver, seen) = resolver_recording();
-    let git = Git::at(dir.path()).unwrap();
 
     let err = default_run(
         &git,
-        ResolveDeps {
-            resolve: resolver,
-            // Empty queue: the resolve offer must never fire — if it does,
-            // the exhausted queue panics and fails this test loudly.
-            prompt: prompt_queue(vec![]),
-            display: sink(),
-            redact: Redact::On,
-        },
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
+        // Empty queue: the resolve offer must never fire — if it does,
+        // the exhausted queue panics and fails this test loudly.
+        resolve_deps(resolver, prompt_queue(vec![])),
+        deps(unreachable_planner(), unreachable_messenger()),
     )
     .await
     .expect_err("rebase state must abort without offering resolve");
-    let msg = format!("{err:#}");
+    err_contains(&err, &["mid-rebase", "git rebase --continue"]);
     assert!(
-        msg.contains("mid-rebase") && msg.contains("git rebase --continue"),
-        "expected manual-continuation abort, got: {msg}"
-    );
-    assert!(
-        !msg.contains("aic resolve"),
-        "must not point at a command that refuses rebase: {msg}"
+        !format!("{err:#}").contains("aic resolve"),
+        "must not point at a command that refuses rebase: {err:#}"
     );
     assert!(seen.lock().is_empty(), "resolver must not run on rebase");
     assert!(!is_clean(dir.path()), "repo must be left untouched");
@@ -165,21 +101,15 @@ async fn commit_run_rebase_state_aborts_with_manual_continuation() {
 /// honest advice for rebase states: the manual continuation, not `aic resolve`.
 #[test]
 fn commit_guard_names_manual_continuation_for_rebase() {
-    let dir = tempfile::tempdir().unwrap();
-    rebase_conflict(dir.path());
-    let git = Git::at(dir.path()).unwrap();
+    let (_dir, git) = with_git(rebase_conflict);
 
     let err = git
         .assert_commit_safe()
         .expect_err("guard must refuse to commit mid-rebase");
-    let msg = format!("{err:#}");
+    err_contains(&err, &["mid-rebase", "git rebase --continue"]);
     assert!(
-        msg.contains("mid-rebase") && msg.contains("git rebase --continue"),
-        "expected manual-continuation hint, got: {msg}"
-    );
-    assert!(
-        !msg.contains("aic resolve"),
-        "must not point at a command that refuses rebase: {msg}"
+        !format!("{err:#}").contains("aic resolve"),
+        "must not point at a command that refuses rebase: {err:#}"
     );
 }
 
@@ -188,36 +118,18 @@ fn commit_guard_names_manual_continuation_for_rebase() {
 /// through the commit-workflow entry point.
 #[tokio::test]
 async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let (dir, git) = with_git(merge_conflict);
 
     let resolver = resolver_returning("merged\n");
     // [0] = "resolve now?" yes, [1] = "apply tracked.txt?" yes
-    let git = Git::at(dir.path()).unwrap();
 
     let result = default_run(
         &git,
-        ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true, true]),
-            display: sink(),
-            redact: Redact::On,
-        },
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
+        resolve_deps(resolver, prompt_queue(vec![true, true])),
+        deps(unreachable_planner(), unreachable_messenger()),
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "full resolve via commit run should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "full resolve via commit run should succeed");
 
     assert!(is_clean(dir.path()), "merge must be finalized");
     assert_eq!(read_file(dir.path(), "tracked.txt"), "merged\n");
@@ -240,39 +152,24 @@ async fn commit_run_auto_detect_yes_routes_to_full_resolve() {
 /// reports zero approved plus one rejected.
 #[tokio::test]
 async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
-    let dir = tempfile::tempdir().unwrap();
-    merge_conflict(dir.path());
+    let (dir, git) = with_git(merge_conflict);
 
     let resolver = resolver_returning("merged\n");
     // [0] = "resolve now?" yes (route into the resolve workflow),
     // [1] = "apply tracked.txt?" no (reject the only proposed resolution).
-    let git = Git::at(dir.path()).unwrap();
 
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
     let result = default_run(
         &git,
         ResolveDeps {
-            resolve: resolver,
-            prompt: prompt_queue(vec![true, false]),
             display,
-            redact: Redact::On,
+            ..resolve_deps(resolver, prompt_queue(vec![true, false]))
         },
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
+        deps(unreachable_planner(), unreachable_messenger()),
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "all-rejected hand-off should not error: {:?}",
-        result
-    );
+    assert_ok(&result, "all-rejected hand-off should not error");
 
     // Approved count is zero → nothing was written or staged. The rejected
     // file is untouched: still unmerged, still carrying its conflict markers,
@@ -306,63 +203,22 @@ async fn commit_run_auto_detect_yes_then_rejects_every_resolution() {
 /// real repo with a stub plan and stub commit messages, so no LLM is contacted.
 #[tokio::test]
 async fn commit_splits_one_file_across_two_batches() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
-    // Two change sites far enough apart that git emits two separate hunks.
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "c"]);
 
     // Stub plan: split the single file's two hunks across two batches.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
-        ],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
+    run_expect_commits(
+        dir.path(),
+        deps(planner_fixed(plan), messenger_fixed("chore: stub")),
+        2,
+        "two batches must land two commits, one per batch",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "two-batch split should succeed: {:?}",
-        result
-    );
-
-    // One commit per batch — two new commits over the base.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 2,
-        "two batches must land two commits, one per batch"
-    );
     // Batch 1 (HEAD~1): only hunk 1 (a1) applied; hunk 2 (c1) still absent.
     let after_batch1 = file_at_ref(dir.path(), "HEAD~1", "tracked.txt");
     assert!(after_batch1.contains("a1"), "batch 1 must include hunk 1");
@@ -391,54 +247,20 @@ async fn commit_splits_one_file_across_two_batches() {
 /// 1's commit and trip the HEAD~1 assertions.
 #[tokio::test]
 async fn commit_splits_two_files_across_two_batches() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     // Stub plan: one file per batch — batch 1 = alpha, batch 2 = beta.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
-        ],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ]);
+    run_expect_commits(
+        dir.path(),
+        deps(planner_fixed(plan), messenger_fixed("chore: stub")),
+        2,
+        "two batches must land two commits, one per batch",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "two-file two-batch split should succeed: {:?}",
-        result
-    );
-
-    // One commit per batch — two new commits, neither file leaked into the other's.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 2,
-        "two batches must land two commits, one per batch"
-    );
     // Batch 1 (HEAD~1): only alpha changed; beta still at its base value.
     assert_eq!(
         file_at_ref(dir.path(), "HEAD~1", "alpha.txt"),
@@ -481,51 +303,20 @@ async fn commit_splits_two_files_across_two_batches() {
 /// trip the tree assertion.
 #[tokio::test]
 async fn commit_batches_two_files_into_one_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
     // Stub plan: one batch carrying both files — one commit for the pair.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                },
-            ],
-            reason: Some("change both".into()),
-        }],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: both files"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![plan_multi_batch(
+        &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+        "change both",
+    )]);
+    run_expect_commits(
+        dir.path(),
+        deps(planner_fixed(plan), messenger_fixed("chore: both files")),
+        1,
+        "a batch carrying two files must land a single commit, not two",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "two-file single-batch Run should succeed: {:?}",
-        result
-    );
-
-    // Exactly one new commit — not one per file.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "a batch carrying two files must land a single commit, not two"
-    );
     // That one commit's tree carries both files' changes.
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "alpha.txt"),
@@ -557,8 +348,7 @@ async fn commit_batches_two_files_into_one_commit() {
 /// will not be included in the batch plan."
 #[tokio::test]
 async fn commit_includes_binary_file_in_batch_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // A tracked binary file, committed at a base value, then rewritten in the
     // workdir and left unstaged — the entry condition for the batch-plan path.
@@ -569,35 +359,14 @@ async fn commit_includes_binary_file_in_batch_plan() {
 
     // Stub plan carrying the whole binary file (no hunks to index). This is the
     // plan a correct model would emit — the bug is downstream of the planner.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: "blob.bin".to_string(),
-                hunks: vec![],
-            }],
-            reason: Some("update binary".into()),
-        }],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: update blob"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![plan_batch("blob.bin", &[], "update binary")]);
+    run_expect_commits(
+        dir.path(),
+        deps(planner_fixed(plan), messenger_fixed("chore: update blob")),
+        1,
+        "the binary change must land one commit",
     )
     .await;
-    assert!(result.is_ok(), "binary batch should succeed: {:?}", result);
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the binary change must land one commit"
-    );
     assert!(
         worktree_is_empty(dir.path()),
         "binary file must be committed, not left in the unstaged area"
@@ -612,38 +381,17 @@ async fn commit_includes_binary_file_in_batch_plan() {
 /// computed then thrown away, never asserted. This captures what was sent.
 #[tokio::test]
 async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
     std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
     git_in(dir.path(), &["add", "blob.bin"]);
     git_in(dir.path(), &["commit", "-m", "add binary"]);
     std::fs::write(dir.path().join("blob.bin"), [9u8, 9, 9, 9]).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: "blob.bin".to_string(),
-                hunks: vec![],
-            }],
-            reason: Some("update binary".into()),
-        }],
-    };
+    let plan = plan(vec![plan_batch("blob.bin", &[], "update binary")]);
     let (planner, sent) = planner_capture(plan);
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner,
-            messenger: messenger_fixed("chore: update blob"),
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await;
-    assert!(result.is_ok(), "batch should succeed: {:?}", result);
+    let result = commit_run(&git, deps(planner, messenger_fixed("chore: update blob"))).await;
+    assert_ok(&result, "batch should succeed");
 
     let sent = sent.lock();
     assert_eq!(sent.len(), 1, "planner must be called exactly once");
@@ -667,8 +415,7 @@ async fn batch_plan_sends_binary_marker_for_zero_hunk_file() {
 #[tokio::test]
 async fn commit_includes_mode_only_change_in_batch_plan() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     let script = dir.path().join("script.sh");
     std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
@@ -678,39 +425,17 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
     // diff is mode-only (`old mode 100644` / `new mode 100755`), zero hunks.
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![generator::BatchChange {
-                file: "script.sh".to_string(),
-                hunks: vec![],
-            }],
-            reason: Some("make script executable".into()),
-        }],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chmod: make script executable"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![plan_batch("script.sh", &[], "make script executable")]);
+    run_expect_commits(
+        dir.path(),
+        deps(
+            planner_fixed(plan),
+            messenger_fixed("chmod: make script executable"),
+        ),
+        1,
+        "the mode-only change must land one commit",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "mode-only batch should succeed: {:?}",
-        result
-    );
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the mode-only change must land one commit"
-    );
     assert!(
         worktree_is_empty(dir.path()),
         "mode-only change must be committed, not left unstaged"
@@ -727,42 +452,24 @@ async fn commit_includes_mode_only_change_in_batch_plan() {
 /// work into the planner would fail loudly instead of shipping green.
 #[tokio::test]
 async fn commit_staged_files_in_one_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // Modify a tracked file and stage it — the entry condition for the staged
     // single-commit path. A non-Rust file keeps this test focused on the
     // commit shape.
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(), // staged path must NOT plan,
-            messenger: messenger_fixed("feat: staged change"),
-            confirm: Confirm::Disabled,
-        },
+    run_expect_commits(
+        dir.path(),
+        // staged path must NOT plan,
+        deps(
+            unreachable_planner(),
+            messenger_fixed("feat: staged change"),
+        ),
+        1,
+        "the staged path must land exactly one commit",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "staged single-commit Run should succeed: {:?}",
-        result
-    );
-
-    // Exactly one new commit landed.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the staged path must land exactly one commit"
-    );
     // Its tree contains the staged change.
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "tracked.txt"),
@@ -797,37 +504,20 @@ async fn commit_staged_files_in_one_commit() {
 /// capture. Setup via [`partial_stage_two_hunk_file`].
 #[tokio::test]
 async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     let (a_state, b_state) = partial_stage_two_hunk_file(dir.path());
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(), // staged path must NOT plan,
-            messenger: messenger_fixed("feat: staged hunk only"),
-            confirm: Confirm::Disabled,
-        },
+    run_expect_commits(
+        dir.path(),
+        // staged path must NOT plan,
+        deps(
+            unreachable_planner(),
+            messenger_fixed("feat: staged hunk only"),
+        ),
+        1,
+        "the staged path must land exactly one commit",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "partially staged Run should succeed, got: {:?}",
-        result.err().map(|e| e.to_string())
-    );
-
-    // Exactly one new commit, carrying only the staged hunk.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the staged path must land exactly one commit"
-    );
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "tracked.txt"),
         a_state,
@@ -856,40 +546,24 @@ async fn commit_staged_hunk_only_leaves_unstaged_hunk_in_worktree() {
 /// The Run must commit the staged deletion, not die on re-staging it.
 #[tokio::test]
 async fn commit_staged_deletion_in_one_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // Stage the file's removal — the entry condition, exactly as reported:
     // one `git rm` drops the path from both the index and the workdir, so
     // nothing of it remains except in HEAD.
     git_in(dir.path(), &["rm", "tracked.txt"]);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: remove tracked file"),
-            confirm: Confirm::Disabled,
-        },
+    run_expect_commits(
+        dir.path(),
+        deps(
+            unreachable_planner(),
+            messenger_fixed("feat: remove tracked file"),
+        ),
+        1,
+        "the staged deletion must land as exactly one commit",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "staged-deletion Run should succeed, got: {:?}",
-        result.err().map(|e| e.to_string())
-    );
 
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the staged deletion must land as exactly one commit"
-    );
     assert!(
         !dir.path().join("tracked.txt").exists(),
         "the file must stay deleted"
@@ -909,45 +583,26 @@ async fn commit_staged_deletion_in_one_commit() {
 /// commit's path list.
 #[tokio::test]
 async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // A second tracked file, so the staged set can mix both kinds.
-    std::fs::write(dir.path().join("other.txt"), "base\n").unwrap();
-    git_in(dir.path(), &["add", "other.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "other.txt", "base\n", "base");
 
     // Staged modification (tracked.txt) + staged deletion (other.txt).
-    std::fs::write(dir.path().join("tracked.txt"), "modified\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "modified\n");
     git_in(dir.path(), &["rm", "other.txt"]);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: mixed staged set"),
-            confirm: Confirm::Disabled,
-        },
+    run_expect_commits(
+        dir.path(),
+        deps(
+            unreachable_planner(),
+            messenger_fixed("feat: mixed staged set"),
+        ),
+        1,
+        "the mixed staged set must land as exactly one commit",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "mixed staged-deletion Run should succeed, got: {:?}",
-        result.err().map(|e| e.to_string())
-    );
 
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the mixed staged set must land as exactly one commit"
-    );
     assert_eq!(
         file_at_ref(dir.path(), "HEAD", "tracked.txt"),
         "modified\n",
@@ -972,60 +627,20 @@ async fn commit_mixed_staged_deletion_and_modification_in_one_commit() {
 /// Guards the [important] partial-failure UX contract.
 #[tokio::test]
 async fn commit_batch_loop_aborts_after_partial_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "c"]);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let (messenger, calls) = messenger_then_error(1); // batch 1 ok, batch 2 fails
-    let git = Git::at(dir.path()).unwrap();
-    let err = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger,
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await
-    .expect_err("must abort when a later batch fails");
+    let err = commit_run(&git, deps(planner_fixed(plan), messenger))
+        .await
+        .expect_err("must abort when a later batch fails");
 
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted on batch 2"),
-        "expected batch-2 abort, got: {msg}"
-    );
-    assert!(
-        msg.contains("1 batch committed"),
-        "expected 1 committed, got: {msg}"
-    );
+    err_contains(&err, &["aborted on batch 2", "1 batch committed"]);
     assert_eq!(*calls.lock(), 2, "messenger called once per batch");
     // Batch 1 DID commit — its hunk is in HEAD despite the later failure; the
     // failed batch 2's hunk is staged but NOT committed.
@@ -1044,8 +659,7 @@ async fn commit_batch_loop_aborts_after_partial_commit() {
 /// batch), and the work is committed.
 #[tokio::test]
 async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // Two single-hunk edits in different directories — conservative defaults
     // keep them as two separate batches, proving the fallback plan (not a
@@ -1059,28 +673,26 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
     std::fs::write(dir.path().join("src/a.rs"), "new a\n").unwrap();
     std::fs::write(dir.path().join("docs/b.md"), "new b\n").unwrap();
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
     let buf = BufferWrite::default();
     let (messenger, calls) =
         messenger_sequence(&["feat(a): fallback draft a", "docs(b): fallback draft b"]);
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             // 120 cols so the ⚠ row's clamp budget holds the whole cause —
             // `warn` truncates with `…` at the text width (ADR 0018).
             display: Display::with_cols(buf.clone(), 120),
-            // Zero batches over real work — the most degenerate invalid plan.
-            planner: planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
-            messenger,
-            confirm: Confirm::Disabled,
+            ..deps(
+                // Zero batches over real work — the most degenerate invalid plan.
+                planner_fixed(plan(vec![])),
+                messenger,
+            )
         },
+        2,
+        "fallback must complete the run",
     )
     .await;
-    assert!(result.is_ok(), "fallback must complete the run: {result:?}");
 
     // The notice rendered: the user knows the LLM's plan was discarded.
     let lines = buf.lines();
@@ -1093,7 +705,6 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
     // The fallback plan drove the normal loop: two batches, two drafts, two
     // commits, clean tree.
     assert_eq!(*calls.lock(), 2, "one draft per fallback batch");
-    assert_eq!(commit_count(dir.path()), before + 2);
     assert!(is_clean(dir.path()), "all work must be committed");
     assert!(notice.contains("no batches"), "the LLM's failure is named");
 }
@@ -1108,18 +719,11 @@ async fn commit_invalid_plan_falls_back_to_deterministic_grouping() {
 /// batch and finish the Run instead of aborting.
 #[tokio::test]
 async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // A base with two change sites far enough apart that git emits two
     // separate hunks (>= ~6 unchanged lines between them).
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "c"]);
 
     // Simulate lint-staged: the pre-commit hook re-stages the full file, so a
     // commit of hunk 1 actually lands both hunks.
@@ -1133,52 +737,20 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
-        ],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: hook swallows the rest"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
+    run_expect_commits(
+        dir.path(),
+        deps(
+            planner_fixed(plan),
+            messenger_fixed("feat: hook swallows the rest"),
+        ),
+        1,
+        "exactly one commit must land — the second batch has nothing left to stage",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "the Run must complete, not abort, when a hook commits more than the batch: {:?}",
-        result
-    );
-
-    // Only batch 1 lands (it carries the whole file); the swallowed batch 2 is
-    // skipped rather than failing on a stale snapshot.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "exactly one commit must land — the second batch has nothing left to stage"
-    );
     // The hook's re-stage means both hunks are in that one commit.
     let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
     assert!(head.contains("a1"), "hunk 1 must be committed");
@@ -1203,57 +775,25 @@ async fn commit_batch_loop_survives_pre_commit_hook_that_re_stages_whole_files()
 /// bookkeeping end-to-end.
 #[tokio::test]
 async fn commit_splits_one_file_across_three_batches() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
     // Three change sites, each padded far enough apart that git emits three
     // separate hunks.
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}b0\n{pad}c0\n");
-    let changed = format!("a1\n{pad}b1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "b", "c"]);
 
     // Stub plan: split the single file's three hunks across three batches.
-    let mk = |h: usize| generator::BatchPlanBatch {
-        changes: vec![generator::BatchChange {
-            file: "tracked.txt".to_string(),
-            hunks: vec![h],
-        }],
-        reason: Some(format!("change {h}")),
-    };
-    let plan = generator::BatchPlanOutput {
-        batches: vec![mk(1), mk(2), mk(3)],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change 1"),
+        plan_batch("tracked.txt", &[2], "change 2"),
+        plan_batch("tracked.txt", &[3], "change 3"),
+    ]);
+    run_expect_commits(
+        dir.path(),
+        deps(planner_fixed(plan), messenger_fixed("chore: stub")),
+        3,
+        "three batches must land three commits, one per batch",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "three-batch split should succeed: {:?}",
-        result
-    );
-
-    // One commit per batch — three new commits over the base.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 3,
-        "three batches must land three commits, one per batch"
-    );
     // Each commit carries exactly its prefix of hunks — no leak forward, no
     // skip. HEAD~2 is batch 1 (a1 only), HEAD~1 adds batch 2 (b1), HEAD adds
     // batch 3 (c1).
@@ -1288,63 +828,27 @@ async fn commit_splits_one_file_across_three_batches() {
 /// before staging.
 #[tokio::test]
 async fn commit_batch_merges_same_file_changes_into_one_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
-    let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
-    let base = format!("a0\n{pad}b0\n");
-    let changed = format!("a1\n{pad}b1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-    std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
+    unstaged_hunks(dir.path(), &["a", "b"]);
 
     // One batch, TWO changes entries for the same file with disjoint hunks.
     // `validate_batch_plan` accepts this (no duplicate hunk); the workflow
     // must treat it as one logical unit.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                },
-            ],
-            reason: Some("both edits".into()),
-        }],
-    };
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: same-file disjoint hunks"),
-            confirm: Confirm::Disabled,
-        },
+    let plan = plan(vec![plan_multi_batch(
+        &[("tracked.txt", &[1]), ("tracked.txt", &[2])],
+        "both edits",
+    )]);
+    run_expect_commits(
+        dir.path(),
+        deps(
+            planner_fixed(plan),
+            messenger_fixed("feat: same-file disjoint hunks"),
+        ),
+        1,
+        "two changes entries for one file must merge into one commit",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "one-batch same-file split should succeed: {:?}",
-        result
-    );
-
-    // Exactly one commit — the two entries merge into one logical unit, never
-    // two, and the file is staged once rather than listed twice in the prompt.
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "two changes entries for one file must merge into one commit"
-    );
     let head = file_at_ref(dir.path(), "HEAD", "tracked.txt");
     assert!(
         head.contains("a1") && head.contains("b1"),
@@ -1362,42 +866,24 @@ async fn commit_batch_merges_same_file_changes_into_one_commit() {
 /// file, the pattern kind, and the `--no-redact` override.
 #[tokio::test]
 async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-    std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    let (dir, git) = with_git(gh::init_test_repo);
+    commit_file(dir.path(), "tracked.txt", "clean\n", "base");
     std::fs::write(
         dir.path().join("tracked.txt"),
         "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
     )
     .unwrap();
 
-    let git = Git::at(dir.path()).unwrap();
-    let err = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await
-    .expect_err("secret-shaped unstaged diff must refuse the Run");
+    let err = commit_run(&git, deps(unreachable_planner(), unreachable_messenger()))
+        .await
+        .expect_err("secret-shaped unstaged diff must refuse the Run");
 
-    let msg = format!("{err:#}");
-    assert!(msg.contains("tracked.txt"), "must name the file: {msg}");
-    assert!(
-        msg.contains("AWS access key ID"),
-        "must name the kind: {msg}"
-    );
-    assert!(msg.contains("--no-redact"), "must name the override: {msg}");
-    assert!(
-        !msg.contains("AKIAIOSFODNN7EXAMPLE"),
-        "the full secret must never print: {msg}"
+    assert_gate_refusal(
+        &err,
+        "tracked.txt",
+        "AWS access key ID",
+        "--no-redact",
+        "AKIAIOSFODNN7EXAMPLE",
     );
     // Nothing was staged or committed by the refused Run (init_test_repo's
     // initial commit + the base commit = 2).
@@ -1408,36 +894,27 @@ async fn commit_run_refuses_secret_in_unstaged_diff_before_any_llm_call() {
 /// secret-shaped diff plans, drafts, and commits normally.
 #[tokio::test]
 async fn commit_run_no_redact_proceeds_past_the_gate() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-    std::fs::write(dir.path().join("tracked.txt"), "clean\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    let dir = with_repo(gh::init_test_repo);
+    commit_file(dir.path(), "tracked.txt", "clean\n", "base");
     std::fs::write(
         dir.path().join("tracked.txt"),
         "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
     )
     .unwrap();
 
-    let git = Git::at(dir.path()).unwrap();
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            review: BatchReview::Disabled,
             redact: Redact::Off,
-            display: sink(),
-            planner: planner_fixed(plan_single_batch("tracked.txt", "rotate key")),
-            messenger: messenger_fixed("chore: rotate deploy key"),
-            confirm: Confirm::Disabled,
+            ..deps(
+                planner_fixed(plan_single_batch("tracked.txt", "rotate key")),
+                messenger_fixed("chore: rotate deploy key"),
+            )
         },
+        1,
+        "exactly one new commit",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "--no-redact must commit normally: {:?}",
-        result
-    );
-    assert_eq!(commit_count(dir.path()), 3, "exactly one new commit");
     assert!(is_clean(dir.path()));
 }
 
@@ -1446,38 +923,18 @@ async fn commit_run_no_redact_proceeds_past_the_gate() {
 /// initial payload the Run sends (issue #155), not just the batch plan.
 #[tokio::test]
 async fn commit_run_refuses_secret_in_staged_diff() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-    std::fs::write(dir.path().join("id_ed25519"), "placeholder\n").unwrap();
-    git_in(dir.path(), &["add", "id_ed25519"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
-    std::fs::write(
-        dir.path().join("id_ed25519"),
+    let (dir, git) = with_git(gh::init_test_repo);
+    commit_file(dir.path(), "id_ed25519", "placeholder\n", "base");
+    stage_file(
+        dir.path(),
+        "id_ed25519",
         "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
-    )
-    .unwrap();
-    git_in(dir.path(), &["add", "id_ed25519"]);
-
-    let git = Git::at(dir.path()).unwrap();
-    let err = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await
-    .expect_err("secret-shaped staged diff must refuse the Run");
-
-    let msg = format!("{err:#}");
-    assert!(msg.contains("id_ed25519"), "must name the file: {msg}");
-    assert!(
-        msg.contains("private key block (PEM)"),
-        "must name the kind: {msg}"
     );
+
+    let err = commit_run(&git, deps(unreachable_planner(), unreachable_messenger()))
+        .await
+        .expect_err("secret-shaped staged diff must refuse the Run");
+
+    err_contains(&err, &["id_ed25519", "private key block (PEM)"]);
     assert_eq!(commit_count(dir.path()), 2, "nothing committed");
 }

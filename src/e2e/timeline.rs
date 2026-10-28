@@ -6,6 +6,11 @@
 
 use super::common::*;
 
+/// Whether any ledger line starts with `prefix`.
+fn has_step(lines: &[String], prefix: &str) -> bool {
+    lines.iter().any(|l| l.starts_with(prefix))
+}
+
 /// The unstaged path's happy-path ledger: one `✓` line per step in skeleton
 /// order — Scan, Redaction Gate, Plan, Draft, Commit — and nothing else from
 /// the timeline (the Commit entries print separately as panel rows).
@@ -13,49 +18,26 @@ use super::common::*;
 /// duration threshold, appending `· Xs`.
 #[tokio::test]
 async fn unstaged_run_appends_the_step_ledger() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (_dir, git) = with_git(two_file_unstaged_repo);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
-        ],
-    };
+    let plan = two_file_two_batch_plan();
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await;
     assert!(result.is_ok(), "{result:?}");
     let lines = buf.lines();
-    let step = |prefix: &str| lines.iter().any(|l| l.starts_with(prefix));
-    assert!(step("  ✓ Scanned 2 files"), "{lines:?}");
-    assert!(step("  ✓ Redaction gate · clean"), "{lines:?}");
-    assert!(step("  ✓ Planned 2 batches"), "{lines:?}");
-    assert!(step("  ✓ Drafted 2 messages"), "{lines:?}");
-    assert!(step("  ✓ Committed 2 batches"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Scanned 2 files"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Redaction gate · clean"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Planned 2 batches"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Drafted 2 messages"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Committed 2 batches"), "{lines:?}");
     assert!(
         lines.iter().all(|l| !l.contains('✗')),
         "the happy path never prints a failed screen: {lines:?}"
@@ -66,32 +48,25 @@ async fn unstaged_run_appends_the_step_ledger() {
 /// or review steps, singular counts.
 #[tokio::test]
 async fn staged_run_appends_the_three_step_ledger() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-    std::fs::write(dir.path().join("tracked.txt"), "diverged\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    let (dir, git) = with_git(gh::init_test_repo);
+    stage_file(dir.path(), "tracked.txt", "diverged\n");
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display: Display::with(buf.clone()),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: staged"),
-            confirm: Confirm::Disabled,
+            ..deps(unreachable_planner(), messenger_fixed("feat: staged"))
         },
     )
     .await;
     assert!(result.is_ok(), "{result:?}");
     let lines = buf.lines();
-    let step = |prefix: &str| lines.iter().any(|l| l.starts_with(prefix));
-    assert!(step("  ✓ Scanned 1 file"), "{lines:?}");
-    assert!(step("  ✓ Redaction gate · clean"), "{lines:?}");
-    assert!(step("  ✓ Drafted message"), "{lines:?}");
-    assert!(step("  ✓ Committed 1 batch"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Scanned 1 file"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Redaction gate · clean"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Drafted message"), "{lines:?}");
+    assert!(has_step(&lines, "  ✓ Committed 1 batch"), "{lines:?}");
     assert!(
         lines.iter().all(|l| !l.contains('✗')),
         "the happy path never prints a failed screen: {lines:?}"
@@ -102,22 +77,17 @@ async fn staged_run_appends_the_three_step_ledger() {
 /// and the ledger — no "Redaction gate" line at all.
 #[tokio::test]
 async fn no_redact_run_has_no_gate_step() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-    std::fs::write(dir.path().join("tracked.txt"), "diverged\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    let (dir, git) = with_git(gh::init_test_repo);
+    stage_file(dir.path(), "tracked.txt", "diverged\n");
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: staged"),
-            confirm: Confirm::Disabled,
+            ..deps(unreachable_planner(), messenger_fixed("feat: staged"))
         },
     )
     .await;
@@ -135,8 +105,7 @@ async fn no_redact_run_has_no_gate_step() {
 /// patterns). Nothing erases, and the error still propagates.
 #[tokio::test]
 async fn redaction_refusal_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     std::fs::write(
         dir.path().join("secret.txt"),
         "-----BEGIN RSA PRIVATE KEY-----\nabc\n",
@@ -144,16 +113,12 @@ async fn redaction_refusal_shapes_the_failed_screen() {
     .unwrap();
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display: Display::with(buf.clone()),
-            planner: unreachable_planner(),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
+            ..deps(unreachable_planner(), unreachable_messenger())
         },
     )
     .await
@@ -171,10 +136,7 @@ async fn redaction_refusal_shapes_the_failed_screen() {
             .any(|l| l.contains("secret.txt") && l.contains("private key")),
         "the refusal detail must name the file and pattern: {lines:?}"
     );
-    assert!(
-        format!("{err:#}").contains("secret-shaped"),
-        "the propagated error keeps its information: {err:#}"
-    );
+    err_contains(&err, &["secret-shaped"]);
 }
 
 /// Declining a batch's confirmation fails the Commit step's screen: the
@@ -182,49 +144,26 @@ async fn redaction_refusal_shapes_the_failed_screen() {
 /// contract (still staged; re-run `aic`). Later steps are absent.
 #[tokio::test]
 async fn declined_batch_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (_dir, git) = with_git(two_file_unstaged_repo);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
-        ],
-    };
+    let plan = two_file_two_batch_plan();
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
                 editor: editor_fixed("edited", None),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await
     .expect_err("the decline must end the Run");
-    assert!(
-        format!("{err:#}").contains("declined on batch 2 of 2"),
-        "{err:#}"
-    );
+    err_contains(&err, &["declined on batch 2 of 2"]);
     let lines = buf.lines();
     assert!(
         lines
@@ -255,29 +194,11 @@ async fn declined_batch_shapes_the_failed_screen() {
 /// merge count when merges happened.
 #[tokio::test]
 async fn review_flow_completes_the_plan_step() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (_dir, git) = with_git(two_file_unstaged_repo);
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
-        ],
-    };
+    let plan = two_file_two_batch_plan();
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let result = commit_run(
         &git,
         RunDeps {
@@ -286,9 +207,7 @@ async fn review_flow_completes_the_plan_step() {
             },
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await;
@@ -310,12 +229,11 @@ async fn review_flow_completes_the_plan_step() {
 /// the nothing-staged hint, and the Run bails with the same clean wording.
 #[tokio::test]
 async fn review_abort_shapes_the_failed_screen() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (_dir, git) = with_git(two_file_unstaged_repo);
     let plan = plan_single_batch("alpha.txt", "change alpha");
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let err = commit_run(
         &git,
         RunDeps {
@@ -324,9 +242,7 @@ async fn review_abort_shapes_the_failed_screen() {
             },
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), unreachable_messenger())
         },
     )
     .await
@@ -352,22 +268,18 @@ async fn review_abort_shapes_the_failed_screen() {
 /// story) and the durable caution row rides under it.
 #[tokio::test]
 async fn invalid_plan_completes_with_planned_verb_and_caution_row() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (_dir, git) = with_git(two_file_unstaged_repo);
     // An empty plan is invalid (real work exists) → deterministic regrouping.
-    let plan = generator::BatchPlanOutput { batches: vec![] };
+    let plan = plan(vec![]);
 
     let buf = BufferWrite::default();
-    let git = Git::at(dir.path()).unwrap();
+
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
             redact: Redact::Off,
             display: Display::with(buf.clone()),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub message"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("feat: stub message"))
         },
     )
     .await;

@@ -13,10 +13,10 @@ impl Git {
         let mut result = Vec::new();
 
         for entry in statuses.iter() {
-            let path = match entry.path() {
-                Ok(p) => p.to_string(),
-                Err(_) => continue,
+            let Ok(path) = entry.path() else {
+                continue;
             };
+            let path = path.to_string();
             let flags = entry.status();
 
             if flags.intersects(

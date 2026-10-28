@@ -253,6 +253,11 @@ impl Encoding {
     }
 }
 
+/// Print-mode argv (`-p PROMPT`): single prompt, answer to stdout, exit.
+fn print_args() -> Vec<String> {
+    ["-p", PROMPT_PLACEHOLDER].map(String::from).into()
+}
+
 /// Built-in preset templates offered by `aic setup`, the docs, and `aic use`.
 /// The names are reserved words in `aic use` (see [`PRESETS`]); everywhere
 /// else they are plain snippets — `aic setup` writes the resolved
@@ -299,13 +304,15 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // flag.
         "claude" => (
             "claude",
-            vec![
-                "-p".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-                "--output-format".to_string(),
-                "stream-json".to_string(),
-                "--include-partial-messages".to_string(),
-            ],
+            [
+                "-p",
+                PROMPT_PLACEHOLDER,
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+            ]
+            .map(String::from)
+            .into(),
             Encoding::ClaudeStreamJson,
         ),
         // `exec` runs non-interactively; pin the sandbox to `read-only` so
@@ -329,13 +336,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // [`CodexDecoder`] so the reasoning window is not empty.
         "codex" => (
             "codex",
-            vec![
-                "exec".to_string(),
-                "--json".to_string(),
-                "-s".to_string(),
-                "read-only".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["exec", "--json", "-s", "read-only", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::CodexJson,
         ),
         // `--mode json` emits `message_update` events whose
@@ -347,13 +350,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // print mode is genuinely text-only.
         "pi" => (
             "pi",
-            vec![
-                "--no-tools".to_string(),
-                "--mode".to_string(),
-                "json".to_string(),
-                "-p".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["--no-tools", "--mode", "json", "-p", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::PiStreamJson,
         ),
         // `run --format json` emits NDJSON events; the `text` event's
@@ -366,12 +365,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // the flag.
         "opencode" => (
             "opencode",
-            vec![
-                "run".to_string(),
-                "--format".to_string(),
-                "json".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["run", "--format", "json", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::OpenCodeJson,
         ),
         // oh-my-pi (`omp`) is a pi fork; its `--mode json` emits the same
@@ -385,11 +381,9 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // headless print mode itself, like claude.
         "omp" => (
             "omp",
-            vec![
-                "--mode".to_string(),
-                "json".to_string(),
-                PROMPT_PLACEHOLDER.to_string(),
-            ],
+            ["--mode", "json", PROMPT_PLACEHOLDER]
+                .map(String::from)
+                .into(),
             Encoding::PiStreamJson,
         ),
         // `-p` print mode: one prompt, answer to stdout, exit. Without
@@ -398,20 +392,12 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // shadows the `gemini` *provider* name in `aic use` (presets win); the
         // Google API stays reachable via the provider alias `google` — same
         // pattern as `claude` shadowing the `anthropic` alias.
-        "gemini" => (
-            "gemini",
-            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
-            Encoding::Plain,
-        ),
+        "gemini" => ("gemini", print_args(), Encoding::Plain),
         // `cursor-agent -p` print mode. `--trust` is deliberately omitted:
         // without it the agent runs untrusted (writes and sensitive reads are
         // disabled), which matches the never-agentic stance better than
         // trusting the workspace.
-        "cursor" => (
-            "cursor-agent",
-            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
-            Encoding::Plain,
-        ),
+        "cursor" => ("cursor-agent", print_args(), Encoding::Plain),
         // Windsurf was renamed Devin Desktop (Cognition); its CLI is the
         // `devin` binary, `devin -p "prompt"` print mode (auth via
         // `devin auth login`). The preset keeps the familiar name and maps to
@@ -419,37 +405,21 @@ pub fn cli_preset(name: &str) -> Option<CliSpec> {
         // default (`true`): an untrusted workspace fails print mode rather
         // than silently widening permission (add the flag manually if you
         // want it skipped in CI).
-        "windsurf" => (
-            "devin",
-            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
-            Encoding::Plain,
-        ),
+        "windsurf" => ("devin", print_args(), Encoding::Plain),
         // GitHub Copilot CLI `-p` prompt mode: single prompt, answer to
         // stdout, exit. Without an approval option (`--yolo` or similar),
         // tool use requires an interactive approval headless mode cannot
         // give, so runs stay text-only.
-        "copilot" => (
-            "copilot",
-            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
-            Encoding::Plain,
-        ),
+        "copilot" => ("copilot", print_args(), Encoding::Plain),
         // Trae CLI (`traecli -p "prompt"`, docs.trae.cn). Non-read tools are
         // gated behind a permission prompt (docs.trae.cn/cli_permission-mode),
         // which headless print mode cannot answer — so the run stays
         // text-only without an explicit `--allowed-tool` list.
-        "trae" => (
-            "traecli",
-            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
-            Encoding::Plain,
-        ),
+        "trae" => ("traecli", print_args(), Encoding::Plain),
         // Qwen Code CLI (`qwen -p`, gemini-cli lineage): `-p`/`--prompt`
         // non-interactive mode, default text output. Same headless stance as
         // gemini above (no `--yolo`, so approval-gated tools stay off).
-        "qwen" => (
-            "qwen",
-            vec!["-p".to_string(), PROMPT_PLACEHOLDER.to_string()],
-            Encoding::Plain,
-        ),
+        "qwen" => ("qwen", print_args(), Encoding::Plain),
         _ => return None,
     };
     // Batch CLIs (codex, opencode) stay silent while reasoning — their answer
@@ -547,7 +517,7 @@ pub struct CommandSpec {
 }
 
 /// The outcome of one subprocess run, already classified.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CommandOutput {
     /// Process exited zero.
     pub success: bool,
@@ -800,22 +770,20 @@ impl CliAgent {
         on_output: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<String> {
         let full_prompt = self.build_prompt(user_prompt, mode);
-        let args: Vec<String> = self
+        let args: Vec<String> = if self
             .spec
             .args
             .iter()
-            .map(|a| a.replace(PROMPT_PLACEHOLDER, &full_prompt))
-            .collect();
-        let contains_placeholder = self
-            .spec
-            .args
-            .iter()
-            .any(|a| a.contains(PROMPT_PLACEHOLDER));
-        let args = if contains_placeholder {
-            args
+            .any(|a| a.contains(PROMPT_PLACEHOLDER))
+        {
+            self.spec
+                .args
+                .iter()
+                .map(|a| a.replace(PROMPT_PLACEHOLDER, &full_prompt))
+                .collect()
         } else {
             // No placeholder: append the prompt as a trailing argument.
-            let mut v = args;
+            let mut v = self.spec.args.clone();
             v.push(full_prompt);
             v
         };
@@ -831,38 +799,19 @@ impl CliAgent {
         // preset whose stdout aic does not decode). The four envelope
         // encodings each pick a [`Decoder`] and share one
         // run/decode/error tail ([`Self::run_streamed`]).
-        match self.spec.encoding {
-            Encoding::Plain => {
-                let out = self.runner.run(&spec, timeout, on_output).await?;
-                out.into_result(&self.spec.command)
-            }
-            Encoding::ClaudeStreamJson => {
-                let mut dec = ClaudeDecoder::new();
-                self.run_streamed(&spec, timeout, &mut dec, on_output, "claude stream-json")
-                    .await
-            }
-            Encoding::PiStreamJson => {
-                let mut dec = PiDecoder::new();
-                self.run_streamed(&spec, timeout, &mut dec, on_output, "pi --mode json")
-                    .await
-            }
-            Encoding::OpenCodeJson => {
-                let mut dec = OpenCodeDecoder::new();
-                self.run_streamed(
-                    &spec,
-                    timeout,
-                    &mut dec,
-                    on_output,
-                    "opencode --format json",
-                )
-                .await
-            }
-            Encoding::CodexJson => {
-                let mut dec = CodexDecoder::new();
-                self.run_streamed(&spec, timeout, &mut dec, on_output, "codex --json")
-                    .await
-            }
+        if self.spec.encoding == Encoding::Plain {
+            let out = self.runner.run(&spec, timeout, on_output).await?;
+            return out.into_result(&self.spec.command);
         }
+        let (mut dec, envelope): (Box<dyn Decoder>, _) = match self.spec.encoding {
+            Encoding::ClaudeStreamJson => (Box::new(ClaudeDecoder::new()), "claude stream-json"),
+            Encoding::PiStreamJson => (Box::new(PiDecoder::new()), "pi --mode json"),
+            Encoding::OpenCodeJson => (Box::new(OpenCodeDecoder::new()), "opencode --format json"),
+            Encoding::CodexJson => (Box::new(CodexDecoder::new()), "codex --json"),
+            Encoding::Plain => unreachable!(), // handled by the early return above
+        };
+        self.run_streamed(&spec, timeout, dec.as_mut(), on_output, envelope)
+            .await
     }
 
     /// Shared tail for the streamed encodings: run the CLI forwarding each

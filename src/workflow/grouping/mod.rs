@@ -310,14 +310,6 @@ pub fn group_same_scope(blocks: Vec<Block>) -> Vec<Block> {
             }
         }
     }
-    // A block that ended up with several changes is, by construction, a
-    // cross-file merge — tag it so its reason is honest even though the first
-    // member kept its original heuristic.
-    for b in &mut out {
-        if b.changes.len() > 1 {
-            b.heuristic = BlockHeuristic::SameScope;
-        }
-    }
     out
 }
 
@@ -425,15 +417,19 @@ mod tests {
         }
     }
 
-    fn default_cfg() -> GroupingConfig {
-        GroupingConfig::default()
+    fn cfg_joins_off() -> GroupingConfig {
+        GroupingConfig {
+            join_same_context: false,
+            cross_file_same_scope: false,
+            ..Default::default()
+        }
     }
 
     /// Single hunk, single file → one `Single` block carrying hunk 1.
     #[test]
     fn single_hunk_is_one_single_block() {
         let files = [file("a.rs", &[hunk(1, "", 1, 3)])];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].heuristic, BlockHeuristic::Single);
         assert_eq!(blocks[0].changes[0].file, "a.rs");
@@ -448,7 +444,7 @@ mod tests {
             "a.rs",
             &[hunk(1, "", 1, 4), hunk(2, "", 7, 3)], // gap = 7 - (1+4) = 1
         )];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].heuristic, BlockHeuristic::Adjacency);
         assert_eq!(blocks[0].changes[0].hunks, vec![1, 2]);
@@ -461,7 +457,7 @@ mod tests {
             "a.rs",
             &[hunk(1, "", 1, 5), hunk(2, "", 20, 3)], // gap = 20 - 6 = 14
         )];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].heuristic, BlockHeuristic::Single);
         assert_eq!(blocks[1].heuristic, BlockHeuristic::Single);
@@ -471,11 +467,7 @@ mod tests {
     /// more line does not.
     #[test]
     fn adjacency_gap_boundary_is_inclusive() {
-        let cfg = GroupingConfig {
-            adjacency_gap: 3,
-            join_same_context: false,
-            cross_file_same_scope: false,
-        };
+        let cfg = cfg_joins_off();
         // gap exactly 3 → merge.
         let files = [file(
             "a.rs",
@@ -503,7 +495,7 @@ mod tests {
             "a.rs",
             &[hunk(1, "fn login", 1, 3), hunk(2, "fn login", 500, 3)],
         )];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].heuristic, BlockHeuristic::SameContext);
         assert_eq!(blocks[0].changes[0].hunks, vec![1, 2]);
@@ -512,11 +504,7 @@ mod tests {
     /// With `join_same_context` off, the same-context hunks stay split by gap.
     #[test]
     fn same_context_can_be_disabled() {
-        let cfg = GroupingConfig {
-            adjacency_gap: 3,
-            join_same_context: false,
-            cross_file_same_scope: false,
-        };
+        let cfg = cfg_joins_off();
         let files = [file(
             "a.rs",
             &[hunk(1, "fn login", 1, 3), hunk(2, "fn login", 500, 3)],
@@ -530,7 +518,7 @@ mod tests {
     #[test]
     fn empty_context_does_not_merge() {
         let files = [file("a.rs", &[hunk(1, "", 1, 3), hunk(2, "", 500, 3)])];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         assert_eq!(blocks.len(), 2);
     }
 
@@ -546,7 +534,7 @@ mod tests {
                 hunk(3, "", 90, 3), // gap large → split
             ],
         )];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].heuristic, BlockHeuristic::Adjacency);
         assert_eq!(blocks[0].changes[0].hunks, vec![1, 2]);
@@ -561,7 +549,7 @@ mod tests {
             file("src/auth/a.rs", &[hunk(1, "", 1, 1)]),
             file("src/core/b.rs", &[hunk(1, "", 1, 1)]),
         ];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         assert_eq!(blocks.len(), 2);
     }
 
@@ -571,7 +559,7 @@ mod tests {
     fn cross_file_same_scope_merges() {
         let cfg = GroupingConfig {
             cross_file_same_scope: true,
-            ..default_cfg()
+            ..cfg_joins_off()
         };
         let files = [
             file("src/auth/login.rs", &[hunk(1, "", 1, 1)]),
@@ -591,7 +579,7 @@ mod tests {
     fn root_scope_files_never_merge() {
         let cfg = GroupingConfig {
             cross_file_same_scope: true,
-            ..default_cfg()
+            ..cfg_joins_off()
         };
         let files = [
             file("Cargo.toml", &[hunk(1, "", 1, 1)]),
@@ -607,9 +595,8 @@ mod tests {
     #[test]
     fn same_scope_leaves_split_files_alone() {
         let cfg = GroupingConfig {
-            adjacency_gap: 3,
-            join_same_context: false,
             cross_file_same_scope: true,
+            ..cfg_joins_off()
         };
         let files = [
             // a.rs: two distant hunks → two blocks (split file).
@@ -638,7 +625,7 @@ mod tests {
             file("src/core/b.rs", &[hunk(1, "", 1, 2)]),
             file("Cargo.toml", &[hunk(1, "", 1, 2)]),
         ];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         let plan = blocks_to_plan(&blocks);
         let counts = vec![
             ("src/auth/a.rs".to_string(), 3),
@@ -660,7 +647,7 @@ mod tests {
     #[test]
     fn binary_file_produces_whole_file_block() {
         let files = [file("a.rs", &[hunk(1, "", 1, 2)]), file("blob.bin", &[])];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         let plan = blocks_to_plan(&blocks);
         // Both files appear: validate_batch_plan now rejects an omitted file.
         let counts = vec![("a.rs".to_string(), 1), ("blob.bin".to_string(), 0)];
@@ -698,7 +685,7 @@ mod tests {
                 hunk(4, "", 90, 2),
             ],
         )];
-        let blocks = group(&files, &default_cfg());
+        let blocks = group(&files, &GroupingConfig::default());
         let mut seen = Vec::new();
         for b in &blocks {
             for c in &b.changes {
@@ -717,7 +704,7 @@ mod tests {
     /// No files → no blocks (no panic).
     #[test]
     fn empty_input_yields_no_blocks() {
-        let blocks: Vec<Block> = group(&[], &default_cfg());
+        let blocks: Vec<Block> = group(&[], &GroupingConfig::default());
         assert!(blocks.is_empty());
     }
 
@@ -748,7 +735,7 @@ diff --git a/a.rs b/a.rs\n\
         assert_eq!(gf.hunks[1].index, 2);
         assert_eq!((gf.hunks[1].old_start, gf.hunks[1].old_count), (20, 4));
         // Same context header → one SameContext block despite the gap.
-        let blocks = group(&[gf], &default_cfg());
+        let blocks = group(&[gf], &GroupingConfig::default());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].heuristic, BlockHeuristic::SameContext);
     }

@@ -18,39 +18,30 @@ async fn run_two_batches(dir: &tempfile::TempDir, a: &str, b: &str) -> String {
     std::fs::write(dir.path().join("a.txt"), a).unwrap();
     std::fs::write(dir.path().join("b.txt"), b).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "a.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "b.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add b".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("a.txt", &[1], "add a"),
+        plan_batch("b.txt", &[1], "add b"),
+    ]);
 
     commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("feat: stub"),
-            confirm: Confirm::Disabled,
-        },
+        deps(planner_fixed(plan), messenger_fixed("feat: stub")),
     )
     .await
     .unwrap();
     start
+}
+
+/// `undo_run` with a prompt that always approves, returning the
+/// confirmation label it showed.
+fn undo_approve_capturing_label(git: &Git) -> String {
+    let seen = std::cell::RefCell::new(String::new());
+    undo::undo_run(git, &|label| {
+        *seen.borrow_mut() = label.to_string();
+        Ok(true)
+    })
+    .unwrap();
+    seen.into_inner()
 }
 
 /// The happy path: after a two-commit Run, `aic undo` resets HEAD back to the
@@ -59,23 +50,15 @@ async fn run_two_batches(dir: &tempfile::TempDir, a: &str, b: &str) -> String {
 /// byte for byte.
 #[tokio::test]
 async fn undo_resets_run_commits_and_unstages_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let start = run_two_batches(&dir, "one\n", "two\n").await;
 
-    let git = Git::at(dir.path()).unwrap();
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 2);
     assert!(git.git_dir().join("aic/undo-run").exists());
     assert!(git.git_dir().join("aic/undo-run-tip").exists());
 
-    let seen = std::cell::RefCell::new(String::new());
-    undo::undo_run(&git, &|label| {
-        *seen.borrow_mut() = label.to_string();
-        Ok(true)
-    })
-    .unwrap();
+    let label = undo_approve_capturing_label(&git);
     assert_eq!(git.head_sha().unwrap(), start, "HEAD must be pre-Run");
-    let label = seen.into_inner();
     assert_eq!(label, "undo this aic run?");
     assert!(
         undo::scope_rows(2, 0, true)
@@ -100,16 +83,11 @@ async fn undo_resets_run_commits_and_unstages_changes() {
 /// Declining the confirmation changes nothing: same HEAD, same state file.
 #[tokio::test]
 async fn undo_declined_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let start = run_two_batches(&dir, "one\n", "two\n").await;
 
-    let git = Git::at(dir.path()).unwrap();
     let err = undo::undo_run(&git, &|_| Ok(false)).unwrap_err();
-    assert!(
-        format!("{err:#}").contains("aborted"),
-        "expected abort, got: {err:#}"
-    );
+    err_contains(&err, &["aborted"]);
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 2);
     assert!(git.git_dir().join("aic/undo-run").exists());
 }
@@ -117,15 +95,10 @@ async fn undo_declined_changes_nothing() {
 /// No recorded Run → a clear refusal, not a crash or a silent success.
 #[test]
 fn undo_without_state_file_refuses() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (_dir, git) = with_git(gh::init_test_repo);
 
-    let git = Git::at(dir.path()).unwrap();
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    assert!(
-        format!("{err:#}").contains("no aic run to undo"),
-        "got: {err:#}"
-    );
+    err_contains(&err, &["no aic run to undo"]);
 }
 
 /// A recorded start with zero commits since (the Run recorded, then its
@@ -133,18 +106,12 @@ fn undo_without_state_file_refuses() {
 /// cleared, so the next undo isn't stuck on it.
 #[test]
 fn undo_after_zero_commit_run_clears_stale_state() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (_dir, git) = with_git(gh::init_test_repo);
 
-    let git = Git::at(dir.path()).unwrap();
     undo::record(&git, &git.head_sha().unwrap()).unwrap();
 
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("made no commits") && msg.contains("stale state cleared"),
-        "got: {msg}"
-    );
+    err_contains(&err, &["made no commits", "stale state cleared"]);
     assert!(!git.git_dir().join("aic/undo-run").exists());
 }
 
@@ -153,24 +120,15 @@ fn undo_after_zero_commit_run_clears_stale_state() {
 /// pre-staged files records, commits, and resets back cleanly.
 #[tokio::test]
 async fn undo_covers_staged_single_commit_run() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
-    let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
     std::fs::write(dir.path().join("staged.txt"), "staged\n").unwrap();
     git.add(&["staged.txt"]).unwrap();
 
     commit_run(
         &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: stub"),
-            confirm: Confirm::Disabled,
-        },
+        deps(unreachable_planner(), messenger_fixed("feat: stub")),
     )
     .await
     .unwrap();
@@ -196,29 +154,19 @@ async fn undo_covers_staged_single_commit_run() {
 /// strips them too; their changes still return to the working tree.
 #[tokio::test]
 async fn undo_prompt_discloses_commits_made_after_the_run() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let start = run_two_batches(&dir, "one\n", "two\n").await;
 
     // The user's own commit after the Run — inside the reset's blast
     // radius (start..HEAD), outside the Run's own commits (start..tip).
     std::fs::write(dir.path().join("mine.txt"), "mine\n").unwrap();
-    let git = Git::at(dir.path()).unwrap();
     git.add(&["mine.txt"]).unwrap();
     git.run_git(&["commit", "-m", "user commit"], None, &[])
         .unwrap();
 
-    let seen = std::cell::RefCell::new(String::new());
-    undo::undo_run(&git, &|label| {
-        *seen.borrow_mut() = label.to_string();
-        Ok(true)
-    })
-    .unwrap();
-
-    let label = seen.into_inner();
     // The ask row is the short ADR 0018 label; the scope facts print as
     // muted detail rows above it (asserted via the pure fn).
-    assert_eq!(label, "undo this aic run?");
+    assert_eq!(undo_approve_capturing_label(&git), "undo this aic run?");
     let rows = undo::scope_rows(2, 1, true);
     assert!(
         rows.iter().any(|r| r.contains("3 commits will be reset")
@@ -242,11 +190,9 @@ async fn undo_prompt_discloses_commits_made_after_the_run() {
 /// the start-only proof cannot catch.
 #[tokio::test]
 async fn undo_refuses_when_run_tip_was_rewritten() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
-    let git = Git::at(dir.path()).unwrap();
     git.run_git(
         &["commit", "--amend", "-m", "rewritten run commit"],
         None,
@@ -255,10 +201,7 @@ async fn undo_refuses_when_run_tip_was_rewritten() {
     .unwrap();
 
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    assert!(
-        format!("{err:#}").contains("refusing to undo"),
-        "got: {err:#}"
-    );
+    err_contains(&err, &["refusing to undo"]);
 }
 
 /// Without a tip anchor (a Run predating tip tracking, or a crash between
@@ -266,25 +209,15 @@ async fn undo_refuses_when_run_tip_was_rewritten() {
 /// must disclose that instead of mislabeling every commit as the Run's own.
 #[test]
 fn undo_without_tip_discloses_unknown_split() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
-    let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
     undo::record(&git, &start).unwrap(); // start anchor only — no tip file
     std::fs::write(dir.path().join("c.txt"), "c\n").unwrap();
     git.add(&["c.txt"]).unwrap();
     git.run_git(&["commit", "-m", "x"], None, &[]).unwrap();
 
-    let seen = std::cell::RefCell::new(String::new());
-    undo::undo_run(&git, &|label| {
-        *seen.borrow_mut() = label.to_string();
-        Ok(true)
-    })
-    .unwrap();
-
-    let label = seen.into_inner();
-    assert_eq!(label, "undo this aic run?");
+    assert_eq!(undo_approve_capturing_label(&git), "undo this aic run?");
     let rows = undo::scope_rows(1, 0, false);
     assert!(
         rows.iter().any(
@@ -301,11 +234,9 @@ fn undo_without_tip_discloses_unknown_split() {
 /// orphaning commits the user never meant to hand back.
 #[tokio::test]
 async fn undo_refuses_when_history_rewritten_past_start() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let _start = run_two_batches(&dir, "one\n", "two\n").await;
 
-    let git = Git::at(dir.path()).unwrap();
     // Rewind past the Run's commits to the recorded start (the baseline),
     // then rewrite the baseline itself — the recorded start is no longer
     // an ancestor of HEAD.
@@ -320,10 +251,7 @@ async fn undo_refuses_when_history_rewritten_past_start() {
     .unwrap();
 
     let err = undo::undo_run(&git, &|_| Ok(true)).unwrap_err();
-    assert!(
-        format!("{err:#}").contains("refusing to undo"),
-        "got: {err:#}"
-    );
+    err_contains(&err, &["refusing to undo"]);
 }
 
 /// A Run that aborts mid-loop (batch 2's draft fails after batch 1
@@ -331,48 +259,21 @@ async fn undo_refuses_when_history_rewritten_past_start() {
 /// commit, not after the Run.
 #[tokio::test]
 async fn partial_run_is_undoable_for_landed_batches() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
-    let git = Git::at(dir.path()).unwrap();
     let start = git.head_sha().unwrap();
     std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
     std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "a.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "b.txt".into(),
-                    hunks: vec![1],
-                }],
-                reason: Some("add b".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("a.txt", &[1], "add a"),
+        plan_batch("b.txt", &[1], "add b"),
+    ]);
     // Drafts fan out concurrently (ADR 0014): both batches' messengers run
     // before any commit, so an error on the second draft surfaces after
     // batch 1 has committed — the partial-failure contract under test.
     let (messenger, _calls) = messenger_then_error(1);
-    let result = commit_run(
-        &git,
-        RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger,
-            confirm: Confirm::Disabled,
-        },
-    )
-    .await;
+    let result = commit_run(&git, deps(planner_fixed(plan), messenger)).await;
     assert!(result.is_err(), "partial run must error");
 
     assert_eq!(git.commit_count(&start, "HEAD").unwrap(), 1);
@@ -387,9 +288,7 @@ async fn partial_run_is_undoable_for_landed_batches() {
 /// non-empty garbage shape through the ancestry proof.
 #[test]
 fn undo_with_malformed_state_file_refuses_without_mutation() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
-    let git = Git::at(dir.path()).unwrap();
+    let (_dir, git) = with_git(gh::init_test_repo);
     let head = git.head_sha().unwrap();
 
     let state = git.git_dir().join("aic/undo-run");
@@ -398,11 +297,7 @@ fn undo_with_malformed_state_file_refuses_without_mutation() {
 
     let err =
         undo::undo_run(&git, &|_| Ok(true)).expect_err("a garbage anchor must refuse, not succeed");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("malformed commit id"),
-        "expected the anchor to be named malformed, got: {msg}"
-    );
+    err_contains(&err, &["malformed commit id"]);
 
     assert_eq!(git.head_sha().unwrap(), head, "no reset may happen");
     assert!(state.exists(), "the state file must be left for inspection");
@@ -414,26 +309,19 @@ fn undo_with_malformed_state_file_refuses_without_mutation() {
 /// one-Run-deep by design — the reset target is the latest start anchor.
 #[tokio::test]
 async fn undo_after_a_second_run_resets_only_the_latest_run() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let run1_start = run_two_batches(&dir, "one\n", "two\n").await;
 
     // Second Run over both files again — same two-batch shape, fresh edits.
     let run2_start = run_two_batches(&dir, "one again\n", "two again\n").await;
 
-    let git = Git::at(dir.path()).unwrap();
     assert_eq!(
         git.commit_count(&run1_start, "HEAD").unwrap(),
         4,
         "both runs' commits are in history before undo"
     );
 
-    let seen = std::cell::RefCell::new(String::new());
-    undo::undo_run(&git, &|label| {
-        *seen.borrow_mut() = label.to_string();
-        Ok(true)
-    })
-    .unwrap();
+    let label = undo_approve_capturing_label(&git);
 
     assert_eq!(git.head_sha().unwrap(), run2_start, "HEAD is run 2's start");
     assert_eq!(
@@ -442,7 +330,6 @@ async fn undo_after_a_second_run_resets_only_the_latest_run() {
         "run 1's commits must survive the undo of run 2"
     );
     assert_eq!(file_at_ref(dir.path(), "HEAD", "a.txt"), "one\n");
-    let label = seen.into_inner();
     assert_eq!(label, "undo this aic run?");
     assert!(
         undo::scope_rows(2, 0, true)

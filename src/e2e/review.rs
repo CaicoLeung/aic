@@ -8,61 +8,28 @@
 
 use super::common::*;
 
-/// A two-Batch plan over the two-file fixture: alpha.txt hunk 1 and
-/// beta.txt hunk 1, each in its own Batch.
-fn two_batch_plan() -> generator::BatchPlanOutput {
-    generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("alpha".to_string()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("beta".to_string()),
-            },
-        ],
-    }
-}
-
 /// Merge then Continue: the plan folds into one Batch, so the Run lands one
 /// commit carrying both files — the Drafted Message is drafted for the
 /// merged diff (one messenger call), not two per-Batch messages.
 #[tokio::test]
 async fn batch_review_merge_then_continue_commits_one_combined_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            messenger: messenger_fixed("feat: combined change"),
-            confirm: Confirm::Disabled,
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
             },
+            ..deps(
+                planner_fixed(two_file_two_batch_plan()),
+                messenger_fixed("feat: combined change"),
+            )
         },
+        1,
+        "a merged plan must land exactly one combined commit",
     )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "a merged plan must land exactly one combined commit"
-    );
+    .await;
     assert_eq!(file_at_ref(dir.path(), "HEAD", "alpha.txt"), "a1\n");
     assert_eq!(file_at_ref(dir.path(), "HEAD", "beta.txt"), "b1\n");
     assert!(worktree_is_empty(dir.path()), "both files fully committed");
@@ -73,135 +40,33 @@ async fn batch_review_merge_then_continue_commits_one_combined_commit() {
 /// committed, both changes exactly as they started.
 #[tokio::test]
 async fn batch_review_abort_stages_nothing_and_commits_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (dir, git) = with_git(two_file_unstaged_repo);
 
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
         RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            // Abort precedes drafting — the messenger must never be called.
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Abort]),
             },
+            // Abort precedes drafting — the messenger must never be called.
+            ..deps(
+                planner_fixed(two_file_two_batch_plan()),
+                unreachable_messenger(),
+            )
         },
     )
     .await
     .expect_err("aborting the Batch Review must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted — no commit made"),
-        "expected the clean abort wording, got: {msg}"
-    );
+    err_contains(&err, &["aborted — no commit made"]);
 
-    assert_eq!(
-        commit_count(dir.path()),
-        before,
-        "an aborted review must not create a commit"
-    );
-    // Nothing staged, nothing committed: both changes stay unstaged exactly
-    // as the Run found them (issue #157's abort acceptance contract).
-    assert_eq!(
-        status_porcelain(dir.path()).trim_end(),
-        " M alpha.txt\n M beta.txt",
-        "the working tree must be untouched, got: {:?}",
-        status_porcelain(dir.path())
-    );
+    assert_abort_untouched(&dir, before);
 }
 
-/// Undo: a merge followed by Undo last merge restores the original plan,
-/// so the Run lands the two separately-planned commits — the go-back the
-/// commit-confirmation menu pattern calls for, instead of aborting the
-/// whole Run over a mistaken merge.
-#[tokio::test]
-async fn batch_review_undo_restores_the_two_batch_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
-
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    commit_run(
-        &git,
-        RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            messenger: messenger_fixed("feat: separate change"),
-            confirm: Confirm::Disabled,
-            review: BatchReview::Interactive {
-                menu: review_queue(vec![
-                    ReviewChoice::Merge(0, 1),
-                    ReviewChoice::UndoMerge,
-                    ReviewChoice::Continue,
-                ]),
-            },
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 2,
-        "undo must restore the original two-Batch plan"
-    );
-    assert!(worktree_is_empty(dir.path()), "both files fully committed");
-}
-
-/// A single-Batch plan still shows the menu (the plan is listed and
-/// abortable) — issue #157's "shows the plan" for opted-in users even when
-/// nothing is mergeable. Abort on it leaves everything untouched.
-#[tokio::test]
-async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
-
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let one_batch = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                },
-            ],
-            reason: Some("everything".to_string()),
-        }],
-    };
-    let err = commit_run(
-        &git,
-        RunDeps {
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(one_batch),
-            // Abort precedes drafting — the messenger must never be called.
-            messenger: unreachable_messenger(),
-            confirm: Confirm::Disabled,
-            review: BatchReview::Interactive {
-                menu: review_queue(vec![ReviewChoice::Abort]),
-            },
-        },
-    )
-    .await
-    .expect_err("aborting the single-Batch review must abort the Run");
-    assert!(
-        format!("{err:#}").contains("aborted — no commit made"),
-        "expected the clean abort wording, got: {err:#}"
-    );
+/// The abort contract both abort tests pin: no new commit, and the working
+/// tree left exactly as the Run found it (issue #157).
+fn assert_abort_untouched(dir: &tempfile::TempDir, before: usize) {
     assert_eq!(
         commit_count(dir.path()),
         before,
@@ -214,6 +79,65 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
     );
 }
 
+/// Undo: a merge followed by Undo last merge restores the original plan,
+/// so the Run lands the two separately-planned commits — the go-back the
+/// commit-confirmation menu pattern calls for, instead of aborting the
+/// whole Run over a mistaken merge.
+#[tokio::test]
+async fn batch_review_undo_restores_the_two_batch_plan() {
+    let dir = with_repo(two_file_unstaged_repo);
+
+    run_expect_commits(
+        dir.path(),
+        RunDeps {
+            review: BatchReview::Interactive {
+                menu: review_queue(vec![
+                    ReviewChoice::Merge(0, 1),
+                    ReviewChoice::UndoMerge,
+                    ReviewChoice::Continue,
+                ]),
+            },
+            ..deps(
+                planner_fixed(two_file_two_batch_plan()),
+                messenger_fixed("feat: separate change"),
+            )
+        },
+        2,
+        "undo must restore the original two-Batch plan",
+    )
+    .await;
+    assert!(worktree_is_empty(dir.path()), "both files fully committed");
+}
+
+/// A single-Batch plan still shows the menu (the plan is listed and
+/// abortable) — issue #157's "shows the plan" for opted-in users even when
+/// nothing is mergeable. Abort on it leaves everything untouched.
+#[tokio::test]
+async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
+    let (dir, git) = with_git(two_file_unstaged_repo);
+
+    let before = commit_count(dir.path());
+
+    let one_batch = plan(vec![plan_multi_batch(
+        &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+        "everything",
+    )]);
+    let err = commit_run(
+        &git,
+        RunDeps {
+            review: BatchReview::Interactive {
+                menu: review_queue(vec![ReviewChoice::Abort]),
+            },
+            // Abort precedes drafting — the messenger must never be called.
+            ..deps(planner_fixed(one_batch), unreachable_messenger())
+        },
+    )
+    .await
+    .expect_err("aborting the single-Batch review must abort the Run");
+    err_contains(&err, &["aborted — no commit made"]);
+    assert_abort_untouched(&dir, before);
+}
+
 /// The review gate applies to whichever plan proceeds — the LLM's or the
 /// deterministic fallback's (`run/mod.rs` promises "the LLM's or the
 /// fallback's"): an invalid plan (zero batches over real work) warns,
@@ -223,8 +147,7 @@ async fn batch_review_single_batch_plan_still_aborts_from_the_menu() {
 /// without this pin.
 #[tokio::test]
 async fn batch_review_operates_on_the_deterministic_fallback_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
     // Two single-hunk edits in different directories: the conservative
     // fallback keeps them as two batches, so a Merge choice proves the menu
     // held the fallback plan (a one-batch regroup could not merge).
@@ -237,26 +160,25 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
     std::fs::write(dir.path().join("src/a.rs"), "new a\n").unwrap();
     std::fs::write(dir.path().join("docs/b.md"), "new b\n").unwrap();
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
     let buf = BufferWrite::default();
 
-    commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
             },
-            redact: Redact::On,
             display: Display::with(buf.clone()),
             // Zero batches over real work — the most degenerate invalid plan.
-            planner: planner_fixed(generator::BatchPlanOutput { batches: vec![] }),
-            messenger: messenger_fixed("feat: combined fallback work"),
-            confirm: Confirm::Disabled,
+            ..deps(
+                planner_fixed(plan(vec![])),
+                messenger_fixed("feat: combined fallback work"),
+            )
         },
+        1,
+        "the merged fallback plan must land exactly one commit",
     )
-    .await
-    .unwrap();
+    .await;
 
     // The fallback notice rendered, then the menu merged the fallback's two
     // batches into one commit carrying both files.
@@ -266,11 +188,6 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
             .iter()
             .any(|l| l.contains("Regrouping deterministically")),
         "expected the fallback notice before the review menu, got: {lines:?}"
-    );
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the merged fallback plan must land exactly one commit"
     );
     assert_eq!(file_at_ref(dir.path(), "HEAD", "src/a.rs"), "new a\n");
     assert_eq!(file_at_ref(dir.path(), "HEAD", "docs/b.md"), "new b\n");
@@ -283,36 +200,27 @@ async fn batch_review_operates_on_the_deterministic_fallback_plan() {
 /// rendering breaks the other when both are enabled.
 #[tokio::test]
 async fn batch_review_merge_then_confirm_commit_lands_the_combined_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let dir = with_repo(two_file_unstaged_repo);
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
             review: BatchReview::Interactive {
                 menu: review_queue(vec![ReviewChoice::Merge(0, 1), ReviewChoice::Continue]),
             },
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(two_batch_plan()),
-            messenger: messenger_fixed("feat: combined change"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                planner_fixed(two_file_two_batch_plan()),
+                messenger_fixed("feat: combined change"),
+            )
         },
+        1,
+        "review merge + confirm Commit must land the one combined commit",
     )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "review merge + confirm Commit must land the one combined commit"
-    );
+    .await;
     assert_eq!(file_at_ref(dir.path(), "HEAD", "alpha.txt"), "a1\n");
     assert_eq!(file_at_ref(dir.path(), "HEAD", "beta.txt"), "b1\n");
     assert!(worktree_is_empty(dir.path()), "both files fully committed");

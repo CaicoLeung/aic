@@ -7,12 +7,18 @@ use git2::{DiffFormat, DiffLineType};
 use std::collections::HashMap;
 
 impl Git {
-    pub fn diff(&self, path: Option<&str>) -> anyhow::Result<String> {
-        let repo = &self.repo;
-        let head_tree = match repo.head() {
+    /// HEAD's tree, or `None` in a repo with no commits yet — every staged
+    /// path then counts as a new file.
+    fn head_tree(&self) -> anyhow::Result<Option<git2::Tree<'_>>> {
+        Ok(match self.repo.head() {
             Ok(r) => Some(r.peel_to_tree().context("failed to peel HEAD to tree")?),
             Err(_) => None,
-        };
+        })
+    }
+
+    pub fn diff(&self, path: Option<&str>) -> anyhow::Result<String> {
+        let repo = &self.repo;
+        let head_tree = self.head_tree()?;
 
         let mut opts = git2::DiffOptions::new();
         opts.include_untracked(true);
@@ -87,10 +93,7 @@ impl Git {
     /// what the next commit would land. Mirrors [`Git::diff`]'s head-less
     /// handling: with no HEAD, every staged path counts as a new file.
     pub fn staged_stats(&self, paths: &[String]) -> anyhow::Result<Vec<FileStats>> {
-        let head_tree = match self.repo.head() {
-            Ok(r) => Some(r.peel_to_tree().context("failed to peel HEAD to tree")?),
-            Err(_) => None,
-        };
+        let head_tree = self.head_tree()?;
         let mut opts = git2::DiffOptions::new();
         opts.include_untracked(true);
         let index = self.index()?;
@@ -144,13 +147,7 @@ impl Git {
             .iter()
             .map(|p| FileStats {
                 path: p.clone(),
-                added: 0,
-                deleted: 0,
-                new: false,
-                removed: false,
-                binary: false,
-                old_size: 0,
-                new_size: 0,
+                ..Default::default()
             })
             .collect();
         let mut new_flags = vec![false; paths.len()];
@@ -240,10 +237,6 @@ fn format_line(line: &git2::DiffLine, output: &mut String) {
 }
 
 fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {
-    if diff.deltas().len() == 0 {
-        return Ok(String::new());
-    }
-
     let mut output = String::new();
     diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
         format_line(&line, &mut output);
@@ -255,13 +248,6 @@ fn format_diff(diff: &git2::Diff) -> anyhow::Result<String> {
 }
 
 fn format_diff_for_path(diff: &git2::Diff, path: &str) -> anyhow::Result<String> {
-    let matched = diff
-        .deltas()
-        .any(|d| d.new_file().path().is_some_and(|p| p == Path::new(path)));
-    if !matched {
-        return Ok(String::new());
-    }
-
     let mut output = String::new();
     diff.print(DiffFormat::Patch, |delta, _hunk, line| {
         if delta.new_file().path().is_none_or(|p| p != Path::new(path)) {

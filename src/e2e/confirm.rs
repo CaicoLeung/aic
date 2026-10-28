@@ -13,36 +13,29 @@ use super::common::*;
 /// re-run can retry.
 #[tokio::test]
 async fn commit_confirm_abort_aborts_staged_single_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
+        // staged path must NOT plan,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(), // staged path must NOT plan,
-            messenger: messenger_fixed("feat: staged change"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                unreachable_planner(),
+                messenger_fixed("feat: staged change"),
+            )
         },
     )
     .await
     .expect_err("aborting the confirmation must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted — no commit made"),
-        "expected the 'no commit made' abort, got: {msg}"
-    );
+    err_contains(&err, &["aborted — no commit made"]);
 
     // No commit landed.
     assert_eq!(
@@ -66,34 +59,28 @@ async fn commit_confirm_abort_aborts_staged_single_commit() {
 /// so a re-run sees exactly the same partial staging.
 #[tokio::test]
 async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
     let (_a_state, b_state) = partial_stage_two_hunk_file(dir.path());
 
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(), // staged path must NOT plan,
-            messenger: messenger_fixed("feat: staged hunk only"),
+            // staged path must NOT plan,
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                unreachable_planner(),
+                messenger_fixed("feat: staged hunk only"),
+            )
         },
     )
     .await
     .expect_err("aborting the confirmation must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("aborted — no commit made"),
-        "expected the 'no commit made' abort, got: {msg}"
-    );
+    err_contains(&err, &["aborted — no commit made"]);
 
     // No commit landed.
     assert_eq!(
@@ -124,43 +111,30 @@ async fn commit_confirm_abort_keeps_hunk_level_staging_selection() {
 /// line — output includes the preview block.
 #[tokio::test]
 async fn commit_confirm_commit_commits_staged_single_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
-    let git = Git::at(dir.path()).unwrap();
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display,
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: staged change"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(
+                unreachable_planner(),
+                messenger_fixed("feat: staged change"),
+            )
         },
+        1,
+        "the confirmed staged commit must land",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "a confirmed commit should land: {:?}",
-        result
-    );
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the confirmed staged commit must land"
-    );
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: staged change",
@@ -195,44 +169,28 @@ async fn commit_confirm_commit_commits_staged_single_commit() {
 /// shows after each draft, and the second draft is what lands.
 #[tokio::test]
 async fn commit_confirm_regenerate_then_commit_lands_new_message() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
     let buf = BufferWrite::default();
     let display = Display::with(buf.clone());
-    let git = Git::at(dir.path()).unwrap();
     let (messenger, calls) = messenger_sequence(&["feat: first draft", "feat: second draft"]);
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display,
-            planner: unreachable_planner(),
-            messenger,
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(unreachable_planner(), messenger)
         },
+        1,
+        "exactly one commit must land",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "Regenerate then Commit should succeed: {:?}",
-        result
-    );
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "exactly one commit must land"
-    );
     assert_eq!(*calls.lock(), 2, "the messenger must run once per draft");
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
@@ -265,42 +223,31 @@ async fn commit_confirm_regenerate_then_commit_lands_new_message() {
 /// menu [Regenerate, Commit] flow drafts twice and the second message lands.
 #[tokio::test]
 async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(
-        dir.path().join("tracked.txt"),
+    stage_file(
+        dir.path(),
+        "tracked.txt",
         "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
-    )
-    .unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    );
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
     let (messenger, calls) = messenger_sequence(&["feat: first draft", "feat: second draft"]);
 
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            review: BatchReview::Disabled,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger,
+            redact: Redact::Off,
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Regenerate, ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
-            redact: Redact::Off,
+            ..deps(unreachable_planner(), messenger)
         },
+        1,
+        "one commit lands",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "--no-redact + Regenerate must complete the Run: {:?}",
-        result
-    );
     assert_eq!(*calls.lock(), 2, "the redraft must reach the messenger");
-    assert_eq!(commit_count(dir.path()), before + 1, "one commit lands");
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: second draft",
@@ -312,41 +259,23 @@ async fn no_redact_run_survives_confirm_regenerate_on_secret_shaped_diff() {
 /// lands (subject + body).
 #[tokio::test]
 async fn commit_confirm_edit_then_commit_lands_edited_message() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: draft"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
                 editor: editor_fixed("feat: edited", Some("edited body")),
             },
+            ..deps(unreachable_planner(), messenger_fixed("feat: draft"))
         },
+        1,
+        "the edited commit must land",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "Edit then Commit should succeed: {:?}",
-        result
-    );
-
-    assert_eq!(
-        commit_count(dir.path()),
-        before + 1,
-        "the edited commit must land"
-    );
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: edited\n\nedited body",
@@ -358,37 +287,23 @@ async fn commit_confirm_edit_then_commit_lands_edited_message() {
 /// cancel path), so the original message is what lands.
 #[tokio::test]
 async fn commit_confirm_edit_cancel_keeps_original_message() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let dir = with_repo(gh::init_test_repo);
 
-    std::fs::write(dir.path().join("tracked.txt"), "staged change\n").unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
+    stage_file(dir.path(), "tracked.txt", "staged change\n");
 
-    let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
-
-    let result = commit_run(
-        &git,
+    run_expect_commits(
+        dir.path(),
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: unreachable_planner(),
-            messenger: messenger_fixed("feat: draft"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Edit, ConfirmChoice::Commit]),
                 editor: editor_cancel(),
             },
+            ..deps(unreachable_planner(), messenger_fixed("feat: draft"))
         },
+        1,
+        "the commit must land",
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "a cancelled edit then Commit should succeed: {:?}",
-        result
-    );
-
-    assert_eq!(commit_count(dir.path()), before + 1, "the commit must land");
     assert_eq!(
         git_out(dir.path(), &["log", "-1", "--pretty=%B"]).trim(),
         "feat: draft",
@@ -401,51 +316,29 @@ async fn commit_confirm_edit_cancel_keeps_original_message() {
 /// stays staged.
 #[tokio::test]
 async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
     // One file, two change sites far enough apart that git emits two hunks.
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
     let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("chore: stub"))
         },
     )
     .await
@@ -505,51 +398,27 @@ async fn commit_confirm_abort_on_later_batch_keeps_earlier_commits() {
 /// working tree ends clean.
 #[tokio::test]
 async fn commit_confirm_commits_every_batch() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (dir, git) = with_git(two_file_unstaged_repo);
 
     // One file per batch — batch 1 = alpha, batch 2 = beta.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change alpha".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change beta".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("alpha.txt", &[1], "change alpha"),
+        plan_batch("beta.txt", &[1], "change beta"),
+    ]);
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Commit, ConfirmChoice::Commit]),
                 editor: unreachable_editor(),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("chore: stub"))
         },
     )
     .await;
-    assert!(
-        result.is_ok(),
-        "confirming every batch should succeed: {:?}",
-        result
-    );
+    assert_ok(&result, "confirming every batch should succeed");
 
     assert_eq!(
         commit_count(dir.path()),
@@ -577,42 +446,26 @@ async fn commit_confirm_commits_every_batch() {
 /// only the preview caller) fails here, where the per-call unit test cannot.
 #[tokio::test]
 async fn multi_file_batch_landed_line_shows_sigma_total() {
-    let dir = tempfile::tempdir().unwrap();
-    two_file_unstaged_repo(dir.path());
+    let (_dir, git) = with_git(two_file_unstaged_repo);
 
     // One batch carrying both files — a genuine multi-file commit.
-    let plan = generator::BatchPlanOutput {
-        batches: vec![generator::BatchPlanBatch {
-            changes: vec![
-                generator::BatchChange {
-                    file: "alpha.txt".to_string(),
-                    hunks: vec![1],
-                },
-                generator::BatchChange {
-                    file: "beta.txt".to_string(),
-                    hunks: vec![1],
-                },
-            ],
-            reason: Some("both files together".into()),
-        }],
-    };
-    let git = Git::at(dir.path()).unwrap();
+    let plan = plan(vec![plan_multi_batch(
+        &[("alpha.txt", &[1]), ("beta.txt", &[1])],
+        "both files together",
+    )]);
     let buf = BufferWrite::default();
+
     let display = Display::with(buf.clone());
 
     let result = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
             display,
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: both"),
-            confirm: Confirm::Disabled,
+            ..deps(planner_fixed(plan), messenger_fixed("chore: both"))
         },
     )
     .await;
-    assert!(result.is_ok(), "multi-file batch should land: {:?}", result);
+    assert_ok(&result, "multi-file batch should land");
 
     let lines = buf.lines();
     assert!(
@@ -635,63 +488,33 @@ async fn multi_file_batch_landed_line_shows_sigma_total() {
 /// reports zero committed, and the declined hunk stays staged.
 #[tokio::test]
 async fn commit_confirm_abort_first_batch_commits_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    gh::init_test_repo(dir.path());
+    let (dir, git) = with_git(gh::init_test_repo);
 
     let pad: String = (0..8).map(|i| format!("pad{i}\n")).collect();
     let base = format!("a0\n{pad}c0\n");
     let changed = format!("a1\n{pad}c1\n");
-    std::fs::write(dir.path().join("tracked.txt"), &base).unwrap();
-    git_in(dir.path(), &["add", "tracked.txt"]);
-    git_in(dir.path(), &["commit", "-m", "base"]);
+    commit_file(dir.path(), "tracked.txt", &base, "base");
     std::fs::write(dir.path().join("tracked.txt"), &changed).unwrap();
 
-    let plan = generator::BatchPlanOutput {
-        batches: vec![
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![1],
-                }],
-                reason: Some("change a".into()),
-            },
-            generator::BatchPlanBatch {
-                changes: vec![generator::BatchChange {
-                    file: "tracked.txt".to_string(),
-                    hunks: vec![2],
-                }],
-                reason: Some("change c".into()),
-            },
-        ],
-    };
+    let plan = plan(vec![
+        plan_batch("tracked.txt", &[1], "change a"),
+        plan_batch("tracked.txt", &[2], "change c"),
+    ]);
     let before = commit_count(dir.path());
-    let git = Git::at(dir.path()).unwrap();
 
     let err = commit_run(
         &git,
         RunDeps {
-            review: BatchReview::Disabled,
-            redact: Redact::On,
-            display: sink(),
-            planner: planner_fixed(plan),
-            messenger: messenger_fixed("chore: stub"),
             confirm: Confirm::Interactive {
                 menu: menu_queue(vec![ConfirmChoice::Abort]),
                 editor: unreachable_editor(),
             },
+            ..deps(planner_fixed(plan), messenger_fixed("chore: stub"))
         },
     )
     .await
     .expect_err("aborting batch 1 must abort the Run");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("declined on batch 1 of 2"),
-        "expected batch-1 decline, got: {msg}"
-    );
-    assert!(
-        msg.contains("0 batches committed"),
-        "expected 0 committed, got: {msg}"
-    );
+    err_contains(&err, &["declined on batch 1 of 2", "0 batches committed"]);
 
     assert_eq!(
         commit_count(dir.path()),

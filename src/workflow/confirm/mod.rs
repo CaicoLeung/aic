@@ -142,13 +142,9 @@ pub(crate) async fn confirm_draft(
             ConfirmChoice::Commit => return Ok((message, body, rows)),
             ConfirmChoice::Regenerate => {
                 display.clear_last(rows);
-                if let Some(f) = frame {
-                    f.live_note("Re-generating commit message");
-                }
+                frame.inspect(|f| f.live_note("Re-generating commit message"));
                 let result = messenger(diff.clone()).await?;
-                if let Some(f) = frame {
-                    f.clear_live_note();
-                }
+                frame.inspect(|f| f.clear_live_note());
                 message = result.message;
                 body = result.body;
             }
@@ -158,13 +154,9 @@ pub(crate) async fn confirm_draft(
                 // one frame first and repaints with the menu state restored
                 // on exit (ADR 0018) — the timeline never scrolls away
                 // mid-edit.
-                if let Some(f) = frame {
-                    f.suspend();
-                }
+                frame.inspect(|f| f.suspend());
                 let edited = editor(&message, body.as_deref());
-                if let Some(f) = frame {
-                    f.resume();
-                }
+                frame.inspect(|f| f.resume());
                 (message, body) = edited?;
             }
             ConfirmChoice::Abort => return Err(CommitDeclined.into()),
@@ -236,12 +228,9 @@ fn edit_message(subject: &str, body: Option<&str>) -> anyhow::Result<(String, Op
 /// sees in the editor is exactly the (subject, body) pair that would commit.
 fn message_to_edit(subject: &str, body: Option<&str>) -> String {
     let mut text = subject.to_string();
-    if let Some(b) = body {
-        let trimmed = b.trim();
-        if !trimmed.is_empty() {
-            text.push('\n');
-            text.push_str(trimmed);
-        }
+    if let Some(b) = body.filter(|b| !b.trim().is_empty()) {
+        text.push('\n');
+        text.push_str(b.trim());
     }
     text
 }
@@ -250,27 +239,30 @@ fn message_to_edit(subject: &str, body: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
-    /// the file path (the `code --wait` case). Verified with a fake editor.
     #[cfg(unix)]
-    #[test]
-    fn edit_message_honors_editor_arguments() {
+    fn with_fake_editor(script_body: &str, f: impl FnOnce(&str)) {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-editor.sh");
-        // Fake editor: the file path is the last argument; rewrite it in place.
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nfor last; do :; done\nprintf 'fix: args\\n' > \"$last\"\n",
-        )
-        .unwrap();
+        std::fs::write(&script, script_body).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let editor = format!("{} --wait", script.display());
         temp_env::with_vars(
             [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
-            || {
+            || f(&editor),
+        );
+    }
+    /// The `edit` crate's temp-file editor honors `$EDITOR` arguments before
+    /// the file path (the `code --wait` case). Verified with a fake editor.
+    #[cfg(unix)]
+    #[test]
+    fn edit_message_honors_editor_arguments() {
+        // Fake editor: the file path is the last argument; rewrite it in place.
+        with_fake_editor(
+            "#!/bin/sh\nfor last; do :; done\nprintf 'fix: args\\n' > \"$last\"\n",
+            |_| {
                 let (subject, body) = edit_message("feat: draft", None).unwrap();
                 assert_eq!(subject, "fix: args");
                 assert_eq!(body, None);
@@ -283,30 +275,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn edit_message_empty_edit_keeps_original() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-editor.sh");
         // Fake editor: blanks the file (subject becomes empty).
-        std::fs::write(&script, "#!/bin/sh\nfor last; do :; done\n: > \"$last\"\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let editor = format!("{} --wait", script.display());
-        temp_env::with_vars(
-            [("VISUAL", None), ("EDITOR", Some(editor.as_str()))],
-            || {
-                let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
-                assert_eq!(
-                    subject, "feat: draft",
-                    "an empty edit must keep the draft subject"
-                );
-                assert_eq!(
-                    body.as_deref(),
-                    Some("draft body"),
-                    "an empty edit must keep the draft body"
-                );
-            },
-        );
+        with_fake_editor("#!/bin/sh\nfor last; do :; done\n: > \"$last\"\n", |_| {
+            let (subject, body) = edit_message("feat: draft", Some("draft body")).unwrap();
+            assert_eq!(
+                subject, "feat: draft",
+                "an empty edit must keep the draft subject"
+            );
+            assert_eq!(
+                body.as_deref(),
+                Some("draft body"),
+                "an empty edit must keep the draft body"
+            );
+        });
     }
 
     /// The confirm menu's label↔choice table is the single source — every row
@@ -322,19 +303,11 @@ mod tests {
         // Every label is bound to a distinct choice — no positional coupling.
         let choices: Vec<_> = CONFIRM_ACTIONS.iter().map(|(_, c)| *c).collect();
         assert_eq!(choices.len(), 4);
-        assert_eq!(
-            choices
-                .iter()
-                .filter(|&&c| c == ConfirmChoice::Commit)
-                .count(),
-            1
-        );
-        assert_eq!(
-            choices
-                .iter()
-                .filter(|&&c| c == ConfirmChoice::Regenerate)
-                .count(),
-            1
-        );
+        for (i, c) in choices.iter().enumerate() {
+            assert!(
+                !choices[..i].contains(c),
+                "confirm choices must be distinct"
+            );
+        }
     }
 }

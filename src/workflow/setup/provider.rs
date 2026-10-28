@@ -6,7 +6,7 @@
 use super::finalize::{field_initial, mask_key, switch_provider};
 use super::verify::step_verify;
 use super::*;
-use crate::core::config::{Source, resolve_api_key, resolve_base_url, resolve_field};
+use crate::core::config::{Source, resolve_base_url, resolve_field};
 use crate::llm::BaseUrlRequirement;
 
 /// Screen label shared by every screen in the provider flow — a const so the
@@ -76,12 +76,9 @@ fn preview_model(p: Provider, draft: &Draft) -> String {
 pub(super) fn provider_choice_label(p: Provider, draft: &Draft) -> String {
     let model = preview_model(p, draft);
     if model.is_empty() {
-        format!(
-            "{ICON_SELECT} {}  (no default — you'll pick a model)",
-            p.display()
-        )
+        format!("{DOT} {}  (no default — you'll pick a model)", p.display())
     } else {
-        format!("{ICON_SELECT} {}  ({model})", p.display())
+        format!("{DOT} {}  ({model})", p.display())
     }
 }
 /// A configurable field inside the AI-provider sub-menu.
@@ -139,16 +136,17 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
             Step::ApiKey => {
                 // Effective key for display: the draft (a user edit or the
                 // seeded config value).
-                let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
+                let (key, _) =
+                    resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
                 entries.push(ProviderEntry::ApiKey);
-                labels.push(format!("{ICON_API_KEY} API key — {}", api_key_label(&key)));
+                labels.push(format!("{DOT} API key — {}", api_key_label(&key)));
             }
             Step::BaseUrl => {
                 let (url, source) =
                     resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
                 entries.push(ProviderEntry::BaseUrl);
                 labels.push(format!(
-                    "{ICON_BASE_URL} Base URL — {}",
+                    "{DOT} Base URL — {}",
                     base_url_label(url.as_deref(), source)
                 ));
             }
@@ -158,19 +156,16 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
                     p.default_model(),
                 );
                 entries.push(ProviderEntry::Model);
-                labels.push(format!(
-                    "{ICON_MODEL} Model — {}",
-                    model_label(&model, source)
-                ));
+                labels.push(format!("{DOT} Model — {}", model_label(&model, source)));
             }
         }
     }
     entries.push(ProviderEntry::Verify);
     labels.push(format!(
-        "{ICON_VERIFY} Verify — test this provider with a sample request"
+        "{DOT} Verify — test this provider with a sample request"
     ));
     entries.push(ProviderEntry::Done);
-    labels.push(format!("{ICON_DONE} Done — back to main menu"));
+    labels.push(format!("{DOT} Done — back to main menu"));
     (entries, labels)
 }
 /// Walk the provider-scoped path (Provider → key → base URL → model) until it
@@ -248,11 +243,25 @@ fn step_provider(existing_provider: Option<Provider>, draft: &mut Draft) -> Resu
     }
 }
 
+/// Map a one-shot text prompt's outcome to step navigation, storing the typed
+/// value via `set`. Back / Cancel pass straight through; the loop-based
+/// sub-modes that retry on Back keep their own match.
+fn text_nav(act: TextAct, set: impl FnOnce(String)) -> Nav {
+    match act {
+        TextAct::Value(v) => {
+            set(v);
+            Nav::Next
+        }
+        TextAct::Back => Nav::Back,
+        TextAct::Cancel => Nav::Cancel,
+    }
+}
+
 fn step_api_key(draft: &mut Draft) -> Result<Nav> {
     let provider = draft.provider.expect("provider chosen before api key");
     // Effective key for editing + keep semantics: the draft (a user edit or
     // the seeded config value).
-    let (key, _) = resolve_api_key(draft.api_key.as_deref().filter(|k| !k.is_empty()));
+    let (key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
     match provider.requires_key() {
         // Cloud provider — key required. A single visible, editable prompt:
         // type a new key (shown in the clear) or leave it blank to keep the
@@ -272,15 +281,10 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
             // otherwise the validator enforces a non-empty entry.
             let allow_empty = !key.is_empty();
             show_screen(PROVIDER_SCREEN)?;
-            match prompt_text(&prompt, None, allow_empty, "API key cannot be empty")? {
-                TextAct::Value(v) => {
-                    let v = if v.is_empty() { key } else { v };
-                    draft.api_key = Some(v);
-                    Ok(Nav::Next)
-                }
-                TextAct::Back => Ok(Nav::Back),
-                TextAct::Cancel => Ok(Nav::Cancel),
-            }
+            Ok(text_nav(
+                prompt_text(&prompt, None, allow_empty, "API key cannot be empty")?,
+                |v| draft.api_key = Some(if v.is_empty() { key } else { v }),
+            ))
         }
         // OpenAI-compatible — key optional (keyless servers allowed). "No key"
         // is a first-class choice a single text field cannot express, so keep
@@ -292,11 +296,11 @@ fn step_api_key(draft: &mut Draft) -> Result<Nav> {
                 vec![
                     format!("{ICON_CHECK} Keep current key ({})", mask_key(&key)),
                     format!("{ICON_PENCIL}  Enter a new key…"),
-                    format!("{ICON_SELECT} No API key (keyless server)"),
+                    format!("{DOT} No API key (keyless server)"),
                 ]
             } else {
                 vec![
-                    format!("{ICON_SELECT} No API key (keyless server)"),
+                    format!("{DOT} No API key (keyless server)"),
                     format!("{ICON_PENCIL}  Enter API key…"),
                 ]
             };
@@ -357,19 +361,15 @@ fn step_base_url(
     match provider.base_url_requirement() {
         BaseUrlRequirement::Required => {
             show_screen(PROVIDER_SCREEN)?;
-            match prompt_text(
-                "Base URL (e.g. http://localhost:1234/v1)",
-                initial.as_deref(),
-                false,
-                "base URL cannot be empty",
-            )? {
-                TextAct::Value(v) => {
-                    draft.base_url = Some(v);
-                    Ok(Nav::Next)
-                }
-                TextAct::Back => Ok(Nav::Back),
-                TextAct::Cancel => Ok(Nav::Cancel),
-            }
+            Ok(text_nav(
+                prompt_text(
+                    "Base URL (e.g. http://localhost:1234/v1)",
+                    initial.as_deref(),
+                    false,
+                    "base URL cannot be empty",
+                )?,
+                |v| draft.base_url = Some(v),
+            ))
         }
         BaseUrlRequirement::Optional(default) => {
             let (effective, source) = resolve_base_url(
@@ -381,12 +381,12 @@ fn step_base_url(
             let items: Vec<String> = if has_url {
                 vec![
                     format!("{ICON_CHECK} Keep current URL ({current})"),
-                    format!("{ICON_SELECT} Use default ({default})"),
+                    format!("{DOT} Use default ({default})"),
                     format!("{ICON_PENCIL}  Enter custom URL…"),
                 ]
             } else {
                 vec![
-                    format!("{ICON_SELECT} Use default ({default})"),
+                    format!("{DOT} Use default ({default})"),
                     format!("{ICON_PENCIL}  Enter custom URL…"),
                 ]
             };
@@ -444,25 +444,18 @@ fn step_model(existing: &Option<Config>, ep: Option<Provider>, draft: &mut Draft
     // No curated list (OpenRouter, OpenAI-compatible) -> required free text.
     if models.is_empty() {
         show_screen(PROVIDER_SCREEN)?;
-        return match prompt_text(
-            "Model (required)",
-            initial.as_deref(),
-            false,
-            "model cannot be empty",
-        )? {
-            TextAct::Value(v) => {
-                draft.model = Some(v);
-                Ok(Nav::Next)
-            }
-            TextAct::Back => Ok(Nav::Back),
-            TextAct::Cancel => Ok(Nav::Cancel),
-        };
+        return Ok(text_nav(
+            prompt_text(
+                "Model (required)",
+                initial.as_deref(),
+                false,
+                "model cannot be empty",
+            )?,
+            |v| draft.model = Some(v),
+        ));
     }
 
-    let mut items: Vec<String> = models
-        .iter()
-        .map(|m| format!("{ICON_SELECT} {m}"))
-        .collect();
+    let mut items: Vec<String> = models.iter().map(|m| format!("{DOT} {m}")).collect();
     items.push(format!("{ICON_PENCIL}  Custom model…"));
     let custom_idx = items.len() - 1;
     let highlight = initial

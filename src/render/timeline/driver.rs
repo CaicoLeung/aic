@@ -337,10 +337,7 @@ impl RunFrame {
         i: StepIdx,
         result: anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        if let Err(e) = &result {
-            self.fail(display, i, Failure::from_error("failed", e));
-        }
-        result
+        result.inspect_err(|e| self.fail(display, i, Failure::from_error("failed", e)))
     }
 
     /// Replace the active step `i`'s live rows wholesale (the reasoning
@@ -359,14 +356,7 @@ impl RunFrame {
     pub fn set_sub_row(&self, i: StepIdx, index: usize, body: &SubBody) {
         let mut st = self.0.lock().unwrap();
         let theme = st.theme();
-        // The raw terminal width — the budget a live row must fit.
-        // `sub_row` clamps its text to it, so no sub-row ever wraps to two
-        // physical rows (a wrapped live row would desync the painter's
-        // whole-frame repaint on every later tick).
-        let width = st
-            .paint
-            .as_ref()
-            .map_or_else(terminal_width, |p| p.raw_width);
+        let width = st.raw_width();
         let slots = &mut st.subs[i.0];
         while slots.len() < index {
             slots.push(None);
@@ -423,10 +413,7 @@ impl RunFrame {
             render(display);
             return;
         }
-        let width = st
-            .paint
-            .as_ref()
-            .map_or_else(terminal_width, |p| p.raw_width);
+        let width = st.raw_width();
         let sink = RowSink::default();
         let collected = Display::with_cols(sink.clone(), width);
         render(&collected);
@@ -580,6 +567,15 @@ impl FrameState {
         }
     }
 
+    /// The raw terminal width — the budget a live row must fit (`sub_row`
+    /// clamps its text to it, so no sub-row ever wraps to two physical rows
+    /// and desyncs the painter's whole-frame repaint).
+    fn raw_width(&self) -> usize {
+        self.paint
+            .as_ref()
+            .map_or_else(terminal_width, |p| p.raw_width)
+    }
+
     /// The active step's elapsed, excluding time spent at menus.
     fn step_elapsed(&self, i: StepIdx) -> Duration {
         let Some(start) = self.starts[i.0] else {
@@ -693,7 +689,16 @@ impl DisplayWrite for RowSink {
         buf.truncate(keep);
     }
     fn colors_enabled(&self) -> bool {
-        console::colors_enabled_stderr()
+        // Tests must stay TTY-independent: `--nocapture` in a color terminal
+        // would otherwise leak ANSI codes into pinned assertions.
+        #[cfg(test)]
+        {
+            false
+        }
+        #[cfg(not(test))]
+        {
+            console::colors_enabled_stderr()
+        }
     }
 }
 
@@ -790,32 +795,11 @@ pub(crate) fn frame_menu(
 mod tests {
     use super::*;
 
-    /// A recording sink: captures lines, pops on clear_last — the same
-    /// contract the e2e BufferWrite harness pins. (`cargo test` runs with
-    /// stderr piped, so every frame built here is the non-TTY ledger mode —
-    /// exactly the path these tests pin.)
-    #[derive(Default, Clone)]
-    struct Rec(Arc<Mutex<Vec<String>>>);
-
-    impl Rec {
-        fn lines(&self) -> Vec<String> {
-            self.0.lock().unwrap().clone()
-        }
-    }
-
-    impl DisplayWrite for Rec {
-        fn write_line(&self, line: &str) {
-            self.0.lock().unwrap().push(line.to_string());
-        }
-        fn clear_last(&self, n: usize) {
-            let mut buf = self.0.lock().unwrap();
-            let keep = buf.len().saturating_sub(n);
-            buf.truncate(keep);
-        }
-    }
-
-    fn display() -> (Display, Rec) {
-        let rec = Rec::default();
+    /// The recording sink for these tests is the production [`RowSink`]:
+    /// (`cargo test` runs with stderr piped, so every frame built here is
+    /// the non-TTY ledger mode — exactly the path these tests pin.)
+    fn display() -> (Display, RowSink) {
+        let rec = RowSink::default();
         (Display::with(rec.clone()), rec)
     }
 

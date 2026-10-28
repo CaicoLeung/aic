@@ -86,108 +86,127 @@ struct ProviderMeta {
     base_url: BaseUrlRequirement,
 }
 
+/// One [`ProviderMeta`] row, `const` so it can live in `REGISTRY`.
+const fn meta(
+    provider: Provider,
+    name: &'static str,
+    display: &'static str,
+    aliases: &'static [&'static str],
+    requires_key: bool,
+    base_url: BaseUrlRequirement,
+) -> ProviderMeta {
+    ProviderMeta {
+        provider,
+        name,
+        display,
+        aliases,
+        requires_key,
+        base_url,
+    }
+}
+
 /// Provider registry in `aic setup` presentation order.
 ///
 /// NOTE: the `aic-web` marketing site parses the `Provider` enum and the
 /// `default_model()` match arms out of this file at build time (aic-web
 /// ADR-0003). Keep the enum and those arms here and string-literal shaped.
 const REGISTRY: &[ProviderMeta] = &[
-    ProviderMeta {
-        provider: Provider::OpenAI,
-        name: "openai",
-        display: "OpenAI",
-        aliases: &[],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::Anthropic,
-        name: "anthropic",
-        display: "Anthropic",
-        aliases: &["claude"],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::Gemini,
-        name: "gemini",
-        display: "Gemini",
-        aliases: &["google"],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::DeepSeek,
-        name: "deepseek",
-        display: "DeepSeek",
-        aliases: &[],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::Groq,
-        name: "groq",
-        display: "Groq",
-        aliases: &[],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::Ollama,
-        name: "ollama",
-        display: "Ollama",
-        aliases: &[],
-        requires_key: false,
-        base_url: BaseUrlRequirement::Optional(OLLAMA_DEFAULT_BASE_URL),
-    },
-    ProviderMeta {
-        provider: Provider::Xai,
-        name: "xai",
-        display: "xAI",
-        aliases: &["grok"],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::Mistral,
-        name: "mistral",
-        display: "Mistral",
-        aliases: &[],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::OpenRouter,
-        name: "openrouter",
-        display: "OpenRouter",
-        aliases: &[],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::Perplexity,
-        name: "perplexity",
-        display: "Perplexity",
-        aliases: &[],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::Together,
-        name: "together",
-        display: "Together",
-        aliases: &["together-ai"],
-        requires_key: true,
-        base_url: BaseUrlRequirement::None,
-    },
-    ProviderMeta {
-        provider: Provider::OpenAiCompatible,
-        name: "openai-compatible",
-        display: "OpenAI-compatible",
-        aliases: &["custom"],
-        requires_key: false,
-        base_url: BaseUrlRequirement::Required,
-    },
+    meta(
+        Provider::OpenAI,
+        "openai",
+        "OpenAI",
+        &[],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::Anthropic,
+        "anthropic",
+        "Anthropic",
+        &["claude"],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::Gemini,
+        "gemini",
+        "Gemini",
+        &["google"],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::DeepSeek,
+        "deepseek",
+        "DeepSeek",
+        &[],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::Groq,
+        "groq",
+        "Groq",
+        &[],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::Ollama,
+        "ollama",
+        "Ollama",
+        &[],
+        false,
+        BaseUrlRequirement::Optional(OLLAMA_DEFAULT_BASE_URL),
+    ),
+    meta(
+        Provider::Xai,
+        "xai",
+        "xAI",
+        &["grok"],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::Mistral,
+        "mistral",
+        "Mistral",
+        &[],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::OpenRouter,
+        "openrouter",
+        "OpenRouter",
+        &[],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::Perplexity,
+        "perplexity",
+        "Perplexity",
+        &[],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::Together,
+        "together",
+        "Together",
+        &["together-ai"],
+        true,
+        BaseUrlRequirement::None,
+    ),
+    meta(
+        Provider::OpenAiCompatible,
+        "openai-compatible",
+        "OpenAI-compatible",
+        &["custom"],
+        false,
+        BaseUrlRequirement::Required,
+    ),
 ];
 
 /// All providers in setup/presentation order.
@@ -389,88 +408,31 @@ pub struct LLMAgent {
 }
 
 macro_rules! with_agent {
-    ($self:expr, $agent:ident, $body:expr) => {
+    ($self:expr, $agent:ident, $body:expr) => {{
+        // One arm body per rig client that differs only by provider module:
+        // build the keyed client, wrap it in an agent, run `$body`. The
+        // Ollama and OpenAI-compatible arms construct clients by hand.
+        macro_rules! keyed_client_arm {
+            ($module:ident) => {{
+                let client = rig::providers::$module::Client::new(&$self.llm.api_key)?;
+                let $agent = client
+                    .agent(&$self.llm.model)
+                    .preamble(&$self.system_prompt)
+                    .build();
+                $body
+            }};
+        }
         match &$self.llm.provider {
-            Provider::OpenAI => {
-                let client = rig::providers::openai::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::Anthropic => {
-                let client = rig::providers::anthropic::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::Gemini => {
-                let client = rig::providers::gemini::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::DeepSeek => {
-                let client = rig::providers::deepseek::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::Groq => {
-                let client = rig::providers::groq::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::Xai => {
-                let client = rig::providers::xai::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::Mistral => {
-                let client = rig::providers::mistral::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::OpenRouter => {
-                let client = rig::providers::openrouter::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::Perplexity => {
-                let client = rig::providers::perplexity::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
-            Provider::Together => {
-                let client = rig::providers::together::Client::new(&$self.llm.api_key)?;
-                let $agent = client
-                    .agent(&$self.llm.model)
-                    .preamble(&$self.system_prompt)
-                    .build();
-                $body
-            }
+            Provider::OpenAI => keyed_client_arm!(openai),
+            Provider::Anthropic => keyed_client_arm!(anthropic),
+            Provider::Gemini => keyed_client_arm!(gemini),
+            Provider::DeepSeek => keyed_client_arm!(deepseek),
+            Provider::Groq => keyed_client_arm!(groq),
+            Provider::Xai => keyed_client_arm!(xai),
+            Provider::Mistral => keyed_client_arm!(mistral),
+            Provider::OpenRouter => keyed_client_arm!(openrouter),
+            Provider::Perplexity => keyed_client_arm!(perplexity),
+            Provider::Together => keyed_client_arm!(together),
             Provider::Ollama => {
                 let url = $self
                     .llm
@@ -517,7 +479,7 @@ macro_rules! with_agent {
                 $body
             }
         }
-    };
+    }};
 }
 
 impl LLMAgent {

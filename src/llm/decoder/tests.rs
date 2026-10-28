@@ -1,5 +1,12 @@
 use super::*;
 
+/// Assert `$f($line)` decodes to exactly `Some($v($s.to_string()))`.
+macro_rules! decodes {
+    ($f:path, $line:expr, $v:path, $s:expr) => {
+        assert_eq!($f($line), Some($v($s.to_string())));
+    };
+}
+
 // ---- claude stream-json decoding -----------------------------------------
 //
 // The decoder is exercised against event shapes captured from a real
@@ -10,18 +17,22 @@ use super::*;
 #[test]
 fn decode_extracts_thinking_delta() {
     let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"analyzing the diff"}},"session_id":"s","uuid":"u"}"#;
-    assert_eq!(
-        decode_claude_stream_line(line),
-        Some(ClaudeDelta::Thinking("analyzing the diff".to_string()))
+    decodes!(
+        decode_claude_stream_line,
+        line,
+        ClaudeDelta::Thinking,
+        "analyzing the diff"
     );
 }
 
 #[test]
 fn decode_extracts_text_delta() {
     let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello world"}},"session_id":"s","uuid":"u"}"#;
-    assert_eq!(
-        decode_claude_stream_line(line),
-        Some(ClaudeDelta::Text("hello world".to_string()))
+    decodes!(
+        decode_claude_stream_line,
+        line,
+        ClaudeDelta::Text,
+        "hello world"
     );
 }
 
@@ -30,22 +41,22 @@ fn decode_extracts_init_milestone() {
     // The `system/init` event carries model + tools + mcp_servers; the
     // milestone summarizes them so the cold start is visible progress.
     let line = r#"{"type":"system","subtype":"init","model":"glm-5.2","tools":["Bash","Read","Edit"],"mcp_servers":[{"name":"zai","status":"connected"},{"name":"other","status":"failed"}]}"#;
-    assert_eq!(
-        decode_claude_stream_line(line),
-        Some(ClaudeDelta::Milestone(
-            "Initialized — model glm-5.2, 3 tools, 1/2 MCP servers connected".to_string()
-        ))
+    decodes!(
+        decode_claude_stream_line,
+        line,
+        ClaudeDelta::Milestone,
+        "Initialized — model glm-5.2, 3 tools, 1/2 MCP servers connected"
     );
 }
 
 #[test]
 fn decode_extracts_hook_started_milestone() {
     let line = r#"{"type":"system","subtype":"hook_started","hook_event":"SessionStart","hook_name":"SessionStart:startup"}"#;
-    assert_eq!(
-        decode_claude_stream_line(line),
-        Some(ClaudeDelta::Milestone(
-            "Running SessionStart hooks…".to_string()
-        ))
+    decodes!(
+        decode_claude_stream_line,
+        line,
+        ClaudeDelta::Milestone,
+        "Running SessionStart hooks…"
     );
 }
 
@@ -54,9 +65,11 @@ fn decode_extracts_terminal_result_event() {
     // The authoritative final-answer carrier; shape trimmed to the fields
     // the decoder reads (real events also carry usage/cost/etc.).
     let line = r#"{"is_error":false,"result":"hello world","type":"result","subtype":"success"}"#;
-    assert_eq!(
-        decode_claude_stream_line(line),
-        Some(ClaudeDelta::Result("hello world".to_string()))
+    decodes!(
+        decode_claude_stream_line,
+        line,
+        ClaudeDelta::Result,
+        "hello world"
     );
 }
 
@@ -184,19 +197,13 @@ fn claude_decoder_dedups_repeated_milestones_and_resets_on_thinking() {
 #[test]
 fn decode_pi_extracts_thinking_delta() {
     let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"User"}}"#;
-    assert_eq!(
-        decode_pi_stream_line(line),
-        Some(PiDelta::Thinking("User".to_string()))
-    );
+    decodes!(decode_pi_stream_line, line, PiDelta::Thinking, "User");
 }
 
 #[test]
 fn decode_pi_extracts_text_delta() {
     let line = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Fore"}}"#;
-    assert_eq!(
-        decode_pi_stream_line(line),
-        Some(PiDelta::Text("Fore".to_string()))
-    );
+    decodes!(decode_pi_stream_line, line, PiDelta::Text, "Fore");
 }
 
 #[test]
@@ -256,18 +263,22 @@ fn pi_decoder_returns_none_when_only_thinking_or_noise() {
 #[test]
 fn decode_opencode_extracts_text_event() {
     let line = r#"{"type":"text","timestamp":1,"sessionID":"s","part":{"id":"p","type":"text","text":"hello world"}}"#;
-    assert_eq!(
-        decode_opencode_stream_line(line),
-        Some(OpenCodeDelta::Text("hello world".to_string()))
+    decodes!(
+        decode_opencode_stream_line,
+        line,
+        OpenCodeDelta::Text,
+        "hello world"
     );
 }
 
 #[test]
 fn decode_opencode_extracts_reasoning_event() {
     let line = r#"{"type":"reasoning","part":{"type":"reasoning","text":"thinking it over"}}"#;
-    assert_eq!(
-        decode_opencode_stream_line(line),
-        Some(OpenCodeDelta::Thinking("thinking it over".to_string()))
+    decodes!(
+        decode_opencode_stream_line,
+        line,
+        OpenCodeDelta::Thinking,
+        "thinking it over"
     );
 }
 
@@ -321,9 +332,11 @@ fn opencode_decoder_returns_none_without_text_event() {
 #[test]
 fn decode_codex_extracts_agent_message() {
     let line = r#"{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"hello world"}}"#;
-    assert_eq!(
-        decode_codex_stream_line(line),
-        Some(CodexDelta::Text("hello world".to_string()))
+    decodes!(
+        decode_codex_stream_line,
+        line,
+        CodexDelta::Text,
+        "hello world"
     );
 }
 
@@ -333,18 +346,17 @@ fn decode_codex_accepts_drifted_assistant_message_alias() {
     // (Issue #4776). Both must decode so a version skew never breaks the
     // answer extraction.
     let line = r#"{"type":"item.completed","item":{"id":"item_1","type":"assistant_message","text":"hi"}}"#;
-    assert_eq!(
-        decode_codex_stream_line(line),
-        Some(CodexDelta::Text("hi".to_string()))
-    );
+    decodes!(decode_codex_stream_line, line, CodexDelta::Text, "hi");
 }
 
 #[test]
 fn decode_codex_extracts_reasoning_when_present() {
     let line = r#"{"type":"item.completed","item":{"id":"item_2","type":"reasoning","text":"thinking it over"}}"#;
-    assert_eq!(
-        decode_codex_stream_line(line),
-        Some(CodexDelta::Thinking("thinking it over".to_string()))
+    decodes!(
+        decode_codex_stream_line,
+        line,
+        CodexDelta::Thinking,
+        "thinking it over"
     );
 }
 
@@ -372,9 +384,11 @@ fn decode_codex_forwards_turn_started_as_progress() {
     // codex is silent during reasoning; turn.started is the earliest
     // milestone, forwarded live so the reasoning window is not empty.
     let line = r#"{"type":"turn.started"}"#;
-    assert_eq!(
-        decode_codex_stream_line(line),
-        Some(CodexDelta::Progress("codex turn started".to_string()))
+    decodes!(
+        decode_codex_stream_line,
+        line,
+        CodexDelta::Progress,
+        "codex turn started"
     );
 }
 
@@ -385,11 +399,11 @@ fn decode_codex_forwards_command_started_as_progress() {
     // progress. The `/bin/zsh -lc '…'` wrapper is stripped and the body
     // is capped.
     let line = r#"{"type":"item.started","item":{"id":"c","type":"command_execution","command":"/bin/zsh -lc 'git diff --cached | head -50'"}}"#;
-    assert_eq!(
-        decode_codex_stream_line(line),
-        Some(CodexDelta::Progress(
-            "codex: git diff --cached | head -50".to_string()
-        ))
+    decodes!(
+        decode_codex_stream_line,
+        line,
+        CodexDelta::Progress,
+        "codex: git diff --cached | head -50"
     );
 }
 

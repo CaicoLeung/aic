@@ -94,10 +94,8 @@ impl RepoState {
         match self {
             Self::Clean => "clean",
             Self::Merge => "merge",
-            Self::CherryPick => "cherry-pick",
-            Self::CherryPickSequence => "cherry-pick",
-            Self::Revert => "revert",
-            Self::RevertSequence => "revert",
+            Self::CherryPick | Self::CherryPickSequence => "cherry-pick",
+            Self::Revert | Self::RevertSequence => "revert",
             Self::Rebase | Self::RebaseInteractive | Self::RebaseMerge => "rebase",
             Self::ApplyMailbox | Self::ApplyMailboxOrRebase => "am",
         }
@@ -299,9 +297,8 @@ fn classify_worktree(repo: &Repository, path: &str) -> ConflictKind {
     let Some(workdir) = repo.workdir() else {
         return ConflictKind::Binary;
     };
-    let bytes = match fs::read(workdir.join(path)) {
-        Ok(b) => b,
-        Err(_) => return ConflictKind::DeleteModify,
+    let Ok(bytes) = fs::read(workdir.join(path)) else {
+        return ConflictKind::DeleteModify;
     };
     if bytes.contains(&0u8) {
         return ConflictKind::Binary;
@@ -538,6 +535,7 @@ fn finalize_hint(state: RepoState) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::git::tests::with_repo;
     use std::path::Path;
     use std::process::Command;
 
@@ -658,8 +656,7 @@ pub(crate) mod tests {
 
     #[test]
     fn conflicted_files_classifies_content_conflict() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::git::tests::init_test_repo(dir.path());
+        let dir = with_repo(crate::git::tests::init_test_repo);
         make_content_conflict(dir.path());
 
         let git = Git::at(dir.path()).unwrap();

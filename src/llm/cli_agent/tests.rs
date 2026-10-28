@@ -55,8 +55,8 @@ fn fail(stderr: &str, code: Option<i32>) -> Result<CommandOutput> {
     Ok(CommandOutput {
         success: false,
         code,
-        stdout: String::new(),
         stderr: stderr.into(),
+        ..Default::default()
     })
 }
 
@@ -192,63 +192,24 @@ fn new_presets_are_headless_print_mode() {
     // mode against its own binary. omp reuses pi's NDJSON envelope (it is a
     // pi fork) so it gets the live reasoning feed; the rest are Plain print
     // mode (no decoder needed — stdout IS the answer).
-    let cases = [
-        (
-            "omp",
-            "omp",
-            vec!["--mode", "json", PROMPT_PLACEHOLDER],
-            Encoding::PiStreamJson,
-            DEFAULT_TIMEOUT_SECS,
-        ),
-        (
-            "gemini",
-            "gemini",
-            vec!["-p", PROMPT_PLACEHOLDER],
-            Encoding::Plain,
-            DEFAULT_TIMEOUT_SECS,
-        ),
-        (
-            "cursor",
-            "cursor-agent",
-            vec!["-p", PROMPT_PLACEHOLDER],
-            Encoding::Plain,
-            DEFAULT_TIMEOUT_SECS,
-        ),
-        (
-            "windsurf",
-            "devin",
-            vec!["-p", PROMPT_PLACEHOLDER],
-            Encoding::Plain,
-            DEFAULT_TIMEOUT_SECS,
-        ),
-        (
-            "copilot",
-            "copilot",
-            vec!["-p", PROMPT_PLACEHOLDER],
-            Encoding::Plain,
-            DEFAULT_TIMEOUT_SECS,
-        ),
-        (
-            "trae",
-            "traecli",
-            vec!["-p", PROMPT_PLACEHOLDER],
-            Encoding::Plain,
-            DEFAULT_TIMEOUT_SECS,
-        ),
-        (
-            "qwen",
-            "qwen",
-            vec!["-p", PROMPT_PLACEHOLDER],
-            Encoding::Plain,
-            DEFAULT_TIMEOUT_SECS,
-        ),
-    ];
-    for (name, command, args, encoding, timeout) in cases {
+    let spec = cli_preset("omp").unwrap_or_else(|| panic!("omp preset missing"));
+    assert_eq!(spec.command, "omp");
+    assert_eq!(spec.args, vec!["--mode", "json", PROMPT_PLACEHOLDER]);
+    assert_eq!(spec.encoding, Encoding::PiStreamJson);
+    assert_eq!(spec.timeout_secs, DEFAULT_TIMEOUT_SECS);
+    for (name, command) in [
+        ("gemini", "gemini"),
+        ("cursor", "cursor-agent"),
+        ("windsurf", "devin"),
+        ("copilot", "copilot"),
+        ("trae", "traecli"),
+        ("qwen", "qwen"),
+    ] {
         let spec = cli_preset(name).unwrap_or_else(|| panic!("{name} preset missing"));
         assert_eq!(spec.command, command, "{name}");
-        assert_eq!(spec.args, args, "{name}");
-        assert_eq!(spec.encoding, encoding, "{name}");
-        assert_eq!(spec.timeout_secs, timeout, "{name}");
+        assert_eq!(spec.args, vec!["-p", PROMPT_PLACEHOLDER], "{name}");
+        assert_eq!(spec.encoding, Encoding::Plain, "{name}");
+        assert_eq!(spec.timeout_secs, DEFAULT_TIMEOUT_SECS, "{name}");
     }
     // The `gemini` preset shadows the provider name in `aic use` (presets
     // win), so the Google API stays reachable via its alias.
@@ -344,9 +305,7 @@ async fn signal_death_is_not_misreported_as_not_installed() {
     // binary was found and ran. Distinct from the NotFound path above.
     let (agent, _) = agent_with(vec![Ok(CommandOutput {
         success: false,
-        code: None,
-        stdout: String::new(),
-        stderr: String::new(),
+        ..Default::default()
     })]);
     let res = agent.call("x").await;
     match res.unwrap_err().downcast_ref::<LlmError>() {

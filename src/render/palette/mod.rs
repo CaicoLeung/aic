@@ -121,20 +121,17 @@ pub(crate) static NEON_TOGGLE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex:
 
 /// Current named-type table (neon or classic).
 fn named_palette() -> &'static [(CommitType, (u8, u8, u8)); 17] {
-    if neon() {
-        &NAMED_PALETTE_NEON
-    } else {
-        &NAMED_PALETTE
-    }
+    theme_pair(&NAMED_PALETTE, &NAMED_PALETTE_NEON)
 }
 
 /// Current fallback table (neon or classic).
 fn fallback_palette() -> &'static [(u8, u8, u8); 6] {
-    if neon() {
-        &FALLBACK_PALETTE_NEON
-    } else {
-        &FALLBACK_PALETTE
-    }
+    theme_pair(&FALLBACK_PALETTE, &FALLBACK_PALETTE_NEON)
+}
+
+/// `neon`-selected variant of a classic/neon pair.
+fn theme_pair<T>(classic: T, neon_variant: T) -> T {
+    if neon() { neon_variant } else { classic }
 }
 
 /// Whether neon variants are active.
@@ -297,33 +294,21 @@ pub fn plain() -> Style {
 /// so renderers can never drift from the contrast-guarded value — call this
 /// instead of re-typing the RGB literal.
 pub fn neutral_gray() -> Style {
-    rgb_style(if neon() {
-        NEUTRAL_GRAY_NEON
-    } else {
-        NEUTRAL_GRAY
-    })
+    rgb_style(theme_pair(NEUTRAL_GRAY, NEUTRAL_GRAY_NEON))
 }
 
 /// Amber [`Style`] for the commit-id token. Reads the single-source
 /// [`COMMIT_ID_COLOR`]; the caller bolds it so the short ref qualifies as
 /// WCAG AA Large.
 pub fn commit_id_color() -> Style {
-    rgb_style(if neon() {
-        COMMIT_ID_COLOR_NEON
-    } else {
-        COMMIT_ID_COLOR
-    })
+    rgb_style(theme_pair(COMMIT_ID_COLOR, COMMIT_ID_COLOR_NEON))
 }
 
 /// Cyan [`Style`] for the Σ total-row glyph. Reads the single-source
 /// [`SIGMA_COLOR`]; the caller bolds it so the glyph qualifies as WCAG AA
 /// Large.
 pub fn sigma_color() -> Style {
-    rgb_style(if neon() {
-        SIGMA_COLOR_NEON
-    } else {
-        SIGMA_COLOR
-    })
+    rgb_style(theme_pair(SIGMA_COLOR, SIGMA_COLOR_NEON))
 }
 
 /// A conventional-commit subject as styled segments — the single source both
@@ -471,71 +456,35 @@ mod tests {
         const DARK: (u8, u8, u8) = (13, 17, 23); // #0d1117 (GitHub dark)
         const AA_LARGE: f64 = 3.0;
 
+        let check = |what: &str, rgb: (u8, u8, u8)| {
+            for (bg, theme) in [(WHITE, "white"), (DARK, "dark")] {
+                let ratio = contrast(rgb, bg);
+                assert!(
+                    ratio >= AA_LARGE,
+                    "{what} {rgb:?} fails 3:1 on {theme}: {ratio:.2}"
+                );
+            }
+        };
         let mut checked = 0usize;
         for (_, rgb) in NAMED_PALETTE {
-            let on_white = contrast(rgb, WHITE);
-            let on_dark = contrast(rgb, DARK);
-            assert!(
-                on_white >= AA_LARGE,
-                "named color {rgb:?} fails 3:1 on white: {on_white:.2}"
-            );
-            assert!(
-                on_dark >= AA_LARGE,
-                "named color {rgb:?} fails 3:1 on dark: {on_dark:.2}"
-            );
+            check("named color", rgb);
             checked += 1;
         }
         for rgb in FALLBACK_PALETTE {
-            let on_white = contrast(rgb, WHITE);
-            let on_dark = contrast(rgb, DARK);
-            assert!(
-                on_white >= AA_LARGE,
-                "fallback color {rgb:?} fails 3:1 on white: {on_white:.2}"
-            );
-            assert!(
-                on_dark >= AA_LARGE,
-                "fallback color {rgb:?} fails 3:1 on dark: {on_dark:.2}"
-            );
+            check("fallback color", rgb);
             checked += 1;
         }
-        let on_white = contrast(NEUTRAL_GRAY, WHITE);
-        let on_dark = contrast(NEUTRAL_GRAY, DARK);
-        assert!(
-            on_white >= AA_LARGE,
-            "neutral gray fails 3:1 on white: {on_white:.2}"
-        );
-        assert!(
-            on_dark >= AA_LARGE,
-            "neutral gray fails 3:1 on dark: {on_dark:.2}"
-        );
+        check("neutral gray", NEUTRAL_GRAY);
         checked += 1;
 
         // Commit-id amber (the one palette color not keyed by a CommitType) —
         // guarded here so the headline contrast fix can't silently regress.
-        let on_white = contrast(COMMIT_ID_COLOR, WHITE);
-        let on_dark = contrast(COMMIT_ID_COLOR, DARK);
-        assert!(
-            on_white >= AA_LARGE,
-            "commit-id amber fails 3:1 on white: {on_white:.2}"
-        );
-        assert!(
-            on_dark >= AA_LARGE,
-            "commit-id amber fails 3:1 on dark: {on_dark:.2}"
-        );
+        check("commit-id amber", COMMIT_ID_COLOR);
         checked += 1;
 
         // Σ total-row cyan — guarded so the summation glyph's contrast can't
         // silently regress.
-        let on_white = contrast(SIGMA_COLOR, WHITE);
-        let on_dark = contrast(SIGMA_COLOR, DARK);
-        assert!(
-            on_white >= AA_LARGE,
-            "sigma cyan fails 3:1 on white: {on_white:.2}"
-        );
-        assert!(
-            on_dark >= AA_LARGE,
-            "sigma cyan fails 3:1 on dark: {on_dark:.2}"
-        );
+        check("sigma cyan", SIGMA_COLOR);
         checked += 1;
 
         // Guard against the palette arrays silently shrinking to [] and the

@@ -40,7 +40,7 @@ pub enum StatusKind {
 /// [`Git::staged_stats`] (what a pending commit would land) and
 /// [`Git::committed_stats`] (what a landed commit did land); rendered by
 /// `display::Display::emit_file_stats`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileStats {
     pub path: String,
     pub added: usize,
@@ -530,10 +530,10 @@ impl Git {
             {
                 continue;
             }
-            let path = match entry.path() {
-                Ok(p) => p.to_string(),
-                Err(_) => continue,
+            let Ok(path) = entry.path() else {
+                continue;
             };
+            let path = path.to_string();
             // Stage-0 entry = the resolved/staged version. A conflicted repo is
             // already caught above, so any staged path here has a stage-0 entry.
             let Some(idx_entry) = index.get_path(Path::new(&path), 0) else {
