@@ -17,10 +17,9 @@
 
 use console::Term;
 use std::collections::VecDeque;
-use std::future::Future;
 use std::time::Duration;
 
-use crate::render::layout::{MARGIN, terminal_height, terminal_width};
+use crate::render::layout::{terminal_height, terminal_width};
 use crate::render::markdown::{LoadingNotice, classify_line, loading_rows, reasoning_rows};
 
 /// Minimum usable width for in-place progress rendering: the spinner glyph +
@@ -61,33 +60,6 @@ pub(crate) const LOADING_GRACE: Duration = Duration::from_secs(5);
 // ponytail: tuned by eye; raise if streaming still flashes, lower if the
 // spinner feels sluggish to restart after a stall.
 pub(crate) const ACTIVE_THRESHOLD: Duration = Duration::from_millis(150);
-
-/// Shared indicatif spinner style: a braille tick and a prefix matching
-/// [`MARGIN`] so the spinner glyph sits at the same 2-column inset as the rest
-/// of the run's stderr block — not flush against the edge. One place to
-/// change the inset or tick animation for every spinner in the run.
-pub(crate) fn spinner_style() -> anyhow::Result<indicatif::ProgressStyle> {
-    Ok(indicatif::ProgressStyle::default_spinner()
-        .template(&format!("{MARGIN}{{spinner}} {{msg}}"))?
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"))
-}
-
-/// Run `fut` behind an in-place spinner labeled `msg`; the spinner is cleared
-/// when the future completes, success or error.
-pub(crate) async fn with_spinner<F, T>(msg: &str, fut: F) -> anyhow::Result<T>
-where
-    F: Future<Output = anyhow::Result<T>>,
-{
-    let pb = indicatif::ProgressBar::new_spinner();
-    pb.set_style(spinner_style()?);
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(SPINNER_TICK);
-
-    let result = fut.await;
-    pb.disable_steady_tick();
-    pb.finish_and_clear();
-    result
-}
 
 /// A rolling window over the model's streamed reasoning, sized to the caller's
 /// `cap` — the rendered-row budget from [`crate::render::cursor::reasoning_window_rows`], reused as
