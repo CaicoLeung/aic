@@ -154,7 +154,10 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
                 let (key, _) =
                     resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
                 entries.push(ProviderEntry::ApiKey);
-                labels.push(format!("{DOT} API key — {}", api_key_label(&key)));
+                labels.push(format!(
+                    "{DOT} API key — {}",
+                    styled_value(&api_key_label(&key))
+                ));
             }
             Step::BaseUrl => {
                 let (url, source) =
@@ -162,7 +165,7 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
                 entries.push(ProviderEntry::BaseUrl);
                 labels.push(format!(
                     "{DOT} Base URL — {}",
-                    base_url_label(url.as_deref(), source)
+                    styled_value(&base_url_label(url.as_deref(), source))
                 ));
             }
             Step::Model => {
@@ -172,13 +175,28 @@ pub(super) fn provider_submenu_items(draft: &Draft) -> (Vec<ProviderEntry>, Vec<
                     .filter(|m| !m.is_empty())
                     .unwrap_or("");
                 entries.push(ProviderEntry::Model);
-                labels.push(format!("{DOT} Model — {}", model_label(model)));
+                labels.push(format!(
+                    "{DOT} Model — {}",
+                    styled_value(&model_label(model))
+                ));
             }
         }
     }
     entries.push(ProviderEntry::Done);
     labels.push(format!("{DOT} Done — back to main menu"));
     (entries, labels)
+}
+
+/// The R5 role for a sub-menu row's value: `emphasis` when a value exists,
+/// `muted` for the `(not set)` placeholder — the value is what the row is
+/// about, the label stays plain. Pure.
+pub(super) fn styled_value(value: &str) -> String {
+    let style = if value == "(not set)" || value == "(not configured)" {
+        palette::muted()
+    } else {
+        palette::emphasis()
+    };
+    style.apply_to(value).to_string()
 }
 /// Walk the provider-scoped path (Provider → key → base URL → model) until it
 /// completes or the user backs out of its first step. Returns `true` when a

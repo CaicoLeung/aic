@@ -125,7 +125,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) — branch rules, commit style, review 
 | Ollama | none | `http://localhost:11434` |
 | OpenAI-compatible | optional | required |
 
-`aic setup` fetches each provider's live model list (ADR 0019), so the picker always offers current models — no hardcoded defaults. A model is explicitly required for every provider; offline or unlisted setups use the `Custom model…` escape hatch. The OpenAI-compatible provider requires `base_url` and routes through the OpenAI client (LM Studio, vLLM, gateways).
+`aic setup` fetches each provider's live model list (ADR 0019), so the picker always offers current models — no hardcoded defaults. A model is explicitly required for every provider; offline or unlisted setups use the `Custom model…` escape hatch. The OpenAI-compatible provider requires `base_url` and routes through the OpenAI client (LM Studio, vLLM, gateways). Finishing a provider or CLI-agent flow auto-runs a connectivity probe; the menu shows its status (✓ / ✗ / not verified), and a failed probe offers Edit / Retry / Save anyway — saving offline is never blocked.
 
 ### CLI-agent presets
 

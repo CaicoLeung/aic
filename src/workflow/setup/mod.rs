@@ -479,12 +479,16 @@ fn cli_label(draft: &Draft) -> String {
 /// the entry the user just finished). `dirty` marks the Save row when the
 /// session has changes [`finalize::draft_dirty`] would not write back as
 /// identical, so the cost of cancelling is visible before the user pays it.
+///
+/// R5 role coloring: values render in `emphasis`, toggle states in
+/// `success`/`muted` (on/off), the verify status line in
+/// `success`/`failure`/`muted` — no new glyphs, no extra rows (ADR 0018).
 fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoice> {
     // R3: the latest auto-verify outcome rides above the menu as a status
     // line — informational, not a selectable row (toggles don't probe).
     oneshot::stderr_detail(
         &format!("Verify: {}", verify_status_label(&draft.verify_status)),
-        palette::muted(),
+        verify_style(&draft.verify_status),
     );
     eprintln!();
     let save_row = if dirty {
@@ -492,17 +496,21 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
     } else {
         format!("{DOT} Save & exit")
     };
+    let value = |v: String| palette::emphasis().apply_to(v).to_string();
     let items = vec![
-        format!("{DOT} Backend — {}", draft.active_backend().display_name()),
-        format!("{DOT} AI provider — {}", provider_label(draft)),
-        format!("{DOT} CLI agent — {}", cli_label(draft)),
+        format!(
+            "{DOT} Backend — {}",
+            value(draft.active_backend().display_name().to_string())
+        ),
+        format!("{DOT} AI provider — {}", value(provider_label(draft))),
+        format!("{DOT} CLI agent — {}", value(cli_label(draft))),
         format!(
             "{DOT} Confirm before commit — {}",
-            yes_no(draft.confirm_before_commit)
+            styled_toggle(draft.confirm_before_commit)
         ),
         format!(
             "{ICON_PENCIL} Review batch plan — {}",
-            yes_no(draft.review_batch_plan)
+            styled_toggle(draft.review_batch_plan)
         ),
         save_row,
     ];
@@ -517,4 +525,25 @@ fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoic
         OptNav::Back => Ok(MenuChoice::Esc),
         OptNav::Cancel => Ok(MenuChoice::Cancel),
     }
+}
+
+/// The R5 role for the verify status line: a pass reads `success`, a failure
+/// `failure`, and "not verified" `muted`. Pure.
+pub(super) fn verify_style(status: &Option<VerifyStatus>) -> console::Style {
+    match status {
+        None => palette::muted(),
+        Some(s) if s.passed => palette::success(),
+        Some(_) => palette::failure(),
+    }
+}
+
+/// The R5 role for a toggle row's on/off word (ADR 0018 wording): `on` in
+/// `success`, `off` in `muted`. Wraps [`yes_no`]'s plain word. Pure.
+pub(super) fn styled_toggle(value: Option<bool>) -> String {
+    let style = if value == Some(true) {
+        palette::success()
+    } else {
+        palette::muted()
+    };
+    style.apply_to(yes_no(value)).to_string()
 }

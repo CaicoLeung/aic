@@ -258,9 +258,10 @@ fn submenu_labels_show_effective_value() {
             ProviderEntry::Done
         ]
     );
-    assert_eq!(labels[0], format!("{DOT} API key — ••••••"));
-    assert_eq!(labels[1], format!("{DOT} Model — deepseek-v4-pro"));
-    assert_eq!(labels[2], format!("{DOT} Done — back to main menu"));
+    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
+    assert_eq!(bare(&labels[0]), format!("{DOT} API key — ••••••"));
+    assert_eq!(bare(&labels[1]), format!("{DOT} Model — deepseek-v4-pro"));
+    assert_eq!(bare(&labels[2]), format!("{DOT} Done — back to main menu"));
 }
 
 #[test]
@@ -840,4 +841,32 @@ fn cli_badges_are_first_letters_and_stable() {
         bare(&CliRow::Preset("qwen").label()),
         format!("{} qwen", bare(&cli_badge("qwen")))
     );
+}
+
+// --- Menu role coloring (R5) -----------------------------------------------
+
+/// R5 toggle roles: `on` wraps in the success style, `off`/unset in muted.
+/// The wording itself stays ADR 0018's (pinned by the yes_no test above);
+/// ANSI-stripped comparison keeps the test immune to the process-global
+/// color flag.
+#[test]
+fn styled_toggle_roles_on_success_off_muted() {
+    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
+    assert_eq!(bare(&styled_toggle(None)), "off");
+    assert_eq!(bare(&styled_toggle(Some(false))), "off");
+    assert_eq!(bare(&styled_toggle(Some(true))), "on");
+    // (The role mapping itself — success vs muted — rides the process-global
+    // color flag and is racy to assert here; palette's own tests pin the
+    // style construction, and the bare-word contract above pins the wiring.)
+}
+
+/// R5 value roles: real values render via emphasis, the `(not set)` /
+/// `(not configured)` placeholders via muted.
+#[test]
+fn styled_value_roles_placeholders_muted() {
+    let bare = |s: &str| console::strip_ansi_codes(s).to_string();
+    assert_eq!(bare(&styled_value("gpt-5")), "gpt-5");
+    assert_eq!(bare(&styled_value("••••••")), "••••••");
+    assert_eq!(bare(&styled_value("(not set)")), "(not set)");
+    assert_eq!(bare(&styled_value("(not configured)")), "(not configured)");
 }

@@ -125,7 +125,7 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 | Ollama | 无 | `http://localhost:11434` |
 | OpenAI-compatible | 可选 | 必需 |
 
-`aic setup` 会实时拉取各 provider 的 model 列表（ADR 0019），picker 始终展示当前可用 model —— 不再内置任何硬编码默认值。所有 provider 的 model 均需显式选择；离线或列表中没有的场景走 `Custom model…` 逃生口。OpenAI-compatible provider 需要 `base_url`，通过 OpenAI client 路由（LM Studio、vLLM、各类 gateway）。
+`aic setup` 会实时拉取各 provider 的 model 列表（ADR 0019），picker 始终展示当前可用 model —— 不再内置任何硬编码默认值。所有 provider 的 model 均需显式选择；离线或列表中没有的场景走 `Custom model…` 逃生口。OpenAI-compatible provider 需要 `base_url`，通过 OpenAI client 路由（LM Studio、vLLM、各类 gateway）。完成 provider 或 CLI-agent 配置后会自动运行连通性探测；菜单常显探测状态（✓ / ✗ / 未验证），探测失败时提供 Edit / Retry / Save anyway 三种出口 —— 离线保存永远不会被阻断。
 
 ### CLI-agent 预设
 
