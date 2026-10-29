@@ -387,7 +387,7 @@ fn failure_detail_rows(step: &Step, theme: &Theme) -> Vec<String> {
 /// detail rows are single physical lines on both render paths (the styled
 /// frame and the plain non-TTY ledger share the string), whatever
 /// multi-line error chain a caller stuffs into [`Failure::detail`].
-pub(crate) fn one_line(s: &str) -> String {
+fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
