@@ -93,3 +93,40 @@ fn install_panic_restore() {
         previous(info);
     }));
 }
+
+#[cfg(all(unix, test))]
+mod tests {
+    use super::Tui;
+    use crate::render::timeline::driver::pty_tests::{capture_until_exit, fork_on_pty};
+
+    /// ADR 0020's alt-screen contract, pinned on a real PTY: exactly one
+    /// `ESC[?1049h`/`ESC[?1049l` pair per session and zero full-screen
+    /// `ESC[2J` clears — the whole-frame diffed repaint never clears.
+    #[test]
+    fn one_alt_screen_pair_and_zero_full_clears_per_session() {
+        fn drive() {
+            let mut tui = Tui::enter().expect("enter");
+            let _ = tui.draw(|f| {
+                f.render_widget(ratatui::widgets::Paragraph::new("x"), f.area());
+            });
+            drop(tui);
+        }
+        let (pid, master, slave) = fork_on_pty(drive);
+        let bytes = capture_until_exit(pid, master, slave);
+        assert_eq!(
+            bytes.matches("\x1b[?1049h").count(),
+            1,
+            "one alt-screen enter per session"
+        );
+        assert_eq!(
+            bytes.matches("\x1b[?1049l").count(),
+            1,
+            "one alt-screen leave per session"
+        );
+        assert_eq!(
+            bytes.matches("\x1b[2J").count(),
+            0,
+            "diffed repaint must never full-clear"
+        );
+    }
+}

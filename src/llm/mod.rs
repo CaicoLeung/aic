@@ -112,6 +112,10 @@ const fn meta(
 }
 
 /// Provider registry in `aic setup` presentation order.
+///
+/// NOTE: the `aic-web` marketing site parses the `Provider` enum out of
+/// this file at build time (aic-web ADR-0003). Keep the enum here and
+/// string-literal shaped.
 const REGISTRY: &[ProviderMeta] = &[
     meta(
         Provider::OpenAI,

@@ -313,6 +313,12 @@ identity, the color only aids scanning). Inline ANSI in option strings is
 safe: inquire 0.9.4's frame renderer is ANSI-aware. `Done` rows and
 non-picker menus keep the muted `·` bullet.
 
+2026-10-29 follow-up: the inquire pickers this amendment rode on were
+replaced the next day by the ADR 0020 ratatui picker; the badge class
+carried over unchanged (`render::tui::style::badge` reads the same
+`palette::badge_rgb` triple), and the ANSI-aware-renderer remark above was
+inquire-specific — ratatui styling made it moot.
+
 ## Amendment (2026-10-29): failed-screen rows are single lines; cursor parks below
 
 A hook-vetoed `git commit` exposed two layout defects in the failed screen.

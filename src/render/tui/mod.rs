@@ -21,3 +21,12 @@ pub(crate) mod picker;
 pub(crate) mod style;
 pub(crate) mod terminal;
 pub(crate) mod text;
+
+/// Ctrl-C on any full-screen surface: the one cancel chord the picker,
+/// the text input, and the wizard's key loop all recognize — one
+/// definition so the three cannot drift.
+pub(crate) fn is_cancel(key: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+}

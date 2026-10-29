@@ -16,7 +16,7 @@ use rig::client::ModelListingClient;
 /// Hard cap for one listing call (ADR 0019): covers rig's internal pagination
 /// (Anthropic's cursor, Gemini's page tokens) so a slow provider can never
 /// stall the wizard longer than this.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// List the model ids `provider` offers, authenticated with `api_key` (empty
 /// for keyless providers), against `base_url` when the provider takes one.
@@ -28,7 +28,7 @@ pub(crate) async fn list_models(
     base_url: Option<&str>,
 ) -> Result<Vec<String>> {
     let fetched = tokio::time::timeout(
-        FETCH_TIMEOUT,
+        LIST_MODELS_TIMEOUT,
         list_models_uncapped(provider, api_key, base_url),
     )
     .await

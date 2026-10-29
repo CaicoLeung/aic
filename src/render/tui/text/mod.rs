@@ -5,12 +5,13 @@
 //! visible insertion point without per-frame cursor-mode toggling. Pure
 //! state + [`TextInput::on_key`] / [`TextInput::draw`], hermetically
 //! testable with `TestBackend`.
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::ICON_ALERT;
+use super::is_cancel;
 use crate::render::layout::MARGIN;
 use crate::render::tui::style as tstyle;
 
@@ -60,9 +61,7 @@ impl TextInput {
     /// Backspace deletes behind it, ←/→ move by char, Enter submits (the
     /// empty-hint fires and retries when empty is not allowed).
     pub(crate) fn on_key(&mut self, key: KeyEvent) -> Option<TextAct> {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        {
+        if is_cancel(key) {
             return Some(TextAct::Cancel);
         }
         match key.code {

@@ -74,7 +74,7 @@ impl SetupDeps {
             fetch_models: Box::new(|provider, api_key, base_url| {
                 let label = format!("Fetching {} models…", provider.display());
                 verify::probe(
-                    verify::FETCH_TIMEOUT,
+                    verify::MODEL_FETCH_TIMEOUT,
                     &label,
                     list_models(provider, api_key, base_url),
                 )

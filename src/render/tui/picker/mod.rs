@@ -6,12 +6,13 @@
 //! to a pick, [`Picker::draw`] paints it into a frame area, so the whole
 //! component is hermetically testable with ratatui's `TestBackend`.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::is_cancel;
 use crate::render::layout::MARGIN;
 use crate::render::tui::style as tstyle;
 
@@ -30,27 +31,33 @@ pub(crate) enum Pick {
 /// the filter matches against.
 #[derive(Clone)]
 pub(crate) struct PickerItem {
-    pub(crate) plain: String,
-    pub(crate) line: Line<'static>,
+    plain: String,
+    line: Line<'static>,
+}
+
+impl PickerItem {
+    /// Append one styled cell, keeping the rendered line and the filter's
+    /// plain text in lockstep — the only sanctioned mutation.
+    pub(crate) fn push(&mut self, text: impl Into<String>, style: Style) {
+        let text = text.into();
+        self.plain.push_str(&text);
+        self.line.spans.push(Span::styled(text, style));
+    }
 }
 
 /// Build one row from styled segments — the picker twin of the ANSI label
 /// fns the raw-ANSI surfaces use. `(text, style)` pairs keep call sites
 /// building the rendered spans and the plain filter text from the same
 /// literals.
-pub(crate) fn item<S: Into<String> + Clone>(cells: Vec<(S, Style)>) -> PickerItem {
-    let plain = cells
-        .iter()
-        .map(|(text, _)| text.clone().into())
-        .collect::<Vec<String>>()
-        .join("");
-    let line = Line::from(
-        cells
-            .into_iter()
-            .map(|(text, style)| Span::styled(text.into(), style))
-            .collect::<Vec<_>>(),
-    );
-    PickerItem { plain, line }
+pub(crate) fn item<S: Into<String>>(cells: Vec<(S, Style)>) -> PickerItem {
+    let mut row = PickerItem {
+        plain: String::new(),
+        line: Line::default(),
+    };
+    for (text, style) in cells {
+        row.push(text, style);
+    }
+    row
 }
 
 /// A filterable single-choice list.
@@ -99,9 +106,7 @@ impl Picker {
     /// the cursor (clamped, never wrapping — an off-screen wrap loses the
     /// cursor), Enter picks the row under the cursor.
     pub(crate) fn on_key(&mut self, key: KeyEvent) -> Option<Pick> {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        {
+        if is_cancel(key) {
             return Some(Pick::Cancel);
         }
         match key.code {

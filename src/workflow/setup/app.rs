@@ -36,6 +36,7 @@ use super::*;
 use crate::core::config::{Source, resolve_base_url, resolve_field};
 use crate::llm::cli_agent::cli_preset;
 use crate::render::layout::MARGIN;
+use crate::render::tui::is_cancel;
 use crate::render::tui::picker::{self, Pick, Picker, PickerItem};
 use crate::render::tui::style as tstyle;
 use crate::render::tui::terminal::Tui;
@@ -77,6 +78,14 @@ enum JobDone {
     Smoke(String),
 }
 
+/// Top-menu row indices (`top_menu_picker` order: Backend, AI provider,
+/// CLI agent, Confirm, Review, Save) — the pick handler, the verify-status
+/// fold, and every Esc-back highlight address rows through these.
+const TOP_ROW_PROVIDER: usize = 1;
+const TOP_ROW_CLI: usize = 2;
+const TOP_ROW_CONFIRM: usize = 3;
+const TOP_ROW_REVIEW: usize = 4;
+
 /// Which backend a verify outcome belongs to — routes the ✓/✗ marker onto
 /// the right top-menu row and the failure screen's `Edit` back into the
 /// right sub-flow.
@@ -90,8 +99,8 @@ impl ProbeFlow {
     /// The top-menu row to highlight when this flow settles.
     fn highlight(self) -> usize {
         match self {
-            ProbeFlow::Provider => 1,
-            ProbeFlow::Cli => 2,
+            ProbeFlow::Provider => TOP_ROW_PROVIDER,
+            ProbeFlow::Cli => TOP_ROW_CLI,
         }
     }
 }
@@ -124,14 +133,25 @@ enum Screen {
     ApiKeyMenu(Picker),
     /// `from_menu`: Esc returns to [`Screen::ApiKeyMenu`] instead of the
     /// provider sub-menu (the text prompt is a sub-mode of the menu).
-    ApiKeyText(TextInput, bool),
+    ApiKeyText {
+        input: TextInput,
+        from_menu: bool,
+    },
     BaseUrlMenu(Picker),
-    BaseUrlText(TextInput, bool),
+    /// `from_menu`: Esc returns to [`Screen::BaseUrlMenu`] instead of the
+    /// provider sub-menu.
+    BaseUrlText {
+        input: TextInput,
+        from_menu: bool,
+    },
     ModelPick(Picker),
     /// `custom`: entered from the picker's `Custom model…` row, so Esc goes
     /// back to the picker; otherwise this is the required free-text
     /// fallback (fetch failed, ADR 0019 §4) and Esc goes to the sub-menu.
-    ModelText(TextInput, bool),
+    ModelText {
+        input: TextInput,
+        custom: bool,
+    },
     CliPick(Picker),
     /// A background job is running; the frame is a spinner + label. `back`
     /// is the screen Esc restores — aborting detaches the job (its result
@@ -184,10 +204,8 @@ pub(super) fn run(
     loop {
         tui.draw(|f| app.draw(f))?;
         if let Some(done) = app.poll_job() {
-            if let Flow::Running = app.on_job(done)? {
-                continue;
-            }
-            unreachable!("on_job always continues the loop")
+            app.on_job(done);
+            continue;
         }
         if !event::poll(TICK)? {
             app.ticks += 1;
@@ -242,11 +260,7 @@ impl App {
     }
 
     fn enter_model_step(&mut self) {
-        let p = self.draft.provider.unwrap_or_default();
-        let (api_key, _) =
-            resolve_field(self.draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-        let (base_url, _) =
-            resolve_base_url(self.draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
+        let (p, api_key, base_url) = model_fetch_ctx(&self.draft);
         let key = cache_key(p, base_url.as_deref(), &api_key);
         if let Some(models) = self.draft.model_cache.get(&key).cloned() {
             self.show_models(models);
@@ -277,15 +291,15 @@ impl App {
                 self.draft.provider,
                 |c| c.model.as_ref(),
             );
-            self.screen = Screen::ModelText(
-                TextInput::new(
+            self.screen = Screen::ModelText {
+                input: TextInput::new(
                     "Model (required)",
                     initial.as_deref(),
                     false,
                     "model cannot be empty",
                 ),
-                false,
-            );
+                custom: false,
+            };
         } else {
             let initial = self
                 .draft
@@ -393,7 +407,7 @@ impl App {
         self.pending = Some(Pending {
             kind: match kind {
                 JobKind::Fetch { .. } => PendingKind::Models {
-                    key: cache_sentinel(&self.draft),
+                    key: model_cache_key(&self.draft),
                 },
                 JobKind::Smoke { .. } => PendingKind::Smoke,
                 JobKind::ProbeProvider | JobKind::ProbeCli => {
@@ -440,26 +454,27 @@ impl App {
             Err(mpsc::TryRecvError::Empty) => None,
             // The job thread died without sending; treat as a failed probe /
             // empty listing so the wizard never hangs on Busy.
-            Err(mpsc::TryRecvError::Disconnected) => Some(match self.pending_kind_snapshot() {
-                PendingSnapshot::Probe => JobDone::Probe(Err(anyhow::anyhow!(
+            Err(mpsc::TryRecvError::Disconnected) => Some(if self.pending_is_probe() {
+                JobDone::Probe(Err(anyhow::anyhow!(
                     "the background probe task did not report a result"
-                ))),
-                _ => JobDone::Models(Vec::new()),
+                )))
+            } else {
+                JobDone::Models(Vec::new())
             }),
         }
     }
 
-    fn pending_kind_snapshot(&self) -> PendingSnapshot {
-        match self.pending.as_ref().map(|p| &p.kind) {
-            Some(PendingKind::Probe { .. }) => PendingSnapshot::Probe,
-            _ => PendingSnapshot::Models,
-        }
+    fn pending_is_probe(&self) -> bool {
+        matches!(
+            self.pending.as_ref().map(|p| &p.kind),
+            Some(PendingKind::Probe { .. })
+        )
     }
 
-    fn on_job(&mut self, done: JobDone) -> Result<Flow> {
+    fn on_job(&mut self, done: JobDone) {
         let kind = match self.pending.take() {
             Some(p) => p.kind,
-            None => return Ok(Flow::Running),
+            None => return,
         };
         match (kind, done) {
             (PendingKind::Models { key }, JobDone::Models(models)) => {
@@ -480,7 +495,7 @@ impl App {
             (PendingKind::Probe { target }, JobDone::Probe(result)) => {
                 let Some(block) = self.verify.as_mut() else {
                     self.top_menu();
-                    return Ok(Flow::Running);
+                    return;
                 };
                 match result {
                     Ok(reply) => {
@@ -507,7 +522,6 @@ impl App {
             // menu rather than wedge on Busy.
             _ => self.top_menu(),
         }
-        Ok(Flow::Running)
     }
 
     // -- input -----------------------------------------------------------
@@ -540,23 +554,25 @@ impl App {
                 Some(Pick::Selected(0)) => {
                     self.screen = Screen::BackendChoice(backend_choice_picker())
                 }
-                Some(Pick::Selected(1)) => {
+                Some(Pick::Selected(TOP_ROW_PROVIDER)) => {
                     self.screen = Screen::ProviderPick(provider_pick_picker(
                         &self.draft,
                         self.existing_provider,
                     ))
                 }
-                Some(Pick::Selected(2)) => self.screen = Screen::CliPick(cli_pick_picker()),
-                Some(Pick::Selected(3)) => {
+                Some(Pick::Selected(TOP_ROW_CLI)) => {
+                    self.screen = Screen::CliPick(cli_pick_picker())
+                }
+                Some(Pick::Selected(TOP_ROW_CONFIRM)) => {
                     self.draft.confirm_before_commit =
                         Some(!self.draft.confirm_before_commit.unwrap_or(false));
-                    self.highlight = 3;
+                    self.highlight = TOP_ROW_CONFIRM;
                     self.top_menu();
                 }
-                Some(Pick::Selected(4)) => {
+                Some(Pick::Selected(TOP_ROW_REVIEW)) => {
                     self.draft.review_batch_plan =
                         Some(!self.draft.review_batch_plan.unwrap_or(false));
-                    self.highlight = 4;
+                    self.highlight = TOP_ROW_REVIEW;
                     self.top_menu();
                 }
                 Some(Pick::Selected(_)) => {
@@ -593,13 +609,16 @@ impl App {
                     self.provider_menu();
                 }
                 Some(Pick::Back) => {
-                    self.highlight = 1;
+                    self.highlight = TOP_ROW_PROVIDER;
                     self.top_menu();
                 }
                 _ => self.screen = Screen::ProviderPick(p),
             },
             Screen::ProviderMenu(mut p) => {
-                let entries = provider_menu_entries(&self.draft);
+                let entries: Vec<ProviderEntry> = provider_menu(&self.draft)
+                    .into_iter()
+                    .map(|(e, _)| e)
+                    .collect();
                 match p.on_key(key) {
                     Some(Pick::Selected(i)) => match entries.get(i).copied() {
                         Some(ProviderEntry::ApiKey) => self.enter_api_key(),
@@ -638,15 +657,23 @@ impl App {
                         self.provider_menu();
                     }
                     Some(Pick::Selected(i)) if i == enter_idx => {
-                        self.screen = Screen::ApiKeyText(
-                            TextInput::new("API key (blank = keyless server)", None, true, ""),
-                            true,
-                        );
+                        self.screen = Screen::ApiKeyText {
+                            input: TextInput::new(
+                                "API key (blank = keyless server)",
+                                None,
+                                true,
+                                "",
+                            ),
+                            from_menu: true,
+                        };
                     }
                     _ => self.screen = Screen::ApiKeyMenu(p),
                 }
             }
-            Screen::ApiKeyText(mut t, from_menu) => match t.on_key(key) {
+            Screen::ApiKeyText {
+                input: mut t,
+                from_menu,
+            } => match t.on_key(key) {
                 Some(TextAct::Submit(v)) => {
                     // The menu path's prompt promises `blank = keyless
                     // server`, so an empty submit clears the key; the
@@ -666,10 +693,18 @@ impl App {
                         self.provider_menu();
                     }
                 }
-                _ => self.screen = Screen::ApiKeyText(t, from_menu),
+                _ => {
+                    self.screen = Screen::ApiKeyText {
+                        input: t,
+                        from_menu,
+                    }
+                }
             },
             Screen::BaseUrlMenu(mut p) => self.on_base_url_menu(&mut p, key),
-            Screen::BaseUrlText(mut t, from_menu) => match t.on_key(key) {
+            Screen::BaseUrlText {
+                input: mut t,
+                from_menu,
+            } => match t.on_key(key) {
                 Some(TextAct::Submit(v)) => {
                     self.draft.base_url = Some(v);
                     self.provider_menu();
@@ -681,14 +716,19 @@ impl App {
                         self.provider_menu();
                     }
                 }
-                _ => self.screen = Screen::BaseUrlText(t, from_menu),
+                _ => {
+                    self.screen = Screen::BaseUrlText {
+                        input: t,
+                        from_menu,
+                    }
+                }
             },
             Screen::ModelPick(mut p) => match p.on_key(key) {
                 Some(Pick::Selected(i)) if is_custom_row(&self.draft, i) => {
-                    self.screen = Screen::ModelText(
-                        TextInput::new("Custom model", None, false, "model cannot be empty"),
-                        true,
-                    );
+                    self.screen = Screen::ModelText {
+                        input: TextInput::new("Custom model", None, false, "model cannot be empty"),
+                        custom: true,
+                    };
                 }
                 Some(Pick::Selected(i)) => {
                     self.draft.model = Some(model_at(&self.draft, i));
@@ -697,7 +737,10 @@ impl App {
                 Some(Pick::Back) => self.provider_menu(),
                 _ => self.screen = Screen::ModelPick(p),
             },
-            Screen::ModelText(mut t, custom) => match t.on_key(key) {
+            Screen::ModelText {
+                input: mut t,
+                custom,
+            } => match t.on_key(key) {
                 Some(TextAct::Submit(v)) => {
                     self.draft.model = Some(v);
                     self.provider_menu();
@@ -709,7 +752,7 @@ impl App {
                         self.provider_menu();
                     }
                 }
-                _ => self.screen = Screen::ModelText(t, custom),
+                _ => self.screen = Screen::ModelText { input: t, custom },
             },
             Screen::CliPick(mut p) => {
                 let rows = cli_menu_rows();
@@ -737,7 +780,7 @@ impl App {
                         None => self.screen = Screen::CliPick(p),
                     },
                     Some(Pick::Back) => {
-                        self.highlight = 2;
+                        self.highlight = TOP_ROW_CLI;
                         self.top_menu();
                     }
                     _ => self.screen = Screen::CliPick(p),
@@ -830,10 +873,15 @@ impl App {
                 self.provider_menu();
             }
             Some(Pick::Selected(i)) if i == custom_idx => {
-                self.screen = Screen::BaseUrlText(
-                    TextInput::new("Custom base URL", None, false, "base URL cannot be empty"),
-                    true,
-                );
+                self.screen = Screen::BaseUrlText {
+                    input: TextInput::new(
+                        "Custom base URL",
+                        None,
+                        false,
+                        "base URL cannot be empty",
+                    ),
+                    from_menu: true,
+                };
             }
             Some(Pick::Back) => self.provider_menu(),
             _ => {
@@ -855,10 +903,10 @@ impl App {
                 )
             };
             let allow_empty = !key.is_empty();
-            self.screen = Screen::ApiKeyText(
-                TextInput::new(&prompt, None, allow_empty, "API key cannot be empty"),
-                false,
-            );
+            self.screen = Screen::ApiKeyText {
+                input: TextInput::new(&prompt, None, allow_empty, "API key cannot be empty"),
+                from_menu: false,
+            };
         } else if provider == Provider::OpenAiCompatible {
             self.screen = Screen::ApiKeyMenu(api_key_menu_picker(&self.draft));
         } else {
@@ -881,15 +929,15 @@ impl App {
                     self.draft.provider,
                     |c| c.base_url.as_ref(),
                 );
-                self.screen = Screen::BaseUrlText(
-                    TextInput::new(
+                self.screen = Screen::BaseUrlText {
+                    input: TextInput::new(
                         "Base URL (e.g. http://localhost:1234/v1)",
                         initial.as_deref(),
                         false,
                         "base URL cannot be empty",
                     ),
-                    false,
-                );
+                    from_menu: false,
+                };
             }
             crate::llm::BaseUrlRequirement::Optional(_) => {
                 self.screen = Screen::BaseUrlMenu(base_url_menu_picker(&self.draft));
@@ -928,9 +976,9 @@ impl App {
             }
             Screen::ProviderPick(p) | Screen::ProviderMenu(p) => p.draw(body, f),
             Screen::ApiKeyMenu(p) | Screen::BaseUrlMenu(p) => p.draw(body, f),
-            Screen::ApiKeyText(t, _) | Screen::BaseUrlText(t, _) | Screen::ModelText(t, _) => {
-                t.draw(body, f)
-            }
+            Screen::ApiKeyText { input: t, .. }
+            | Screen::BaseUrlText { input: t, .. }
+            | Screen::ModelText { input: t, .. } => t.draw(body, f),
             Screen::ModelPick(p) | Screen::CliPick(p) => p.draw(body, f),
             // The failure screen shows *why* the probe failed (error block,
             // no pause row) above the Edit / Retry / Save-anyway picker —
@@ -1040,11 +1088,11 @@ impl App {
             Screen::ProviderPick(_)
             | Screen::ProviderMenu(_)
             | Screen::ApiKeyMenu(_)
-            | Screen::ApiKeyText(..)
+            | Screen::ApiKeyText { .. }
             | Screen::BaseUrlMenu(_)
-            | Screen::BaseUrlText(..)
+            | Screen::BaseUrlText { .. }
             | Screen::ModelPick(_)
-            | Screen::ModelText(..) => "AI provider",
+            | Screen::ModelText { .. } => "AI provider",
             Screen::CliPick(_) => "CLI agent",
             Screen::Busy { .. } | Screen::VerifyOutcome | Screen::FailExit(_) => "Verify",
         }
@@ -1052,7 +1100,7 @@ impl App {
 
     fn hint_line(&self) -> String {
         match &self.screen {
-            Screen::ApiKeyText(..) | Screen::BaseUrlText(..) | Screen::ModelText(..) => {
+            Screen::ApiKeyText { .. } | Screen::BaseUrlText { .. } | Screen::ModelText { .. } => {
                 "Enter confirm · Esc back · Ctrl-C cancel".into()
             }
             Screen::VerifyOutcome => "Enter continue · Ctrl-C cancel".into(),
@@ -1072,11 +1120,6 @@ impl ProbeFlow {
     }
 }
 
-enum PendingSnapshot {
-    Probe,
-    Models,
-}
-
 #[derive(Clone)]
 enum JobKind {
     Fetch {
@@ -1089,12 +1132,6 @@ enum JobKind {
     Smoke {
         program: String,
     },
-}
-
-fn is_cancel(key: KeyEvent) -> bool {
-    key.modifiers
-        .contains(crossterm::event::KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
 }
 
 // -- row builders ---------------------------------------------------------
@@ -1154,19 +1191,16 @@ fn top_menu_picker(draft: &Draft, existing: &Option<Config>, highlight: usize) -
     // standalone status line, the marker rides the row it is about.
     if let Some(status) = &draft.verify_status {
         let idx = match status.backend {
-            BackendKind::Api => 1,
-            BackendKind::Cli => 2,
+            BackendKind::Api => TOP_ROW_PROVIDER,
+            BackendKind::Cli => TOP_ROW_CLI,
         };
-        let marker = if status.passed {
+        let (marker, style) = if status.passed {
             (format!(" {ICON_CHECK}"), tstyle::success())
         } else {
             (format!(" {ICON_CROSS}"), tstyle::failure())
         };
         if let Some(row) = items.get_mut(idx) {
-            row.line
-                .spans
-                .push(Span::styled(marker.0.clone(), marker.1));
-            row.plain.push_str(&marker.0);
+            row.push(marker, style);
         }
     }
     let save = if dirty {
@@ -1234,27 +1268,17 @@ fn provider_pick_picker(draft: &Draft, existing_provider: Option<Provider>) -> P
 }
 
 fn provider_menu_picker(draft: &Draft) -> Picker {
-    Picker::new("Configure AI provider", provider_menu_rows(draft))
+    let rows = provider_menu(draft)
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect();
+    Picker::new("Configure AI provider", rows)
 }
 
-/// The applicable-field entries of the provider sub-menu (ADR 0019 steps)
-/// plus `Done`, in row order. Pure.
-fn provider_menu_entries(draft: &Draft) -> Vec<ProviderEntry> {
-    let p = draft.provider.unwrap_or_default();
-    let mut entries = Vec::new();
-    for step in applicable_steps(p) {
-        match step {
-            super::provider::Step::Provider => {}
-            super::provider::Step::ApiKey => entries.push(ProviderEntry::ApiKey),
-            super::provider::Step::BaseUrl => entries.push(ProviderEntry::BaseUrl),
-            super::provider::Step::Model => entries.push(ProviderEntry::Model),
-        }
-    }
-    entries.push(ProviderEntry::Done);
-    entries
-}
-
-fn provider_menu_rows(draft: &Draft) -> Vec<PickerItem> {
+/// The provider sub-menu: `(entry, row)` per applicable field (ADR 0019
+/// steps) plus `Done`, in row order. One walker builds both sides so the
+/// pick index and the rendered row can never drift apart. Pure.
+fn provider_menu(draft: &Draft) -> Vec<(ProviderEntry, PickerItem)> {
     let p = draft.provider.unwrap_or_default();
     let mut rows = Vec::new();
     for step in applicable_steps(p) {
@@ -1263,14 +1287,17 @@ fn provider_menu_rows(draft: &Draft) -> Vec<PickerItem> {
             super::provider::Step::ApiKey => {
                 let (key, _) =
                     resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-                rows.push(menu_value_row("· API key — ", &api_key_label(&key)));
+                rows.push((
+                    ProviderEntry::ApiKey,
+                    menu_value_row("· API key — ", &api_key_label(&key)),
+                ));
             }
             super::provider::Step::BaseUrl => {
                 let (url, source) =
                     resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
-                rows.push(menu_value_row(
-                    "· Base URL — ",
-                    &base_url_label(url.as_deref(), source),
+                rows.push((
+                    ProviderEntry::BaseUrl,
+                    menu_value_row("· Base URL — ", &base_url_label(url.as_deref(), source)),
                 ));
             }
             super::provider::Step::Model => {
@@ -1279,14 +1306,17 @@ fn provider_menu_rows(draft: &Draft) -> Vec<PickerItem> {
                     .as_deref()
                     .filter(|m| !m.is_empty())
                     .unwrap_or("");
-                rows.push(menu_value_row("· Model — ", &model_label(model)));
+                rows.push((
+                    ProviderEntry::Model,
+                    menu_value_row("· Model — ", &model_label(model)),
+                ));
             }
         }
     }
-    rows.push(picker::item(vec![(
-        "· Done — back to main menu",
-        tstyle::plain(),
-    )]));
+    rows.push((
+        ProviderEntry::Done,
+        picker::item(vec![("· Done — back to main menu", tstyle::plain())]),
+    ));
     rows
 }
 
@@ -1378,40 +1408,41 @@ fn effective_api_key(draft: &Draft) -> String {
     resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "").0
 }
 
-/// The cached model list under `key`, if this session already fetched one.
-fn cache_sentinel(draft: &Draft) -> String {
+/// The effective provider/key/base-url triple the model cache and fetch
+/// jobs are keyed by (ADR 0019 §5 session cache).
+fn model_fetch_ctx(draft: &Draft) -> (Provider, String, Option<String>) {
     let p = draft.provider.unwrap_or_default();
     let (api_key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
     let (base_url, _) = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
+    (p, api_key, base_url)
+}
+
+/// The session cache key for the current provider's model list.
+fn model_cache_key(draft: &Draft) -> String {
+    let (p, api_key, base_url) = model_fetch_ctx(draft);
     cache_key(p, base_url.as_deref(), &api_key)
+}
+
+/// The cached model list for the current provider, if this session already
+/// fetched one (empty otherwise).
+fn cached_models(draft: &Draft) -> Vec<String> {
+    draft
+        .model_cache
+        .get(&model_cache_key(draft))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Whether picker row `i` of the model screen is the `Custom model…`
 /// escape hatch (always the last row — [`picker_rows`] appends it).
 fn is_custom_row(draft: &Draft, i: usize) -> bool {
-    let p = draft.provider.unwrap_or_default();
-    let (api_key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-    let (base_url, _) = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
-    let models = draft
-        .model_cache
-        .get(&cache_key(p, base_url.as_deref(), &api_key))
-        .cloned()
-        .unwrap_or_default();
-    i + 1 == picker_rows(&models).len()
+    i + 1 == picker_rows(&cached_models(draft)).len()
 }
 
 /// The model list entry at picker row `i` (all rows but the last are
 /// models; the last is the custom escape hatch, handled by [`is_custom_row`]).
 fn model_at(draft: &Draft, i: usize) -> String {
-    let p = draft.provider.unwrap_or_default();
-    let (api_key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-    let (base_url, _) = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
-    let models = draft
-        .model_cache
-        .get(&cache_key(p, base_url.as_deref(), &api_key))
-        .cloned()
-        .unwrap_or_default();
-    models.get(i).cloned().unwrap_or_default()
+    cached_models(draft).get(i).cloned().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1493,7 +1524,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let done = done.expect("job result must arrive");
-        assert!(matches!(app.on_job(done), Ok(Flow::Running)));
+        app.on_job(done);
         assert!(
             matches!(app.screen, Screen::ModelPick(_)),
             "a fetched model list must land on the picker, got stuck instead"
@@ -1536,7 +1567,7 @@ mod tests {
         app.probe_cli(Some("true".into())); // Busy(back=CliPick)
         // The smoke result arrives; the chained probe Busy must still
         // remember CliPick as its back screen.
-        let _ = app.on_job(JobDone::Smoke("✓ `true` found".into())).unwrap();
+        app.on_job(JobDone::Smoke("✓ `true` found".into()));
         match &app.screen {
             Screen::Busy { back, .. } => {
                 assert!(
@@ -1562,7 +1593,7 @@ mod tests {
         let models = vec!["m1".to_string(), "m2".to_string()];
         app.draft
             .model_cache
-            .insert(cache_sentinel(&app.draft), models.clone());
+            .insert(model_cache_key(&app.draft), models.clone());
         app.show_models(models);
         // Exactly one custom row: the last one.
         assert!(!is_custom_row(&app.draft, 1), "m2 must be a model row");
@@ -1573,7 +1604,7 @@ mod tests {
         }
         let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
-            matches!(app.screen, Screen::ModelText(_, true)),
+            matches!(app.screen, Screen::ModelText { custom: true, .. }),
             "Enter on the custom row must open the custom-model input"
         );
     }
@@ -1601,7 +1632,13 @@ mod tests {
         let _ = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)); // row 2
         let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
-            matches!(app.screen, Screen::ApiKeyText(_, true)),
+            matches!(
+                app.screen,
+                Screen::ApiKeyText {
+                    from_menu: true,
+                    ..
+                }
+            ),
             "`Enter a new key…` must open the key prompt"
         );
     }
@@ -1612,10 +1649,10 @@ mod tests {
     #[test]
     fn blank_api_key_submit_from_menu_goes_keyless() {
         let mut app = app_with_hanging_fetch(); // api_key = Some("sk-test")
-        app.screen = Screen::ApiKeyText(
-            TextInput::new("API key (blank = keyless server)", None, true, ""),
-            true,
-        );
+        app.screen = Screen::ApiKeyText {
+            input: TextInput::new("API key (blank = keyless server)", None, true, ""),
+            from_menu: true,
+        };
         let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
             app.draft.api_key.is_none(),
@@ -1624,10 +1661,10 @@ mod tests {
 
         // The required-key path (a failed probe re-ask) keeps the old key.
         app.draft.api_key = Some("sk-old".into());
-        app.screen = Screen::ApiKeyText(
-            TextInput::new("API key", Some("sk-old"), true, "API key cannot be empty"),
-            false,
-        );
+        app.screen = Screen::ApiKeyText {
+            input: TextInput::new("API key", Some("sk-old"), true, "API key cannot be empty"),
+            from_menu: false,
+        };
         let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             app.draft.api_key.as_deref(),

@@ -98,7 +98,7 @@ const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Budget for a model-listing fetch — above `list_models`' own 5 s cap, so
 /// it is the outer belt only.
-pub(super) const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const MODEL_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The API-provider probe behind R3 auto-verify (AIC-23): a minimal sample
 /// request against the selected provider using the **effective** draft

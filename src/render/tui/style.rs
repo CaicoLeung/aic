@@ -56,3 +56,47 @@ pub(crate) fn badge(name: &str) -> Style {
 fn rgb((r, g, b): (u8, u8, u8)) -> Style {
     Style::new().fg(Color::Rgb(r, g, b))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use console::Style as ConsoleStyle;
+
+    /// The ANSI-16 twins must re-express the palette roles exactly: each
+    /// role is asserted on both sides — the palette (console vocabulary)
+    /// against its documented attributes, the twin (ratatui vocabulary)
+    /// against the same — so a role change on either side fails here and
+    /// forces the twin update (the module doc's "pinned by tests" claim).
+    #[test]
+    fn ansi16_twins_mirror_the_palette_roles() {
+        assert_eq!(palette::success(), ConsoleStyle::new().green().bold());
+        assert_eq!(
+            success(),
+            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+        );
+
+        assert_eq!(palette::failure(), ConsoleStyle::new().red().bold());
+        assert_eq!(
+            failure(),
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+        );
+
+        assert_eq!(palette::pending(), ConsoleStyle::new().yellow().bold());
+        assert_eq!(
+            pending(),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        );
+
+        assert_eq!(palette::caution(), ConsoleStyle::new().yellow());
+        assert_eq!(caution(), Style::new().fg(Color::Yellow));
+
+        assert_eq!(palette::muted(), ConsoleStyle::new().dim());
+        assert_eq!(muted(), Style::new().add_modifier(Modifier::DIM));
+
+        assert_eq!(palette::emphasis(), ConsoleStyle::new().bold());
+        assert_eq!(emphasis(), Style::new().add_modifier(Modifier::BOLD));
+
+        assert_eq!(palette::plain(), ConsoleStyle::new());
+        assert_eq!(plain(), Style::new());
+    }
+}

@@ -324,6 +324,10 @@ impl RunFrame {
                     // gluing onto the remediation row.
                     let _ = p.term.write_line("");
                     p.row = p.row.map(|r| (r + 1).min(p.height));
+                    // `write_line` advances only the terminal cursor;
+                    // `p.row` is the model's own row bookkeeping — this
+                    // bump is the sync that keeps it in step (the same
+                    // pairing `flush_rows` keeps), not a second advance.
                     // The frame just painted the failed screen; the ledger
                     // emit is non-TTY only (ADR 0018 amendment 1 — a
                     // second emit would duplicate the block).
@@ -970,7 +974,7 @@ mod tests {
 /// parent replays DSR replies, captures the master side, and asserts the
 /// erase → entry → repaint sequence.
 #[cfg(all(unix, test))]
-mod pty_tests {
+pub(crate) mod pty_tests {
     use super::*;
     use crate::render::cursor::pty_tests::open_pty;
 
@@ -1104,7 +1108,7 @@ mod pty_tests {
     /// stdio; returns `(pid, master, slave)` with the parent's fds. The
     /// child runs `drive` then `_exit(0)` — `drive` allocates (see the
     /// fork-discipline note on the flush test).
-    fn fork_on_pty(drive: fn()) -> (i32, i32, i32) {
+    pub(crate) fn fork_on_pty(drive: fn()) -> (i32, i32, i32) {
         let (master, slave) = open_pty();
         let ws = libc::winsize {
             ws_row: 30,
@@ -1135,7 +1139,7 @@ mod pty_tests {
     /// with row 12 (the probe's canonical path; row ≤ height so it is
     /// kept), keep reading the master until the child exits, then drain
     /// what is left. Returns everything the child wrote; closes both fds.
-    fn capture_until_exit(pid: i32, master: i32, slave: i32) -> String {
+    pub(crate) fn capture_until_exit(pid: i32, master: i32, slave: i32) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut capture: Vec<u8> = Vec::new();
         let mut buf = [0u8; 4096];
