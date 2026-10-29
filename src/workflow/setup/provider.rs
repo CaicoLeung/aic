@@ -114,17 +114,37 @@ pub(super) fn cache_key(provider: Provider, base_url: Option<&str>, api_key: &st
     )
 }
 
+/// One row of the Model picker (ADR 0019 §6): a listed model, or the
+/// `Custom model…` escape hatch. The tag travels with the row so the pick
+/// handler dispatches on what the row *is*, never on its position.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) enum ModelRow {
+    Model(String),
+    Custom,
+}
+
+impl ModelRow {
+    /// The row's display label (the `·` bullet lives in the label, matching
+    /// every other menu row).
+    pub(super) fn label(&self) -> String {
+        match self {
+            ModelRow::Model(m) => format!("{DOT} {m}"),
+            ModelRow::Custom => format!("{ICON_PENCIL}  Custom model…"),
+        }
+    }
+}
+
 /// Picker rows over a fetched list (ADR 0019 §6): already sorted by the
 /// fetcher, capped at the first 50 — no search, no pagination — plus the
 /// `Custom model…` escape hatch. Pure.
-pub(super) fn picker_rows(models: &[String]) -> Vec<String> {
+pub(super) fn picker_rows(models: &[String]) -> Vec<ModelRow> {
     // ponytail: first-50 truncation; add search/pagination if providers
     // start shipping lists where 50 isn't enough to find anything.
-    let mut items: Vec<String> = models
+    let mut items: Vec<ModelRow> = models
         .iter()
         .take(50)
-        .map(|m| format!("{DOT} {m}"))
+        .map(|m| ModelRow::Model(m.clone()))
         .collect();
-    items.push(format!("{ICON_PENCIL}  Custom model…"));
+    items.push(ModelRow::Custom);
     items
 }

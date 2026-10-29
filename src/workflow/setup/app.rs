@@ -28,8 +28,8 @@ use ratatui::widgets::Paragraph;
 use super::cli_flow::{CliRow, cli_menu_rows};
 use super::finalize;
 use super::provider::{
-    ProviderEntry, api_key_label, applicable_steps, base_url_label, cache_key, model_label,
-    picker_rows, preview_model,
+    ModelRow, ProviderEntry, api_key_label, applicable_steps, base_url_label, cache_key,
+    model_label, picker_rows, preview_model,
 };
 use super::verify::smoke_check;
 use super::*;
@@ -78,13 +78,44 @@ enum JobDone {
     Smoke(String),
 }
 
-/// Top-menu row indices (`top_menu_picker` order: Backend, AI provider,
-/// CLI agent, Confirm, Review, Save) — the pick handler, the verify-status
-/// fold, and every Esc-back highlight address rows through these.
-const TOP_ROW_PROVIDER: usize = 1;
-const TOP_ROW_CLI: usize = 2;
-const TOP_ROW_CONFIRM: usize = 3;
-const TOP_ROW_REVIEW: usize = 4;
+/// The top menu's rows, tagged with the sub-flow each opens — the pick
+/// handler, the verify-status fold, and every Esc-back highlight address
+/// rows by tag, so builder order can never drift from dispatch.
+#[derive(Clone, Copy, PartialEq)]
+enum TopRow {
+    Backend,
+    Provider,
+    Cli,
+    Confirm,
+    Review,
+    Save,
+}
+
+/// The API-key menu's rows (the `Keep current key` row only exists when a
+/// key is already set).
+#[derive(Clone, Copy, PartialEq)]
+enum ApiKeyRow {
+    Keep,
+    NoKey,
+    Enter,
+}
+
+/// The base-URL menu's rows (the `Keep current URL` row only exists when a
+/// custom URL is set).
+#[derive(Clone, Copy, PartialEq)]
+enum BaseUrlRow {
+    Keep,
+    Default,
+    Custom,
+}
+
+/// The failure screen's rows.
+#[derive(Clone, Copy, PartialEq)]
+enum FailExitRow {
+    Edit,
+    Retry,
+    SaveAnyway,
+}
 
 /// Which backend a verify outcome belongs to — routes the ✓/✗ marker onto
 /// the right top-menu row and the failure screen's `Edit` back into the
@@ -97,10 +128,10 @@ enum ProbeFlow {
 
 impl ProbeFlow {
     /// The top-menu row to highlight when this flow settles.
-    fn highlight(self) -> usize {
+    fn highlight(self) -> TopRow {
         match self {
-            ProbeFlow::Provider => TOP_ROW_PROVIDER,
-            ProbeFlow::Cli => TOP_ROW_CLI,
+            ProbeFlow::Provider => TopRow::Provider,
+            ProbeFlow::Cli => TopRow::Cli,
         }
     }
 }
@@ -124,27 +155,27 @@ struct VerifyBlock {
 #[derive(Clone)]
 enum Screen {
     /// First-run Backend choice (ADR 0011 mode-first).
-    ModeChoice(Picker),
-    TopMenu(Picker),
-    BackendChoice(Picker),
-    ProviderPick(Picker),
-    ProviderMenu(Picker),
+    ModeChoice(Picker<BackendKind>),
+    TopMenu(Picker<TopRow>),
+    BackendChoice(Picker<BackendKind>),
+    ProviderPick(Picker<Provider>),
+    ProviderMenu(Picker<ProviderEntry>),
     /// The optional-key menu (OpenAI-compatible providers).
-    ApiKeyMenu(Picker),
+    ApiKeyMenu(Picker<ApiKeyRow>),
     /// `from_menu`: Esc returns to [`Screen::ApiKeyMenu`] instead of the
     /// provider sub-menu (the text prompt is a sub-mode of the menu).
     ApiKeyText {
         input: TextInput,
         from_menu: bool,
     },
-    BaseUrlMenu(Picker),
+    BaseUrlMenu(Picker<BaseUrlRow>),
     /// `from_menu`: Esc returns to [`Screen::BaseUrlMenu`] instead of the
     /// provider sub-menu.
     BaseUrlText {
         input: TextInput,
         from_menu: bool,
     },
-    ModelPick(Picker),
+    ModelPick(Picker<ModelRow>),
     /// `custom`: entered from the picker's `Custom model…` row, so Esc goes
     /// back to the picker; otherwise this is the required free-text
     /// fallback (fetch failed, ADR 0019 §4) and Esc goes to the sub-menu.
@@ -152,7 +183,7 @@ enum Screen {
         input: TextInput,
         custom: bool,
     },
-    CliPick(Picker),
+    CliPick(Picker<CliRow>),
     /// A background job is running; the frame is a spinner + label. `back`
     /// is the screen Esc restores — aborting detaches the job (its result
     /// is dropped when the channel's receiver goes away), so a wedged
@@ -164,7 +195,7 @@ enum Screen {
     /// A successful probe, waiting for Enter.
     VerifyOutcome,
     /// A failed probe: the error block plus Edit / Retry / Save anyway (R3).
-    FailExit(Picker),
+    FailExit(Picker<FailExitRow>),
     /// Esc on a dirty top menu: confirm the discard (default yes).
     DiscardConfirm,
 }
@@ -179,7 +210,7 @@ pub(super) struct App {
     draft: Draft,
     screen: Screen,
     /// Top-menu row to re-highlight after a sub-flow settles.
-    highlight: usize,
+    highlight: TopRow,
     pending: Option<Pending>,
     /// The smoke-check one-liner riding along with the CLI verify screens.
     smoke_line: Option<String>,
@@ -233,7 +264,7 @@ impl App {
         let screen = if existing.is_none() {
             Screen::ModeChoice(mode_choice_picker())
         } else {
-            Screen::TopMenu(top_menu_picker(&draft, &existing, 0))
+            Screen::TopMenu(top_menu_picker(&draft, &existing, TopRow::Backend))
         };
         Self {
             deps,
@@ -241,7 +272,7 @@ impl App {
             existing_provider,
             draft,
             screen,
-            highlight: 0,
+            highlight: TopRow::Backend,
             pending: None,
             smoke_line: None,
             verify: None,
@@ -312,7 +343,7 @@ impl App {
                 "Model",
                 picker_rows(&models)
                     .into_iter()
-                    .map(|m| picker::item(vec![(&m, tstyle::plain())]))
+                    .map(|r| (picker::item(vec![(r.label(), tstyle::plain())]), r))
                     .collect(),
                 initial,
             ));
@@ -536,14 +567,14 @@ impl App {
         }
         match std::mem::replace(&mut self.screen, Screen::DiscardConfirm) {
             Screen::ModeChoice(mut p) => match p.on_key(key) {
-                Some(Pick::Selected(0)) => {
+                Some(Pick::Selected(BackendKind::Api)) => {
                     self.draft.backend_kind = Some(BackendKind::Api);
                     self.screen = Screen::ProviderPick(provider_pick_picker(
                         &self.draft,
                         self.existing_provider,
                     ))
                 }
-                Some(Pick::Selected(_)) => {
+                Some(Pick::Selected(BackendKind::Cli)) => {
                     self.draft.backend_kind = Some(BackendKind::Cli);
                     self.screen = Screen::CliPick(cli_pick_picker());
                 }
@@ -551,31 +582,31 @@ impl App {
                 _ => self.screen = Screen::ModeChoice(p),
             },
             Screen::TopMenu(mut p) => match p.on_key(key) {
-                Some(Pick::Selected(0)) => {
+                Some(Pick::Selected(TopRow::Backend)) => {
                     self.screen = Screen::BackendChoice(backend_choice_picker())
                 }
-                Some(Pick::Selected(TOP_ROW_PROVIDER)) => {
+                Some(Pick::Selected(TopRow::Provider)) => {
                     self.screen = Screen::ProviderPick(provider_pick_picker(
                         &self.draft,
                         self.existing_provider,
                     ))
                 }
-                Some(Pick::Selected(TOP_ROW_CLI)) => {
+                Some(Pick::Selected(TopRow::Cli)) => {
                     self.screen = Screen::CliPick(cli_pick_picker())
                 }
-                Some(Pick::Selected(TOP_ROW_CONFIRM)) => {
+                Some(Pick::Selected(TopRow::Confirm)) => {
                     self.draft.confirm_before_commit =
                         Some(!self.draft.confirm_before_commit.unwrap_or(false));
-                    self.highlight = TOP_ROW_CONFIRM;
+                    self.highlight = TopRow::Confirm;
                     self.top_menu();
                 }
-                Some(Pick::Selected(TOP_ROW_REVIEW)) => {
+                Some(Pick::Selected(TopRow::Review)) => {
                     self.draft.review_batch_plan =
                         Some(!self.draft.review_batch_plan.unwrap_or(false));
-                    self.highlight = TOP_ROW_REVIEW;
+                    self.highlight = TopRow::Review;
                     self.top_menu();
                 }
-                Some(Pick::Selected(_)) => {
+                Some(Pick::Selected(TopRow::Save)) => {
                     return Ok(Flow::Save(finalize::finalize(self.draft.clone())));
                 }
                 Some(Pick::Back) => {
@@ -588,88 +619,60 @@ impl App {
                 _ => self.screen = Screen::TopMenu(p),
             },
             Screen::BackendChoice(mut p) => match p.on_key(key) {
-                Some(Pick::Selected(0)) => {
-                    self.draft.backend_kind = Some(BackendKind::Api);
-                    self.highlight = 0;
-                    self.top_menu();
-                }
-                Some(Pick::Selected(_)) => {
-                    self.draft.backend_kind = Some(BackendKind::Cli);
-                    self.highlight = 0;
+                Some(Pick::Selected(kind)) => {
+                    self.draft.backend_kind = Some(kind);
+                    self.highlight = TopRow::Backend;
                     self.top_menu();
                 }
                 Some(Pick::Back) => self.top_menu(),
                 _ => self.screen = Screen::BackendChoice(p),
             },
             Screen::ProviderPick(mut p) => match p.on_key(key) {
-                Some(Pick::Selected(i)) => {
-                    let chosen = Provider::all()[i];
+                Some(Pick::Selected(chosen)) => {
                     finalize::switch_provider(&mut self.draft, chosen);
                     self.draft.provider = Some(chosen);
                     self.provider_menu();
                 }
                 Some(Pick::Back) => {
-                    self.highlight = TOP_ROW_PROVIDER;
+                    self.highlight = TopRow::Provider;
                     self.top_menu();
                 }
                 _ => self.screen = Screen::ProviderPick(p),
             },
-            Screen::ProviderMenu(mut p) => {
-                let entries: Vec<ProviderEntry> = provider_menu(&self.draft)
-                    .into_iter()
-                    .map(|(e, _)| e)
-                    .collect();
-                match p.on_key(key) {
-                    Some(Pick::Selected(i)) => match entries.get(i).copied() {
-                        Some(ProviderEntry::ApiKey) => self.enter_api_key(),
-                        Some(ProviderEntry::BaseUrl) => self.enter_base_url(),
-                        Some(ProviderEntry::Model) => self.enter_model_step(),
-                        // Soft required gate (ADR 0019 §7): Done routes into
-                        // the Model step until a model exists.
-                        Some(ProviderEntry::Done) if self.draft.effective_model().is_empty() => {
-                            self.enter_model_step()
-                        }
-                        Some(ProviderEntry::Done) => self.probe_provider(),
-                        None => self.provider_menu(),
-                    },
-                    Some(Pick::Back) => {
-                        self.screen = Screen::ProviderPick(provider_pick_picker(
-                            &self.draft,
-                            self.existing_provider,
-                        ))
-                    }
-                    _ => self.screen = Screen::ProviderMenu(p),
+            Screen::ProviderMenu(mut p) => match p.on_key(key) {
+                Some(Pick::Selected(ProviderEntry::ApiKey)) => self.enter_api_key(),
+                Some(Pick::Selected(ProviderEntry::BaseUrl)) => self.enter_base_url(),
+                Some(Pick::Selected(ProviderEntry::Model)) => self.enter_model_step(),
+                // Soft required gate (ADR 0019 §7): Done routes into the
+                // Model step until a model exists.
+                Some(Pick::Selected(ProviderEntry::Done))
+                    if self.draft.effective_model().is_empty() =>
+                {
+                    self.enter_model_step()
                 }
-            }
-            Screen::ApiKeyMenu(mut p) => {
-                let has_key = !effective_api_key(&self.draft).is_empty();
-                // Rows in builder order (`api_key_menu_picker`): with a key
-                // [Keep, No API key, Enter new]; without [No API key, Enter new].
-                let (keep_idx, no_key_idx, enter_idx) = if has_key {
-                    (Some(0), 1, 2)
-                } else {
-                    (None, 0, 1)
-                };
-                match p.on_key(key) {
-                    Some(Pick::Selected(i)) if keep_idx == Some(i) => self.provider_menu(),
-                    Some(Pick::Selected(i)) if i == no_key_idx => {
-                        self.draft.api_key = None;
-                        self.provider_menu();
-                    }
-                    Some(Pick::Selected(i)) if i == enter_idx => {
-                        self.screen = Screen::ApiKeyText {
-                            input: TextInput::new(
-                                "API key (blank = keyless server)",
-                                None,
-                                true,
-                                "",
-                            ),
-                            from_menu: true,
-                        };
-                    }
-                    _ => self.screen = Screen::ApiKeyMenu(p),
+                Some(Pick::Selected(ProviderEntry::Done)) => self.probe_provider(),
+                Some(Pick::Back) => {
+                    self.screen = Screen::ProviderPick(provider_pick_picker(
+                        &self.draft,
+                        self.existing_provider,
+                    ))
                 }
-            }
+                _ => self.screen = Screen::ProviderMenu(p),
+            },
+            Screen::ApiKeyMenu(mut p) => match p.on_key(key) {
+                Some(Pick::Selected(ApiKeyRow::Keep)) => self.provider_menu(),
+                Some(Pick::Selected(ApiKeyRow::NoKey)) => {
+                    self.draft.api_key = None;
+                    self.provider_menu();
+                }
+                Some(Pick::Selected(ApiKeyRow::Enter)) => {
+                    self.screen = Screen::ApiKeyText {
+                        input: TextInput::new("API key (blank = keyless server)", None, true, ""),
+                        from_menu: true,
+                    };
+                }
+                _ => self.screen = Screen::ApiKeyMenu(p),
+            },
             Screen::ApiKeyText {
                 input: mut t,
                 from_menu,
@@ -724,14 +727,14 @@ impl App {
                 }
             },
             Screen::ModelPick(mut p) => match p.on_key(key) {
-                Some(Pick::Selected(i)) if is_custom_row(&self.draft, i) => {
+                Some(Pick::Selected(ModelRow::Custom)) => {
                     self.screen = Screen::ModelText {
                         input: TextInput::new("Custom model", None, false, "model cannot be empty"),
                         custom: true,
                     };
                 }
-                Some(Pick::Selected(i)) => {
-                    self.draft.model = Some(model_at(&self.draft, i));
+                Some(Pick::Selected(ModelRow::Model(m))) => {
+                    self.draft.model = Some(m);
                     self.provider_menu();
                 }
                 Some(Pick::Back) => self.provider_menu(),
@@ -754,38 +757,32 @@ impl App {
                 }
                 _ => self.screen = Screen::ModelText { input: t, custom },
             },
-            Screen::CliPick(mut p) => {
-                let rows = cli_menu_rows();
-                match p.on_key(key) {
-                    Some(Pick::Selected(i)) => match rows.get(i).copied() {
-                        Some(CliRow::Preset(name)) => {
-                            let spec = cli_preset(name).expect("PRESETS rows have specs");
-                            let program = spec.command.to_string();
-                            self.draft.cli = CliConfig {
-                                command: Some(spec.command),
-                                args: Some(spec.args),
-                                timeout_secs: Some(spec.timeout_secs),
-                                encoding: Some(spec.encoding),
-                            };
-                            self.probe_cli(Some(program));
-                        }
-                        Some(CliRow::Done) => {
-                            if self.draft.active_cli_command().is_some() {
-                                self.probe_cli(None);
-                            } else {
-                                self.highlight = 2;
-                                self.top_menu();
-                            }
-                        }
-                        None => self.screen = Screen::CliPick(p),
-                    },
-                    Some(Pick::Back) => {
-                        self.highlight = TOP_ROW_CLI;
+            Screen::CliPick(mut p) => match p.on_key(key) {
+                Some(Pick::Selected(CliRow::Preset(name))) => {
+                    let spec = cli_preset(name).expect("PRESETS rows have specs");
+                    let program = spec.command.to_string();
+                    self.draft.cli = CliConfig {
+                        command: Some(spec.command),
+                        args: Some(spec.args),
+                        timeout_secs: Some(spec.timeout_secs),
+                        encoding: Some(spec.encoding),
+                    };
+                    self.probe_cli(Some(program));
+                }
+                Some(Pick::Selected(CliRow::Done)) => {
+                    if self.draft.active_cli_command().is_some() {
+                        self.probe_cli(None);
+                    } else {
+                        self.highlight = TopRow::Cli;
                         self.top_menu();
                     }
-                    _ => self.screen = Screen::CliPick(p),
                 }
-            }
+                Some(Pick::Back) => {
+                    self.highlight = TopRow::Cli;
+                    self.top_menu();
+                }
+                _ => self.screen = Screen::CliPick(p),
+            },
             Screen::Busy { label, back } => {
                 if key.code == KeyCode::Esc {
                     // Abort: detach the job (dropping the receiver makes its
@@ -802,11 +799,13 @@ impl App {
                 _ => self.screen = Screen::VerifyOutcome,
             },
             Screen::FailExit(mut p) => match p.on_key(key) {
-                Some(Pick::Selected(0)) => match self.verify.as_ref().map(|v| v.flow) {
-                    Some(ProbeFlow::Cli) => self.screen = Screen::CliPick(cli_pick_picker()),
-                    _ => self.provider_menu(),
-                },
-                Some(Pick::Selected(1)) => {
+                Some(Pick::Selected(FailExitRow::Edit)) => {
+                    match self.verify.as_ref().map(|v| v.flow) {
+                        Some(ProbeFlow::Cli) => self.screen = Screen::CliPick(cli_pick_picker()),
+                        _ => self.provider_menu(),
+                    }
+                }
+                Some(Pick::Selected(FailExitRow::Retry)) => {
                     let flow = self.verify.as_ref().map(|v| v.flow);
                     let target = self
                         .verify
@@ -821,20 +820,14 @@ impl App {
                         _ => self.probe_provider(),
                     }
                 }
-                Some(Pick::Selected(_)) => {
+                // Save-anyway and Esc both land on the flow's own top-menu
+                // row (AI provider for API, CLI agent for CLI).
+                Some(Pick::Selected(FailExitRow::SaveAnyway)) | Some(Pick::Back) => {
                     self.highlight = self
                         .verify
                         .as_ref()
                         .map(|v| v.flow.highlight())
-                        .unwrap_or(0);
-                    self.top_menu();
-                }
-                Some(Pick::Back) => {
-                    self.highlight = self
-                        .verify
-                        .as_ref()
-                        .map(|v| v.flow.highlight())
-                        .unwrap_or(0);
+                        .unwrap_or(TopRow::Backend);
                     self.top_menu();
                 }
                 _ => self.screen = Screen::FailExit(p),
@@ -851,28 +844,14 @@ impl App {
         Ok(Flow::Running)
     }
 
-    fn on_base_url_menu(&mut self, p: &mut Picker, key: KeyEvent) {
-        let provider = self
-            .draft
-            .provider
-            .expect("provider chosen before base url");
-        let (_, source) = resolve_base_url(
-            self.draft.base_url.as_deref().filter(|u| !u.is_empty()),
-            &provider,
-        );
-        let has_url = matches!(source, Source::Config);
-        let (keep_idx, use_default_idx, custom_idx) = if has_url {
-            (Some(0), 1, 2)
-        } else {
-            (None, 0, 1)
-        };
+    fn on_base_url_menu(&mut self, p: &mut Picker<BaseUrlRow>, key: KeyEvent) {
         match p.on_key(key) {
-            Some(Pick::Selected(i)) if keep_idx == Some(i) => self.provider_menu(),
-            Some(Pick::Selected(i)) if i == use_default_idx => {
+            Some(Pick::Selected(BaseUrlRow::Keep)) => self.provider_menu(),
+            Some(Pick::Selected(BaseUrlRow::Default)) => {
                 self.draft.base_url = None;
                 self.provider_menu();
             }
-            Some(Pick::Selected(i)) if i == custom_idx => {
+            Some(Pick::Selected(BaseUrlRow::Custom)) => {
                 self.screen = Screen::BaseUrlText {
                     input: TextInput::new(
                         "Custom base URL",
@@ -971,15 +950,17 @@ impl App {
             hint,
         );
         match &self.screen {
-            Screen::ModeChoice(p) | Screen::TopMenu(p) | Screen::BackendChoice(p) => {
-                p.draw(body, f)
-            }
-            Screen::ProviderPick(p) | Screen::ProviderMenu(p) => p.draw(body, f),
-            Screen::ApiKeyMenu(p) | Screen::BaseUrlMenu(p) => p.draw(body, f),
+            Screen::ModeChoice(p) | Screen::BackendChoice(p) => p.draw(body, f),
+            Screen::TopMenu(p) => p.draw(body, f),
+            Screen::ProviderPick(p) => p.draw(body, f),
+            Screen::ProviderMenu(p) => p.draw(body, f),
+            Screen::ApiKeyMenu(p) => p.draw(body, f),
+            Screen::BaseUrlMenu(p) => p.draw(body, f),
             Screen::ApiKeyText { input: t, .. }
             | Screen::BaseUrlText { input: t, .. }
             | Screen::ModelText { input: t, .. } => t.draw(body, f),
-            Screen::ModelPick(p) | Screen::CliPick(p) => p.draw(body, f),
+            Screen::ModelPick(p) => p.draw(body, f),
+            Screen::CliPick(p) => p.draw(body, f),
             // The failure screen shows *why* the probe failed (error block,
             // no pause row) above the Edit / Retry / Save-anyway picker —
             // the picker alone gave no clue what went wrong.
@@ -1136,70 +1117,97 @@ enum JobKind {
 
 // -- row builders ---------------------------------------------------------
 
-fn mode_choice_picker() -> Picker {
+fn mode_choice_picker() -> Picker<BackendKind> {
     Picker::new(
         "What would you like to configure?",
         vec![
-            picker::item(vec![(
-                "· API provider — use an API key (OpenAI, Anthropic, Gemini, …)",
-                tstyle::plain(),
-            )]),
-            picker::item(vec![(
-                "· CLI agent — reuse Claude Code / Codex / pi (no API key needed)",
-                tstyle::plain(),
-            )]),
+            (
+                picker::item(vec![(
+                    "· API provider — use an API key (OpenAI, Anthropic, Gemini, …)",
+                    tstyle::plain(),
+                )]),
+                BackendKind::Api,
+            ),
+            (
+                picker::item(vec![(
+                    "· CLI agent — reuse Claude Code / Codex / pi (no API key needed)",
+                    tstyle::plain(),
+                )]),
+                BackendKind::Cli,
+            ),
         ],
     )
 }
 
-fn backend_choice_picker() -> Picker {
+fn backend_choice_picker() -> Picker<BackendKind> {
     let value = |v: &'static str| (v, tstyle::emphasis());
     Picker::new(
         "Which Backend should aic use?",
         vec![
-            picker::item(vec![
-                ("· API provider — ", tstyle::plain()),
-                value("use an API key"),
-            ]),
-            picker::item(vec![
-                ("· CLI agent — ", tstyle::plain()),
-                value("reuse a coding-agent CLI (no API key)"),
-            ]),
+            (
+                picker::item(vec![
+                    ("· API provider — ", tstyle::plain()),
+                    value("use an API key"),
+                ]),
+                BackendKind::Api,
+            ),
+            (
+                picker::item(vec![
+                    ("· CLI agent — ", tstyle::plain()),
+                    value("reuse a coding-agent CLI (no API key)"),
+                ]),
+                BackendKind::Cli,
+            ),
         ],
     )
 }
 
-fn top_menu_picker(draft: &Draft, existing: &Option<Config>, highlight: usize) -> Picker {
+fn top_menu_picker(draft: &Draft, existing: &Option<Config>, highlight: TopRow) -> Picker<TopRow> {
     let dirty = finalize::draft_dirty(draft, existing);
     let mut items = vec![
-        picker::item(vec![
-            ("· Backend — ", tstyle::plain()),
-            (draft.active_backend().display_name(), tstyle::emphasis()),
-        ]),
-        menu_value_row("· AI provider — ", &provider_label(draft)),
-        menu_value_row("· CLI agent — ", &cli_label(draft)),
-        picker::item(vec![
-            ("· Confirm before commit — ", tstyle::plain()),
-            toggle_row(draft.confirm_before_commit),
-        ]),
-        picker::item(vec![
-            ("· Review batch plan — ", tstyle::plain()),
-            toggle_row(draft.review_batch_plan),
-        ]),
+        (
+            picker::item(vec![
+                ("· Backend — ", tstyle::plain()),
+                (draft.active_backend().display_name(), tstyle::emphasis()),
+            ]),
+            TopRow::Backend,
+        ),
+        (
+            menu_value_row("· AI provider — ", &provider_label(draft)),
+            TopRow::Provider,
+        ),
+        (
+            menu_value_row("· CLI agent — ", &cli_label(draft)),
+            TopRow::Cli,
+        ),
+        (
+            picker::item(vec![
+                ("· Confirm before commit — ", tstyle::plain()),
+                toggle_row(draft.confirm_before_commit),
+            ]),
+            TopRow::Confirm,
+        ),
+        (
+            picker::item(vec![
+                ("· Review batch plan — ", tstyle::plain()),
+                toggle_row(draft.review_batch_plan),
+            ]),
+            TopRow::Review,
+        ),
     ];
     // Fold the latest verify outcome onto its backend's row (ADR 0020): no
     // standalone status line, the marker rides the row it is about.
     if let Some(status) = &draft.verify_status {
-        let idx = match status.backend {
-            BackendKind::Api => TOP_ROW_PROVIDER,
-            BackendKind::Cli => TOP_ROW_CLI,
+        let owner = match status.backend {
+            BackendKind::Api => TopRow::Provider,
+            BackendKind::Cli => TopRow::Cli,
         };
         let (marker, style) = if status.passed {
             (format!(" {ICON_CHECK}"), tstyle::success())
         } else {
             (format!(" {ICON_CROSS}"), tstyle::failure())
         };
-        if let Some(row) = items.get_mut(idx) {
+        if let Some((row, _)) = items.iter_mut().find(|(_, tag)| *tag == owner) {
             row.push(marker, style);
         }
     }
@@ -1208,8 +1216,12 @@ fn top_menu_picker(draft: &Draft, existing: &Option<Config>, highlight: usize) -
     } else {
         "· Save & exit"
     };
-    items.push(picker::item(vec![(save, tstyle::plain())]));
-    Picker::new_at("What would you like to configure?", items, highlight)
+    items.push((picker::item(vec![(save, tstyle::plain())]), TopRow::Save));
+    let cursor = items
+        .iter()
+        .position(|(_, tag)| *tag == highlight)
+        .unwrap_or(0);
+    Picker::new_at("What would you like to configure?", items, cursor)
 }
 
 fn menu_value_row(prefix: &str, value: &str) -> PickerItem {
@@ -1235,7 +1247,7 @@ fn toggle_row(value: Option<bool>) -> (&'static str, ratatui::style::Style) {
     }
 }
 
-fn provider_pick_picker(draft: &Draft, existing_provider: Option<Provider>) -> Picker {
+fn provider_pick_picker(draft: &Draft, existing_provider: Option<Provider>) -> Picker<Provider> {
     let items = Provider::all()
         .iter()
         .map(|p| {
@@ -1256,7 +1268,7 @@ fn provider_pick_picker(draft: &Draft, existing_provider: Option<Provider>) -> P
             } else {
                 cells.push((format!("({model})"), tstyle::muted()));
             }
-            picker::item(cells)
+            (picker::item(cells), *p)
         })
         .collect();
     let cursor = draft
@@ -1267,81 +1279,82 @@ fn provider_pick_picker(draft: &Draft, existing_provider: Option<Provider>) -> P
     Picker::new_at("Choose your AI provider", items, cursor)
 }
 
-fn provider_menu_picker(draft: &Draft) -> Picker {
-    let rows = provider_menu(draft)
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect();
-    Picker::new("Configure AI provider", rows)
+fn provider_menu_picker(draft: &Draft) -> Picker<ProviderEntry> {
+    Picker::new("Configure AI provider", provider_menu(draft))
 }
 
-/// The provider sub-menu: `(entry, row)` per applicable field (ADR 0019
-/// steps) plus `Done`, in row order. One walker builds both sides so the
-/// pick index and the rendered row can never drift apart. Pure.
-fn provider_menu(draft: &Draft) -> Vec<(ProviderEntry, PickerItem)> {
-    let p = draft.provider.unwrap_or_default();
+/// The provider sub-menu rows, each tagged with the entry it opens (ADR
+/// 0019 steps) plus `Done`. One walker builds row and tag together so the
+/// pick and the rendered row can never drift apart. Pure.
+fn provider_menu(draft: &Draft) -> Vec<(PickerItem, ProviderEntry)> {
+    let provider = draft.provider.unwrap_or_default();
+    let (api_key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
+    let masked = api_key_label(&api_key);
+    let (base_url, source) = resolve_base_url(
+        draft.base_url.as_deref().filter(|u| !u.is_empty()),
+        &provider,
+    );
+    let url_row = base_url_label(base_url.as_deref(), source);
+    let model = draft.effective_model();
     let mut rows = Vec::new();
-    for step in applicable_steps(p) {
+    for step in applicable_steps(provider) {
         match step {
             super::provider::Step::Provider => {}
             super::provider::Step::ApiKey => {
-                let (key, _) =
-                    resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
                 rows.push((
+                    menu_value_row("· API key — ", &masked),
                     ProviderEntry::ApiKey,
-                    menu_value_row("· API key — ", &api_key_label(&key)),
                 ));
             }
             super::provider::Step::BaseUrl => {
-                let (url, source) =
-                    resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
                 rows.push((
+                    menu_value_row("· Base URL — ", &url_row),
                     ProviderEntry::BaseUrl,
-                    menu_value_row("· Base URL — ", &base_url_label(url.as_deref(), source)),
                 ));
             }
             super::provider::Step::Model => {
-                let model = draft
-                    .model
-                    .as_deref()
-                    .filter(|m| !m.is_empty())
-                    .unwrap_or("");
                 rows.push((
+                    menu_value_row("· Model — ", &model_label(&model)),
                     ProviderEntry::Model,
-                    menu_value_row("· Model — ", &model_label(model)),
                 ));
             }
         }
     }
     rows.push((
-        ProviderEntry::Done,
         picker::item(vec![("· Done — back to main menu", tstyle::plain())]),
+        ProviderEntry::Done,
     ));
     rows
 }
 
-fn api_key_menu_picker(draft: &Draft) -> Picker {
+fn api_key_menu_picker(draft: &Draft) -> Picker<ApiKeyRow> {
     let key = effective_api_key(draft);
     let has_key = !key.is_empty();
     let mut rows = Vec::new();
     if has_key {
-        rows.push(picker::item(vec![(
-            format!(
-                "{ICON_CHECK} Keep current key ({})",
-                finalize::mask_key(&key)
-            ),
-            tstyle::plain(),
-        )]));
+        rows.push((
+            picker::item(vec![(
+                format!(
+                    "{ICON_CHECK} Keep current key ({})",
+                    finalize::mask_key(&key)
+                ),
+                tstyle::plain(),
+            )]),
+            ApiKeyRow::Keep,
+        ));
     }
-    rows.push(picker::item(vec![(
-        "· No API key (keyless server)",
-        tstyle::plain(),
-    )]));
-    rows.push(picker::item(vec![("· Enter a new key…", tstyle::plain())]));
+    rows.push((
+        picker::item(vec![("· No API key (keyless server)", tstyle::plain())]),
+        ApiKeyRow::NoKey,
+    ));
+    rows.push((
+        picker::item(vec![("· Enter a new key…", tstyle::plain())]),
+        ApiKeyRow::Enter,
+    ));
     Picker::new("API key", rows)
 }
 
-fn base_url_menu_picker(draft: &Draft) -> Picker {
+fn base_url_menu_picker(draft: &Draft) -> Picker<BaseUrlRow> {
     let provider = draft.provider.expect("provider chosen before base url");
     let (effective, source) = resolve_base_url(
         draft.base_url.as_deref().filter(|u| !u.is_empty()),
@@ -1355,48 +1368,69 @@ fn base_url_menu_picker(draft: &Draft) -> Picker {
     let current = effective.as_deref().unwrap_or(default);
     let mut rows = Vec::new();
     if has_url {
-        rows.push(picker::item(vec![(
-            format!("{ICON_CHECK} Keep current URL ({current})"),
-            tstyle::plain(),
-        )]));
+        rows.push((
+            picker::item(vec![(
+                format!("{ICON_CHECK} Keep current URL ({current})"),
+                tstyle::plain(),
+            )]),
+            BaseUrlRow::Keep,
+        ));
     }
-    rows.push(picker::item(vec![(
-        format!("· Use default ({default})"),
-        tstyle::plain(),
-    )]));
-    rows.push(picker::item(vec![("· Enter custom URL…", tstyle::plain())]));
+    rows.push((
+        picker::item(vec![(
+            format!("· Use default ({default})"),
+            tstyle::plain(),
+        )]),
+        BaseUrlRow::Default,
+    ));
+    rows.push((
+        picker::item(vec![("· Enter custom URL…", tstyle::plain())]),
+        BaseUrlRow::Custom,
+    ));
     Picker::new("Base URL", rows)
 }
 
-fn cli_pick_picker() -> Picker {
+fn cli_pick_picker() -> Picker<CliRow> {
     let rows = cli_menu_rows()
         .into_iter()
-        .map(|row| match row {
-            CliRow::Preset(name) => {
-                let letter = name
-                    .chars()
-                    .next()
-                    .unwrap_or('·')
-                    .to_uppercase()
-                    .to_string();
-                picker::item(vec![
-                    (letter, tstyle::badge(name)),
-                    (format!(" {name}"), tstyle::plain()),
-                ])
-            }
-            CliRow::Done => picker::item(vec![("· Done — back to main menu", tstyle::plain())]),
+        .map(|row| {
+            let item = match row {
+                CliRow::Preset(name) => {
+                    let letter = name
+                        .chars()
+                        .next()
+                        .unwrap_or('·')
+                        .to_uppercase()
+                        .to_string();
+                    picker::item(vec![
+                        (letter, tstyle::badge(name)),
+                        (format!(" {name}"), tstyle::plain()),
+                    ])
+                }
+                CliRow::Done => picker::item(vec![("· Done — back to main menu", tstyle::plain())]),
+            };
+            (item, row)
         })
         .collect();
     Picker::new("CLI agent backend", rows)
 }
 
-fn fail_exit_picker() -> Picker {
+fn fail_exit_picker() -> Picker<FailExitRow> {
     Picker::new(
         "Probe failed",
         vec![
-            picker::item(vec![("· Edit settings", tstyle::plain())]),
-            picker::item(vec![("· Retry probe", tstyle::plain())]),
-            picker::item(vec![("· Save anyway", tstyle::plain())]),
+            (
+                picker::item(vec![("· Edit settings", tstyle::plain())]),
+                FailExitRow::Edit,
+            ),
+            (
+                picker::item(vec![("· Retry probe", tstyle::plain())]),
+                FailExitRow::Retry,
+            ),
+            (
+                picker::item(vec![("· Save anyway", tstyle::plain())]),
+                FailExitRow::SaveAnyway,
+            ),
         ],
     )
 }
@@ -1421,28 +1455,6 @@ fn model_fetch_ctx(draft: &Draft) -> (Provider, String, Option<String>) {
 fn model_cache_key(draft: &Draft) -> String {
     let (p, api_key, base_url) = model_fetch_ctx(draft);
     cache_key(p, base_url.as_deref(), &api_key)
-}
-
-/// The cached model list for the current provider, if this session already
-/// fetched one (empty otherwise).
-fn cached_models(draft: &Draft) -> Vec<String> {
-    draft
-        .model_cache
-        .get(&model_cache_key(draft))
-        .cloned()
-        .unwrap_or_default()
-}
-
-/// Whether picker row `i` of the model screen is the `Custom model…`
-/// escape hatch (always the last row — [`picker_rows`] appends it).
-fn is_custom_row(draft: &Draft, i: usize) -> bool {
-    i + 1 == picker_rows(&cached_models(draft)).len()
-}
-
-/// The model list entry at picker row `i` (all rows but the last are
-/// models; the last is the custom escape hatch, handled by [`is_custom_row`]).
-fn model_at(draft: &Draft, i: usize) -> String {
-    cached_models(draft).get(i).cloned().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1582,22 +1594,20 @@ mod tests {
         }
     }
 
-    /// The model picker offers exactly one `Custom model…` row (appended by
-    /// [`picker_rows`]), and Enter on it opens the custom text input. The
-    /// regression: `show_models` used to chain a *second* custom row, and
-    /// `is_custom_row` only matched the last — Enter on the first silently
-    /// set the model to `""` and dropped the choice.
+    /// The model picker's `Custom model…` row (appended by [`picker_rows`])
+    /// opens the custom text input, and a listed model row sets that model.
+    /// Regression lineage: the rows were once re-derived from the session
+    /// cache on every keypress, so a mis-mapped index silently set the
+    /// model to `""` (the double-custom-row bug). Tags make each row's
+    /// meaning structural; this keeps the behavior honest.
     #[test]
-    fn model_picker_custom_row_opens_the_custom_input() {
+    fn model_picker_rows_act_as_labeled() {
         let mut app = app_with_hanging_fetch();
         let models = vec!["m1".to_string(), "m2".to_string()];
         app.draft
             .model_cache
             .insert(model_cache_key(&app.draft), models.clone());
         app.show_models(models);
-        // Exactly one custom row: the last one.
-        assert!(!is_custom_row(&app.draft, 1), "m2 must be a model row");
-        assert!(is_custom_row(&app.draft, 2), "custom row must be the last");
         // Filter to the custom row, Enter on the first (only) match.
         for c in "custom model".chars() {
             let _ = app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -1606,6 +1616,17 @@ mod tests {
         assert!(
             matches!(app.screen, Screen::ModelText { custom: true, .. }),
             "Enter on the custom row must open the custom-model input"
+        );
+        // Back re-enters the picker; a listed model row must set the model.
+        let _ = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        for c in "m1".chars() {
+            let _ = app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.draft.model.as_deref(),
+            Some("m1"),
+            "Enter on a model row must set that model"
         );
     }
 

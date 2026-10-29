@@ -2,9 +2,12 @@
 //! option rows with the `›` menu cursor (ADR 0018 marker vocabulary).
 //! Type-to-filter narrows the rows live — the UX inquire's Select kept
 //! (ADR 0007) and the one behavior long lists (live-fetched models) cannot
-//! lose. Pure state + two entry points: [`Picker::on_key`] maps a key event
-//! to a pick, [`Picker::draw`] paints it into a frame area, so the whole
-//! component is hermetically testable with ratatui's `TestBackend`.
+//! lose. Rows carry a caller-supplied tag; Enter reports the chosen row's
+//! tag, never its index, so a pick handler dispatches on what the row *is*
+//! and cannot drift from the builder's row order. Pure state + two entry
+//! points: [`Picker::on_key`] maps a key event to a pick, [`Picker::draw`]
+//! paints it into a frame area, so the whole component is hermetically
+//! testable with ratatui's `TestBackend`.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -18,9 +21,10 @@ use crate::render::tui::style as tstyle;
 
 /// The outcome of one key press on a picker.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Pick {
-    /// Enter: the chosen row, as an index into the **original** item list.
-    Selected(usize),
+pub(crate) enum Pick<T> {
+    /// Enter: the chosen row's tag. The filtered→original index mapping
+    /// stays inside the picker.
+    Selected(T),
     /// Esc: go back one level.
     Back,
     /// Ctrl-C / closed input: cancel the whole surface.
@@ -60,18 +64,19 @@ pub(crate) fn item<S: Into<String>>(cells: Vec<(S, Style)>) -> PickerItem {
     row
 }
 
-/// A filterable single-choice list.
+/// A filterable single-choice list over tagged rows: `T` is the action (or
+/// value) selecting a row produces.
 #[derive(Clone)]
-pub(crate) struct Picker {
+pub(crate) struct Picker<T> {
     prompt: String,
-    items: Vec<PickerItem>,
+    items: Vec<(PickerItem, T)>,
     filter: String,
     /// Cursor position within the **filtered** view; clamped to its length.
     cursor: usize,
 }
 
-impl Picker {
-    pub(crate) fn new(prompt: &str, items: Vec<PickerItem>) -> Self {
+impl<T> Picker<T> {
+    pub(crate) fn new(prompt: &str, items: Vec<(PickerItem, T)>) -> Self {
         Self {
             prompt: prompt.to_string(),
             items,
@@ -83,7 +88,7 @@ impl Picker {
     /// [`Picker::new`] with the cursor preset — restoring a screen that
     /// remembers its selection (the provider list opens on the active
     /// provider).
-    pub(crate) fn new_at(prompt: &str, items: Vec<PickerItem>, cursor: usize) -> Self {
+    pub(crate) fn new_at(prompt: &str, items: Vec<(PickerItem, T)>, cursor: usize) -> Self {
         Self {
             cursor,
             ..Self::new(prompt, items)
@@ -98,44 +103,8 @@ impl Picker {
         }
         let needle = self.filter.to_lowercase();
         (0..self.items.len())
-            .filter(|&i| self.items[i].plain.to_lowercase().contains(&needle))
+            .filter(|&i| self.items[i].0.plain.to_lowercase().contains(&needle))
             .collect()
-    }
-
-    /// Map a key press to a [`Pick`]; typing narrows the filter, arrows move
-    /// the cursor (clamped, never wrapping — an off-screen wrap loses the
-    /// cursor), Enter picks the row under the cursor.
-    pub(crate) fn on_key(&mut self, key: KeyEvent) -> Option<Pick> {
-        if is_cancel(key) {
-            return Some(Pick::Cancel);
-        }
-        match key.code {
-            KeyCode::Up => {
-                self.cursor = self.cursor.saturating_sub(1);
-                None
-            }
-            KeyCode::Down => {
-                let len = self.visible().len();
-                self.cursor = (self.cursor + 1).min(len.saturating_sub(1));
-                None
-            }
-            KeyCode::Enter => {
-                let visible = self.visible();
-                visible.get(self.cursor).map(|&i| Pick::Selected(i))
-            }
-            KeyCode::Esc => Some(Pick::Back),
-            KeyCode::Backspace => {
-                self.filter.pop();
-                self.cursor = 0;
-                None
-            }
-            KeyCode::Char(c) => {
-                self.filter.push(c);
-                self.cursor = 0;
-                None
-            }
-            _ => None,
-        }
     }
 
     /// Paint the picker into `area`: prompt, filter (only while non-empty),
@@ -171,10 +140,51 @@ impl Picker {
                 "  "
             };
             let mut line = Line::from(Span::styled(format!("{MARGIN}{marker}"), tstyle::plain()));
-            line.spans.extend(self.items[i].line.spans.iter().cloned());
+            line.spans
+                .extend(self.items[i].0.line.spans.iter().cloned());
             lines.push(line);
         }
         f.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+impl<T: Clone> Picker<T> {
+    /// Map a key press to a [`Pick`]; typing narrows the filter, arrows move
+    /// the cursor (clamped, never wrapping — an off-screen wrap loses the
+    /// cursor), Enter picks the row under the cursor.
+    pub(crate) fn on_key(&mut self, key: KeyEvent) -> Option<Pick<T>> {
+        if is_cancel(key) {
+            return Some(Pick::Cancel);
+        }
+        match key.code {
+            KeyCode::Up => {
+                self.cursor = self.cursor.saturating_sub(1);
+                None
+            }
+            KeyCode::Down => {
+                let len = self.visible().len();
+                self.cursor = (self.cursor + 1).min(len.saturating_sub(1));
+                None
+            }
+            KeyCode::Enter => {
+                let visible = self.visible();
+                visible
+                    .get(self.cursor)
+                    .map(|&i| Pick::Selected(self.items[i].1.clone()))
+            }
+            KeyCode::Esc => Some(Pick::Back),
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.cursor = 0;
+                None
+            }
+            KeyCode::Char(c) => {
+                self.filter.push(c);
+                self.cursor = 0;
+                None
+            }
+            _ => None,
+        }
     }
 }
 

@@ -578,9 +578,12 @@ fn picker_rows_cap_at_fifty_and_append_custom() {
     let models: Vec<String> = (0..80).map(|i| format!("model-{i:02}")).collect();
     let rows = picker_rows(&models);
     assert_eq!(rows.len(), 51);
-    assert_eq!(rows[0], format!("{DOT} model-00"));
-    assert_eq!(rows[49], format!("{DOT} model-49"));
-    assert_eq!(rows[50], format!("{ICON_PENCIL}  Custom model…"));
+    assert_eq!(rows[0], ModelRow::Model("model-00".into()));
+    assert_eq!(rows[49], ModelRow::Model("model-49".into()));
+    assert_eq!(rows[50], ModelRow::Custom);
+    // Labels keep the ADR 0018 marker vocabulary.
+    assert_eq!(rows[0].label(), format!("{DOT} model-00"));
+    assert_eq!(rows[50].label(), format!("{ICON_PENCIL}  Custom model…"));
     // A short list passes through untouched.
     let rows = picker_rows(&["a".to_string(), "b".to_string()]);
     assert_eq!(rows.len(), 3);
