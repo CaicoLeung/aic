@@ -49,7 +49,7 @@ pub(super) fn applicable_steps(p: Provider) -> Vec<Step> {
 /// disagree on which model a provider will use.
 pub(super) fn preview_model(p: Provider, draft: &Draft) -> String {
     if draft.provider == Some(p) {
-        return draft.effective_model();
+        return draft.effective().model;
     }
     draft
         .known_providers

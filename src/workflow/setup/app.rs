@@ -33,7 +33,7 @@ use super::provider::{
 };
 use super::verify::smoke_check;
 use super::*;
-use crate::core::config::{Source, resolve_base_url, resolve_field};
+use crate::core::config::Source;
 use crate::llm::cli_agent::cli_preset;
 use crate::render::layout::MARGIN;
 use crate::render::tui::is_cancel;
@@ -303,23 +303,23 @@ impl App {
     }
 
     fn enter_model_step(&mut self) {
-        let (provider, api_key, base_url) = model_fetch_ctx(&self.draft);
-        let key = cache_key(provider, base_url.as_deref(), &api_key);
+        let eff = self.draft.effective();
+        let key = cache_key(eff.provider, eff.base_url.as_deref(), &eff.api_key);
         if let Some(models) = self.draft.model_cache.get(&key).cloned() {
             self.show_models(models);
-        } else if provider.requires_key() && api_key.is_empty() {
+        } else if eff.provider.requires_key() && eff.api_key.is_empty() {
             // A key-requiring provider with no key can only 401 — never
             // touch the network (ADR 0019 §4); cache the empty degrade.
             self.draft.model_cache.insert(key, Vec::new());
             self.show_models(Vec::new());
         } else {
             self.spawn(Job::Fetch {
-                provider,
-                api_key,
-                base_url,
+                provider: eff.provider,
+                api_key: eff.api_key,
+                base_url: eff.base_url,
                 key,
             });
-            self.busy(format!("Fetching {} models…", provider.display()));
+            self.busy(format!("Fetching {} models…", eff.provider.display()));
         }
     }
 
@@ -379,15 +379,11 @@ impl App {
     /// screens and would otherwise ride along onto this provider outcome.
     fn probe_provider(&mut self) {
         self.smoke_line = None;
-        let p = self.draft.provider.unwrap_or_default();
-        let target = p.display().to_lowercase();
-        let model = self.draft.effective_model();
-        let (api_key, _) =
-            resolve_field(self.draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-        let masked = api_key_label(&api_key);
-        let (url, source) =
-            resolve_base_url(self.draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
-        let url_row = base_url_label(url.as_deref(), source);
+        let eff = self.draft.effective();
+        let target = eff.provider.display().to_lowercase();
+        let model = eff.model.clone();
+        let masked = api_key_label(&eff.api_key);
+        let url_row = base_url_label(eff.base_url.as_deref(), eff.base_url_source);
         self.verify = Some(VerifyBlock {
             flow: ProbeFlow::Provider,
             target: target.clone(),
@@ -406,7 +402,7 @@ impl App {
             ],
         });
         self.spawn(Job::ProbeProvider { target });
-        self.busy(format!("Contacting {} ({model})…", p.display()));
+        self.busy(format!("Contacting {} ({model})…", eff.provider.display()));
     }
 
     /// Start a CLI-flow probe (R3); `smoke_first` chains the `--version`
@@ -460,9 +456,8 @@ impl App {
                     base_url,
                     ..
                 } => JobDone::Models((deps.fetch_models)(provider, &api_key, base_url.as_deref())),
-                Job::ProbeProvider { target } => {
-                    let _ = target;
-                    JobDone::Probe((deps.verify_provider)(&draft))
+                Job::ProbeProvider { .. } => {
+                    JobDone::Probe((deps.verify_provider)(&draft.effective()))
                 }
                 Job::ProbeCli { .. } => JobDone::Probe((deps.verify_cli)(&draft)),
                 Job::Smoke { program } => JobDone::Smoke(smoke_check(&program)),
@@ -647,7 +642,7 @@ impl App {
                 // Soft required gate (ADR 0019 §7): Done routes into the
                 // Model step until a model exists.
                 Some(Pick::Selected(ProviderEntry::Done))
-                    if self.draft.effective_model().is_empty() =>
+                    if self.draft.effective().model.is_empty() =>
                 {
                     self.enter_model_step()
                 }
@@ -685,7 +680,7 @@ impl App {
                     // the previous value on an empty submit.
                     self.draft.api_key = match (from_menu, v.is_empty()) {
                         (true, true) => None,
-                        (_, true) => Some(effective_api_key(&self.draft)),
+                        (_, true) => Some(self.draft.effective().api_key),
                         (_, false) => Some(v),
                     };
                     self.provider_menu();
@@ -872,7 +867,7 @@ impl App {
 
     fn enter_api_key(&mut self) {
         let provider = self.draft.provider.expect("provider chosen before api key");
-        let key = effective_api_key(&self.draft);
+        let key = self.draft.effective().api_key;
         if provider.requires_key() {
             let prompt = if key.is_empty() {
                 "API key".to_string()
@@ -1014,7 +1009,7 @@ impl App {
                 ProbeFlow::Provider => format!(
                     "Verify — {} ({})",
                     block.target,
-                    self.draft.effective_model()
+                    self.draft.effective().model
                 ),
                 ProbeFlow::Cli => format!("Verify — {target}", target = block.target),
             };
@@ -1276,34 +1271,29 @@ fn provider_menu_picker(draft: &Draft) -> Picker<ProviderEntry> {
 /// 0019 steps) plus `Done`. One walker builds row and tag together so the
 /// pick and the rendered row can never drift apart. Pure.
 fn provider_menu(draft: &Draft) -> Vec<(PickerItem, ProviderEntry)> {
-    let provider = draft.provider.unwrap_or_default();
-    let (api_key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-    let masked = api_key_label(&api_key);
-    let (base_url, source) = resolve_base_url(
-        draft.base_url.as_deref().filter(|u| !u.is_empty()),
-        &provider,
-    );
-    let url_row = base_url_label(base_url.as_deref(), source);
-    let model = draft.effective_model();
+    let eff = draft.effective();
     let mut rows = Vec::new();
-    for step in applicable_steps(provider) {
+    for step in applicable_steps(eff.provider) {
         match step {
             super::provider::Step::Provider => {}
             super::provider::Step::ApiKey => {
                 rows.push((
-                    menu_value_row("· API key — ", &masked),
+                    menu_value_row("· API key — ", &api_key_label(&eff.api_key)),
                     ProviderEntry::ApiKey,
                 ));
             }
             super::provider::Step::BaseUrl => {
                 rows.push((
-                    menu_value_row("· Base URL — ", &url_row),
+                    menu_value_row(
+                        "· Base URL — ",
+                        &base_url_label(eff.base_url.as_deref(), eff.base_url_source),
+                    ),
                     ProviderEntry::BaseUrl,
                 ));
             }
             super::provider::Step::Model => {
                 rows.push((
-                    menu_value_row("· Model — ", &model_label(&model)),
+                    menu_value_row("· Model — ", &model_label(&eff.model)),
                     ProviderEntry::Model,
                 ));
             }
@@ -1317,7 +1307,7 @@ fn provider_menu(draft: &Draft) -> Vec<(PickerItem, ProviderEntry)> {
 }
 
 fn api_key_menu_picker(draft: &Draft) -> Picker<ApiKeyRow> {
-    let key = effective_api_key(draft);
+    let key = draft.effective().api_key;
     let has_key = !key.is_empty();
     let mut rows = Vec::new();
     if has_key {
@@ -1344,17 +1334,13 @@ fn api_key_menu_picker(draft: &Draft) -> Picker<ApiKeyRow> {
 }
 
 fn base_url_menu_picker(draft: &Draft) -> Picker<BaseUrlRow> {
-    let provider = draft.provider.expect("provider chosen before base url");
-    let (effective, source) = resolve_base_url(
-        draft.base_url.as_deref().filter(|u| !u.is_empty()),
-        &provider,
-    );
-    let has_url = matches!(source, Source::Config);
-    let default = match provider.base_url_requirement() {
+    let eff = draft.effective();
+    let has_url = matches!(eff.base_url_source, Source::Config);
+    let default = match eff.provider.base_url_requirement() {
         crate::llm::BaseUrlRequirement::Optional(d) => d,
         _ => "",
     };
-    let current = effective.as_deref().unwrap_or(default);
+    let current = eff.base_url.as_deref().unwrap_or(default);
     let mut rows = Vec::new();
     if has_url {
         rows.push((
@@ -1426,19 +1412,8 @@ fn fail_exit_picker() -> Picker<FailExitRow> {
 
 // -- small pure helpers ---------------------------------------------------
 
-/// The effective (draft or seeded-config) API key, unmasked.
-fn effective_api_key(draft: &Draft) -> String {
-    resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "").0
-}
-
-/// The effective provider/key/base-url triple the model cache and fetch
-/// jobs are keyed by (ADR 0019 §5 session cache).
-fn model_fetch_ctx(draft: &Draft) -> (Provider, String, Option<String>) {
-    let p = draft.provider.unwrap_or_default();
-    let (api_key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-    let (base_url, _) = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
-    (p, api_key, base_url)
-}
+// (The effective-value helpers collapsed into `Draft::effective`,
+// setup/mod.rs.)
 
 #[cfg(test)]
 mod tests {
@@ -1587,10 +1562,8 @@ mod tests {
     fn model_picker_rows_act_as_labeled() {
         let mut app = app_with_hanging_fetch();
         let models = vec!["m1".to_string(), "m2".to_string()];
-        let key = {
-            let (p, api_key, base_url) = model_fetch_ctx(&app.draft);
-            cache_key(p, base_url.as_deref(), &api_key)
-        };
+        let eff = app.draft.effective();
+        let key = cache_key(eff.provider, eff.base_url.as_deref(), &eff.api_key);
         app.draft.model_cache.insert(key, models.clone());
         app.show_models(models);
         // Filter to the custom row, Enter on the first (only) match.

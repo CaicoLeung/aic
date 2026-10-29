@@ -5,7 +5,7 @@
 //! their results.
 
 use super::*;
-use crate::core::config::{ResolvedConfig, resolve_base_url, resolve_field};
+use crate::core::config::ResolvedConfig;
 use std::time::Duration;
 
 /// Best-effort check that `program` is installed. Runs `program --version`
@@ -106,19 +106,14 @@ pub(super) const MODEL_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// trimmed reply, or the underlying error (validation setup-hint, auth,
 /// rate limit, network, unknown model). No UI: the caller decides which
 /// screen an outcome gets.
-pub(super) fn probe_provider(draft: &Draft) -> Result<String> {
-    let p = draft.provider.unwrap_or_default();
-    // Effective values: the draft (a user edit or the seeded config value).
+pub(super) fn probe_provider(eff: &Effective) -> Result<String> {
     // There is no default model (ADR 0019) — an empty one fails `validate`
     // below with the setup hint.
-    let api_key = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "").0;
-    let base_url = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p).0;
-    let model = resolve_field(draft.model.as_deref().filter(|m| !m.is_empty()), "").0;
     let resolved = ResolvedConfig::from_parts(
-        p.name().to_string(),
-        api_key,
-        model.clone(),
-        base_url.clone(),
+        eff.provider.name().to_string(),
+        eff.api_key.clone(),
+        eff.model.clone(),
+        eff.base_url.clone(),
     );
 
     // The same validation the Run path runs (`LlmConfig::load`), so a missing
@@ -126,7 +121,7 @@ pub(super) fn probe_provider(draft: &Draft) -> Result<String> {
     resolved.validate()?;
 
     let llm = resolved.to_llm();
-    let label = format!("Contacting {} ({model})", p.display());
+    let label = format!("Contacting {} ({})", eff.provider.display(), eff.model);
     probe(PROVIDER_PROBE_TIMEOUT, &label, async {
         llm.agent("You are a connectivity checker. Follow the user's instruction exactly.")
             .verify()

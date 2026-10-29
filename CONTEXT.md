@@ -93,6 +93,10 @@ _Avoid_: custom provider, generic provider, passthrough
 The live model list aic fetches from the active Provider's `/models`-style endpoint during setup (ADR 0019), offered in the Model picker. There is no Default Model — a Model is explicitly required for every Provider; when the listing fails or is unavailable, the picker degrades to free-text entry.
 _Avoid_: model cache (that's the session-scoped copy), default model (retired term)
 
+**Effective**:
+The setup wizard's resolved snapshot of the draft's API-provider fields (provider, API key, base URL + its source, model) — what the sub-menu rows show, the Verify probes send, and the Model listing session cache is keyed by (ADR 0019 §5). Computed in one place off the draft; no surface re-derives it.
+_Avoid_: resolved config (that's `ResolvedConfig`), effective settings, active values
+
 ### Backends
 
 **Backend**:

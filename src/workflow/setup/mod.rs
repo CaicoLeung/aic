@@ -22,7 +22,10 @@ use anyhow::{Context, Result};
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
 
-use crate::core::config::{BackendKind, CliConfig, Config, ProviderProfile, config_path};
+use crate::core::config::{
+    BackendKind, CliConfig, Config, ProviderProfile, Source, config_path, resolve_base_url,
+    resolve_field,
+};
 use crate::llm::{Provider, list_models};
 use crate::render::tui::ICON_ALERT;
 use crate::render::{oneshot, palette, tui};
@@ -52,18 +55,22 @@ pub(super) struct SetupDeps {
     /// Probe the API-provider backend with the draft's effective values
     /// (R3 auto-verify): `Ok(reply)` on success, `Err` with the provider /
     /// validation error otherwise.
-    pub verify_provider: VerifyProbe,
+    pub verify_provider: ProviderProbe,
     /// Probe the CLI-agent backend the same way (R3 auto-verify); it reads
     /// the whole draft (the CLI trio, not the provider fields).
-    pub verify_cli: VerifyProbe,
+    pub verify_cli: CliProbe,
 }
 
 /// The R1 seam: a boxed listing fetch, injectable for hermetic tests.
 pub(super) type FetchModels =
     Box<dyn Fn(Provider, &str, Option<&str>) -> Vec<String> + Send + Sync>;
 
-/// An R3 seam: one boxed backend probe (`&Draft` → reply or error).
-pub(super) type VerifyProbe = Box<dyn Fn(&Draft) -> Result<String> + Send + Sync>;
+/// An R3 seam: a boxed provider probe (`&Effective` → reply or error).
+pub(super) type ProviderProbe = Box<dyn Fn(&Effective) -> Result<String> + Send + Sync>;
+
+/// An R3 seam: a boxed CLI probe (`&Draft` → reply or error) — the CLI
+/// trio lives on the draft, not on [`Effective`].
+pub(super) type CliProbe = Box<dyn Fn(&Draft) -> Result<String> + Send + Sync>;
 
 impl SetupDeps {
     /// Production wiring: the real listing fetch and verify probes, each
@@ -142,6 +149,19 @@ pub(super) struct Draft {
     verify_status: Option<VerifyStatus>,
 }
 
+/// The draft's effective API-provider values (ADR 0019 §5): what the
+/// sub-menu rows show, the probes send, and the session model-cache and
+/// fetch jobs are keyed by. One snapshot off [`Draft::effective`] instead
+/// of a `resolve_field` dance re-derived at each site.
+pub(super) struct Effective {
+    pub(super) provider: Provider,
+    pub(super) api_key: String,
+    pub(super) base_url: Option<String>,
+    pub(super) base_url_source: Source,
+    /// The chosen model; empty when none is (no default model — ADR 0019).
+    pub(super) model: String,
+}
+
 /// One auto-verify probe outcome (R3): the probed target's short label
 /// (`openai`, `claude`), which Backend owns it, and whether it passed.
 #[derive(Clone, PartialEq, Debug)]
@@ -184,16 +204,25 @@ impl Draft {
         self.backend_kind.unwrap_or(BackendKind::Api)
     }
 
-    /// The model the selected provider will use, for display: the in-session
-    /// draft choice (seeded from the existing config in
-    /// [`finalize::seed_draft`]). Empty when none is chosen — there is no
-    /// default model (ADR 0019); the provider flow gates `Done` on it.
-    fn effective_model(&self) -> String {
-        self.model
-            .as_deref()
-            .filter(|m| !m.is_empty())
-            .map(String::from)
-            .unwrap_or_default()
+    /// Resolve the draft's effective API-provider values — the draft's own
+    /// choice (a user edit or the seeded config value) for every field.
+    /// The API backend always resolves to a provider (OpenAI by default,
+    /// mirroring [`finalize::finalize`]).
+    pub(super) fn effective(&self) -> Effective {
+        let provider = self.provider.unwrap_or_default();
+        let api_key = resolve_field(self.api_key.as_deref().filter(|k| !k.is_empty()), "").0;
+        let (base_url, base_url_source) = resolve_base_url(
+            self.base_url.as_deref().filter(|u| !u.is_empty()),
+            &provider,
+        );
+        let model = resolve_field(self.model.as_deref().filter(|m| !m.is_empty()), "").0;
+        Effective {
+            provider,
+            api_key,
+            base_url,
+            base_url_source,
+            model,
+        }
     }
 }
 
@@ -212,7 +241,7 @@ pub(super) fn provider_label(draft: &Draft) -> String {
         None if draft.active_backend() == BackendKind::Api => Provider::default(),
         None => return "(not set)".to_string(),
     };
-    let model = draft.effective_model();
+    let model = draft.effective().model;
     if model.is_empty() {
         p.display().to_string()
     } else {

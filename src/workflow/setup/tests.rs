@@ -189,15 +189,26 @@ fn submenu_labels_reflect_value_and_source() {
 }
 
 #[test]
-fn effective_model_is_the_draft_choice_only() {
-    // Draft model is the whole story (ADR 0019: no provider default).
-    let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
-    assert_eq!(d.effective_model(), "gpt-5");
+fn effective_bundle_carries_the_draft_choice_only() {
+    // Draft values are the whole story (ADR 0019: no provider default).
+    let d = draft(Some(Provider::OpenAI), Some("sk-1"), Some("gpt-5"), None);
+    let eff = d.effective();
+    assert_eq!(eff.provider, Provider::OpenAI);
+    assert_eq!(eff.api_key, "sk-1");
+    assert_eq!(eff.model, "gpt-5");
     // No model chosen -> empty, whatever the provider.
-    let d = draft(Some(Provider::OpenAI), None, None, None);
-    assert_eq!(d.effective_model(), "");
-    let d = draft(Some(Provider::OpenRouter), None, None, None);
-    assert_eq!(d.effective_model(), "");
+    assert_eq!(
+        draft(Some(Provider::OpenAI), None, None, None)
+            .effective()
+            .model,
+        ""
+    );
+    assert_eq!(
+        draft(Some(Provider::OpenRouter), None, None, None)
+            .effective()
+            .model,
+        ""
+    );
 }
 
 #[test]
@@ -617,7 +628,9 @@ fn cache_key_separates_provider_base_and_key() {
 fn provider_probe_reports_validation_hint_without_network() {
     // Key-requiring provider with neither key nor model set.
     let d = draft(Some(Provider::OpenAI), None, None, None);
-    let err = super::verify::probe_provider(&d).unwrap_err().to_string();
+    let err = super::verify::probe_provider(&d.effective())
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("aic setup"),
         "validation error must point at setup, got: {err}"
