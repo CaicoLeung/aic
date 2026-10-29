@@ -1,6 +1,6 @@
 # ADR 0018: Run timeline — upfront Step list over a whole-frame repaint engine
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by ADR 0020 (the Run timeline model is frozen as-is; full-screen surfaces are a separate ratatui substrate)
 - **Date:** 2026-10-25
 
 ## Context
@@ -297,3 +297,50 @@ Third review pass — two palette-semantics fixes:
    only the spinner glyph keeps the yellow. Yellow is left meaning "needs
    your attention": the `?` pending/ask markers and the ⚠ rows. Motion
    already says "working".
+
+## Amendment (2026-10-28): setup badge class — hashed letter sigils
+
+The setup wizard's provider and CLI-agent pickers (ADR 0007 inquire menus,
+outside the Run timeline) now lead each row with a one-letter badge: the
+display name's first letter, bolded, colored by `palette::badge` — an FNV-1a
+hash of the canonical name into the existing guarded `FALLBACK_PALETTE`
+tables (classic + neon twins, same WCAG guard as commit types). This extends
+the marker system with a *class*, not new vocabulary glyphs: the timeline's
+fixed set (`·` ✓ ✗ ⚠) is unchanged, the letters are plain ASCII, and no
+Nerd Font is required. Same name → same color across runs and themes;
+same-letter collisions between names are accepted (the letter carries
+identity, the color only aids scanning). Inline ANSI in option strings is
+safe: inquire 0.9.4's frame renderer is ANSI-aware. `Done` rows and
+non-picker menus keep the muted `·` bullet.
+
+2026-10-29 follow-up: the inquire pickers this amendment rode on were
+replaced the next day by the ADR 0020 ratatui picker; the badge class
+carried over unchanged (`render::tui::style::badge` reads the same
+`palette::badge_rgb` triple), and the ANSI-aware-renderer remark above was
+inquire-specific — ratatui styling made it moot.
+
+## Amendment (2026-10-29): failed-screen rows are single lines; cursor parks below
+
+A hook-vetoed `git commit` exposed two layout defects in the failed screen.
+Its stderr (commitlint and friends) is multi-line, and the batch-abort site
+stuffs the whole error chain into one `Failure::detail` row:
+
+1. **Detail rows flatten to one physical line.** A detail carrying embedded
+   `\n` broke the painter's one-physical-row-per-row arithmetic (the row
+   either wrapped or shredded the plain ledger) and truncated mid-word at
+   the prose budget looking like corrupted output. Both render paths
+   (`failure_detail_rows`, `plain_step_lines`) now collapse newlines and
+   whitespace runs to single spaces — whatever a caller stuffs into
+   `Failure::detail`. The frame row stays budget-truncated like every other
+   frame row; the full chain remains the process `Error:` report's job.
+2. **`fail()` parks the cursor below the failed block.** The failed frame is
+   the Run's last paint, and the painter leaves the cursor at the END of the
+   last detail row — so the runtime's `Error: …` report glued onto it
+   (`re-run `aic` to continueError: aborted …`). `fail()` now writes one
+   newline on a terminal after the final repaint; nothing repaints after a
+   failure, so the frame stays intact and the report starts clean.
+3. **The batch-abort bail is cause-first.** The error message read
+   `aborted … re-run `aic` to continue: <git chain>`, chaining a multi-line
+   git blob onto the remediation sentence. It now reads what failed and why
+   on line 1 (`aborted on batch N of M after K committed: <chain>`), then
+   the two remediation lines — matching the declined message's shape.

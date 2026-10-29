@@ -86,12 +86,12 @@ The endpoint a Provider sends requests to. Optional and overridable (env/config)
 _Avoid_: endpoint, server, URL
 
 **OpenAI-compatible provider**:
-A generic Provider that routes through the OpenAI client against a user-supplied Base URL, for servers that speak the OpenAI chat-completions API (LM Studio, vLLM, gateways). Has no Default Model — the user must supply one.
+A generic Provider that routes through the OpenAI client against a user-supplied Base URL, for servers that speak the OpenAI chat-completions API (LM Studio, vLLM, gateways). Like every Provider, its model must be set explicitly.
 _Avoid_: custom provider, generic provider, passthrough
 
-**Default Model**:
-The model used for a Provider when the user has not set one (env/config). Chosen for speed and cost, since aic's workload (commit messages) is lightweight.
-_Avoid_: fallback model, base model
+**Model listing**:
+The live model list aic fetches from the active Provider's `/models`-style endpoint during setup (ADR 0019), offered in the Model picker. There is no Default Model — a Model is explicitly required for every Provider; when the listing fails or is unavailable, the picker degrades to free-text entry.
+_Avoid_: model cache (that's the session-scoped copy), default model (retired term)
 
 ### Backends
 
@@ -154,8 +154,12 @@ The upfront Step list a flow paints before doing any work. Completed Steps peel 
 _Avoid_: step list, task list, progress panel
 
 **One-shot line**:
-Any line `aic` prints outside a Run timeline or resolve frame — the one-shot commands' result lines and detail rows, start-up notices, cancellation lines, and the setup wizard's screens. Every one sits on the Run's shared inset: result and marker lines at the Step marker's column, explanatory detail rows one level deeper at the sub-row column; blank separator lines carry no inset. inquire-rendered menus and clap's `--help` are not aic lines and stay flush.
+Any line `aic` prints outside a Run timeline, resolve frame, or full-screen surface — the one-shot commands' result lines and detail rows, start-up notices, cancellation lines, and the setup wizard's post-exit save/cancel notice. Every one sits on the Run's shared inset: result and marker lines at the Step marker's column, explanatory detail rows one level deeper at the sub-row column; blank separator lines carry no inset. inquire-rendered menus and clap's `--help` are not aic lines and stay flush.
 _Avoid_: padding, container, wrapper
+
+**Screen**:
+One full-frame state of a ratatui surface (ADR 0020): the app describes the whole screen (a Picker, a text editor, a Busy spinner, an outcome block), the terminal diffs it against the previous frame inside the alternate screen, and no intermediate frame ever reaches the user's scrollback. The setup wizard is a chain of Screens driven by one state machine (`workflow/setup/app.rs`); a Screen is re-enterable with its cursor restored. Not to be confused with a Run Step (an inline timeline row) or a one-shot line (a normal-buffer print).
+_Avoid_: page, dialog, view (overloaded)
 
 **Diff bar**:
 The proportional +/− block on a Commit entry's Σ line — it trails the `+A −D` counts (no file count) and fills every remaining cell up to the shared text boundary (the capped width the Run's prose and reasoning wrap at — not the terminal's real edge), colored by the Palette's `added`/`removed` roles in proportion to the entry's added/removed line counts (floor 4 cells, omitted on narrower terminals). Aggregates text lines only; binary files never feed the bar (their per-file row shows a byte-size change instead).
@@ -179,4 +183,4 @@ _Avoid_: reasoning service, thinking component, streaming view
 
 **Markdown renderer**:
 The pure line→styled-rows painter (`src/render/markdown/`) that turns a partial Markdown reasoning window into ANSI-styled terminal rows — ADR 0013's renderer contract. Line-local classification (`classify_line` + running fence state), inline `**bold**`/`` `code` `` parsing, syntect code highlighting, and the generic `wrap_runs` wrap engine; `reasoning_rows`/`loading_rows` are its front doors. Zero I/O and no `&Git`-style state: every function takes model inputs and returns rows, so the whole pipeline is unit-testable on its own. The when-to-paint policy lives in the Reasoning feed; the terminal surface that frames these rows is `progress::ReasoningRenderer`.
-_Avoid_: markdown engine, TUI (ADR 0013 bans a framework), pretty printer
+_Avoid_: markdown engine, TUI (full-screen ratatui surfaces are `src/render/tui/`, ADR 0020), pretty printer

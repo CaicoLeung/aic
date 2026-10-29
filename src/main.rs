@@ -78,6 +78,24 @@ async fn main() -> anyhow::Result<()> {
             };
             completion::install_completion(shell)
         }
-        None => run::default_workflow(cli.hint.as_deref(), cli.no_redact).await,
+        None => {
+            // A failed Run already painted its ✗ screen; `fail` parks the
+            // cursor one row below the failed block for this report. Print
+            // the complete chain once — untruncated, git's own multi-line
+            // stderr included — and exit without anyhow's `Error:` dump,
+            // which duplicated the frame's width-capped copy of the error.
+            if let Err(e) = run::default_workflow(cli.hint.as_deref(), cli.no_redact).await {
+                let report = format!("{e:#}");
+                for line in report.split('\n') {
+                    if line.is_empty() {
+                        eprintln!();
+                    } else {
+                        oneshot::stderr_line(line, palette::failure());
+                    }
+                }
+                std::process::exit(1);
+            }
+            Ok(())
+        }
     }
 }

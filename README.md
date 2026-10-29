@@ -110,22 +110,22 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) — branch rules, commit style, review 
 
 ### Supported providers
 
-| Provider | Default model | API key | Base URL |
-|----------|--------------|---------|----------|
-| OpenAI | `gpt-5-mini` | required | built-in |
-| Anthropic | `claude-haiku-4-5` | required | built-in |
-| Gemini | `gemini-2.5-flash` | required | built-in |
-| DeepSeek | `deepseek-v4-flash` | required | built-in |
-| Groq | `llama-3.3-70b-versatile` | required | built-in |
-| xAI | `grok-4.3` | required | built-in |
-| Mistral | `mistral-small-latest` | required | built-in |
-| OpenRouter | _(set `model`)_ | required | built-in |
-| Perplexity | `sonar` | required | built-in |
-| Together | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | required | built-in |
-| Ollama | `llama3.3` | none | `http://localhost:11434` |
-| OpenAI-compatible | _(set `model`)_ | optional | required |
+| Provider | API key | Base URL |
+|----------|---------|----------|
+| OpenAI | required | built-in |
+| Anthropic | required | built-in |
+| Gemini | required | built-in |
+| DeepSeek | required | built-in |
+| Groq | required | built-in |
+| xAI | required | built-in |
+| Mistral | required | built-in |
+| OpenRouter | required | built-in |
+| Perplexity | required | built-in |
+| Together | required | built-in |
+| Ollama | none | `http://localhost:11434` |
+| OpenAI-compatible | optional | required |
 
-OpenRouter and the OpenAI-compatible provider have no default model — set `model` in config. The OpenAI-compatible provider requires `base_url` and routes through the OpenAI client (LM Studio, vLLM, gateways).
+`aic setup` fetches each provider's live model list (ADR 0019), so the picker always offers current models — no hardcoded defaults. A model is explicitly required for every provider; offline or unlisted setups use the `Custom model…` escape hatch. The OpenAI-compatible provider requires `base_url` and routes through the OpenAI client (LM Studio, vLLM, gateways). Finishing a provider or CLI-agent flow auto-runs a connectivity probe; the menu shows its status (✓ / ✗ / not verified), and a failed probe offers Edit / Retry / Save anyway — saving offline is never blocked.
 
 ### CLI-agent presets
 

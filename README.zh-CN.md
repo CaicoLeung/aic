@@ -110,22 +110,22 @@ Shell 补全：`aic completion`（bash、fish、zsh、nushell）。
 
 ### 支持的 provider
 
-| Provider | 默认 model | API key | Base URL |
-|----------|-----------|---------|----------|
-| OpenAI | `gpt-5-mini` | 必需 | 内置 |
-| Anthropic | `claude-haiku-4-5` | 必需 | 内置 |
-| Gemini | `gemini-2.5-flash` | 必需 | 内置 |
-| DeepSeek | `deepseek-v4-flash` | 必需 | 内置 |
-| Groq | `llama-3.3-70b-versatile` | 必需 | 内置 |
-| xAI | `grok-4.3` | 必需 | 内置 |
-| Mistral | `mistral-small-latest` | 必需 | 内置 |
-| OpenRouter | _(需指定 `model`)_ | 必需 | 内置 |
-| Perplexity | `sonar` | 必需 | 内置 |
-| Together | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | 必需 | 内置 |
-| Ollama | `llama3.3` | 无 | `http://localhost:11434` |
-| OpenAI-compatible | _(需指定 `model`)_ | 可选 | 必需 |
+| Provider | API key | Base URL |
+|----------|---------|----------|
+| OpenAI | 必需 | 内置 |
+| Anthropic | 必需 | 内置 |
+| Gemini | 必需 | 内置 |
+| DeepSeek | 必需 | 内置 |
+| Groq | 必需 | 内置 |
+| xAI | 必需 | 内置 |
+| Mistral | 必需 | 内置 |
+| OpenRouter | 必需 | 内置 |
+| Perplexity | 必需 | 内置 |
+| Together | 必需 | 内置 |
+| Ollama | 无 | `http://localhost:11434` |
+| OpenAI-compatible | 可选 | 必需 |
 
-OpenRouter 和 OpenAI-compatible provider 没有默认 model —— 在 config 中设置 `model`。OpenAI-compatible provider 还需要 `base_url`，通过 OpenAI client 路由（LM Studio、vLLM、各类 gateway）。
+`aic setup` 会实时拉取各 provider 的 model 列表（ADR 0019），picker 始终展示当前可用 model —— 不再内置任何硬编码默认值。所有 provider 的 model 均需显式选择；离线或列表中没有的场景走 `Custom model…` 逃生口。OpenAI-compatible provider 需要 `base_url`，通过 OpenAI client 路由（LM Studio、vLLM、各类 gateway）。完成 provider 或 CLI-agent 配置后会自动运行连通性探测；菜单常显探测状态（✓ / ✗ / 未验证），探测失败时提供 Edit / Retry / Save anyway 三种出口 —— 离线保存永远不会被阻断。
 
 ### CLI-agent 预设
 

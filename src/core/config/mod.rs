@@ -597,7 +597,9 @@ impl ResolvedConfig {
 
         let (api_key, api_key_source) = resolve_field(cfg.api_key.as_deref(), "");
 
-        let (model, model_source) = resolve_field(cfg.model.as_deref(), provider.default_model());
+        // No default model exists (ADR 0019): an absent `model` resolves
+        // empty and `validate` rejects it with the setup hint.
+        let (model, model_source) = resolve_field(cfg.model.as_deref(), "");
 
         let (base_url, base_url_source) = resolve_base_url(cfg.base_url.as_deref(), &provider);
 
@@ -614,7 +616,8 @@ impl ResolvedConfig {
     }
 
     /// Build a [`ResolvedConfig`] from already-effective values (the setup
-    /// wizard's Verify step: the draft choice, else the provider default) —
+    /// wizard's Verify step: the draft choice — there is no default model,
+    /// ADR 0019) —
     /// the same pipeline the Run path runs (`resolve` → `validate` →
     /// `to_llm`), minus the config-file read. Sources are all
     /// [`Source::Default`]: provenance is display-only, and the wizard shows
@@ -686,7 +689,7 @@ impl ResolvedConfig {
         }
         if self.model.trim().is_empty() {
             anyhow::bail!(
-                "provider '{}' has no default model — set `model` in config (run `aic setup`)",
+                "no model is set for provider '{}' — set `model` in config (run `aic setup`)",
                 provider.name()
             );
         }

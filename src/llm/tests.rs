@@ -100,20 +100,11 @@ fn name_round_trips_for_every_provider() {
     }
 }
 
-#[test]
-fn default_models_are_refreshed() {
-    assert_eq!(Provider::OpenAI.default_model(), "gpt-5-mini");
-    assert_eq!(Provider::Anthropic.default_model(), "claude-haiku-4-5");
-    assert_eq!(Provider::Gemini.default_model(), "gemini-2.5-flash");
-    assert_eq!(Provider::DeepSeek.default_model(), "deepseek-v4-flash");
-    assert_eq!(Provider::Ollama.default_model(), "llama3.3");
-    assert_eq!(Provider::Mistral.default_model(), "mistral-small-latest");
-}
-
 /// AIC-12: the five Phase-1 providers (xAI, Mistral, OpenRouter,
 /// Perplexity, Together) plus the OpenAI-compatible escape hatch must each
 /// resolve a canonical name, an API-key requirement where the provider
-/// needs one, a sensible default model, and a correct base-URL requirement.
+/// needs one, and a correct base-URL requirement. Model data is never
+/// hardcoded — the wizard fetches it live (ADR 0019).
 #[test]
 fn new_provider_metadata_is_complete() {
     // Canonical backend values (README tables mirror these).
@@ -135,17 +126,6 @@ fn new_provider_metadata_is_complete() {
     assert!(!Provider::Ollama.requires_key());
     assert!(!Provider::OpenAiCompatible.requires_key());
 
-    // Defaults: fast, low-cost models; the routers have none by design.
-    assert_eq!(Provider::Xai.default_model(), "grok-4.3");
-    assert_eq!(Provider::Mistral.default_model(), "mistral-small-latest");
-    assert_eq!(Provider::Perplexity.default_model(), "sonar");
-    assert_eq!(
-        Provider::Together.default_model(),
-        "meta-llama/Llama-3.3-70B-Instruct-Turbo"
-    );
-    assert!(Provider::OpenRouter.default_model().is_empty());
-    assert!(Provider::OpenAiCompatible.default_model().is_empty());
-
     // Base URL: built-in endpoints for the five; required for the escape
     // hatch (config `base_url`).
     for p in [
@@ -161,15 +141,6 @@ fn new_provider_metadata_is_complete() {
         Provider::OpenAiCompatible.base_url_requirement(),
         BaseUrlRequirement::Required
     );
-
-    // Setup picker lists: curated models exist for the four with defaults;
-    // OpenRouter and the escape hatch intentionally expose none.
-    assert!(!Provider::Xai.models().is_empty());
-    assert!(!Provider::Mistral.models().is_empty());
-    assert!(Provider::OpenRouter.models().is_empty());
-    assert!(!Provider::Perplexity.models().is_empty());
-    assert!(!Provider::Together.models().is_empty());
-    assert!(Provider::OpenAiCompatible.models().is_empty());
 }
 
 #[test]

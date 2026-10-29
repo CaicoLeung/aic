@@ -25,7 +25,7 @@ Key patterns (explicitly call out when touching code):
 - **Dual git strategy**: libgit2 for reads (status/diff), real `git` CLI for mutations via `run_git` so hooks/gpgsign run (`src/git/mod.rs`).
 - **Error handling**: `anyhow` everywhere, context names user-facing ops; no `thiserror`. Marker errors for downcast only: `CommitDeclined`, `LlmError`/`RetryError`. Git's own stderr surfaces via `nonzero_exit`.
 - **Async**: single tokio runtime; `async-trait` only on `CommandRunner` (`src/llm/cli_agent/`). Blocking tty probe wrapped in `spawn_blocking`.
-- **Rendering**: all colors through `src/render/palette/` roles (WCAG-tested) — never hand-roll `console::Style`. Markdown painter is pure/zero-IO; ADR 0013 bans TUI frameworks.
+- **Rendering**: all colors through `src/render/palette/` roles (WCAG-tested) — never hand-roll `console::Style`. Markdown painter is pure/zero-IO. Full-screen surfaces (setup wizard) use the ratatui substrate in `src/render/tui/` (ADR 0020); the inline Run renderer stays raw-ANSI (ADR 0013, as narrowed by ADR 0020).
 - **State**: no globals, except the two process-wide render statics documented in ADR 0018's amendment note — `timeline::driver::ACTIVE_FRAME` (the installed Run frame; threading it through every seam would pollute the LLM/test seams) and `palette`'s `NEON`/`PROBED` flags (one-shot dark-terminal probe; ceiling: per-output neon, if ever needed). Config = `~/.config/aic/config.toml` (TOML, dir 0700/file 0600, resolved via `home_dir`, identical on all OSes — ADR 0012). Config file is the single source of truth; env vars deliberately not read (ADR 0008). `backend_kind` ("api"|"cli") is the authoritative discriminator (ADR 0011).
 
 **Domain vocabulary is normative**: `CONTEXT.md` defines Run, Batch, Block, Drafted Message, Batch staging, Conflict, Resolution, Finalize, Backend, Palette, etc., with Avoid-lists — use these exact terms in code, docs, and commits; never the synonyms. Read `docs/agents/domain.md` rules before exploring; ADR conflicts must be flagged, not silently overridden.
@@ -37,10 +37,10 @@ Key patterns (explicitly call out when touching code):
 | `src/core/` | Cross-cutting: clap CLI, config persistence/resolution/migrations, seam type aliases, self-update, shell completion |
 | `src/git/` | Repository surface: `Git` adapter (libgit2 reads + CLI mutations), pure diff parsing, diff→JSON envelope, hunk staging remap, conflict domain |
 | `src/llm/` | Backends: provider registry + rig clients, CLI-agent shells, NDJSON decoders, tolerant JSON parse, shared retry, prompts, generator |
-| `src/render/` | Terminal output: display, progress/spinners, reasoning feed, markdown, palette, layout, cursor (DSR), commit types |
+| `src/render/` | Terminal output: display, progress/spinners, reasoning feed, markdown, palette, layout, cursor (DSR), commit types, ratatui TUI substrate (`tui/`) |
 | `src/workflow/` | User flows composing the rest: run, resolve, setup wizard, confirm, grouping, input primitives |
 | `src/e2e/` | `#[cfg(test)]` integration suite (real git tempdirs, stubbed LLM/UI) |
-| `docs/adr/` | 16 numbered ADRs with supersession chain — read before non-trivial changes |
+| `docs/adr/` | 20 numbered ADRs with supersession chain — read before non-trivial changes |
 | `docs/agents/` | Agent ops: issue-tracker protocol (`gh` CLI), triage labels, domain-doc rules |
 | `scripts/` | Release automation (prepare-release, release, release_lib + tests), provider smoke test, and `autoresearch.sh` (src-LOC / binary-size / test-count metrics for Rust-upgrade passes; metrics only print when test + clippy gates pass) |
 | `demo/` | VHS tapes + sim scripts rendering the README GIFs |

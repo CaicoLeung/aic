@@ -138,15 +138,16 @@ fn seed_draft_carries_review_batch_plan() {
 #[test]
 fn provider_label_defaults_to_openai_for_api_backend() {
     // API backend (the default) with no provider chosen shows the OpenAI
-    // default + its default model, mirroring `finalize` — never "(not set)"
-    // while API is active.
+    // default provider, mirroring `finalize` — never "(not set)" while API
+    // is active. No model is chosen, and there is no default model
+    // (ADR 0019), so the row carries the provider alone.
     let d = draft(None, None, None, None);
-    assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+    assert_eq!(provider_label(&d), "OpenAI");
 
     // Explicit API backend, still no provider -> same default.
     let mut d = draft(None, None, None, None);
     d.backend_kind = Some(BackendKind::Api);
-    assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
+    assert_eq!(provider_label(&d), "OpenAI");
 
     // CLI backend ignores the provider -> "(not set)" until one is set.
     let mut d = draft(None, None, None, None);
@@ -156,24 +157,12 @@ fn provider_label_defaults_to_openai_for_api_backend() {
 
 #[test]
 fn provider_label_shows_provider_and_model() {
-    // Explicit model wins.
+    // Explicit model rides along.
     let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
     assert_eq!(provider_label(&d), "OpenAI · gpt-5");
-    // No explicit model -> provider default.
-    let d = draft(Some(Provider::OpenAI), None, None, None);
-    assert_eq!(provider_label(&d), "OpenAI · gpt-5-mini");
-    // Provider with no default model -> just the provider name.
+    // No model chosen -> provider name only (no default to show).
     let d = draft(Some(Provider::OpenRouter), None, None, None);
     assert_eq!(provider_label(&d), "OpenRouter");
-}
-
-/// [`yes_no`] renders the toggle row for both gates: absent (default) reads
-/// "off", an explicit choice reads back verbatim (ADR 0018 wording).
-#[test]
-fn yes_no_defaults_off_and_reflects_choice() {
-    assert_eq!(yes_no(None), "off");
-    assert_eq!(yes_no(Some(false)), "off");
-    assert_eq!(yes_no(Some(true)), "on");
 }
 
 #[test]
@@ -182,13 +171,10 @@ fn submenu_labels_reflect_value_and_source() {
     assert_eq!(api_key_label("sk-123"), "••••••");
     assert_eq!(api_key_label(""), "(not set)");
 
-    // Model: value, (default) when provider-default-sourced, (not set) when empty.
-    assert_eq!(model_label("gpt-5", Source::Config), "gpt-5");
-    assert_eq!(
-        model_label("deepseek-v4-flash", Source::Default),
-        "deepseek-v4-flash (default)"
-    );
-    assert_eq!(model_label("", Source::Default), "(not set)");
+    // Model: value, (not set) when empty — no source annotation exists
+    // (ADR 0019: no default model).
+    assert_eq!(model_label("gpt-5"), "gpt-5");
+    assert_eq!(model_label(""), "(not set)");
 
     // Base URL: value, annotated by source, (not set) when none.
     assert_eq!(
@@ -203,130 +189,39 @@ fn submenu_labels_reflect_value_and_source() {
 }
 
 #[test]
-fn provider_submenu_entries_follow_applicability() {
-    // OpenAI: API key + Model + Verify + Done (no base URL).
-    let d = draft(Some(Provider::OpenAI), None, None, None);
-    let (entries, _) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::ApiKey,
-            ProviderEntry::Model,
-            ProviderEntry::Verify,
-            ProviderEntry::Done
-        ]
-    );
-
-    // Ollama: Base URL + Model + Verify + Done (no API key).
-    let d = draft(Some(Provider::Ollama), None, None, None);
-    let (entries, _) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::BaseUrl,
-            ProviderEntry::Model,
-            ProviderEntry::Verify,
-            ProviderEntry::Done
-        ]
-    );
-
-    // OpenAI-compatible: API key + Base URL + Model + Verify + Done.
-    let d = draft(Some(Provider::OpenAiCompatible), None, None, None);
-    let (entries, _) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::ApiKey,
-            ProviderEntry::BaseUrl,
-            ProviderEntry::Model,
-            ProviderEntry::Verify,
-            ProviderEntry::Done
-        ]
-    );
-}
-
-#[test]
-fn submenu_labels_show_effective_value() {
-    // The in-session draft (a user choice or a seeded config value) is the
-    // effective value and is shown as-is — re-entering setup must not read
-    // as if the choice was lost (AIC-15).
-    let d = draft(
-        Some(Provider::DeepSeek),
-        Some("sk-123"),
-        Some("deepseek-v4-pro"),
-        None,
-    );
-    let (entries, labels) = provider_submenu_items(&d);
-    assert_eq!(
-        entries,
-        vec![
-            ProviderEntry::ApiKey,
-            ProviderEntry::Model,
-            ProviderEntry::Verify,
-            ProviderEntry::Done
-        ]
-    );
-    assert_eq!(labels[0], format!("{DOT} API key — ••••••"));
-    assert_eq!(labels[1], format!("{DOT} Model — deepseek-v4-pro"));
-    assert_eq!(
-        labels[2],
-        format!("{DOT} Verify — test this provider with a sample request")
-    );
-    assert_eq!(labels[3], format!("{DOT} Done — back to main menu"));
-}
-
-#[test]
-fn effective_model_prefers_draft_then_default() {
-    // Draft model wins over the provider default.
+fn effective_model_is_the_draft_choice_only() {
+    // Draft model is the whole story (ADR 0019: no provider default).
     let d = draft(Some(Provider::OpenAI), None, Some("gpt-5"), None);
-    assert_eq!(d.effective_model(Provider::OpenAI), "gpt-5");
-    // No draft model -> provider default.
+    assert_eq!(d.effective_model(), "gpt-5");
+    // No model chosen -> empty, whatever the provider.
     let d = draft(Some(Provider::OpenAI), None, None, None);
-    assert_eq!(d.effective_model(Provider::OpenAI), "gpt-5-mini");
-    // Provider with no default -> empty string.
+    assert_eq!(d.effective_model(), "");
     let d = draft(Some(Provider::OpenRouter), None, None, None);
-    assert_eq!(d.effective_model(Provider::OpenRouter), "");
+    assert_eq!(d.effective_model(), "");
 }
 
 #[test]
-fn provider_choice_label_shows_chosen_model_for_selected_provider() {
-    // The selected provider shows the user's chosen model, not the bare
-    // default — re-entering setup must not read as if the choice was lost
-    // (AIC-15).
+fn preview_model_shows_chosen_model_for_selected_provider() {
+    // The selected provider shows the user's chosen model — re-entering
+    // setup must not read as if the choice was lost (AIC-15).
     let mut d = draft(Some(Provider::DeepSeek), None, None, None);
     d.model = Some("deepseek-v4-pro".into());
-    assert_eq!(
-        provider_choice_label(Provider::DeepSeek, &d),
-        format!("{DOT} DeepSeek  (deepseek-v4-pro)")
-    );
+    assert_eq!(preview_model(Provider::DeepSeek, &d), "deepseek-v4-pro");
 
-    // Other providers still show their default for comparison.
-    assert_eq!(
-        provider_choice_label(Provider::OpenAI, &d),
-        format!("{DOT} OpenAI  (gpt-5-mini)")
-    );
+    // Another provider shows its remembered bank entry, never a default.
+    let mut d = draft(Some(Provider::DeepSeek), None, None, None);
+    d.model = Some("deepseek-v4-pro".into());
+    d.known_providers.push(ProviderProfile {
+        backend: "openai".into(),
+        api_key: None,
+        model: Some("gpt-5".into()),
+        base_url: None,
+    });
+    assert_eq!(preview_model(Provider::OpenAI, &d), "gpt-5");
 
-    // No chosen model -> the provider default for the selected provider.
+    // No chosen model anywhere -> empty (rendered as "(model not set)").
     let d = draft(Some(Provider::DeepSeek), None, None, None);
-    assert_eq!(
-        provider_choice_label(Provider::DeepSeek, &d),
-        format!("{DOT} DeepSeek  (deepseek-v4-flash)")
-    );
-
-    // Selected provider with no default and a chosen model -> chosen model.
-    let mut d = draft(Some(Provider::OpenRouter), None, None, None);
-    d.model = Some("meta-llama/llama-4-scout".into());
-    assert_eq!(
-        provider_choice_label(Provider::OpenRouter, &d),
-        format!("{DOT} OpenRouter  (meta-llama/llama-4-scout)")
-    );
-
-    // Selected provider with no default and no chosen model -> the hint.
-    let d = draft(Some(Provider::OpenRouter), None, None, None);
-    assert_eq!(
-        provider_choice_label(Provider::OpenRouter, &d),
-        format!("{DOT} OpenRouter  (no default — you'll pick a model)")
-    );
+    assert_eq!(preview_model(Provider::DeepSeek, &d), "");
 }
 
 #[test]
@@ -409,27 +304,6 @@ fn finalize_carries_review_batch_plan() {
     assert_eq!(out.review_batch_plan, Some(true));
 }
 
-/// [`toggle_initial`] (both gates share it) prefers the in-session draft
-/// choice, then the existing config's value, else defaults off.
-#[test]
-fn toggle_initial_prefers_draft_then_existing_then_off() {
-    let existing = Some(Config {
-        review_batch_plan: Some(true),
-        ..Default::default()
-    });
-
-    // No draft, existing true -> true; no draft, no existing -> off.
-    assert!(toggle_initial(
-        None,
-        existing.as_ref().and_then(|c| c.review_batch_plan)
-    ));
-    assert!(!toggle_initial(None, None));
-
-    // Draft choice wins over existing, either way.
-    assert!(!toggle_initial(Some(false), Some(true)));
-    assert!(toggle_initial(Some(true), None));
-}
-
 fn draft_with_cli(command: Option<&str>) -> Draft {
     Draft {
         backend_kind: command.map(|_| BackendKind::Cli),
@@ -502,10 +376,10 @@ fn provider_choice_label_previews_banked_model_for_non_active() {
         model: Some("claude-sonnet-4-remembered".into()),
         ..Default::default()
     });
-    let label = provider_choice_label(Provider::Anthropic, &draft);
+    let preview = preview_model(Provider::Anthropic, &draft);
     assert!(
-        label.contains("claude-sonnet-4-remembered"),
-        "list should preview the remembered model, got: {label}"
+        preview.contains("claude-sonnet-4-remembered"),
+        "list should preview the remembered model, got: {preview}"
     );
 }
 
@@ -685,24 +559,73 @@ fn cli_menu_rows_have_no_unmappable_header() {
     // Regression: the CLI-agent menu once had a "Choose a preset:" *label*
     // as row 0 with no action — selecting it panicked the TUI. Now every
     // row is an actionable CliRow paired with its label, so there is no
-    // separate index to leave unmapped. There is also no "Custom command…"
-    // row: a free-form command has no decoder for its stdout envelope, so
-    // it would silently run in plain-text mode — only the presets
-    // (see [`PRESETS`]) are offered.
-    for command_set in [false, true] {
-        let rows = cli_menu_rows(command_set);
-        // Row 0 must be a real preset, never a bare label.
-        assert!(
-            matches!(rows.first(), Some(CliRow::Preset(_))),
-            "row 0 must be an actionable preset, not a header (command_set={command_set})"
-        );
-        // Presets lead, then (only when set) Verify, then Done — every
-        // expected variant present, nothing extra, and no Custom row.
-        assert_eq!(rows.len(), PRESETS.len() + usize::from(command_set) + 1);
-        assert!(!rows.contains(&CliRow::Verify) || command_set);
-        assert_eq!(rows.contains(&CliRow::Verify), command_set);
-        assert!(rows.contains(&CliRow::Done));
-        // Done is always last.
-        assert!(matches!(rows.last(), Some(CliRow::Done)));
-    }
+    // separate index to leave unmapped. There is no "Custom command…" row
+    // (a free-form command has no decoder) and no manual Verify row (R3 —
+    // the probe runs automatically when the flow completes).
+    let rows = cli_menu_rows();
+    // Row 0 must be a real preset, never a bare label.
+    assert!(matches!(rows.first(), Some(CliRow::Preset(_))));
+    // Presets lead, then Done — nothing else, regardless of whether a
+    // command is already set (Done just re-probes when one is, R3).
+    assert_eq!(rows.len(), PRESETS.len() + 1);
+    assert!(matches!(rows.last(), Some(CliRow::Done)));
+}
+
+/// Picker rows (ADR 0019 §6): 50-entry cap plus the `Custom model…` escape
+/// hatch — no search, no pagination.
+#[test]
+fn picker_rows_cap_at_fifty_and_append_custom() {
+    let models: Vec<String> = (0..80).map(|i| format!("model-{i:02}")).collect();
+    let rows = picker_rows(&models);
+    assert_eq!(rows.len(), 51);
+    assert_eq!(rows[0], format!("{DOT} model-00"));
+    assert_eq!(rows[49], format!("{DOT} model-49"));
+    assert_eq!(rows[50], format!("{ICON_PENCIL}  Custom model…"));
+    // A short list passes through untouched.
+    let rows = picker_rows(&["a".to_string(), "b".to_string()]);
+    assert_eq!(rows.len(), 3);
+}
+
+/// The cache key (ADR 0019 §5) folds provider, base URL, and masked key:
+/// any one changing must produce a different key. Equal-length keys mask
+/// identically (`••••••`) — that collision is the accepted ceiling of a
+/// masked key (never holds raw key material), noted at `cache_key`.
+#[test]
+fn cache_key_separates_provider_base_and_key() {
+    let a = cache_key(Provider::OpenAI, None, "sk-123456789");
+    assert_ne!(a, cache_key(Provider::Mistral, None, "sk-123456789"));
+    assert_ne!(
+        a,
+        cache_key(Provider::OpenAI, Some("http://h:1"), "sk-123456789")
+    );
+    // Different key *length* changes the mask, hence the key.
+    assert_ne!(a, cache_key(Provider::OpenAI, None, "sk-12345678"));
+    assert_eq!(a, cache_key(Provider::OpenAI, None, "sk-123456789"));
+}
+
+// --- Auto-verify on Done (R3) ---------------------------------------------
+
+/// A provider probe against an incomplete draft fails validation — the
+/// Run-path setup hint, not an opaque provider error — without touching the
+/// network: `validate` rejects the draft before any request is built. This
+/// is the Err that drives the failure screen when Done is reached with a
+/// missing key or model.
+#[test]
+fn provider_probe_reports_validation_hint_without_network() {
+    // Key-requiring provider with neither key nor model set.
+    let d = draft(Some(Provider::OpenAI), None, None, None);
+    let err = super::verify::probe_provider(&d).unwrap_err().to_string();
+    assert!(
+        err.contains("aic setup"),
+        "validation error must point at setup, got: {err}"
+    );
+}
+
+/// A CLI probe with no configured command errs instead of spawning
+/// anything (the defensive guard; callers only auto-verify once a command
+/// is set).
+#[test]
+fn cli_probe_without_command_errs_cleanly() {
+    let d = draft(None, None, None, None);
+    assert!(super::verify::probe_cli(&d).is_err());
 }

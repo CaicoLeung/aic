@@ -19,15 +19,18 @@
 pub mod cli_agent;
 pub mod decoder;
 pub mod generator;
+mod model_listing;
 pub mod parse;
 pub mod prompt;
 pub mod redact;
 pub mod retry;
+
 use crate::llm::cli_agent::{CliAgent, CliSpec};
 use crate::llm::parse::{classify_retry, parse_json_response};
 use crate::llm::retry::{RetryPolicy, RetryReason, retry, should_retry};
 use anyhow::Result;
 use futures::StreamExt;
+pub(crate) use model_listing::list_models;
 use rig::agent::{MultiTurnStreamItem, Text};
 use rig::client::AgentClientExt;
 use rig::completion::{Prompt, StructuredOutputError, TypedPrompt};
@@ -75,8 +78,11 @@ pub enum BaseUrlRequirement {
 
 /// Identity metadata for one provider. The `REGISTRY` table below is the single
 /// source of truth for a provider's canonical name, aliases, API-key
-/// requirement, and base-URL requirement. Adding a provider = one registry row + one
-/// `default_model` arm + one `with_agent!` arm. See docs/adr/0003.
+/// requirement, and base-URL requirement.
+///
+/// Adding a provider = one registry row + one `with_agent!` arm + one
+/// `model_listing` arm. Model data itself is never hardcoded — the wizard
+/// fetches it live (ADR 0019). See docs/adr/0003.
 struct ProviderMeta {
     provider: Provider,
     name: &'static str,
@@ -107,9 +113,9 @@ const fn meta(
 
 /// Provider registry in `aic setup` presentation order.
 ///
-/// NOTE: the `aic-web` marketing site parses the `Provider` enum and the
-/// `default_model()` match arms out of this file at build time (aic-web
-/// ADR-0003). Keep the enum and those arms here and string-literal shaped.
+/// NOTE: the `aic-web` marketing site parses the `Provider` enum out of
+/// this file at build time (aic-web ADR-0003). Keep the enum here and
+/// string-literal shaped.
 const REGISTRY: &[ProviderMeta] = &[
     meta(
         Provider::OpenAI,
@@ -297,73 +303,6 @@ impl Provider {
 
     pub fn all() -> &'static [Provider] {
         ALL_PROVIDERS
-    }
-
-    /// Default model for a provider. An empty string means the provider has no
-    /// default and the user must supply one (OpenRouter, OpenAI-compatible).
-    ///
-    /// The `aic-web` site parses these match arms at build time, so keep this a
-    /// `match self` with string-literal arms (aic-web ADR-0003).
-    pub fn default_model(&self) -> &'static str {
-        match self {
-            Self::OpenAI => "gpt-5-mini",
-            Self::Anthropic => "claude-haiku-4-5",
-            Self::Gemini => "gemini-2.5-flash",
-            Self::DeepSeek => "deepseek-v4-flash",
-            Self::Groq => "llama-3.3-70b-versatile",
-            Self::Ollama => "llama3.3",
-            Self::Xai => "grok-4.3",
-            Self::Mistral => "mistral-small-latest",
-            Self::OpenRouter => "",
-            Self::Perplexity => "sonar",
-            Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            Self::OpenAiCompatible => "",
-        }
-    }
-
-    /// Curated, currently-recommended model IDs for the `aic setup` picker.
-    /// Empty for providers where a fixed list doesn't fit (OpenRouter exposes
-    /// thousands; OpenAI-compatible points at a user's own server). The picker
-    /// pre-selects the provider's [`default_model`](Self::default_model) when
-    /// present, otherwise the first entry. These are best-effort and may lag
-    /// behind each provider's latest releases — the picker always offers a
-    /// "custom" escape hatch.
-    pub fn models(&self) -> &'static [&'static str] {
-        match self {
-            Self::OpenAI => &["gpt-5", "gpt-5-mini", "gpt-5-nano"],
-            Self::Anthropic => &["claude-sonnet-4-5", "claude-haiku-4-5"],
-            Self::Gemini => &[
-                "gemini-2.5-pro",
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite",
-            ],
-            Self::DeepSeek => &["deepseek-v4-flash", "deepseek-v4-pro"],
-            Self::Groq => &[
-                "llama-3.3-70b-versatile",
-                "llama-3.1-8b-instant",
-                "openai/gpt-oss-120b",
-            ],
-            Self::Ollama => &["llama3.3", "qwen2.5", "qwen3", "deepseek-r1"],
-            Self::Xai => &["grok-4.5", "grok-4.3"],
-            Self::Mistral => &[
-                "mistral-large-latest",
-                "mistral-small-latest",
-                "codestral-latest",
-            ],
-            Self::OpenRouter => &[],
-            Self::Perplexity => &[
-                "sonar",
-                "sonar-pro",
-                "sonar-reasoning-pro",
-                "sonar-deep-research",
-            ],
-            Self::Together => &[
-                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                "deepseek-ai/DeepSeek-V4-Pro",
-            ],
-            Self::OpenAiCompatible => &[],
-        }
     }
 }
 

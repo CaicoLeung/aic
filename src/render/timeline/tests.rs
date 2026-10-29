@@ -443,6 +443,45 @@ fn plain_step_lines_print_only_completed_and_failed() {
     );
 }
 
+/// A failure detail carrying a multi-line error chain (git's own stderr
+/// from a vetoing commit-msg hook) renders as ONE physical row on both
+/// paths: a row that embeds `\n` desyncs the painter's whole-frame
+/// repaint (one physical row per row) and shreds the plain ledger with
+/// un-indented continuation lines.
+#[test]
+fn failure_detail_flattens_multiline_error_chains_to_one_row() {
+    let blob = "git commit -F - --cleanup=verbatim: exited with exit status: 1 — \u{27d7}   input: docs(adr): add ADR 0020\n\u{2716}   body line 1 must not be longer than 100 characters (found 240) [error] [body-max-line-length]\n\n\u{2716}  found 1 problems, 0 warnings";
+    let failed = Step::failed(
+        "Commit batches",
+        "failed on batch 1 of 5",
+        vec![blob.into()],
+    );
+
+    let frame_rows = timeline_frame(std::slice::from_ref(&failed), &THEME);
+    assert_eq!(
+        frame_rows.len(),
+        2,
+        "headline + ONE detail row: {frame_rows:?}"
+    );
+    // Frame path: flattened to ONE row and clamped at the prose budget
+    // (truncated, never wrapped — same rule as every frame row).
+    let frame_detail = frame_rows[1].strip_prefix("    ").expect("sub-row inset");
+    assert_eq!(
+        frame_detail,
+        "git commit -F - --cleanup=verbatim: exited with exit status: 1 — \u{27d7} input: docs(adr): add ADR 002"
+    );
+
+    // The plain non-TTY ledger shares the flattened string in full — no
+    // width budget off a terminal, and no embedded newline either.
+    assert_eq!(
+        plain_step_lines(&failed),
+        vec![
+            "✗ Commit batches — failed on batch 1 of 5".to_string(),
+            "git commit -F - --cleanup=verbatim: exited with exit status: 1 — \u{27d7} input: docs(adr): add ADR 0020 \u{2716} body line 1 must not be longer than 100 characters (found 240) [error] [body-max-line-length] \u{2716} found 1 problems, 0 warnings".to_string(),
+        ]
+    );
+}
+
 /// Height budget (ADR 0018): min of the window cap and the terminal's spare
 /// rows; below 3 rows the window is suppressed (0).
 #[test]

@@ -1,27 +1,34 @@
 //! The interactive `aic setup` wizard — a menu-driven configuration flow that
 //! writes [`Config`] to disk. The wizard is the shallow UI over the deep
-//! config-resolution concept that lives in [`crate::core::config`]; it was extracted
-//! out of `config.rs` (AIC-17) so resolution is no longer buried under ~900
-//! lines of TUI machinery.
+//! config-resolution concept that lives in [`crate::core::config`]; it was
+//! extracted out of `config.rs` (AIC-17) so resolution is no longer buried
+//! under ~900 lines of TUI machinery.
 //!
 //! The wizard is menu-driven, not a forced linear path: the top level offers
-//! two independent entries — the AI provider (provider + key + base URL +
-//! model) and the run toggles (confirm before commit, review batch plan) —
-//! plus `Save & exit`. Generic
-//! interactive primitives (single-choice menu, text prompt, IO-cancel
-//! classifier) live in [`crate::workflow::input`].
-//! The sub-flows live in submodules: [`provider`] (AI-provider path),
-//! [`cli_flow`] (CLI-agent picker), [`verify`] (probes), and [`finalize`]
+//! the Backend selector, the AI provider (provider + key + base URL +
+//! model), the CLI agent (command + args + timeout), and the run toggles
+//! (confirm before commit, review batch plan), plus `Save & exit`.
+//!
+//! Since ADR 0020 the surface is a ratatui application ([`app`]): every
+//! screen is one whole-frame diffed repaint inside the alternate screen, so
+//! no intermediate frame can ever leak into the user's terminal — the
+//! leftover-output defect class the old inquire screens (and their opt-in
+//! per-screen clearing) kept reproducing. The sub-modules hold the flow's
+//! pure logic: [`provider`] (AI-provider steps, ADR 0019), [`cli_flow`]
+//! (CLI-agent presets), [`verify`] (probes), and [`finalize`]
 //! (draft↔Config conversion).
 
 use anyhow::{Context, Result};
-use console::Term;
 use std::io::{self, IsTerminal};
+use std::sync::Arc;
 
 use crate::core::config::{BackendKind, CliConfig, Config, ProviderProfile, config_path};
-use crate::llm::Provider;
-use crate::render::{oneshot, palette};
-use crate::workflow::input::{OptNav, TextAct, opt_nav, prompt_text, prompt_yes_no};
+use crate::llm::{Provider, list_models};
+use crate::render::tui::ICON_ALERT;
+use crate::render::{oneshot, palette, tui};
+use std::collections::HashMap;
+
+mod app;
 mod cli_flow;
 mod finalize;
 mod provider;
@@ -30,71 +37,53 @@ mod verify;
 #[cfg(test)]
 mod tests;
 
-pub fn run_setup() -> Result<()> {
-    if !io::stdin().is_terminal() {
-        let path = config_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "~/.config/aic/config.toml".into());
-        oneshot::stderr_line(
-            "aic setup needs an interactive terminal, but stdin is not a TTY.",
-            palette::plain(),
-        );
-        oneshot::stderr_line(
-            "To configure non-interactively you can either:",
-            palette::plain(),
-        );
-        oneshot::stderr_detail(
-            &format!(
-                "• write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit, review_batch_plan), or"
-            ),
-            palette::muted(),
-        );
-        oneshot::stderr_detail(
-            "• run `aic setup` in a TTY, or edit the config file directly",
-            palette::muted(),
-        );
-        anyhow::bail!("cannot run interactive setup without a TTY");
-    }
-
-    match wizard()? {
-        Some(config) => {
-            config.save()?;
-            let path = config_path().context("could not determine config path")?;
-            println!();
-            oneshot::stdout_line(
-                &format!(
-                    "{} Saved to {}",
-                    palette::styled_stdout("\u{2713}", palette::success()),
-                    path.display()
-                ),
-                palette::plain(),
-            );
-            println!();
-            Ok(())
-        }
-        None => {
-            oneshot::stdout_line("Setup cancelled. Nothing was saved.", palette::muted());
-            Ok(())
-        }
-    }
+/// The wizard's injected seams (ADR 0019) — the operations `cargo test`
+/// cannot run hermetically. Production wires real implementations; tests
+/// script results. Shaped after [`crate::workflow::RunDeps`]: one purposeful
+/// bundle, not a provider trait hierarchy. `Send + Sync` because the
+/// ratatui event loop runs each operation on a background thread (ADR
+/// 0020) so the spinner keeps animating.
+pub(super) struct SetupDeps {
+    /// Fetch a provider's live model list (`provider`, effective `api_key`,
+    /// effective `base_url`). An empty return means failure / offline /
+    /// missing key — the Model step then degrades to required free text and
+    /// never blocks (ADR 0019 §4).
+    pub fetch_models: FetchModels,
+    /// Probe the API-provider backend with the draft's effective values
+    /// (R3 auto-verify): `Ok(reply)` on success, `Err` with the provider /
+    /// validation error otherwise.
+    pub verify_provider: VerifyProbe,
+    /// Probe the CLI-agent backend the same way (R3 auto-verify).
+    pub verify_cli: VerifyProbe,
 }
 
-/// Clear the terminal and render the setup header, so each menu or prompt
-/// occupies a clean screen instead of leaving previous selections in the
-/// scrollback.
-fn show_screen(section: &str) -> Result<()> {
-    // stderr: all interactive chrome shares inquire's stream, so a piped
-    // stdout carries only real results (the save path's "Saved to" line).
-    let term = Term::stderr();
-    term.clear_screen()?;
-    term.move_cursor_to(0, 0)?;
-    oneshot::stderr_line(&format!("aic setup — {section}"), palette::plain());
-    oneshot::stderr_detail(
-        "↑/↓ move · Enter confirm · Esc back/cancel · Ctrl-C cancel",
-        palette::muted(),
-    );
-    eprintln!();
-    Ok(())
+/// The one R1 seam: a boxed listing fetch, injectable for hermetic tests.
+pub(super) type FetchModels =
+    Box<dyn Fn(Provider, &str, Option<&str>) -> Vec<String> + Send + Sync>;
+
+/// An R3 seam: one boxed backend probe (`&Draft` → reply or error).
+pub(super) type VerifyProbe = Box<dyn Fn(&Draft) -> Result<String> + Send + Sync>;
+
+impl SetupDeps {
+    /// Production wiring: the real listing fetch and verify probes, each
+    /// driven on a dedicated nested runtime by the wizard's background job
+    /// threads. The listing collapses any error to an empty list — the
+    /// degrade contract above.
+    fn real() -> Self {
+        Self {
+            fetch_models: Box::new(|provider, api_key, base_url| {
+                let label = format!("Fetching {} models…", provider.display());
+                verify::probe(
+                    verify::MODEL_FETCH_TIMEOUT,
+                    &label,
+                    list_models(provider, api_key, base_url),
+                )
+                .unwrap_or_default()
+            }),
+            verify_provider: Box::new(verify::probe_provider),
+            verify_cli: Box::new(verify::probe_cli),
+        }
+    }
 }
 
 // Glyphs that visually distinguish each setup item across the menus. Each
@@ -104,24 +93,17 @@ fn show_screen(section: &str) -> Result<()> {
 const DOT: &str = "·"; // muted `·` section bullet for every menu row
 
 // Status markers for verify outcomes and the save line — same glyph family.
+// `ICON_ALERT` lives in [`crate::render::tui`], shared with the text
+// input's validation hint so the glyph cannot drift between the two.
 const ICON_CHECK: &str = "✓";
 const ICON_CROSS: &str = "✗";
-const ICON_ALERT: &str = "⚠";
 const ICON_PENCIL: &str = "·";
-
-/// Per-step outcome for the setup state machine.
-#[derive(PartialEq)]
-enum Nav {
-    Next,
-    Back,
-    Cancel,
-}
 
 /// In-progress wizard selections. Values persist across sub-flow navigation so
 /// the user can edit one entry without losing the others. Seeded from the
 /// existing config ([`finalize::seed_draft`]) so untouched fields survive saving.
 #[derive(Default, Clone)]
-struct Draft {
+pub(super) struct Draft {
     /// Which Backend this session has chosen (ADR 0011). `None` ⇒ not yet
     /// chosen; [`Draft::active_backend`] defaults it to [`BackendKind::Api`].
     /// Set by the mode-first screen or a radio switch; drives [`finalize::finalize`].
@@ -148,6 +130,42 @@ struct Draft {
     /// top-level fields (for pre-bank configs), and written back on save via
     /// [`finalize::finalize`].
     known_providers: Vec<ProviderProfile>,
+    /// Fetched model lists this session (ADR 0019), keyed by
+    /// provider + base URL + masked key — any change re-fetches. Never
+    /// persisted; a fresh wizard run starts cold.
+    model_cache: HashMap<String, Vec<String>>,
+    /// Latest auto-verify outcome (R3): which Backend was probed and whether
+    /// it passed. `None` ⇒ not verified this session. Since ADR 0020 it has
+    /// no standalone status row — the ✓/✗ marker rides the top-menu row of
+    /// the Backend it belongs to.
+    verify_status: Option<VerifyStatus>,
+}
+
+/// One auto-verify probe outcome (R3): the probed target's short label
+/// (`openai`, `claude`), which Backend owns it, and whether it passed.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct VerifyStatus {
+    pub(super) backend: BackendKind,
+    pub(super) target: String,
+    pub(super) passed: bool,
+}
+
+impl VerifyStatus {
+    pub(super) fn backend_pass(backend: BackendKind, target: String) -> Self {
+        Self {
+            backend,
+            target,
+            passed: true,
+        }
+    }
+
+    pub(super) fn backend_fail(backend: BackendKind, target: String) -> Self {
+        Self {
+            backend,
+            target,
+            passed: false,
+        }
+    }
 }
 
 impl Draft {
@@ -165,193 +183,26 @@ impl Draft {
         self.backend_kind.unwrap_or(BackendKind::Api)
     }
 
-    /// The model the selected provider will actually use, for display: the
-    /// in-session draft choice (seeded from the existing config in
-    /// [`finalize::seed_draft`]) first, else the provider default. Empty when the
-    /// provider has no default (OpenRouter, OpenAI-compatible).
-    fn effective_model(&self, p: Provider) -> String {
+    /// The model the selected provider will use, for display: the in-session
+    /// draft choice (seeded from the existing config in
+    /// [`finalize::seed_draft`]). Empty when none is chosen — there is no
+    /// default model (ADR 0019); the provider flow gates `Done` on it.
+    fn effective_model(&self) -> String {
         self.model
             .as_deref()
             .filter(|m| !m.is_empty())
             .map(String::from)
-            .unwrap_or_else(|| p.default_model().to_string())
+            .unwrap_or_default()
     }
 }
 
-/// Top-level menu choices for the setup wizard. `Esc` and Ctrl-C at the menu
-/// both cancel; the wizard distinguishes them so `Esc` can offer to keep
-/// unsaved changes while Ctrl-C stays an immediate, unguarded exit.
-enum MenuChoice {
-    Backend,
-    Provider,
-    CliAgent,
-    Confirm,
-    Review,
-    Save,
-    /// Esc — cancel, but the wizard guard-checks unsaved changes first.
-    Esc,
-    /// Ctrl-C — immediate cancel, no guard.
-    Cancel,
-}
-
-/// Run the setup wizard. Returns `None` when the user cancels (Esc on the
-/// top-level menu, or Ctrl-C anywhere). Silent on the cancel path — the
-/// caller prints the notice.
-///
-/// The wizard is menu-driven, not a forced linear path: the top level offers a
-/// Backend selector (which of the API-provider / CLI-agent backends a Run
-/// uses), the AI provider (provider + key + base URL + model), the CLI
-/// agent (command + args + timeout), and the run toggles (confirm before
-/// commit, review batch plan) — plus `Save & exit`. Each entry configures
-/// only its own fields and returns to the
-/// menu; both backends keep their configured content, so switching the active
-/// Backend never wipes what was entered for the other.
-fn wizard() -> Result<Option<Config>> {
-    let existing = Config::load().unwrap_or(None);
-    let existing_provider = existing
-        .as_ref()
-        .and_then(|c| c.backend.as_deref())
-        .map(Provider::from_name);
-
-    // Seed the draft from the existing config so a partial visit never wipes
-    // fields the user didn't touch: `Save & exit` writes the merged draft.
-    let mut draft = finalize::seed_draft(&existing);
-
-    // Mode-first on a fresh install (ADR 0011): with no config yet, teach the
-    // two-backend model up front and route into the chosen backend's flow.
-    // Re-config skips this and lands on the menu, whose Backend selector row
-    // sets the active backend (both backends' fields stay in the draft).
-    if existing.is_none() {
-        match step_mode_choice()? {
-            ModeChoice::Api => {
-                draft.backend_kind = Some(BackendKind::Api);
-                if provider::run_provider_flow(&existing, existing_provider, &mut draft)? {
-                    return Ok(None);
-                }
-            }
-            ModeChoice::Cli => {
-                draft.backend_kind = Some(BackendKind::Cli);
-                if cli_flow::run_cli_flow(&mut draft)? {
-                    return Ok(None);
-                }
-            }
-            ModeChoice::Skip => {} // Esc — drop straight into the menu
-            ModeChoice::Cancel => return Ok(None),
-        }
-    }
-
-    // Which menu row to highlight when the menu re-renders: returning from a
-    // sub-flow highlights the entry the user just finished.
-    let mut highlight = 0;
-    loop {
-        let dirty = finalize::draft_dirty(&draft, &existing);
-        match step_menu(&draft, dirty, highlight)? {
-            MenuChoice::Backend => {
-                // Flip the active Backend (ADR 0011). Both backends keep their
-                // configured fields; only the selector changes, and `finalize`
-                // writes just the active one on save.
-                if step_backend_choice(&mut draft)? {
-                    return Ok(None); // Ctrl-C on the backend selector
-                }
-                highlight = 0;
-            }
-            MenuChoice::Provider => {
-                if provider::run_provider_flow(&existing, existing_provider, &mut draft)? {
-                    return Ok(None); // Ctrl-C inside the provider path
-                }
-                highlight = 1;
-            }
-            MenuChoice::CliAgent => {
-                if cli_flow::run_cli_flow(&mut draft)? {
-                    return Ok(None); // Ctrl-C inside the CLI-agent path
-                }
-                highlight = 2;
-            }
-            MenuChoice::Confirm => {
-                if run_confirm_flow(&existing, &mut draft)? {
-                    return Ok(None); // Ctrl-C on the confirmation toggle
-                }
-                highlight = 3;
-            }
-            MenuChoice::Review => {
-                if run_review_flow(&existing, &mut draft)? {
-                    return Ok(None); // Ctrl-C on the review toggle
-                }
-                highlight = 4;
-            }
-            MenuChoice::Save => return Ok(Some(finalize::finalize(draft))),
-            MenuChoice::Esc => {
-                // Esc cancels too, but not silently: with unsaved changes,
-                // confirm the discard (Enter = discard; "no" returns to the
-                // menu). Ctrl-C stays the unconditional exit.
-                if dirty && !prompt_yes_no("Discard unsaved changes?")? {
-                    continue;
-                }
-                return Ok(None);
-            }
-            MenuChoice::Cancel => return Ok(None),
-        }
-    }
-}
-
-/// Mode-first first-run choice (ADR 0011): which Backend to set up. Offered
-/// only when no config exists yet.
-enum ModeChoice {
-    Api,
-    Cli,
-    /// Esc on the mode screen — skip the guided choice and drop into the menu.
-    Skip,
-    Cancel,
-}
-
-/// First-run screen: pick which Backend aic should use. Teaches the
-/// two-backend model without forcing re-configuring users through it. Esc
-/// skips to the menu; Ctrl-C cancels setup.
-fn step_mode_choice() -> Result<ModeChoice> {
-    show_screen("choose a backend")?;
-    let items = vec![
-        format!("{DOT} API provider — use an API key (OpenAI, Anthropic, Gemini, …)"),
-        format!("{DOT} CLI agent — reuse Claude Code / Codex / pi (no API key needed)"),
-    ];
-    Ok(match opt_nav("How should aic get its model?", &items, 0)? {
-        OptNav::Value(0) => ModeChoice::Api,
-        OptNav::Value(1) => ModeChoice::Cli,
-        OptNav::Value(_) => unreachable!("mode choice has exactly two entries"),
-        OptNav::Back => ModeChoice::Skip,
-        OptNav::Cancel => ModeChoice::Cancel,
-    })
-}
-
-/// Pick the active Backend (ADR 0011): a two-option nav between the API
-/// provider and CLI agent. Both backends keep their configured fields in the
-/// draft — this only flips which one a Run uses (and which [`finalize::finalize`]
-/// writes). Defaults to the current selection; a config with no `backend_kind`
-/// seeds as API (the historical default). Returns `true` on Ctrl-C (cancel
-/// setup).
-fn step_backend_choice(draft: &mut Draft) -> Result<bool> {
-    show_screen("choose a backend")?;
-    let items = vec![
-        format!("{DOT} API provider — use an API key"),
-        format!("{DOT} CLI agent — reuse a coding-agent CLI (no API key)"),
-    ];
-    let default = match draft.active_backend() {
-        BackendKind::Api => 0,
-        BackendKind::Cli => 1,
-    };
-    match opt_nav("Which backend should aic use?", &items, default)? {
-        OptNav::Value(0) => draft.backend_kind = Some(BackendKind::Api),
-        OptNav::Value(_) => draft.backend_kind = Some(BackendKind::Cli),
-        OptNav::Back => {} // Esc — keep the current selection
-        OptNav::Cancel => return Ok(true),
-    }
-    Ok(false)
-}
 /// `AI provider` menu row: the current provider and the model that would be
-/// used (the chosen one, else the provider default). The API backend always
-/// resolves to a provider — OpenAI by default, matching [`finalize::finalize`] — so the
-/// row never reads `(not set)` while API is the active backend. `(not set)`
-/// stays correct only for the CLI backend, which ignores the provider.
-fn provider_label(draft: &Draft) -> String {
+/// used (the chosen one; there is no default model — ADR 0019). The API
+/// backend always resolves to a provider — OpenAI by default, matching
+/// [`finalize::finalize`] — so the row never reads `(not set)` while API is
+/// the active backend. `(not set)` stays correct only for the CLI backend,
+/// which ignores the provider.
+pub(super) fn provider_label(draft: &Draft) -> String {
     let p = match draft.provider {
         Some(p) => p,
         // API backend defaults to OpenAI (mirrors `finalize`), so the menu
@@ -360,140 +211,89 @@ fn provider_label(draft: &Draft) -> String {
         None if draft.active_backend() == BackendKind::Api => Provider::default(),
         None => return "(not set)".to_string(),
     };
-    let model = draft.effective_model(p);
+    let model = draft.effective_model();
     if model.is_empty() {
         p.display().to_string()
     } else {
         format!("{} · {model}", p.display())
     }
 }
-/// Menu-row label for an opt-in toggle (both workflow gates default off):
-/// `on` only when explicitly on (ADR 0018 toggle wording).
-fn yes_no(value: Option<bool>) -> String {
-    if value.unwrap_or(false) {
-        "on".to_string()
-    } else {
-        "off".to_string()
-    }
-}
 
 /// `CLI agent` menu row: the configured command's name — args stay in the
 /// picker and the config, not on this row. `(not configured)` when no
 /// CLI-agent backend is set.
-fn cli_label(draft: &Draft) -> String {
+pub(super) fn cli_label(draft: &Draft) -> String {
     match draft.active_cli_command() {
         Some(cmd) => cmd.to_string(),
         None => "(not configured)".to_string(),
     }
 }
-/// Render and run the top-level menu. Entering an entry routes to its
-/// sub-flow; `Save & exit` finalizes; Esc/`Ctrl-C` cancel the whole setup.
-/// `default_idx` is the row highlighted when the menu opens (persisted from
-/// the entry the user just finished). `dirty` marks the Save row when the
-/// session has changes [`finalize::draft_dirty`] would not write back as
-/// identical, so the cost of cancelling is visible before the user pays it.
-fn step_menu(draft: &Draft, dirty: bool, default_idx: usize) -> Result<MenuChoice> {
-    show_screen("main menu")?;
-    let save_row = if dirty {
-        format!("{DOT} Save & exit — unsaved changes")
-    } else {
-        format!("{DOT} Save & exit")
-    };
-    let items = vec![
-        format!("{DOT} Backend — {}", draft.active_backend().display_name()),
-        format!("{DOT} AI provider — {}", provider_label(draft)),
-        format!("{DOT} CLI agent — {}", cli_label(draft)),
-        format!(
-            "{DOT} Confirm before commit — {}",
-            yes_no(draft.confirm_before_commit)
-        ),
-        format!(
-            "{ICON_PENCIL} Review batch plan — {}",
-            yes_no(draft.review_batch_plan)
-        ),
-        save_row,
-    ];
-    match opt_nav("What would you like to configure?", &items, default_idx)? {
-        OptNav::Value(0) => Ok(MenuChoice::Backend),
-        OptNav::Value(1) => Ok(MenuChoice::Provider),
-        OptNav::Value(2) => Ok(MenuChoice::CliAgent),
-        OptNav::Value(3) => Ok(MenuChoice::Confirm),
-        OptNav::Value(4) => Ok(MenuChoice::Review),
-        OptNav::Value(5) => Ok(MenuChoice::Save),
-        OptNav::Value(_) => unreachable!("menu has exactly six entries"),
-        OptNav::Back => Ok(MenuChoice::Esc),
-        OptNav::Cancel => Ok(MenuChoice::Cancel),
+
+/// The setup entry point. Refuses non-interactive or full-screen-incapable
+/// terminals, runs the ratatui wizard inside the terminal guard, then —
+/// after the guard has restored the user's shell — prints the save/cancel
+/// notice into the normal buffer (the only setup bytes that ever touch it,
+/// by design: results belong to the user's scrollback, chrome does not).
+pub fn run_setup() -> Result<()> {
+    if !io::stdin().is_terminal() {
+        let path = config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.config/aic/config.toml".into());
+        oneshot::stderr_line(
+            "aic setup needs an interactive terminal, but stdin is not a TTY.",
+            palette::plain(),
+        );
+        oneshot::stderr_line(
+            "To configure non-interactively you can either:",
+            palette::plain(),
+        );
+        oneshot::stderr_detail(
+            &format!(
+                "• write the config file at {path} (TOML keys: backend, api_key, model, base_url, confirm_before_commit, review_batch_plan), or"
+            ),
+            palette::muted(),
+        );
+        oneshot::stderr_detail(
+            "• run `aic setup` in a TTY, or edit the config file directly",
+            palette::muted(),
+        );
+        anyhow::bail!("cannot run interactive setup without a TTY");
     }
-}
-
-/// Run the confirmation-toggle sub-flow (issue #78). Returns `true` on
-/// Ctrl-C (cancel the whole setup); `false` returns to the menu either way.
-fn run_confirm_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    step_toggle(
-        "commit confirmation",
-        "Require confirmation before each commit?",
-        toggle_initial(
-            draft.confirm_before_commit,
-            existing.as_ref().and_then(|c| c.confirm_before_commit),
-        ),
-        draft,
-        |d, v| d.confirm_before_commit = Some(v),
-    )
-}
-
-/// Run the review-toggle sub-flow (issue #157). Same contract as
-/// [`run_confirm_flow`].
-fn run_review_flow(existing: &Option<Config>, draft: &mut Draft) -> Result<bool> {
-    step_toggle(
-        "batch review",
-        "Review the batch plan before drafting?",
-        toggle_initial(
-            draft.review_batch_plan,
-            existing.as_ref().and_then(|c| c.review_batch_plan),
-        ),
-        draft,
-        |d, v| d.review_batch_plan = Some(v),
-    )
-}
-
-/// Initial value for a toggle step (both gates share it): the in-session
-/// draft choice first, then the existing config's value, else `false`
-/// (default off). Not provider-dependent, so no `field_initial`-style
-/// provider guard is needed.
-fn toggle_initial(draft_val: Option<bool>, existing_val: Option<bool>) -> bool {
-    draft_val.or(existing_val).unwrap_or(false)
-}
-
-/// The shared Yes/No toggle step behind both opt-in workflow gates (issues
-/// #78 and #157): one arrow-keyed option list — never typed input, so the
-/// user keeps their hands off the keyboard — writing the choice back
-/// through `set`. One step serves both gates so the two can't drift apart.
-/// Returns `true` only on a hard cancel (Ctrl-C / closed stdin, which ends
-/// the whole setup); a made choice and Esc-as-back both return `false` —
-/// every non-cancel path lands back on the menu.
-fn step_toggle(
-    screen: &str,
-    prompt: &str,
-    initial: bool,
-    draft: &mut Draft,
-    set: fn(&mut Draft, bool),
-) -> Result<bool> {
-    show_screen(screen)?;
-    let items = vec!["on".to_string(), "off".to_string()];
-    let default_idx = usize::from(!initial);
-    match opt_nav(prompt, &items, default_idx)? {
-        OptNav::Value(0) => {
-            set(draft, true);
-            Ok(false)
+    // ADR 0020: the wizard is a full-screen TUI; a terminal that cannot
+    // host one (a VT-less Unix tty, legacy conhost) is refused outright —
+    // the old stacked-scrollback degrade would resurrect exactly the
+    // leftover-output defect class this migration eradicates.
+    if !tui::terminal::tui_capable() {
+        oneshot::stderr_line(
+            "aic setup needs a full-screen terminal; this one does not support the required escape sequences.",
+            palette::plain(),
+        );
+        anyhow::bail!("cannot run setup on this terminal");
+    }
+    let deps = Arc::new(SetupDeps::real());
+    let existing = Config::load().unwrap_or(None);
+    let mut term = tui::terminal::Tui::enter()?;
+    let outcome = app::run(deps, existing, &mut term);
+    drop(term);
+    match outcome? {
+        Some(config) => {
+            config.save()?;
+            let path = config_path().context("could not determine config path")?;
+            println!();
+            oneshot::stdout_line(
+                &format!(
+                    "{} Saved to {}",
+                    palette::styled_stdout("\u{2713}", palette::success()),
+                    path.display()
+                ),
+                palette::plain(),
+            );
+            println!();
+            Ok(())
         }
-        OptNav::Value(1) => {
-            set(draft, false);
-            Ok(false)
+        None => {
+            oneshot::stdout_line("Setup cancelled. Nothing was saved.", palette::muted());
+            Ok(())
         }
-        // Same guard style as `step_menu` and `step_mode`: exactly two rows
-        // exist, so any other index is a scripted-seam bug, not a silent "no".
-        OptNav::Value(_) => unreachable!("toggle has exactly two entries"),
-        OptNav::Back => Ok(false),
-        OptNav::Cancel => Ok(true),
     }
 }

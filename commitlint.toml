@@ -45,4 +45,4 @@ applicable = "always"
 [rules.body-max-line-length]
 level = 2
 applicable = "always"
-value = 100
+value = 250

@@ -301,26 +301,43 @@ impl RunFrame {
     /// Fail step `i`: `✗` headline + detail rows persist; every later step
     /// is absent from the frame (ADR 0018). Off a terminal the headline and
     /// details append to the ledger; on a terminal the frame shows them in
-    /// place (a second emit below the frame would duplicate the block and
     /// desync the repaint geometry — see [`Self::complete`]). Nothing erases
-    /// on failure.
+    /// on failure; the cursor parks one row below the failed block so the
+    /// run's final error report (main's boundary line) starts on its own
+    /// line.
     pub fn fail(&self, display: &Display, i: StepIdx, failure: Failure) {
-        let (lines, ledger) = {
+        let lines = {
             let mut st = self.0.lock().unwrap();
             st.steps[i.0].state = StepState::Failed;
             st.steps[i.0].failure = Some(failure);
             st.steps[i.0].live_rows.clear();
             st.steps[i.0].active_elapsed = None;
             st.repaint();
-            (
-                plain_step_lines(&st.steps[i.0]),
-                st.paint.is_none(), // ledger only off a terminal
-            )
-        };
-        if ledger {
-            for line in lines {
-                display.emit(&line);
+            match st.paint.as_mut() {
+                Some(p) => {
+                    // The failed frame is the Run's LAST paint — nothing
+                    // repaints after it (no step is Active; later steps
+                    // never render), and the painter leaves the cursor at
+                    // the END of the last detail row. Park it on the row
+                    // below the block so whatever prints next (the run's
+                    // final error report) starts on its own line instead of
+                    // gluing onto the remediation row.
+                    let _ = p.term.write_line("");
+                    p.row = p.row.map(|r| (r + 1).min(p.height));
+                    // `write_line` advances only the terminal cursor;
+                    // `p.row` is the model's own row bookkeeping — this
+                    // bump is the sync that keeps it in step (the same
+                    // pairing `flush_rows` keeps), not a second advance.
+                    // The frame just painted the failed screen; the ledger
+                    // emit is non-TTY only (ADR 0018 amendment 1 — a
+                    // second emit would duplicate the block).
+                    Vec::new()
+                }
+                None => plain_step_lines(&st.steps[i.0]),
             }
+        };
+        for line in lines {
+            display.emit(&line);
         }
     }
 
@@ -957,7 +974,7 @@ mod tests {
 /// parent replays DSR replies, captures the master side, and asserts the
 /// erase → entry → repaint sequence.
 #[cfg(all(unix, test))]
-mod pty_tests {
+pub(crate) mod pty_tests {
     use super::*;
     use crate::render::cursor::pty_tests::open_pty;
 
@@ -978,28 +995,7 @@ mod pty_tests {
     /// move the child into a dedicated spawned test binary.
     #[test]
     fn flush_erases_prints_entry_and_repaints_on_a_tty() {
-        let (master, slave) = open_pty();
-        // 30×100 geometry: room for the frame below the row-12 DSR reply.
-        let ws = libc::winsize {
-            ws_row: 30,
-            ws_col: 100,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        assert_eq!(unsafe { libc::ioctl(slave, libc::TIOCSWINSZ, &ws) }, 0);
-
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork failed");
-        if pid == 0 {
-            unsafe {
-                libc::dup2(slave, 0);
-                libc::dup2(slave, 1);
-                libc::dup2(slave, 2);
-                if slave > 2 {
-                    libc::close(slave);
-                }
-                libc::close(master);
-            }
+        fn drive() {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1018,13 +1014,132 @@ mod pty_tests {
             let msg = b"\nPTYFLUSH-DONE\n";
             unsafe {
                 libc::write(2, msg.as_ptr().cast(), msg.len());
-                libc::_exit(0);
             }
         }
+        let (pid, master, slave) = fork_on_pty(drive);
+        let text = capture_until_exit(pid, master, slave);
+        assert!(
+            text.contains("PTYFLUSH-DONE"),
+            "child never finished its drive"
+        );
+        assert_eq!(
+            text.matches("PTYFLUSH-ENTRY").count(),
+            1,
+            "flushed entry row must print exactly once, not duplicate"
+        );
+        assert!(
+            text.contains("\x1b[2K"),
+            "flush must erase the painted frame (CLR_LINE bytes)"
+        );
+        // Chronological collapse: the Scan ✓ block peeled to scrollback
+        // exactly once (never repainted), above the flushed entry; the
+        // final Plan peel lands below it — the tail of the screen.
+        let summary_at = text.find("Scanned 2 files").expect("peeled block printed");
+        let entry_at = text.find("PTYFLUSH-ENTRY").expect("entry row printed");
+        assert_eq!(
+            text.matches("Scanned 2 files").count(),
+            1,
+            "a peeled step prints exactly once — the frame never repaints it"
+        );
+        assert!(
+            summary_at < entry_at,
+            "the peeled ✓ block lands above the flushed entry"
+        );
+        let plan_at = text.rfind("Planned 2 batches").expect("final peel printed");
+        assert!(
+            plan_at > entry_at,
+            "the flow's last peel is the tail, below the flushed entry"
+        );
+    }
 
-        // Parent: fake terminal — answer every DSR query with row 12 (the
-        // probe's canonical path; row ≤ height so it is kept), keep reading
-        // the master until the child exits, then drain what is left.
+    /// `fail` on a terminal paints the failed screen as the Run's LAST
+    /// frame and parks the cursor on the row below it: the next writer is
+    /// the process's final `Error:` report, printed with NO leading
+    /// newline — without the park it glues onto the last remediation row
+    /// (`re-run \`aic\` to continueError: aborted …`).
+    ///
+    /// Same fork discipline as the flush test above.
+    #[test]
+    fn fail_parks_cursor_below_the_failed_block_on_a_tty() {
+        fn drive() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("child runtime");
+            runtime.block_on(async {
+                let frame = RunFrame::new(vec!["Commit batches".into()]).await;
+                let display = Display::new();
+                frame.activate(StepIdx::FIRST);
+                frame.fail(
+                    &display,
+                    StepIdx::FIRST,
+                    Failure {
+                        reason: "failed on batch 1 of 1".into(),
+                        detail: vec!["PTYFAIL-DETAIL row".into()],
+                    },
+                );
+            });
+            // The process's `Error:` report: no leading newline. It must
+            // land on its own row, below the parked failed frame.
+            let msg = b"PTYFAIL-AFTER\n";
+            unsafe {
+                libc::write(2, msg.as_ptr().cast(), msg.len());
+            }
+        }
+        let (pid, master, slave) = fork_on_pty(drive);
+        let text = capture_until_exit(pid, master, slave);
+        let plain = console::strip_ansi_codes(&text).to_string();
+        assert!(
+            plain.contains("PTYFAIL-DETAIL row"),
+            "the failed screen painted: {plain:?}"
+        );
+        let after = plain
+            .find("PTYFAIL-AFTER")
+            .expect("post-failure writer printed");
+        assert_eq!(
+            plain[..after].chars().next_back(),
+            Some('\n'),
+            "the writer after a failed frame must start on its own line: {plain:?}"
+        );
+    }
+
+    /// Open a 30×100 pty (room for a frame below the row-12 DSR reply the
+    /// parent feeds) and fork `drive` onto the slave as the child's only
+    /// stdio; returns `(pid, master, slave)` with the parent's fds. The
+    /// child runs `drive` then `_exit(0)` — `drive` allocates (see the
+    /// fork-discipline note on the flush test).
+    pub(crate) fn fork_on_pty(drive: fn()) -> (i32, i32, i32) {
+        let (master, slave) = open_pty();
+        let ws = libc::winsize {
+            ws_row: 30,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(unsafe { libc::ioctl(slave, libc::TIOCSWINSZ, &ws) }, 0);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe {
+                libc::dup2(slave, 0);
+                libc::dup2(slave, 1);
+                libc::dup2(slave, 2);
+                if slave > 2 {
+                    libc::close(slave);
+                }
+                libc::close(master);
+            }
+            drive();
+            unsafe { libc::_exit(0) };
+        }
+        (pid, master, slave)
+    }
+
+    /// Parent half of a PTY drive: fake terminal — answer every DSR query
+    /// with row 12 (the probe's canonical path; row ≤ height so it is
+    /// kept), keep reading the master until the child exits, then drain
+    /// what is left. Returns everything the child wrote; closes both fds.
+    pub(crate) fn capture_until_exit(pid: i32, master: i32, slave: i32) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut capture: Vec<u8> = Vec::new();
         let mut buf = [0u8; 4096];
@@ -1063,7 +1178,7 @@ mod pty_tests {
             } else {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "child did not exit in 10s — flush deadlocked?"
+                    "child did not exit in 10s — drive deadlocked?"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
@@ -1072,39 +1187,6 @@ mod pty_tests {
             libc::close(master);
             libc::close(slave);
         }
-
-        let text = String::from_utf8_lossy(&capture);
-        assert!(
-            text.contains("PTYFLUSH-DONE"),
-            "child never finished its drive"
-        );
-        assert_eq!(
-            text.matches("PTYFLUSH-ENTRY").count(),
-            1,
-            "flushed entry row must print exactly once, not duplicate"
-        );
-        assert!(
-            text.contains("\x1b[2K"),
-            "flush must erase the painted frame (CLR_LINE bytes)"
-        );
-        // Chronological collapse: the Scan ✓ block peeled to scrollback
-        // exactly once (never repainted), above the flushed entry; the
-        // final Plan peel lands below it — the tail of the screen.
-        let summary_at = text.find("Scanned 2 files").expect("peeled block printed");
-        let entry_at = text.find("PTYFLUSH-ENTRY").expect("entry row printed");
-        assert_eq!(
-            text.matches("Scanned 2 files").count(),
-            1,
-            "a peeled step prints exactly once — the frame never repaints it"
-        );
-        assert!(
-            summary_at < entry_at,
-            "the peeled ✓ block lands above the flushed entry"
-        );
-        let plan_at = text.rfind("Planned 2 batches").expect("final peel printed");
-        assert!(
-            plan_at > entry_at,
-            "the flow's last peel is the tail, below the flushed entry"
-        );
+        String::from_utf8_lossy(&capture).into_owned()
     }
 }

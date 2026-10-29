@@ -190,6 +190,59 @@ async fn declined_batch_shapes_the_failed_screen() {
     );
 }
 
+/// A failed commit (hook veto) failed screen: the ✗ headline names the
+/// batch and the remediation rows carry the recovery contract, but the
+/// error chain is NOT re-rendered in the frame — it prints once,
+/// untruncated, in main's boundary report after the frame ends, so no
+/// width-capped duplicate row ships alongside it. The propagated error
+/// still carries the full chain (git's own stderr) — that text is what the
+/// boundary report prints.
+#[tokio::test]
+async fn commit_failure_screen_carries_remediation_only() {
+    let (dir, git) = with_git(gh::init_test_repo);
+    gh::install_hook(
+        dir.path(),
+        "pre-commit",
+        "echo 'blocked by policy' >&2; exit 1",
+    );
+    std::fs::write(dir.path().join("tracked.txt"), "changed by hook test\n").unwrap();
+    let plan = plan_single_batch("tracked.txt", "hook veto");
+    let buf = BufferWrite::default();
+
+    let err = commit_run(
+        &git,
+        RunDeps {
+            display: Display::with(buf.clone()),
+            ..deps(planner_fixed(plan), messenger_fixed("chore: vetoed"))
+        },
+    )
+    .await
+    .expect_err("a vetoing hook must abort the Run");
+
+    err_contains(&err, &["blocked by policy", "aborted on batch 1 of 1"]);
+    let lines = buf.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("  ✗ Commit batches · 1/1 — failed on batch 1 of 1")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("the remaining changes are still staged")),
+        "the remediation row must survive: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("re-run `aic` to continue")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("git commit -F")),
+        "the error chain must not render in the frame: {lines:?}"
+    );
+}
+
 /// The Batch Review flow completes its step with the batch count — plus the
 /// merge count when merges happened.
 #[tokio::test]

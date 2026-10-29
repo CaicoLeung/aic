@@ -1,6 +1,6 @@
 # ADR 0007: Unify interactive menus on `inquire`, drop `dialoguer`
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR 0020 for full-screen surfaces (setup moved to ratatui); still governing for the inline confirm/review menus until their phase
 - **Date:** 2026-08-07
 
 ## Context

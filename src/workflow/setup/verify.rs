@@ -1,12 +1,11 @@
-//! The setup wizard's Verify probes: the API-provider sample request, the
-//! CLI-agent probe, and the smoke check that a configured program exists.
+//! The setup wizard's Verify probes (R3): the API-provider and CLI-agent
+//! sample requests that run automatically when a backend sub-flow completes,
+//! plus the smoke check that a configured program exists. Outcome screens
+//! live in [`super::app`]; this module only runs the probes and returns
+//! their results.
 
-use super::finalize::mask_key;
 use super::*;
 use crate::core::config::{ResolvedConfig, resolve_base_url, resolve_field};
-use crate::render::layout::MARGIN;
-use crate::render::oneshot::DETAIL_INDENT;
-use crate::render::{oneshot, palette};
 use std::time::Duration;
 
 /// Best-effort check that `program` is installed. Runs `program --version`
@@ -58,53 +57,63 @@ pub(super) fn smoke_check(program: &str) -> String {
         }
     }
 }
-/// Wait for Enter so a smoke-check / status message stays visible before the
-/// screen redraws. Best-effort: a non-interactive stdin just continues.
-pub(super) fn pause_done() -> Result<()> {
-    use std::io::BufRead;
-    eprint!("\n{MARGIN}{DETAIL_INDENT}Press Enter to continue… ");
-    let mut line = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut line);
-    Ok(())
-}
 
-/// Drive `fut` under the Verify spinner label on a dedicated current-thread
-/// Tokio runtime. `block_in_place` parks the outer multi-thread task; the
-/// nested current-thread runtime then drives the async probe future. Without
-/// `block_in_place`, `Runtime::block_on` panics inside an active runtime.
-fn probe(label: &str, fut: impl Future<Output = Result<String>>) -> Result<String> {
-    tokio::task::block_in_place(|| -> Result<String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to build verify runtime")?;
-        rt.block_on(crate::render::progress::with_spinner(label, fut))
+/// Drive `fut` on a dedicated current-thread Tokio runtime under a hard
+/// `timeout`. Since ADR 0020 the probes run on the wizard's background job
+/// threads, which are plain `std::thread`s outside any runtime, so the
+/// nested `block_on` is legal without `block_in_place`. Shared by the
+/// Verify probes and the wizard's model-listing fetch (ADR 0019), so every
+/// setup-time network touch runs the same way. The spinner paints inside
+/// the alternate screen via the app's render loop, not here.
+///
+/// The timeout is the wedge guard: the rig/reqwest path carries no total
+/// request timeout of its own, so without this ceiling a hung connection
+/// would spin the Busy screen forever (the screen itself is Esc-abortable
+/// and Ctrl-C always cancels — this bound is the belt to those braces).
+pub(super) fn probe<T>(
+    timeout: Duration,
+    label: &str,
+    fut: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build verify runtime")?;
+    rt.block_on(async {
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("{label} timed out after {} s", timeout.as_secs()))?
     })
 }
-/// The Verify item (AIC-23): make a minimal sample request against the
-/// selected provider using the **effective** config — config > default, with
-/// an in-session draft edit standing in for the config value — i.e. exactly
-/// the values the sub-menu rows show. Success or the underlying provider
-/// error (auth, rate limit, network, unknown model) is reported on a dedicated
-/// screen, then the wizard returns to the sub-menu. Never auto-advances:
-/// Verify is a probe, not a field edit.
-///
-/// The sample call runs on a dedicated current-thread Tokio runtime. `aic
-/// setup` is dispatched from `#[tokio::main]`, so the wizard is already
-/// executing inside a runtime; `block_in_place` parks the main task on the
-/// multi-thread runtime so a nested runtime can drive the async verify call
-/// without panicking.
-pub(super) fn step_verify(draft: &Draft) -> Result<Nav> {
+
+/// Budget for one provider verify call. The probe prompt is trivial (one
+/// short reply), so anything beyond this is a wedged connection, not a slow
+/// model.
+const PROVIDER_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Total cap for one CLI verify call — above the CLI backend's own idle
+/// budget (`DEFAULT_TIMEOUT_SECS` = 240 s, reset on every output line), so
+/// it only ever fires for a CLI that stays chatty without finishing.
+const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Budget for a model-listing fetch — above `list_models`' own 5 s cap, so
+/// it is the outer belt only.
+pub(super) const MODEL_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The API-provider probe behind R3 auto-verify (AIC-23): a minimal sample
+/// request against the selected provider using the **effective** draft
+/// values — exactly the values the sub-menu rows show. Returns the model's
+/// trimmed reply, or the underlying error (validation setup-hint, auth,
+/// rate limit, network, unknown model). No UI: the caller decides which
+/// screen an outcome gets.
+pub(super) fn probe_provider(draft: &Draft) -> Result<String> {
     let p = draft.provider.unwrap_or_default();
-    // Effective values: the draft (a user edit or the seeded config value),
-    // then the default.
+    // Effective values: the draft (a user edit or the seeded config value).
+    // There is no default model (ADR 0019) — an empty one fails `validate`
+    // below with the setup hint.
     let api_key = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "").0;
     let base_url = resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p).0;
-    let model = resolve_field(
-        draft.model.as_deref().filter(|m| !m.is_empty()),
-        p.default_model(),
-    )
-    .0;
+    let model = resolve_field(draft.model.as_deref().filter(|m| !m.is_empty()), "").0;
     let resolved = ResolvedConfig::from_parts(
         p.name().to_string(),
         api_key,
@@ -114,115 +123,26 @@ pub(super) fn step_verify(draft: &Draft) -> Result<Nav> {
 
     // The same validation the Run path runs (`LlmConfig::load`), so a missing
     // required field reads as a setup hint, not an opaque provider error.
-    if let Err(e) = resolved.validate() {
-        show_verify_result(&p, &model, &resolved.api_key, base_url.as_deref(), Err(e))?;
-        return Ok(Nav::Next);
-    }
+    resolved.validate()?;
 
     let llm = resolved.to_llm();
-    let label = format!("Contacting {} ({model})…", p.display());
-    let result = probe(&label, async {
+    let label = format!("Contacting {} ({model})", p.display());
+    probe(PROVIDER_PROBE_TIMEOUT, &label, async {
         llm.agent("You are a connectivity checker. Follow the user's instruction exactly.")
             .verify()
             .await
-    });
-
-    show_verify_result(&p, &model, &resolved.api_key, base_url.as_deref(), result)?;
-    Ok(Nav::Next)
+    })
 }
 
-/// The outcome block shared by both Verify screens: the success / failure
-/// line, the trimmed reply, the error plus its common causes, and the pause
-/// before the sub-menu redraws. Callers print their own headers first.
-fn show_outcome(
-    term: &Term,
-    result: Result<String>,
-    ok: &str,
-    failed: &str,
-    causes: &[&str],
-) -> Result<()> {
-    match result {
-        Ok(reply) => {
-            oneshot::stderr_line(&format!("{ICON_CHECK} {ok}"), palette::success());
-            if !reply.is_empty() {
-                oneshot::stderr_detail(&format!("Reply: {reply}"), palette::muted());
-            }
-        }
-        Err(e) => {
-            oneshot::stderr_line(&format!("{ICON_CROSS} {failed}"), palette::failure());
-            oneshot::stderr_detail(&format!("Error: {e}"), palette::muted());
-            eprintln!();
-            for cause in causes {
-                oneshot::stderr_detail(cause, palette::muted());
-            }
-        }
-    }
-    eprintln!();
-    oneshot::stderr_detail("Press Enter to return to the menu…", palette::muted());
-    let _ = term.read_char();
-    Ok(())
-}
-
-/// Render the Verify result on a fresh screen and pause for a keypress so the
-/// user can read it before the sub-menu redraws. `result` carries the model's
-/// trimmed reply on success, or the propagated error on failure.
-fn show_verify_result(
-    p: &Provider,
-    model: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-    result: Result<String>,
-) -> Result<()> {
-    let term = Term::stderr();
-    term.clear_screen()?;
-    term.move_cursor_to(0, 0)?;
-    oneshot::stderr_line(
-        &format!("Verify — {} ({model})", p.display()),
-        palette::plain(),
-    );
-    oneshot::stderr_detail(
-        &format!(
-            "API key:  {}",
-            if api_key.is_empty() {
-                "(none)".to_string()
-            } else {
-                mask_key(api_key)
-            }
-        ),
-        palette::muted(),
-    );
-    oneshot::stderr_detail(
-        &format!("Base URL: {}", base_url.unwrap_or("(none)")),
-        palette::muted(),
-    );
-    eprintln!();
-    show_outcome(
-        &term,
-        result,
-        "Success — the provider responded.",
-        "Failed — the provider did not accept the request.",
-        &["Common causes: wrong API key, model name, base URL, or network."],
-    )
-}
-
-/// The CLI analogue of [`step_verify`] (AIC-23): probe the configured CLI with a
-/// minimal prompt using the **effective** draft values, so a missing binary or
-/// an unauthenticated CLI is caught here — at setup time — rather than failing
-/// mid-Run. The CLI runs in headless/print mode; the probe sends "Reply with
-/// exactly: OK" and checks for a reply. Install / auth / timeout errors surface
-/// as the matching [`LlmError`](crate::llm::cli_agent::LlmError); success reports the
-/// trimmed reply.
-///
-/// Runs on a dedicated current-thread runtime like [`step_verify`] — `aic
-/// setup` is already inside `#[tokio::main]`, so `block_in_place` parks the
-/// outer task while the nested runtime drives the async probe.
-pub(super) fn step_verify_cli(draft: &Draft) -> Result<Nav> {
+/// The CLI-agent probe behind R3 auto-verify: run the configured command in
+/// print mode with a connectivity-check prompt; `Ok(reply)` means the
+/// command exists and its envelope decoded. Runs on a dedicated
+/// current-thread runtime like [`probe_provider`].
+pub(super) fn probe_cli(draft: &Draft) -> Result<String> {
     if draft.active_cli_command().is_none() {
-        // Defensive: the menu only offers Verify when a command is set.
-        show_cli_verify_result(Err(anyhow::anyhow!("no CLI command is set yet")))?;
-        return Ok(Nav::Next);
+        // Defensive: callers only auto-verify once a command is set.
+        anyhow::bail!("no CLI command is set yet");
     }
-    // Resolve the spec the SAME way a run does — `CliConfig::to_spec` — so
     // verify decodes the CLI's stdout envelope with the right decoder. The
     // prior hand-built spec hardcoded `Encoding::Plain`, so a claude-preset
     // verify (whose argv carries `--output-format stream-json`) rendered raw
@@ -230,35 +150,44 @@ pub(super) fn step_verify_cli(draft: &Draft) -> Result<Nav> {
     // `LlmConfig::load` means setup and run-time can no longer disagree on
     // the decoder.
     let spec = draft.cli.to_spec();
-    let label = format!("Probing `{}` (print mode)…", spec.command);
+    let label = format!("Probing `{}`", spec.command);
     let agent = crate::llm::cli_agent::CliAgent::new(
         spec,
         "You are a connectivity checker. Follow the user's instruction exactly.".to_string(),
     );
-    let result = probe(&label, async { agent.verify().await });
-    show_cli_verify_result(result)?;
-    Ok(Nav::Next)
+    probe(CLI_PROBE_TIMEOUT, &label, async { agent.verify().await })
 }
 
-/// Render the CLI Verify result on a fresh screen and pause for a keypress,
-/// mirroring [`show_verify_result`] for the API path. `result` carries the
-/// trimmed reply on success, or the propagated
-/// [`LlmError`](crate::llm::cli_agent::LlmError) on failure (its `Display` already
-/// carries a human hint).
-fn show_cli_verify_result(result: Result<String>) -> Result<()> {
-    let term = Term::stderr();
-    term.clear_screen()?;
-    term.move_cursor_to(0, 0)?;
-    oneshot::stderr_line("Verify — CLI agent", palette::plain());
-    eprintln!();
-    show_outcome(
-        &term,
-        result,
-        "Success — the CLI responded.",
-        "Failed — the CLI did not answer.",
-        &[
-            "Common causes: the CLI is not installed, not",
-            "authenticated, or timed out. Run the CLI once to log in.",
-        ],
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `probe` enforces its timeout even when the wrapped future never
+    /// resolves: without the ceiling a wedged network call would spin the
+    /// Busy screen forever (the screen is Esc-abortable, this is the belt).
+    #[test]
+    fn probe_times_out_a_never_resolving_future() {
+        let start = std::time::Instant::now();
+        let err = probe(
+            Duration::from_millis(50),
+            "test probe",
+            std::future::pending::<anyhow::Result<()>>(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("timed out after"),
+            "error must name the timeout, got: {err:#}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must return promptly"
+        );
+    }
+
+    /// A future that finishes inside the budget passes through untouched.
+    #[test]
+    fn probe_passes_through_a_fast_future() {
+        let out = probe(Duration::from_secs(5), "test probe", async { Ok(7) }).unwrap();
+        assert_eq!(out, 7);
+    }
 }

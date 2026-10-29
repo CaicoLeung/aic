@@ -12,3 +12,4 @@ pub mod palette;
 pub mod progress;
 pub mod reasoning_feed;
 pub mod timeline;
+pub(crate) mod tui;
