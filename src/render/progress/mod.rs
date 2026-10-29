@@ -1,6 +1,6 @@
-//! The run's live progress surface: an in-place spinner for one-shot waits
-//! ([`with_spinner`]) and a flicker-free streaming reasoning feed
-//! ([`ReasoningRenderer`] + [`ThinkingView`]).
+//! The run's live progress surface: the flicker-free streaming reasoning
+//! feed ([`ReasoningRenderer`] + [`ThinkingView`]) and the timing
+//! constants / frame-byte builders every animated surface shares.
 //!
 //! Split out of `display.rs` (AIC-19): `display` is the *static* panel engine
 //! — commit lines, conflict summaries, the things that print once and stay.

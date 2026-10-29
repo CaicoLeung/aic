@@ -183,4 +183,4 @@ _Avoid_: reasoning service, thinking component, streaming view
 
 **Markdown renderer**:
 The pure line→styled-rows painter (`src/render/markdown/`) that turns a partial Markdown reasoning window into ANSI-styled terminal rows — ADR 0013's renderer contract. Line-local classification (`classify_line` + running fence state), inline `**bold**`/`` `code` `` parsing, syntect code highlighting, and the generic `wrap_runs` wrap engine; `reasoning_rows`/`loading_rows` are its front doors. Zero I/O and no `&Git`-style state: every function takes model inputs and returns rows, so the whole pipeline is unit-testable on its own. The when-to-paint policy lives in the Reasoning feed; the terminal surface that frames these rows is `progress::ReasoningRenderer`.
-_Avoid_: markdown engine, TUI (ADR 0013 bans a framework), pretty printer
+_Avoid_: markdown engine, TUI (full-screen ratatui surfaces are `src/render/tui/`, ADR 0020), pretty printer

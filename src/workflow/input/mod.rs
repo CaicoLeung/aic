@@ -1,20 +1,22 @@
 //! Generic interactive-input primitives shared across the workflow UIs: the
-//! setup wizard ([`crate::workflow::setup`]), the commit-confirm menu
-//! ([`crate::workflow::confirm`]), and the Batch Review menu
-//! ([`crate::workflow::review`]) — a normalized single-choice menu
-//! ([`opt_nav`]), a zero-residue Select row ([`select_row`]), a raw-mode text
-//! prompt ([`prompt_text`]), the inquire cancel classifier and its Option
-//! mapping ([`is_io_cancel`] / [`is_graceful_cancel`] / [`inquire_opt`]),
-//! the one-pass [`truncate`], and the shared non-TTY-stdin guard
+//! commit-confirm menu ([`crate::workflow::confirm`]), the Batch Review menu
+//! ([`crate::workflow::review`]), and the completion-shell prompt — a
+//! zero-residue Select row ([`select_row`]), its timeline-frame twin
+//! ([`select_in_frame`]), the raw-mode y/n prompt ([`prompt_yes_no`]), the
+//! inquire cancel classifier and its Option mapping
+//! ([`is_io_cancel`] / [`is_graceful_cancel`] / [`inquire_opt`]), the
+//! one-pass [`truncate`], and the shared non-TTY-stdin guard
 //! ([`ensure_interactive_terminal`]).
 //!
 //! These are deliberately provider- and config-agnostic — they know nothing
 //! about the fields being edited, only how to drive `inquire` and normalize
 //! its Esc / Ctrl-C / closed-stdin outcomes. ADR 0007 names this module as
-//! the home for generic interactive-input primitives: the wizard helpers
+//! the home for generic interactive-input primitives: the menu-row helpers
 //! used to live at the bottom of `config.rs` (wrong locality, AIC-17), and
-//! the menu-row helpers were lifted here once the second production menu
-//! made the duplication visible.
+//! they were lifted here once the second production menu made the
+//! duplication visible. The setup wizard left `inquire` behind entirely in
+//! ADR 0020 (ratatui substrate, [`crate::render::tui`]); these primitives
+//! remain for the inline Run surfaces.
 
 use crate::render::layout::MARGIN;
 use anyhow::{Context, Result};
@@ -24,10 +26,11 @@ use std::io;
 /// Whether an inquire error is a hard cancel — Ctrl-C
 /// ([`InquireError::OperationInterrupted`]) or a closed/EOF stdin (surfaced as
 /// an [`InquireError::IO`] error of kind `Interrupted`/`UnexpectedEof`). Esc
-/// ([`InquireError::OperationCanceled`]) is deliberately excluded: the wizard
-/// treats Esc as *back* while the production menus treat every cancel alike,
-/// so each caller decides where Esc falls. Shared with `is_graceful_cancel`
-/// in `confirm.rs` so the IO-kind sub-clause isn't duplicated.
+/// ([`InquireError::OperationCanceled`]) is deliberately left to
+/// [`is_graceful_cancel`], which adds it on top, so callers can keep hard
+/// and graceful cancels distinct where that distinction matters. Shared with
+/// `is_graceful_cancel` in `confirm.rs` so the IO-kind sub-clause isn't
+/// duplicated.
 pub(crate) fn is_io_cancel(e: &InquireError) -> bool {
     matches!(e, InquireError::OperationInterrupted)
         || matches!(
@@ -43,10 +46,11 @@ pub(crate) fn is_io_cancel(e: &InquireError) -> bool {
 /// Ctrl-C, or a closed/EOF stdin) rather than an unexpected I/O failure.
 /// Esc/Ctrl-C are inquire's own cancel variants; a dropped stdin surfaces as
 /// an `IO` error with an `Interrupted`/`UnexpectedEof` kind, so detect those
-/// too and treat them as cancels (matching the setup wizard's handling).
+/// too and treat them as cancels (matching how the production menus treat
+/// every graceful exit).
 pub(crate) fn is_graceful_cancel(e: &InquireError) -> bool {
-    // Esc (OperationCanceled) plus the hard cancels shared with the wizard's
-    // `opt_nav` (Ctrl-C / closed stdin) — see [`is_io_cancel`].
+    // Esc (OperationCanceled) plus the hard cancels shared with
+    // [`is_io_cancel`] (Ctrl-C / closed stdin).
     matches!(e, InquireError::OperationCanceled) || is_io_cancel(e)
 }
 
@@ -56,9 +60,6 @@ pub(crate) fn is_graceful_cancel(e: &InquireError) -> bool {
 /// mapping for callers that collapse Esc / Ctrl-C / closed-stdin into one
 /// "no answer" outcome (both production menus and the completion-shell
 /// prompt).
-///
-/// The setup wizard's `opt_nav` does **not** use this: it keeps Esc (Back)
-/// distinct from Ctrl-C (Cancel), so it stays a three-way match of its own.
 pub(crate) fn inquire_opt<T>(result: Result<T, InquireError>) -> anyhow::Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),

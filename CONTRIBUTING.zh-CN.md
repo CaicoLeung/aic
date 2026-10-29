@@ -20,7 +20,7 @@ cargo test           # 单元测试内联在 src/ 中（#[cfg(test)] 模块）
 
 - **禁止 merge commit。** 保持分支线性 — 用 rebase 而不是把 main 合进来。merge commit 在合并时会被拒绝。
 - **Conventional Commits** 提交信息（`feat:`、`fix:`、`refactor:`、`docs:`、`test:`、`chore:` ...）— aic 自己就生成这类信息，项目与自身工具保持一致。
-- **提交信息门禁。** `cargo-commitlint`（规则见 `commitlint.toml`）在提交时校验每条信息 — type/scope/subject 规则、100 字符上限、正文换行；Merge/Revert 豁免。每个 clone 启用一次：`git config core.hooksPath .githooks`（安装 `cargo install cargo-commitlint` 之前 hook 会优雅跳过）；临时跳过设 `COMMITLINT_SKIP=1`；校验历史：`cargo commitlint check --from origin/main`
+- **提交信息门禁。** `cargo-commitlint`（规则见 `commitlint.toml`）在提交时校验每条信息 — type/scope/subject 规则、标题 100 字符 / 正文 250 字符上限、正文换行；Merge/Revert 豁免。每个 clone 启用一次：`git config core.hooksPath .githooks`（安装 `cargo install cargo-commitlint` 之前 hook 会优雅跳过）；临时跳过设 `COMMITLINT_SKIP=1`；校验历史：`cargo commitlint check --from origin/main`
 
 ## 提交 PR 之前
 
