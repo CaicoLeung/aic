@@ -299,10 +299,6 @@ impl App {
                 picker_rows(&models)
                     .into_iter()
                     .map(|m| picker::item(vec![(&m, tstyle::plain())]))
-                    .chain(std::iter::once(picker::item(vec![(
-                        "Custom model…",
-                        tstyle::plain(),
-                    )])))
                     .collect(),
                 initial,
             ));
@@ -321,7 +317,10 @@ impl App {
     }
 
     /// Start a provider-flow probe (R3) with the draft's effective values.
+    /// Clears any CLI-flow smoke line first: it belongs to the CLI verify
+    /// screens and would otherwise ride along onto this provider outcome.
     fn probe_provider(&mut self) {
+        self.smoke_line = None;
         let p = self.draft.provider.unwrap_or_default();
         let target = p.display().to_lowercase();
         let model = self.draft.effective_model();
@@ -561,7 +560,7 @@ impl App {
                     self.top_menu();
                 }
                 Some(Pick::Selected(_)) => {
-                    return Ok(Flow::Save(finalize::finalize(clone_draft(&self.draft))));
+                    return Ok(Flow::Save(finalize::finalize(self.draft.clone())));
                 }
                 Some(Pick::Back) => {
                     if finalize::draft_dirty(&self.draft, &self.existing) {
@@ -625,8 +624,10 @@ impl App {
             }
             Screen::ApiKeyMenu(mut p) => {
                 let has_key = !effective_api_key(&self.draft).is_empty();
+                // Rows in builder order (`api_key_menu_picker`): with a key
+                // [Keep, No API key, Enter new]; without [No API key, Enter new].
                 let (keep_idx, no_key_idx, enter_idx) = if has_key {
-                    (Some(0), 2, 1)
+                    (Some(0), 1, 2)
                 } else {
                     (None, 0, 1)
                 };
@@ -647,8 +648,15 @@ impl App {
             }
             Screen::ApiKeyText(mut t, from_menu) => match t.on_key(key) {
                 Some(TextAct::Submit(v)) => {
-                    let keep = effective_api_key(&self.draft);
-                    self.draft.api_key = Some(if v.is_empty() { keep } else { v });
+                    // The menu path's prompt promises `blank = keyless
+                    // server`, so an empty submit clears the key; the
+                    // required-key re-ask (a failed probe) instead keeps
+                    // the previous value on an empty submit.
+                    self.draft.api_key = match (from_menu, v.is_empty()) {
+                        (true, true) => None,
+                        (_, true) => Some(effective_api_key(&self.draft)),
+                        (_, false) => Some(v),
+                    };
                     self.provider_menu();
                 }
                 Some(TextAct::Back) => {
@@ -923,7 +931,16 @@ impl App {
             Screen::ApiKeyText(t, _) | Screen::BaseUrlText(t, _) | Screen::ModelText(t, _) => {
                 t.draw(body, f)
             }
-            Screen::ModelPick(p) | Screen::CliPick(p) | Screen::FailExit(p) => p.draw(body, f),
+            Screen::ModelPick(p) | Screen::CliPick(p) => p.draw(body, f),
+            // The failure screen shows *why* the probe failed (error block,
+            // no pause row) above the Edit / Retry / Save-anyway picker —
+            // the picker alone gave no clue what went wrong.
+            Screen::FailExit(p) => {
+                let [block, pick] =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(5)]).areas(body);
+                f.render_widget(self.verify_paragraph(false), block);
+                p.draw(pick, f);
+            }
             Screen::Busy { label, .. } => f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(
@@ -1246,12 +1263,12 @@ fn provider_menu_rows(draft: &Draft) -> Vec<PickerItem> {
             super::provider::Step::ApiKey => {
                 let (key, _) =
                     resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
-                rows.push(value_row("· API key — ", &api_key_label(&key)));
+                rows.push(menu_value_row("· API key — ", &api_key_label(&key)));
             }
             super::provider::Step::BaseUrl => {
                 let (url, source) =
                     resolve_base_url(draft.base_url.as_deref().filter(|u| !u.is_empty()), &p);
-                rows.push(value_row(
+                rows.push(menu_value_row(
                     "· Base URL — ",
                     &base_url_label(url.as_deref(), source),
                 ));
@@ -1262,7 +1279,7 @@ fn provider_menu_rows(draft: &Draft) -> Vec<PickerItem> {
                     .as_deref()
                     .filter(|m| !m.is_empty())
                     .unwrap_or("");
-                rows.push(value_row("· Model — ", &model_label(model)));
+                rows.push(menu_value_row("· Model — ", &model_label(model)));
             }
         }
     }
@@ -1271,12 +1288,6 @@ fn provider_menu_rows(draft: &Draft) -> Vec<PickerItem> {
         tstyle::plain(),
     )]));
     rows
-}
-
-/// A `· Label — value` row with the placeholder/values styling of the old
-/// `styled_value` (emphasis for real values, muted for `(not set)`).
-fn value_row(prefix: &str, value: &str) -> PickerItem {
-    menu_value_row(prefix, value)
 }
 
 fn api_key_menu_picker(draft: &Draft) -> Picker {
@@ -1376,7 +1387,7 @@ fn cache_sentinel(draft: &Draft) -> String {
 }
 
 /// Whether picker row `i` of the model screen is the `Custom model…`
-/// escape hatch (always the last row).
+/// escape hatch (always the last row — [`picker_rows`] appends it).
 fn is_custom_row(draft: &Draft, i: usize) -> bool {
     let p = draft.provider.unwrap_or_default();
     let (api_key, _) = resolve_field(draft.api_key.as_deref().filter(|k| !k.is_empty()), "");
@@ -1386,8 +1397,7 @@ fn is_custom_row(draft: &Draft, i: usize) -> bool {
         .get(&cache_key(p, base_url.as_deref(), &api_key))
         .cloned()
         .unwrap_or_default();
-    let rows = picker_rows(&models);
-    i == rows.len()
+    i + 1 == picker_rows(&models).len()
 }
 
 /// The model list entry at picker row `i` (all rows but the last are
@@ -1402,10 +1412,6 @@ fn model_at(draft: &Draft, i: usize) -> String {
         .cloned()
         .unwrap_or_default();
     models.get(i).cloned().unwrap_or_default()
-}
-
-fn clone_draft(draft: &Draft) -> Draft {
-    draft.clone()
 }
 
 #[cfg(test)]
@@ -1543,5 +1549,145 @@ mod tests {
             }
             _ => panic!("expected chained Busy"),
         }
+    }
+
+    /// The model picker offers exactly one `Custom model…` row (appended by
+    /// [`picker_rows`]), and Enter on it opens the custom text input. The
+    /// regression: `show_models` used to chain a *second* custom row, and
+    /// `is_custom_row` only matched the last — Enter on the first silently
+    /// set the model to `""` and dropped the choice.
+    #[test]
+    fn model_picker_custom_row_opens_the_custom_input() {
+        let mut app = app_with_hanging_fetch();
+        let models = vec!["m1".to_string(), "m2".to_string()];
+        app.draft
+            .model_cache
+            .insert(cache_sentinel(&app.draft), models.clone());
+        app.show_models(models);
+        // Exactly one custom row: the last one.
+        assert!(!is_custom_row(&app.draft, 1), "m2 must be a model row");
+        assert!(is_custom_row(&app.draft, 2), "custom row must be the last");
+        // Filter to the custom row, Enter on the first (only) match.
+        for c in "custom model".chars() {
+            let _ = app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(app.screen, Screen::ModelText(_, true)),
+            "Enter on the custom row must open the custom-model input"
+        );
+    }
+
+    /// With a key set, the API-key menu's rows act as labeled: `No API key`
+    /// clears the stored key, `Enter a new key…` opens the prompt. The
+    /// regression: the handler kept the old inquire-era index order after
+    /// the picker rows were reordered, swapping both actions.
+    #[test]
+    fn api_key_menu_rows_act_as_labeled() {
+        let mut app = app_with_hanging_fetch(); // api_key = Some("sk-test")
+        app.screen = Screen::ApiKeyMenu(api_key_menu_picker(&app.draft));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)); // row 1
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.draft.api_key.is_none(),
+            "`No API key` must clear the key"
+        );
+        assert!(matches!(app.screen, Screen::ProviderMenu(_)));
+
+        // Re-enter with a key still set: row 2 must be the text prompt.
+        app.draft.api_key = Some("sk-test".into());
+        app.screen = Screen::ApiKeyMenu(api_key_menu_picker(&app.draft));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)); // row 2
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(app.screen, Screen::ApiKeyText(_, true)),
+            "`Enter a new key…` must open the key prompt"
+        );
+    }
+
+    /// A blank submit on the menu-path key prompt means *keyless server*
+    /// (that is what the prompt says); only the required-key re-ask keeps
+    /// the previous value on a blank submit.
+    #[test]
+    fn blank_api_key_submit_from_menu_goes_keyless() {
+        let mut app = app_with_hanging_fetch(); // api_key = Some("sk-test")
+        app.screen = Screen::ApiKeyText(
+            TextInput::new("API key (blank = keyless server)", None, true, ""),
+            true,
+        );
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.draft.api_key.is_none(),
+            "blank submit from the menu must clear the key (keyless server)"
+        );
+
+        // The required-key path (a failed probe re-ask) keeps the old key.
+        app.draft.api_key = Some("sk-old".into());
+        app.screen = Screen::ApiKeyText(
+            TextInput::new("API key", Some("sk-old"), true, "API key cannot be empty"),
+            false,
+        );
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.draft.api_key.as_deref(),
+            Some("sk-old"),
+            "blank submit on the required-key re-ask must keep the previous key"
+        );
+    }
+
+    /// The failure screen must paint the probe's error block above the
+    /// Edit / Retry / Save-anyway picker — the picker alone left the user
+    /// with no clue what went wrong.
+    #[test]
+    fn fail_exit_screen_shows_the_probe_error() {
+        let mut app = app_with_hanging_fetch();
+        app.verify = Some(VerifyBlock {
+            flow: ProbeFlow::Provider,
+            target: "openai-compatible".into(),
+            reply: None,
+            error: Some("connection refused".into()),
+            causes: Vec::new(),
+            context: Vec::new(),
+        });
+        app.screen = Screen::FailExit(fail_exit_picker());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(text.contains("Failed"), "must state the probe failed");
+        assert!(
+            text.contains("connection refused"),
+            "must show the probe's error, got: {text}"
+        );
+    }
+
+    /// Starting a provider probe clears any CLI-flow smoke line — a stale
+    /// `✓ <cli> found` must not ride along onto the provider's outcome.
+    #[test]
+    fn provider_probe_clears_the_smoke_line() {
+        let mut app = App::new(
+            Arc::new(SetupDeps {
+                fetch_models: Box::new(|_, _, _| Vec::new()),
+                verify_provider: Box::new(|_| Err(anyhow::anyhow!("offline"))),
+                verify_cli: Box::new(|_| panic!("not scripted")),
+            }),
+            None,
+            None,
+            Draft {
+                provider: Some(Provider::OpenAI),
+                api_key: Some("sk-test".into()),
+                ..Default::default()
+            },
+        );
+        app.smoke_line = Some("✓ `claude` found".into());
+        app.probe_provider();
+        assert!(app.smoke_line.is_none(), "smoke line must be cleared");
     }
 }

@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::ICON_ALERT;
 use crate::render::layout::MARGIN;
 use crate::render::tui::style as tstyle;
 
@@ -66,7 +67,11 @@ impl TextInput {
         }
         match key.code {
             KeyCode::Enter => {
-                if self.value.is_empty() && !self.allow_empty {
+                // Leading/trailing whitespace never carries meaning in the
+                // values this field edits (keys, base URLs, models) — and a
+                // whitespace-only paste must fail validation like an empty
+                // one instead of submitting a blank key/URL.
+                if self.value.trim().is_empty() && !self.allow_empty {
                     self.error = Some(
                         if self.empty_hint.is_empty() {
                             "value cannot be empty"
@@ -78,7 +83,7 @@ impl TextInput {
                     return None;
                 }
                 self.error = None;
-                Some(TextAct::Submit(self.value.clone()))
+                Some(TextAct::Submit(self.value.trim().to_string()))
             }
             KeyCode::Esc => Some(TextAct::Back),
             KeyCode::Backspace => {
@@ -166,8 +171,6 @@ impl TextInput {
         f.render_widget(Paragraph::new(lines), area);
     }
 }
-
-const ICON_ALERT: &str = "⚠";
 
 #[cfg(test)]
 mod tests;

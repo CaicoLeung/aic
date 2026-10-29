@@ -68,3 +68,25 @@ fn esc_backs_out_and_ctrl_c_cancels() {
     assert_eq!(t.on_key(key(KeyCode::Esc)), Some(TextAct::Back));
     assert_eq!(t.on_key(ctrl_c()), Some(TextAct::Cancel));
 }
+
+/// Submitted values are trimmed, and a whitespace-only value is refused
+/// like an empty one — a pasted key/URL must not carry surrounding blanks
+/// into the config, and a blank paste must not submit at all.
+#[test]
+fn submit_trims_and_refuses_whitespace_only() {
+    let mut t = field(false);
+    t.on_key(key(KeyCode::Char(' ')));
+    t.on_key(key(KeyCode::Char(' ')));
+    assert_eq!(
+        t.on_key(key(KeyCode::Enter)),
+        None,
+        "whitespace-only must fail validation on a required field"
+    );
+    for c in " sk-live ".chars() {
+        t.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(
+        t.on_key(key(KeyCode::Enter)),
+        Some(TextAct::Submit("sk-live".into()))
+    );
+}

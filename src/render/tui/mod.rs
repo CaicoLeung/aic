@@ -11,6 +11,12 @@
 //! painter (ADR 0018) until its own migration phase; this module is the
 //! home the migrated surfaces grow into.
 
+/// The ⚠ warning marker of the ADR 0018 glyph family, shared by the text
+/// input's validation hint and the wizard's verify screens. Lives here so
+/// the substrate and the flow render the identical glyph instead of each
+/// declaring its own copy.
+pub(crate) const ICON_ALERT: &str = "⚠";
+
 pub(crate) mod picker;
 pub(crate) mod style;
 pub(crate) mod terminal;

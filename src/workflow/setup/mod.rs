@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use crate::core::config::{BackendKind, CliConfig, Config, ProviderProfile, config_path};
 use crate::llm::{Provider, list_models};
+use crate::render::tui::ICON_ALERT;
 use crate::render::{oneshot, palette, tui};
 use std::collections::HashMap;
 
@@ -92,9 +93,10 @@ impl SetupDeps {
 const DOT: &str = "·"; // muted `·` section bullet for every menu row
 
 // Status markers for verify outcomes and the save line — same glyph family.
+// `ICON_ALERT` lives in [`crate::render::tui`], shared with the text
+// input's validation hint so the glyph cannot drift between the two.
 const ICON_CHECK: &str = "✓";
 const ICON_CROSS: &str = "✗";
-const ICON_ALERT: &str = "⚠";
 const ICON_PENCIL: &str = "·";
 
 /// In-progress wizard selections. Values persist across sub-flow navigation so
