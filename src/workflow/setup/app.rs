@@ -56,20 +56,32 @@ enum Flow {
     Cancel,
 }
 
-/// The background job being waited on, and what its result means.
+/// The background job being waited on: its request payload, kept so the
+/// result handler knows what the reply means.
 struct Pending {
-    kind: PendingKind,
+    job: Job,
     rx: mpsc::Receiver<JobDone>,
 }
 
-enum PendingKind {
-    /// Fetching a provider's live model list; `key` is the session-cache
-    /// key the result is stored under (ADR 0019 §5).
-    Models { key: String },
-    /// A backend verify probe (R3) against `target`.
-    Probe { target: String },
+/// One background job's full payload — what to run and everything the
+/// result handler needs. Request and meaning travel together; there is no
+/// second kind-of-job enum to keep in step.
+#[derive(Clone)]
+enum Job {
+    /// Fetch a provider's live model list; `key` is the session-cache key
+    /// the result is stored under (ADR 0019 §5).
+    Fetch {
+        provider: Provider,
+        api_key: String,
+        base_url: Option<String>,
+        key: String,
+    },
+    /// A provider verify probe (R3) against `target`.
+    ProbeProvider { target: String },
+    /// A CLI verify probe (R3) against `target`.
+    ProbeCli { target: String },
     /// The `--version` smoke check of a CLI preset, chained into a probe.
-    Smoke,
+    Smoke { program: String },
 }
 
 enum JobDone {
@@ -291,22 +303,23 @@ impl App {
     }
 
     fn enter_model_step(&mut self) {
-        let (p, api_key, base_url) = model_fetch_ctx(&self.draft);
-        let key = cache_key(p, base_url.as_deref(), &api_key);
+        let (provider, api_key, base_url) = model_fetch_ctx(&self.draft);
+        let key = cache_key(provider, base_url.as_deref(), &api_key);
         if let Some(models) = self.draft.model_cache.get(&key).cloned() {
             self.show_models(models);
-        } else if p.requires_key() && api_key.is_empty() {
+        } else if provider.requires_key() && api_key.is_empty() {
             // A key-requiring provider with no key can only 401 — never
             // touch the network (ADR 0019 §4); cache the empty degrade.
             self.draft.model_cache.insert(key, Vec::new());
             self.show_models(Vec::new());
         } else {
-            self.spawn(JobKind::Fetch {
-                provider: p,
+            self.spawn(Job::Fetch {
+                provider,
                 api_key,
                 base_url,
+                key,
             });
-            self.busy(format!("Fetching {} models…", p.display()));
+            self.busy(format!("Fetching {} models…", provider.display()));
         }
     }
 
@@ -392,7 +405,7 @@ impl App {
                 )),
             ],
         });
-        self.pending_kind_probe(target, JobKind::ProbeProvider);
+        self.spawn(Job::ProbeProvider { target });
         self.busy(format!("Contacting {} ({model})…", p.display()));
     }
 
@@ -413,59 +426,46 @@ impl App {
         });
         match smoke_first {
             Some(program) => {
-                self.spawn(JobKind::Smoke {
+                self.spawn(Job::Smoke {
                     program: program.clone(),
                 });
                 self.busy(format!("Checking `{program}`…"));
             }
             None => {
-                self.pending_kind_probe(target.clone(), JobKind::ProbeCli);
+                self.spawn(Job::ProbeCli {
+                    target: target.clone(),
+                });
                 self.busy(format!("Probing {target}…"));
             }
         }
     }
 
-    fn pending_kind_probe(&mut self, target: String, kind: JobKind) {
-        let pending = self.spawn_job(kind);
-        self.pending = Some(Pending {
-            kind: PendingKind::Probe { target },
-            rx: pending,
-        });
-    }
-
-    fn spawn(&mut self, kind: JobKind) {
-        let rx = self.spawn_job(kind.clone());
-        self.pending = Some(Pending {
-            kind: match kind {
-                JobKind::Fetch { .. } => PendingKind::Models {
-                    key: model_cache_key(&self.draft),
-                },
-                JobKind::Smoke { .. } => PendingKind::Smoke,
-                JobKind::ProbeProvider | JobKind::ProbeCli => {
-                    unreachable!("probes go through pending_kind_probe")
-                }
-            },
-            rx,
-        });
+    fn spawn(&mut self, job: Job) {
+        let rx = self.spawn_job(job.clone());
+        self.pending = Some(Pending { job, rx });
     }
 
     /// Launch `kind` on a background thread (the probes' nested runtimes
     /// cannot run on the async-runtime thread the loop lives on) and return
     /// the channel its result lands on.
-    fn spawn_job(&self, kind: JobKind) -> mpsc::Receiver<JobDone> {
+    fn spawn_job(&self, job: Job) -> mpsc::Receiver<JobDone> {
         let (tx, rx) = mpsc::channel();
         let deps = Arc::clone(&self.deps);
         let draft = self.draft.clone();
         thread::spawn(move || {
-            let done = match kind {
-                JobKind::Fetch {
+            let done = match job {
+                Job::Fetch {
                     provider,
                     api_key,
                     base_url,
+                    ..
                 } => JobDone::Models((deps.fetch_models)(provider, &api_key, base_url.as_deref())),
-                JobKind::ProbeProvider => JobDone::Probe((deps.verify_provider)(&draft)),
-                JobKind::ProbeCli => JobDone::Probe((deps.verify_cli)(&draft)),
-                JobKind::Smoke { program } => JobDone::Smoke(smoke_check(&program)),
+                Job::ProbeProvider { target } => {
+                    let _ = target;
+                    JobDone::Probe((deps.verify_provider)(&draft))
+                }
+                Job::ProbeCli { .. } => JobDone::Probe((deps.verify_cli)(&draft)),
+                Job::Smoke { program } => JobDone::Smoke(smoke_check(&program)),
             };
             let _ = tx.send(done);
         });
@@ -497,33 +497,34 @@ impl App {
 
     fn pending_is_probe(&self) -> bool {
         matches!(
-            self.pending.as_ref().map(|p| &p.kind),
-            Some(PendingKind::Probe { .. })
+            self.pending.as_ref().map(|p| &p.job),
+            Some(Job::ProbeProvider { .. } | Job::ProbeCli { .. })
         )
     }
 
     fn on_job(&mut self, done: JobDone) {
-        let kind = match self.pending.take() {
-            Some(p) => p.kind,
+        let job = match self.pending.take() {
+            Some(p) => p.job,
             None => return,
         };
-        match (kind, done) {
-            (PendingKind::Models { key }, JobDone::Models(models)) => {
-                let models = models.clone();
+        match (job, done) {
+            (Job::Fetch { key, .. }, JobDone::Models(models)) => {
                 self.draft.model_cache.insert(key, models.clone());
                 self.show_models(models);
             }
-            (PendingKind::Smoke, JobDone::Smoke(line)) => {
+            (Job::Smoke { .. }, JobDone::Smoke(line)) => {
                 self.smoke_line = Some(line);
                 let target = self
                     .verify
                     .as_ref()
                     .map(|v| v.target.clone())
                     .unwrap_or_default();
-                self.pending_kind_probe(target.clone(), JobKind::ProbeCli);
+                self.spawn(Job::ProbeCli {
+                    target: target.clone(),
+                });
                 self.busy(format!("Probing {target}…"));
             }
-            (PendingKind::Probe { target }, JobDone::Probe(result)) => {
+            (Job::ProbeProvider { target } | Job::ProbeCli { target }, JobDone::Probe(result)) => {
                 let Some(block) = self.verify.as_mut() else {
                     self.top_menu();
                     return;
@@ -814,7 +815,7 @@ impl App {
                         .unwrap_or_default();
                     match flow {
                         Some(ProbeFlow::Cli) => {
-                            self.pending_kind_probe(target, JobKind::ProbeCli);
+                            self.spawn(Job::ProbeCli { target });
                             self.busy("Probing…".into());
                         }
                         _ => self.probe_provider(),
@@ -1101,19 +1102,7 @@ impl ProbeFlow {
     }
 }
 
-#[derive(Clone)]
-enum JobKind {
-    Fetch {
-        provider: Provider,
-        api_key: String,
-        base_url: Option<String>,
-    },
-    ProbeProvider,
-    ProbeCli,
-    Smoke {
-        program: String,
-    },
-}
+// (Job lives with the other job plumbing, next to `Pending` above.)
 
 // -- row builders ---------------------------------------------------------
 
@@ -1451,12 +1440,6 @@ fn model_fetch_ctx(draft: &Draft) -> (Provider, String, Option<String>) {
     (p, api_key, base_url)
 }
 
-/// The session cache key for the current provider's model list.
-fn model_cache_key(draft: &Draft) -> String {
-    let (p, api_key, base_url) = model_fetch_ctx(draft);
-    cache_key(p, base_url.as_deref(), &api_key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1604,9 +1587,11 @@ mod tests {
     fn model_picker_rows_act_as_labeled() {
         let mut app = app_with_hanging_fetch();
         let models = vec!["m1".to_string(), "m2".to_string()];
-        app.draft
-            .model_cache
-            .insert(model_cache_key(&app.draft), models.clone());
+        let key = {
+            let (p, api_key, base_url) = model_fetch_ctx(&app.draft);
+            cache_key(p, base_url.as_deref(), &api_key)
+        };
+        app.draft.model_cache.insert(key, models.clone());
         app.show_models(models);
         // Filter to the custom row, Enter on the first (only) match.
         for c in "custom model".chars() {

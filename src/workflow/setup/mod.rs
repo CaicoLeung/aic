@@ -53,11 +53,12 @@ pub(super) struct SetupDeps {
     /// (R3 auto-verify): `Ok(reply)` on success, `Err` with the provider /
     /// validation error otherwise.
     pub verify_provider: VerifyProbe,
-    /// Probe the CLI-agent backend the same way (R3 auto-verify).
+    /// Probe the CLI-agent backend the same way (R3 auto-verify); it reads
+    /// the whole draft (the CLI trio, not the provider fields).
     pub verify_cli: VerifyProbe,
 }
 
-/// The one R1 seam: a boxed listing fetch, injectable for hermetic tests.
+/// The R1 seam: a boxed listing fetch, injectable for hermetic tests.
 pub(super) type FetchModels =
     Box<dyn Fn(Provider, &str, Option<&str>) -> Vec<String> + Send + Sync>;
 
