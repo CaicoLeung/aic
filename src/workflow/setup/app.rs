@@ -31,7 +31,6 @@ use super::provider::{
     ModelRow, ProviderEntry, api_key_label, applicable_steps, base_url_label, cache_key,
     model_label, picker_rows, preview_model,
 };
-use super::verify::smoke_check;
 use super::*;
 use crate::core::config::Source;
 use crate::llm::cli_agent::cli_preset;
@@ -460,7 +459,7 @@ impl App {
                     JobDone::Probe((deps.verify_provider)(&draft.effective()))
                 }
                 Job::ProbeCli { .. } => JobDone::Probe((deps.verify_cli)(&draft)),
-                Job::Smoke { program } => JobDone::Smoke(smoke_check(&program)),
+                Job::Smoke { program } => JobDone::Smoke((deps.smoke)(&program)),
             };
             let _ = tx.send(done);
         });
@@ -1429,6 +1428,7 @@ mod tests {
             }),
             verify_provider: Box::new(|_| panic!("verify_provider not scripted")),
             verify_cli: Box::new(|_| panic!("verify_cli not scripted")),
+            smoke: Box::new(|_| panic!("smoke not scripted")),
         });
         let draft = Draft {
             provider: Some(Provider::OpenAI),
@@ -1472,6 +1472,7 @@ mod tests {
                 fetch_models: Box::new(|_, _, _| vec!["gpt-test".into()]),
                 verify_provider: Box::new(|_| panic!("not scripted")),
                 verify_cli: Box::new(|_| panic!("not scripted")),
+                smoke: Box::new(|_| panic!("not scripted")),
             }),
             None,
             None,
@@ -1522,6 +1523,7 @@ mod tests {
                 fetch_models: Box::new(|_, _, _| Vec::new()),
                 verify_provider: Box::new(|_| panic!("not scripted")),
                 verify_cli: Box::new(|_| Ok("ok".into())),
+                smoke: Box::new(|_| "✓ `true` found".into()),
             }),
             None,
             None,
@@ -1693,6 +1695,7 @@ mod tests {
                 fetch_models: Box::new(|_, _, _| Vec::new()),
                 verify_provider: Box::new(|_| Err(anyhow::anyhow!("offline"))),
                 verify_cli: Box::new(|_| panic!("not scripted")),
+                smoke: Box::new(|_| panic!("not scripted")),
             }),
             None,
             None,

@@ -637,6 +637,23 @@ fn provider_probe_reports_validation_hint_without_network() {
     );
 }
 
+/// The real smoke check (ADR 0010) reports a program that exists on $PATH:
+/// `/usr/bin/true` ignores `--version` and exits 0 everywhere POSIX.
+#[test]
+#[cfg(unix)]
+fn smoke_check_finds_a_real_program() {
+    let line = super::verify::smoke_check("true");
+    assert!(line.contains("`true` found"), "got: {line}");
+}
+
+/// A program missing from $PATH reports the install hint, not an error —
+/// the name is not a program on any supported platform.
+#[test]
+fn smoke_check_reports_a_missing_program() {
+    let line = super::verify::smoke_check("aic-no-such-program-xyz");
+    assert!(line.contains("not found"), "got: {line}");
+}
+
 /// A CLI probe with no configured command errs instead of spawning
 /// anything (the defensive guard; callers only auto-verify once a command
 /// is set).

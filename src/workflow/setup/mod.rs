@@ -59,6 +59,10 @@ pub(super) struct SetupDeps {
     /// Probe the CLI-agent backend the same way (R3 auto-verify); it reads
     /// the whole draft (the CLI trio, not the provider fields).
     pub verify_cli: CliProbe,
+    /// One `--version` existence check of a CLI program, as the human
+    /// one-liner the verify screens show (ADR 0010 — aic never installs
+    /// or authenticates a CLI itself).
+    pub smoke: SmokeCheck,
 }
 
 /// The R1 seam: a boxed listing fetch, injectable for hermetic tests.
@@ -71,6 +75,9 @@ pub(super) type ProviderProbe = Box<dyn Fn(&Effective) -> Result<String> + Send 
 /// An R3 seam: a boxed CLI probe (`&Draft` → reply or error) — the CLI
 /// trio lives on the draft, not on [`Effective`].
 pub(super) type CliProbe = Box<dyn Fn(&Draft) -> Result<String> + Send + Sync>;
+
+/// The smoke-check seam: boxed so tests can script it or run real binaries.
+pub(super) type SmokeCheck = Box<dyn Fn(&str) -> String + Send + Sync>;
 
 impl SetupDeps {
     /// Production wiring: the real listing fetch and verify probes, each
@@ -90,6 +97,7 @@ impl SetupDeps {
             }),
             verify_provider: Box::new(verify::probe_provider),
             verify_cli: Box::new(verify::probe_cli),
+            smoke: Box::new(verify::smoke_check),
         }
     }
 }
