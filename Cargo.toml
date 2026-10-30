@@ -1,6 +1,6 @@
 [package]
 name = "aic"
-version = "0.5.8"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.99"
 description = "AI-powered git commit message generator"
