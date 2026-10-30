@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-10-30
+
+> 🎉 **0.6.0** — 7 changes · 1 contributor
+
+### Features
+
+- Run timeline redesign — bounded frame, flushed entries, delta summaries, neon palette
+- Chronological collapse and Run-wide aligned commit entries
+- Rebuild wizard as full-screen ratatui TUI (**BREAKING**)
+
+### Bug Fixes
+
+- Bump self_update to 1.3 to clear zip RUSTSEC advisories (#165)
+- Bump tokio to 1.54.1 to clear RUSTSEC-2026-0384 (#168)
+- Paint interactive menus and tighten timeline semantics
+
+### Documentation
+
+- Restructure README around first-screen pitch and folded reference (#167)
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.5.8] - 2026-10-15
 
 > 🎉 **0.5.8** — 4 changes · 1 contributor
