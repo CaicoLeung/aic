@@ -29,7 +29,7 @@ The conventional-commit message (with optional body) the LLM produces for a Batc
 _Avoid_: suggestion, proposal, generated text
 
 **Workdir Snapshot**:
-The plan-time capture of the unstaged branch's Scan phase (`WorkdirSnapshot` in `src/workflow/run/`): one traversal holding each file's raw workdir-vs-HEAD diff plus its derived views — the planner's envelope, the hunk counts that define the plan's index space, the raw pairs the Redaction Gate and the deterministic fallback consume, and the per-Batch slices the Draft phase sends. Every consumer that must agree on hunk numbering reads this one object; Batch staging deliberately does not (it re-reads the current diff per Batch).
+The plan-time capture of the unstaged branch's Scan phase (`WorkdirSnapshot` in `src/workflow/run/`): one traversal holding each file's raw index→workdir diff (nothing is staged on this branch, so the index equals HEAD) plus its derived views — the planner's envelope, the hunk counts that define the plan's index space, the raw pairs the Redaction Gate and the deterministic fallback consume, and the per-Batch slices the Draft phase sends. Every consumer that must agree on hunk numbering reads this one object; Batch staging deliberately does not (it re-reads the current diff per Batch).
 _Avoid_: diff cache, scan state, plan input
 
 **Batch staging**:

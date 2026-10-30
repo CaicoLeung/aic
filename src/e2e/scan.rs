@@ -1,22 +1,12 @@
-//! Unit tests for the plan-time [`WorkdirSnapshot`].
+//! The Run's Scan phase against a real repo: `WorkdirSnapshot::scan` is
+//! the one traversal every plan-time consumer reads (the planner's
+//! envelope, the validator's hunk counts, the Draft slices), so its
+//! views must agree with a fresh parse of the diffs it captured.
 
-use std::path::Path;
-use std::process::Command;
-
-use super::WorkdirSnapshot;
-use crate::git::Git;
+use super::common::*;
 use crate::git::diff;
 
-fn git(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok, "git {args:?} failed");
-}
-
+/// The unstaged `FileStatus` list — the Run's dispatch input.
 fn unstaged(git: &Git) -> Vec<crate::git::FileStatus> {
     git.status()
         .unwrap()
@@ -31,15 +21,10 @@ fn unstaged(git: &Git) -> Vec<crate::git::FileStatus> {
 /// Redaction Gate and the fallback would consume.
 #[test]
 fn scan_captures_counts_payload_and_raw_diffs_together() {
-    let dir = tempfile::tempdir().unwrap();
-    git(dir.path(), &["init", "-q"]);
-    git(dir.path(), &["config", "user.email", "t@t"]);
-    git(dir.path(), &["config", "user.name", "t"]);
+    let (dir, git) = with_git(gh::init_test_repo);
     let base = "a\n".repeat(12);
-    std::fs::write(dir.path().join("a.txt"), &base).unwrap();
-    std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-qm", "base"]);
+    commit_file(dir.path(), "a.txt", &base, "base a");
+    commit_file(dir.path(), "b.txt", "b\n", "base b");
     // Two disjoint edits in a.txt (two hunks), one in b.txt.
     let mut edited = base.clone();
     edited.replace_range(0..1, "A");
@@ -47,7 +32,6 @@ fn scan_captures_counts_payload_and_raw_diffs_together() {
     std::fs::write(dir.path().join("a.txt"), edited).unwrap();
     std::fs::write(dir.path().join("b.txt"), "B\n").unwrap();
 
-    let git = Git::at(dir.path()).unwrap();
     let statuses = unstaged(&git);
     let files: Vec<_> = statuses.iter().collect();
     let snapshot = WorkdirSnapshot::scan(&git, &files).unwrap();
@@ -82,17 +66,11 @@ fn scan_captures_counts_payload_and_raw_diffs_together() {
 /// binary marker — so the model cannot silently drop it.
 #[test]
 fn scan_marks_non_textual_changes_instead_of_dropping_them() {
-    let dir = tempfile::tempdir().unwrap();
-    git(dir.path(), &["init", "-q"]);
-    git(dir.path(), &["config", "user.email", "t@t"]);
-    git(dir.path(), &["config", "user.name", "t"]);
-    std::fs::write(dir.path().join("run.sh"), "hello\n").unwrap();
-    git(dir.path(), &["add", "."]);
-    git(dir.path(), &["commit", "-qm", "base"]);
+    let (dir, git) = with_git(gh::init_test_repo);
+    commit_file(dir.path(), "run.sh", "hello\n", "base");
     // Pure mode change: no textual hunks, non-empty raw diff.
-    git(dir.path(), &["update-index", "--chmod=+x", "run.sh"]);
+    git_in(dir.path(), &["update-index", "--chmod=+x", "run.sh"]);
 
-    let git = Git::at(dir.path()).unwrap();
     let files = unstaged(&git);
     let snapshot = WorkdirSnapshot::scan(&git, &files.iter().collect::<Vec<_>>()).unwrap();
 

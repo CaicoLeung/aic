@@ -14,7 +14,7 @@ pub(super) use crate::render::display::{Display, DisplayWrite};
 pub(super) use crate::workflow::confirm::{CommitEditor, Confirm, ConfirmChoice, ConfirmMenu};
 pub(super) use crate::workflow::resolve::{ResolveDeps, resolve_run};
 pub(super) use crate::workflow::review::{BatchReview, ReviewChoice, ReviewMenu};
-pub(super) use crate::workflow::run::{RunDeps, commit_run, default_run};
+pub(super) use crate::workflow::run::{RunDeps, WorkdirSnapshot, commit_run, default_run};
 pub(super) use git2::Repository;
 pub(super) use parking_lot::Mutex;
 pub(super) use std::collections::VecDeque;

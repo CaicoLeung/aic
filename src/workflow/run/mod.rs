@@ -107,8 +107,10 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
 }
 
 /// The plan-time workdir snapshot: one Scan-phase traversal capturing
-/// each unstaged file's raw workdir-vs-HEAD diff plus every derived
-/// view. It exists so the consumers that must agree on hunk numbering —
+/// each unstaged file's raw index→workdir diff (`Git::diff_workdir`;
+/// this branch only runs with nothing staged, so the index equals
+/// HEAD) plus every derived view. It exists so the consumers that must
+/// agree on hunk numbering —
 /// the numbered view sent to the model, the counts behind
 /// `validate_batch_plan`, and each Batch's sliced draft input — all
 /// read from one capture. Staging does NOT read from it: the `staging`
@@ -128,8 +130,6 @@ pub(crate) struct WorkdirSnapshot {
     /// input and the deterministic fallback's regrouping source, so
     /// both consume exactly what the model sees.
     raw_pairs: Vec<(String, String)>,
-    /// Scan-order paths (the stats query's input).
-    paths: Vec<String>,
 }
 
 impl WorkdirSnapshot {
@@ -163,13 +163,11 @@ impl WorkdirSnapshot {
             .iter()
             .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
             .collect();
-        let paths = files.iter().map(|f| f.path.clone()).collect();
         Ok(Self {
             payload: serde_json::json!({ "unstaged_files": payload_files }).to_string(),
             raw_diffs,
             hunk_counts,
             raw_pairs,
-            paths,
         })
     }
 
@@ -189,9 +187,10 @@ impl WorkdirSnapshot {
         &self.raw_pairs
     }
 
-    /// Scan-order paths.
-    pub(crate) fn paths(&self) -> &[String] {
-        &self.paths
+    /// Scan-order paths (the stats query's input) — derived from
+    /// [`Self::raw_pairs`], the order-carrying view.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.raw_pairs.iter().map(|(p, _)| p.clone()).collect()
     }
 
     /// One Batch's Drafted-Message input: its planned hunks sliced out
@@ -216,13 +215,9 @@ impl WorkdirSnapshot {
             hunk_counts: counts,
             payload: String::new(),
             raw_pairs: Vec::new(),
-            paths: Vec::new(),
         }
     }
 }
-
-#[cfg(test)]
-mod tests;
 
 /// The unstaged branch of the Run: scan the workdir, plan Batches (with the
 /// deterministic fallback), review, pre-draft every Batch concurrently
@@ -273,7 +268,7 @@ async fn unstaged_run(
         &frame,
         display,
         SCAN,
-        git.workdir_stats(snapshot.paths()),
+        git.workdir_stats(&snapshot.paths()),
         unstaged_files.len(),
     )?;
     // Run-wide counts-grid geometry: every Commit entry footer of this
