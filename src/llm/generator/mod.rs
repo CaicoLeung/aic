@@ -17,7 +17,11 @@ pub struct CommitOutput {
 /// mixes changes of different scopes.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchChange {
-    /// Repo-relative file path.
+    /// Repo-relative file path. `path` is accepted as an alias: the diff
+    /// envelope the model sees (`WorkdirSnapshot::scan` in
+    /// src/workflow/run/) names the key `path`, so backends echoing that
+    /// name is expected, not a model failure (issue #180).
+    #[serde(alias = "path")]
     pub file: String,
     /// 1-based indices of the hunks (numbered in the diff shown to the model)
     /// that belong to this batch. Empty means every hunk of the file.
@@ -421,6 +425,17 @@ mod tests {
         let plan: BatchPlanOutput = serde_json::from_str(json).unwrap();
         assert!(plan.batches[0].reason.is_none());
         assert!(plan.batches[0].changes[0].hunks.is_empty());
+    }
+
+    /// Issue #180: the diff envelope names the key `path`, and pi consistently
+    /// echoes it into the plan despite the schema — aborting the Run on a
+    /// well-formed plan. The serde alias keeps such plans parsing.
+    #[test]
+    fn deserialization_accepts_path_alias_for_file() {
+        let json = r#"{"batches":[{"changes":[{"path":"a.rs","hunks":[1]}],"reason":"add auth"}]}"#;
+        let plan: BatchPlanOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.batches[0].changes[0].file, "a.rs");
+        assert_eq!(plan.batches[0].changes[0].hunks, vec![1]);
     }
 
     /// [`prompts_for_run`] is the single hint threading both network-bound Run
