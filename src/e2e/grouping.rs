@@ -80,7 +80,7 @@ fn grouped_plan_stages_and_commits_every_block() {
     let mut staging = Staging::new();
     for (i, block) in blocks.iter().enumerate() {
         let paths = staging
-            .stage_batch(&git, &block.to_batch(), &sink())
+            .stage_batch(&git, &block.to_batch().files(), &sink())
             .unwrap_or_else(|e| panic!("stage block {i} failed: {e:#}"));
         assert!(
             !paths.is_empty(),

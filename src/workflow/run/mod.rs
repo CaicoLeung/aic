@@ -17,27 +17,23 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context;
 use futures::stream::{self, StreamExt};
 
 use crate::core::config;
 use crate::core::types::{BatchPlanner, BoxFuture, CommitMessenger};
+use crate::git::FileStatus;
 use crate::git::Git;
 use crate::git::diff;
 use crate::git::diff_json;
 use crate::git::staging;
 use crate::llm::generator;
 use crate::llm::redact::{self, Redact};
-use crate::render::cursor;
 use crate::render::display::CountsGeometry;
 use crate::render::display::Display;
 use crate::render::display::counts_geometry;
-use crate::render::markdown::LoadingNotice;
-use crate::render::markdown::loading_rows;
-use crate::render::progress;
-use crate::render::reasoning_feed;
 use crate::render::timeline::driver::{self, RunFrame};
 use crate::render::timeline::{Failure, StepIdx, StepIx, SubBody, delta_suffix, plural};
 use crate::workflow::confirm::{CommitDeclined, Confirm, confirm_draft};
@@ -46,6 +42,10 @@ use crate::workflow::input;
 use crate::workflow::resolve::{ResolveDeps, resolve_run};
 use crate::workflow::review::{BatchReview, review_plan};
 use crate::workflow::undo;
+
+mod reasoning;
+
+use reasoning::run_with_reasoning_feed;
 
 /// Cap on concurrent commit-message drafts during a multi-batch Run (ADR 0014).
 /// Each batch's draft fans out after the plan; this bounds in-flight LLM requests
@@ -85,15 +85,6 @@ pub(crate) struct RunDeps {
 /// one. The frame starts only after the status check confirms there is
 /// work — `nothing to commit` still renders alone, with no timeline.
 pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
-    let RunDeps {
-        display,
-        planner,
-        messenger,
-        confirm,
-        review,
-        redact,
-    } = deps;
-
     let status = git.status()?;
     // The Run-start HEAD snapshot `aic undo` resets back to — captured before
     // any planning or staging, and recorded just before the Run's first
@@ -107,432 +98,616 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
         let unstaged_files: Vec<_> = status.iter().filter(|f| !f.staged).collect();
         if unstaged_files.is_empty() {
             // Nothing staged *and* nothing unstaged — no work for the LLM.
-            display.nothing_to_commit();
+            deps.display.nothing_to_commit();
             return Ok(());
         }
+        unstaged_run(git, &deps, undo_start, &unstaged_files).await
+    } else {
+        staged_run(git, &deps, undo_start, &staged_files).await
+    }
+}
 
-        // Step skeleton (ADR 0018): Scan, the Redaction Gate (iff `--no-redact`
-        // did not turn it off), Plan, Review (iff configured), Draft, Commit.
-        let redact_on = redact == Redact::On;
-        let review_on = matches!(review, BatchReview::Interactive { .. });
-        let mut labels: Vec<String> = vec!["Scan changes".into()];
-        if redact_on {
-            labels.push("Redaction gate".into());
-        }
-        labels.push("Plan batches".into());
-        if review_on {
-            labels.push("Review plan".into());
-        }
-        labels.push("Draft messages".into());
-        labels.push("Commit batches".into());
-        let frame = RunFrame::new(labels).await;
-        let _frame_guard = driver::install(frame.clone());
-        const SCAN: StepIdx = StepIdx::FIRST;
-        let mut ix = StepIx::AFTER_FIRST;
-        let redact_step = ix.take_if(redact_on);
-        let plan_step = ix.take();
-        let review_step = ix.take_if(review_on);
-        let draft_step = ix.take();
-        let commit_step = ix.take();
+/// The plan-time workdir snapshot: one Scan-phase traversal capturing
+/// each unstaged file's raw index→workdir diff (`Git::diff_workdir`;
+/// this branch only runs with nothing staged, so the index equals
+/// HEAD) plus every derived view. It exists so the consumers that must
+/// agree on hunk numbering —
+/// the numbered view sent to the model, the counts behind
+/// `validate_batch_plan`, and each Batch's sliced draft input — all
+/// read from one capture. Staging does NOT read from it: the `staging`
+/// module re-reads a fresh diff per batch (so the Run survives
+/// pre-commit hooks that re-stage whole files) and remaps the plan-time
+/// indices onto the current diff via its internal `committed_hunks`.
+pub(crate) struct WorkdirSnapshot {
+    /// Raw per-file diffs keyed by path — the slice source behind
+    /// [`Self::batch_diff`].
+    raw_diffs: HashMap<String, String>,
+    /// Per-file hunk counts in scan order — the numbering the model saw.
+    hunk_counts: Vec<(String, usize)>,
+    /// The planner's envelope (`{"unstaged_files":[…]}`), built once
+    /// during the scan.
+    payload: String,
+    /// `(path, raw diff)` pairs in scan order — the Redaction Gate's
+    /// input and the deterministic fallback's regrouping source, so
+    /// both consume exactly what the model sees.
+    raw_pairs: Vec<(String, String)>,
+}
 
-        frame.activate(SCAN);
-        // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
-        // feeds the two consumers that must agree on hunk numbering: the
-        // numbered view sent to the model, and `file_hunk_counts` for
-        // `validate_batch_plan`. Staging does NOT read from it — the `staging`
-        // module re-reads a fresh diff per batch (so the Run survives
-        // pre-commit hooks that re-stage whole files) and remaps the plan-time
-        // indices onto the current diff via its internal `committed_hunks`.
-        let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
-        let mut raw_diffs: HashMap<String, String> = HashMap::new();
-        let files = unstaged_files
-            .iter()
-            .map(|f| {
-                let diff = git.diff_workdir(Some(f.path.as_str()))?;
-                raw_diffs.insert(f.path.clone(), diff.clone());
-                let hunk_count = diff::parse_file_patch(&diff).hunk_count();
-                file_hunk_counts.push((f.path.clone(), hunk_count));
-                // A changed file with no textual hunks (binary/mode/rename)
-                // would yield an empty scoped diff — the model reads that as
-                // "nothing changed" and drops the file. Send an explicit marker
-                // instead so it includes the file with an empty hunks array.
-                let scoped = if hunk_count == 0 && !diff.trim().is_empty() {
-                    crate::llm::prompt::BINARY_MARKER.to_string()
-                } else {
-                    diff::format_diff_scoped(&diff, &f.path)
-                };
-                Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
-            })
-            .collect::<anyhow::Result<Vec<_>>>();
-        let files = frame.fail_on_err(&display, SCAN, files)?;
-        let diff = serde_json::json!({ "unstaged_files": files });
-        // (path, raw diff) pairs from the snapshot above — the single
-        // source for the Redaction Gate below and the deterministic
-        // fallback's regrouping, so both consume exactly what the model
-        // sees.
-        let raw_pairs: Vec<(String, String)> = unstaged_files
+impl WorkdirSnapshot {
+    /// Capture the workdir diff of every file once. A changed file with
+    /// no textual hunks (binary/mode/rename) would yield an empty
+    /// scoped diff — the model reads that as "nothing changed" and
+    /// drops the file — so its envelope entry carries the explicit
+    /// binary marker instead, keeping the file plannable with an empty
+    /// hunks array.
+    pub(crate) fn scan(git: &Git, files: &[&FileStatus]) -> anyhow::Result<Self> {
+        let mut raw_diffs = HashMap::new();
+        let mut hunk_counts = Vec::new();
+        let mut payload_files = Vec::new();
+        for f in files {
+            let diff = git.diff_workdir(Some(f.path.as_str()))?;
+            raw_diffs.insert(f.path.clone(), diff.clone());
+            let patch = diff::parse_file_patch(&diff);
+            hunk_counts.push((f.path.clone(), patch.hunk_count()));
+            let scoped = if patch.is_non_textual() {
+                crate::llm::prompt::BINARY_MARKER.to_string()
+            } else {
+                diff::format_diff_scoped(&diff, &f.path)
+            };
+            payload_files.push(serde_json::json!({
+                "path": f.path,
+                "status": f.kind,
+                "diff": scoped
+            }));
+        }
+        let raw_pairs = files
             .iter()
             .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
             .collect();
-        let scan_paths: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_stats = scanned(
-            &frame,
-            &display,
-            SCAN,
-            git.workdir_stats(&scan_paths),
-            unstaged_files.len(),
-        )?;
-        // Run-wide counts-grid geometry: every Commit entry footer of this
-        // Run floors its `+N`/`−M` columns with it — computed over the
-        // WHOLE unstaged diff up front — so per-batch digit counts can't
-        // drift the flushed table's columns.
-        let counts_floor = counts_geometry(&scan_stats);
+        Ok(Self {
+            payload: serde_json::json!({ "unstaged_files": payload_files }).to_string(),
+            raw_diffs,
+            hunk_counts,
+            raw_pairs,
+        })
+    }
 
-        // Redaction Gate, first payload site (issue #155, ADR 0017): the
-        // raw per-file diffs feed every LLM payload of this branch — the
-        // plan envelope above and each batch's Drafted Message input (sliced
-        // from `raw_diffs`) — so gating here once refuses before any Backend
-        // call. The confirmation menu's Re-generate redraft stays ungated by
-        // design: it re-sends content this gate already cleared. A refusal
-        // is the step's failed screen: the headline names the gate, the
-        // detail row carries the full files + patterns refusal (ADR 0018).
-        super::redact_gate(&frame, &display, redact_step, redact::Override::Run, |_| {
-            Ok(&raw_pairs)
-        })?;
+    /// The planner's envelope over the snapshot's numbered views.
+    pub(crate) fn planner_payload(&self) -> &str {
+        &self.payload
+    }
 
-        frame.activate(plan_step);
-        let result = frame.fail_on_err(&display, plan_step, planner(diff.to_string()).await)?;
-        // An invalid plan is an LLM malfunction, not a user problem: warn and
-        // regroup deterministically instead of failing the Run. The engine's
-        // output is a valid partition by construction (every hunk of real
-        // work lands in exactly one batch), so issue #34's silent no-op
-        // cannot recur — real work always yields ≥1 batch. The re-validation
-        // is defensive only. The summary reads "Grouped" on this fallback
-        // path (ADR 0018) and the caution row rides right under it.
-        let mut fallback_err: Option<String> = None;
-        let mut result = match generator::validate_batch_plan(&result, &file_hunk_counts) {
-            Ok(()) => result,
-            Err(plan_err) => {
-                fallback_err = Some(plan_err.to_string());
-                let plan = grouping::plan_from_diffs(&raw_pairs);
-                generator::validate_batch_plan(&plan, &file_hunk_counts)
-                    .context("deterministic fallback plan failed validation")?;
-                plan
-            }
-        };
-        let count = result.batches.len();
-        // The caution row must ride the step's live rows BEFORE completion:
-        // under chronological collapse (ADR 0018 amendment 3) `complete`
-        // peels the finished block to scrollback at once, so a row emitted
-        // after it would land on a step the frame no longer renders.
-        if let Some(err) = &fallback_err {
-            // Outcome first: the row clamps at the text budget, so the
-            // actionable half ("Regrouping deterministically") must lead —
-            // the e2e suite widens to 120 cols so its causes survive the
-            // clamp whole (at the default 80 the cause text is cut).
-            frame.step_display(&display).warn(&format!(
-                "Regrouping deterministically — invalid batch plan ({err})"
-            ));
+    /// Per-file hunk counts — the plan's index space. This is the only
+    /// numbering `validate_batch_plan` and the Review gate ever see.
+    pub(crate) fn hunk_counts(&self) -> &[(String, usize)] {
+        &self.hunk_counts
+    }
+
+    /// `(path, raw diff)` pairs in scan order.
+    pub(crate) fn raw_pairs(&self) -> &[(String, String)] {
+        &self.raw_pairs
+    }
+
+    /// Scan-order paths (the stats query's input) — derived from
+    /// [`Self::raw_pairs`], the order-carrying view.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.raw_pairs.iter().map(|(p, _)| p.clone()).collect()
+    }
+
+    /// One Batch's Drafted-Message input: its planned hunks sliced out
+    /// of the plan-time diffs — the numbering the model saw and the
+    /// plan refers to (ADR 0014).
+    pub(crate) fn batch_diff(&self, batch: &generator::BatchPlanBatch) -> anyhow::Result<String> {
+        diff_json::plan_batch_diff_json(batch, &self.raw_diffs)
+    }
+
+    /// The deterministic regrouping of the raw diffs (the fallback plan).
+    pub(crate) fn fallback_plan(&self) -> generator::BatchPlanOutput {
+        grouping::plan_from_diffs(&self.raw_pairs)
+    }
+
+    /// Counts-only construction for tests that drive phases without a
+    /// repo (the Review gate's unit tests); phases that need diffs go
+    /// through [`Self::scan`].
+    #[cfg(test)]
+    pub(crate) fn from_hunk_counts(counts: Vec<(String, usize)>) -> Self {
+        Self {
+            raw_diffs: HashMap::new(),
+            hunk_counts: counts,
+            payload: String::new(),
+            raw_pairs: Vec::new(),
         }
-        // One verb for the step in every state: the skeleton promises
-        // "Plan batches", so the summary keeps "Planned" even on the
-        // deterministic fallback — the ⚠ row above already tells that story.
-        frame.complete(
-            &display,
-            plan_step,
-            format!("Planned {}", plural(count, "batch")),
-        );
+    }
+}
 
-        // Batch Review (issue #157): the opt-in pre-draft gate — applies to
-        // whichever plan proceeds (the LLM's or the deterministic
-        // fallback's) and merges Batches before any Drafted Message is paid
-        // for. Abort here is the cheapest exit: nothing staged, nothing
-        // drafted.
-        if let Some(rs) = review_step {
-            frame.activate(rs);
-            result = review_plan(result, &file_hunk_counts, &display, &review, &frame, rs)?;
+/// The unstaged branch of the Run: scan the workdir, plan Batches (with the
+/// deterministic fallback), review, pre-draft every Batch concurrently
+/// (ADR 0014), then stage + commit Batch by Batch. The spine owns the step
+/// skeleton and threads the phase results; each phase below is a named fn.
+async fn unstaged_run(
+    git: &Git,
+    deps: &RunDeps,
+    undo_start: Option<String>,
+    unstaged_files: &[&FileStatus],
+) -> anyhow::Result<()> {
+    let RunDeps {
+        display,
+        planner,
+        messenger,
+        review,
+        redact,
+        ..
+    } = deps;
+
+    // Step skeleton (ADR 0018): Scan, the Redaction Gate (iff `--no-redact`
+    // did not turn it off), Plan, Review (iff configured), Draft, Commit.
+    let redact_on = *redact == Redact::On;
+    let review_on = matches!(review, BatchReview::Interactive { .. });
+    let mut labels: Vec<String> = vec!["Scan changes".into()];
+    if redact_on {
+        labels.push("Redaction gate".into());
+    }
+    labels.push("Plan batches".into());
+    if review_on {
+        labels.push("Review plan".into());
+    }
+    labels.push("Draft messages".into());
+    labels.push("Commit batches".into());
+    let frame = RunFrame::new(labels).await;
+    let _frame_guard = driver::install(frame.clone());
+    const SCAN: StepIdx = StepIdx::FIRST;
+    let mut ix = StepIx::AFTER_FIRST;
+    let redact_step = ix.take_if(redact_on);
+    let plan_step = ix.take();
+    let review_step = ix.take_if(review_on);
+    let draft_step = ix.take();
+    let commit_step = ix.take();
+
+    frame.activate(SCAN);
+    let snapshot = frame.fail_on_err(display, SCAN, WorkdirSnapshot::scan(git, unstaged_files))?;
+    let scan_stats = scanned(
+        &frame,
+        display,
+        SCAN,
+        git.workdir_stats(&snapshot.paths()),
+        unstaged_files.len(),
+    )?;
+    // Run-wide counts-grid geometry: every Commit entry footer of this
+    // Run floors its `+N`/`−M` columns with it — computed over the
+    // WHOLE unstaged diff up front — so per-batch digit counts can't
+    // drift the flushed table's columns.
+    let counts_floor = counts_geometry(&scan_stats);
+
+    // Redaction Gate, first payload site (issue #155, ADR 0017): the
+    // snapshot's raw per-file diffs feed every LLM payload of this
+    // branch — the plan envelope above and each batch's Drafted Message
+    // input (sliced from the snapshot) — so gating here once refuses
+    // before any Backend call. The confirmation menu's Re-generate
+    // redraft stays ungated by design: it re-sends content this gate
+    // already cleared. A refusal is the step's failed screen: the
+    // headline names the gate, the detail row carries the full files +
+    // patterns refusal (ADR 0018).
+    super::redact_gate(&frame, display, redact_step, redact::Override::Run, |_| {
+        Ok(snapshot.raw_pairs())
+    })?;
+
+    frame.activate(plan_step);
+    let planned = frame.fail_on_err(
+        display,
+        plan_step,
+        planner(snapshot.planner_payload().to_string()).await,
+    )?;
+    let mut result = plan_with_fallback(&frame, display, plan_step, planned, &snapshot)?;
+
+    // Batch Review (issue #157): the opt-in pre-draft gate — applies to
+    // whichever plan proceeds (the LLM's or the deterministic
+    // fallback's) and merges Batches before any Drafted Message is paid
+    // for. Abort here is the cheapest exit: nothing staged, nothing
+    // drafted.
+    if let Some(rs) = review_step {
+        result = review_plan(result, &snapshot, display, review, &frame, rs)?;
+    }
+    let drafts = draft_all(&frame, display, draft_step, messenger, &result, &snapshot).await?;
+
+    frame.activate(commit_step);
+    commit_batches(
+        git,
+        deps,
+        &frame,
+        commit_step,
+        PlannedCommits {
+            plan: result,
+            drafts,
+            undo_start,
+            counts_floor,
+        },
+    )
+    .await
+}
+
+/// The Plan phase: validate the planner's output against the scan's hunk
+/// counts and hand back the plan to proceed with — the LLM's, or the
+/// deterministic regrouping when the plan is invalid.
+///
+/// An invalid plan is an LLM malfunction, not a user problem: warn and
+/// regroup deterministically instead of failing the Run. The engine's
+/// output is a valid partition by construction (every hunk of real
+/// work lands in exactly one batch), so issue #34's silent no-op
+/// cannot recur — real work always yields ≥1 batch. The re-validation
+/// is defensive only. The summary reads "Grouped" on this fallback
+/// path (ADR 0018) and the caution row rides right under it.
+fn plan_with_fallback(
+    frame: &RunFrame,
+    display: &Display,
+    plan_step: StepIdx,
+    planned: generator::BatchPlanOutput,
+    snapshot: &WorkdirSnapshot,
+) -> anyhow::Result<generator::BatchPlanOutput> {
+    let mut fallback_err: Option<String> = None;
+    let result = match generator::validate_batch_plan(&planned, snapshot.hunk_counts()) {
+        Ok(()) => planned,
+        Err(plan_err) => {
+            fallback_err = Some(plan_err.to_string());
+            let plan = snapshot.fallback_plan();
+            generator::validate_batch_plan(&plan, snapshot.hunk_counts())
+                .context("deterministic fallback plan failed validation")?;
+            plan
         }
-        let count = result.batches.len();
+    };
+    let count = result.batches.len();
+    // The caution row must ride the step's live rows BEFORE completion:
+    // under chronological collapse (ADR 0018 amendment 3) `complete`
+    // peels the finished block to scrollback at once, so a row emitted
+    // after it would land on a step the frame no longer renders.
+    if let Some(err) = &fallback_err {
+        // Outcome first: the row clamps at the text budget, so the
+        // actionable half ("Regrouping deterministically") must lead —
+        // the e2e suite widens to 120 cols so its causes survive the
+        // clamp whole (at the default 80 the cause text is cut).
+        frame.step_display(display).warn(&format!(
+            "Regrouping deterministically — invalid batch plan ({err})"
+        ));
+    }
+    // One verb for the step in every state: the skeleton promises
+    // "Plan batches", so the summary keeps "Planned" even on the
+    // deterministic fallback — the ⚠ row above already tells that story.
+    frame.complete(
+        display,
+        plan_step,
+        format!("Planned {}", plural(count, "batch")),
+    );
+    Ok(result)
+}
 
-        // Pre-draft every batch's message concurrently (ADR 0014): the LLM
-        // round-trips dominate a multi-batch Run's wall-clock, and each batch's
-        // diff content is fully known at plan time, so fanning the drafts out
-        // collapses N sequential waits into one. Each draft is sliced from the
-        // plan-time workdir diff (the numbering the model saw) rather than the
-        // staged diff; the two diverge only under a pre-commit hook that
-        // rewrites bytes — irrelevant to a commit message — and the
-        // confirmation Re-generate action still redrafts against the staged
-        // diff. Each concurrent draft reveals its own sub-row as it
-        // starts and flips it to a `✓` on finish (ADR 0018); all sub-rows
-        // erase together at step completion. Order-preserving `buffered`
-        // keeps the messenger's call order (and the test messengers'
-        // per-call counters) deterministic. The fixed MAX_CONCURRENT_DRAFTS
-        // is the committed per-batch concurrency cap of this program.
-        let batch_diffs = frame.fail_on_err(
-            &display,
-            draft_step,
-            result
-                .batches
-                .iter()
-                .map(|b| diff_json::plan_batch_diff_json(b, &raw_diffs))
-                .collect::<anyhow::Result<Vec<_>>>(),
-        )?;
-        frame.activate(draft_step);
-        // Each draft's sub-row carries its batch's lead file (plus a
-        // "+N more" count) — an anonymous `Generating commit message` column
-        // gives the user no way to map an outcome to a batch (ADR 0018).
-        let draft_labels: Vec<String> = result
-            .batches
+/// The Draft phase: slice each Batch's diff from the plan-time snapshot
+/// and pre-draft every message concurrently (ADR 0014): the LLM
+/// round-trips dominate a multi-batch Run's wall-clock, and each batch's
+/// diff content is fully known at plan time, so fanning the drafts out
+/// collapses N sequential waits into one. Each draft is sliced from the
+/// plan-time workdir diff (the numbering the model saw) rather than the
+/// staged diff; the two diverge only under a pre-commit hook that
+/// rewrites bytes — irrelevant to a commit message — and the
+/// confirmation Re-generate action still redrafts against the staged
+/// diff. Each concurrent draft reveals its own sub-row as it
+/// starts and flips it to a `✓` on finish (ADR 0018); all sub-rows
+/// erase together at step completion. Order-preserving `buffered`
+/// keeps the messenger's call order (and the test messengers'
+/// per-call counters) deterministic. The fixed MAX_CONCURRENT_DRAFTS
+/// is the committed per-batch concurrency cap of this program.
+async fn draft_all(
+    frame: &RunFrame,
+    display: &Display,
+    draft_step: StepIdx,
+    messenger: &CommitMessenger,
+    plan: &generator::BatchPlanOutput,
+    snapshot: &WorkdirSnapshot,
+) -> anyhow::Result<Vec<anyhow::Result<generator::CommitOutput>>> {
+    let count = plan.batches.len();
+    let batch_diffs = frame.fail_on_err(
+        display,
+        draft_step,
+        plan.batches
             .iter()
-            .map(|b| files_label(&b.changes))
-            .collect();
-        let drafts: Vec<anyhow::Result<generator::CommitOutput>> = {
-            let futs = batch_diffs.into_iter().enumerate().map(|(i, batch_diff)| {
-                let frame = frame.clone();
-                let messenger = &messenger;
-                let label = draft_labels[i].clone();
-                async move {
-                    frame.set_sub_row(
-                        draft_step,
-                        i + 1,
-                        &SubBody::InFlight(format!("Drafting {label}")),
-                    );
-                    let started = Instant::now();
-                    let outcome = messenger(batch_diff).await;
-                    frame.set_sub_row(
-                        draft_step,
-                        i + 1,
-                        &SubBody::Done(label, Some(started.elapsed())),
-                    );
-                    outcome
-                }
-            });
-            stream::iter(futs)
-                .buffered(MAX_CONCURRENT_DRAFTS)
-                .collect()
-                .await
-        };
-        frame.complete(
-            &display,
-            draft_step,
-            format!("Drafted {}", plural(count, "message")),
-        );
+            .map(|b| snapshot.batch_diff(b))
+            .collect::<anyhow::Result<Vec<_>>>(),
+    )?;
+    frame.activate(draft_step);
+    // Each draft's sub-row carries its batch's lead file (plus a
+    // "+N More" count) — an anonymous `Generating commit message` column
+    // gives the user no way to map an outcome to a batch (ADR 0018).
+    let draft_labels: Vec<String> = plan
+        .batches
+        .iter()
+        .map(|b| files_label(&b.changes))
+        .collect();
+    let drafts: Vec<anyhow::Result<generator::CommitOutput>> = {
+        let futs = batch_diffs.into_iter().enumerate().map(|(i, batch_diff)| {
+            let frame = frame.clone();
+            let messenger = &messenger;
+            let label = draft_labels[i].clone();
+            async move {
+                frame.set_sub_row(
+                    draft_step,
+                    i + 1,
+                    &SubBody::InFlight(format!("Drafting {label}")),
+                );
+                let started = Instant::now();
+                let outcome = messenger(batch_diff).await;
+                frame.set_sub_row(
+                    draft_step,
+                    i + 1,
+                    &SubBody::Done(label, Some(started.elapsed())),
+                );
+                outcome
+            }
+        });
+        stream::iter(futs)
+            .buffered(MAX_CONCURRENT_DRAFTS)
+            .collect()
+            .await
+    };
+    frame.complete(
+        display,
+        draft_step,
+        format!("Drafted {}", plural(count, "message")),
+    );
+    Ok(drafts)
+}
 
-        frame.activate(commit_step);
-        let step_display = frame.step_display(&display);
-        let mut staging = staging::Staging::new();
-        for (i, (batch, draft)) in result.batches.iter().zip(drafts).enumerate() {
-            frame.set_label(
-                commit_step,
-                // Keep the skeleton's verb — the pending row promised
-                // "Commit batches", and `· i/N` carries the position.
-                format!("Commit batches · {}/{}", i + 1, count),
-            );
-            // Stage this batch's hunks, then commit its pre-drafted message.
-            // Either step failing after earlier batches already committed
-            // leaves the repo partially committed, so both share one abort
-            // message naming how far we got and that the rest is recoverable by
-            // re-running `aic`. The draft was produced up front; surfacing its
-            // error after staging (not before) keeps the "remaining changes
-            // are still staged" contract identical to drafting inline.
-            let outcome = async {
-                let paths = staging.stage_batch(git, batch, &step_display)?;
-                if paths.is_empty() {
-                    // Every file in this batch already landed via an earlier
-                    // batch or a pre-commit hook — nothing to commit.
-                    return Ok(());
-                }
-                let draft = draft?;
-                generate_and_commit(
-                    git,
-                    &paths,
-                    &step_display,
-                    &frame,
-                    DraftedCommit {
-                        undo_start: undo_start.clone(),
-                        sub: (count > 1).then_some(i + 1),
-                        draft,
-                        counts_floor,
-                    },
-                    &messenger,
-                    &confirm,
-                )
-                .await
-            };
-            if let Err(e) = outcome.await {
-                let batch_word = if i == 1 { "batch" } else { "batches" };
-                let remediation = [
-                    format!(
-                        "{i} {batch_word} committed; the remaining changes are still staged in the index"
-                    ),
-                    "re-run `aic` to continue".to_string(),
-                ];
-                // Declining the confirmation is a user choice, not an error:
-                // report it as a clean abort naming how far the run got and
-                // that the rest is recoverable — same shape as the single-
-                // commit path's "no commit made". Other failures keep the
-                // underlying cause in the message. Either way the step's
-                // failed screen names the batch and the remediation rows
-                // carry the recovery contract (ADR 0018).
-                if e.downcast_ref::<CommitDeclined>().is_some() {
-                    frame.fail(
-                        &display,
-                        commit_step,
-                        Failure {
-                            // The step label already carries `· i/N`; the
-                            // error chain below keeps the full position.
-                            reason: "declined".to_string(),
-                            detail: remediation.to_vec(),
-                        },
-                    );
-                    anyhow::bail!(
-                        "declined on batch {} of {} after {} {batch_word} committed.\n\
-                         The remaining changes are still staged in the index.\n\
-                         re-run `aic` to continue.",
-                        i + 1,
-                        count,
-                        i
-                    );
-                }
-                // Headline + remediation only: the error chain prints once,
-                // in full, after the frame ends (main's boundary report) —
-                // an in-frame copy is width-capped to one row and would only
-                // duplicate it.
+/// The Commit phase's inputs: the validated plan, its pre-drafted messages
+/// (parallel to `plan.batches`), and the two Run-wide values every entry
+/// needs. Bundled so [`commit_batches`] stays under clippy's argument
+/// budget (same precedent as [`DraftedCommit`]).
+struct PlannedCommits {
+    plan: generator::BatchPlanOutput,
+    drafts: Vec<anyhow::Result<generator::CommitOutput>>,
+    undo_start: Option<String>,
+    counts_floor: CountsGeometry,
+}
+
+/// The Commit phase: stage each Batch's hunks and commit its pre-drafted
+/// message, Batch by Batch.
+async fn commit_batches(
+    git: &Git,
+    deps: &RunDeps,
+    frame: &RunFrame,
+    commit_step: StepIdx,
+    planned: PlannedCommits,
+) -> anyhow::Result<()> {
+    let PlannedCommits {
+        plan,
+        drafts,
+        undo_start,
+        counts_floor,
+    } = planned;
+    let count = plan.batches.len();
+    let step_display = frame.step_display(&deps.display);
+    let mut staging = staging::Staging::new();
+    for (i, (batch, draft)) in plan.batches.iter().zip(drafts).enumerate() {
+        frame.set_label(
+            commit_step,
+            // Keep the skeleton's verb — the pending row promised
+            // "Commit batches", and `· i/N` carries the position.
+            format!("Commit batches · {}/{}", i + 1, count),
+        );
+        // Stage this batch's hunks, then commit its pre-drafted message.
+        // Either step failing after earlier batches already committed
+        // leaves the repo partially committed, so both share one abort
+        // message naming how far we got and that the rest is recoverable by
+        // re-running `aic`. The draft was produced up front; surfacing its
+        // error after staging (not before) keeps the "remaining changes
+        // are still staged" contract identical to drafting inline.
+        let outcome = async {
+            let paths = staging.stage_batch(git, &batch.files(), &step_display)?;
+            if paths.is_empty() {
+                // Every file in this batch already landed via an earlier
+                // batch or a pre-commit hook — nothing to commit.
+                return Ok(());
+            }
+            let draft = draft?;
+            generate_and_commit(
+                git,
+                &paths,
+                &step_display,
+                frame,
+                DraftedCommit {
+                    undo_start: undo_start.clone(),
+                    sub: (count > 1).then_some(i + 1),
+                    draft,
+                    counts_floor,
+                },
+                &deps.messenger,
+                &deps.confirm,
+            )
+            .await
+        };
+        if let Err(e) = outcome.await {
+            let batch_word = if i == 1 { "batch" } else { "batches" };
+            let remediation = [
+                format!(
+                    "{i} {batch_word} committed; the remaining changes are still staged in the index"
+                ),
+                "re-run `aic` to continue".to_string(),
+            ];
+            // Declining the confirmation is a user choice, not an error:
+            // report it as a clean abort naming how far the run got and
+            // that the rest is recoverable — same shape as the single-
+            // commit path's "no commit made". Other failures keep the
+            // underlying cause in the message. Either way the step's
+            // failed screen names the batch and the remediation rows
+            // carry the recovery contract (ADR 0018).
+            if e.downcast_ref::<CommitDeclined>().is_some() {
                 frame.fail(
-                    &display,
+                    &deps.display,
                     commit_step,
                     Failure {
-                        reason: format!("failed on batch {} of {count}", i + 1),
+                        // The step label already carries `· i/N`; the
+                        // error chain below keeps the full position.
+                        reason: "declined".to_string(),
                         detail: remediation.to_vec(),
                     },
                 );
                 anyhow::bail!(
-                    "aborted on batch {} of {} after {} {batch_word} committed: {e:#}",
+                    "declined on batch {} of {} after {} {batch_word} committed.\n\
+                     The remaining changes are still staged in the index.\n\
+                     re-run `aic` to continue.",
                     i + 1,
                     count,
                     i
                 );
             }
+            // Headline + remediation only: the error chain prints once,
+            // in full, after the frame ends (main's boundary report) —
+            // an in-frame copy is width-capped to one row and would only
+            // duplicate it.
+            frame.fail(
+                &deps.display,
+                commit_step,
+                Failure {
+                    reason: format!("failed on batch {} of {count}", i + 1),
+                    detail: remediation.to_vec(),
+                },
+            );
+            anyhow::bail!(
+                "aborted on batch {} of {} after {} {batch_word} committed: {e:#}",
+                i + 1,
+                count,
+                i
+            );
         }
-        frame.complete(
-            &display,
-            commit_step,
-            format!("Committed {}", plural(count, "batch")),
-        );
-    } else {
-        let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        // Step skeleton (ADR 0018): the staged branch's three steps (four
-        // with the gate) — no plan or review; the user did the partitioning.
-        let redact_on = redact == Redact::On;
-        let mut labels: Vec<String> = vec!["Scan changes".into()];
-        if redact_on {
-            labels.push("Redaction gate".into());
-        }
-        labels.push("Draft message".into());
-        labels.push("Commit".into());
-        let frame = RunFrame::new(labels).await;
-        let _frame_guard = driver::install(frame.clone());
-        const SCAN: StepIdx = StepIdx::FIRST;
-        let mut ix = StepIx::AFTER_FIRST;
-        let redact_step = ix.take_if(redact_on);
-        let draft_step = ix.take();
-        let commit_step = ix.take();
-
-        frame.activate(SCAN);
-        let staged_paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
-        let scan_stats = scanned(
-            &frame,
-            &display,
-            SCAN,
-            git.staged_stats(&staged_paths),
-            staged_files.len(),
-        )?;
-        // Run-wide counts-grid geometry (see the unstaged branch): the
-        // staged branch lands one entry, so the floor equals its own
-        // geometry — kept for symmetry with the shared `commit_line`
-        // contract.
-        let counts_floor = counts_geometry(&scan_stats);
-
-        // Redaction Gate, second payload site (issue #155, ADR 0017): the
-        // staged branch's one LLM call sends `staged_diff_json`'s content.
-        // Gate reads the same per-file diffs itself rather than scanning
-        // inside `staged_diff_json` — that fn is shared with the confirm
-        // menu's Re-generate redraft, which stays ungated by design (the
-        // cheap second libgit2 read buys that boundary).
-        super::redact_gate(&frame, &display, redact_step, redact::Override::Run, |rs| {
-            frame.fail_on_err(
-                &display,
-                rs,
-                paths
-                    .iter()
-                    .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
-                    .collect::<anyhow::Result<Vec<(String, String)>>>(),
-            )
-        })?;
-        // Commit the index exactly as the user staged it — no re-stage
-        // (issue #150). The historic `git add` over these paths folded each
-        // staged file's full workdir state into the index, silently
-        // swallowing hunks the user had deliberately left out of hunk-level
-        // staging (`git add -p` / lazygit). That fold existed to capture
-        // automatic rustfmt output before committing; the formatting step
-        // was removed (#87), leaving it vestigial. `paths` still feeds the
-        // diff, stats, and commit below; `Git::commit` commits the index
-        // as-is, so unstaged hunks survive for a follow-up Run.
-        frame.activate(draft_step);
-        let diff_str = frame.fail_on_err(&display, draft_step, staged_diff_json(git, &paths))?;
-        let draft = frame.fail_on_err(&display, draft_step, messenger(diff_str.clone()).await)?;
-        frame.complete(&display, draft_step, "Drafted message");
-
-        frame.activate(commit_step);
-        let step_display = frame.step_display(&display);
-        match generate_and_commit(
-            git,
-            &paths,
-            &step_display,
-            &frame,
-            DraftedCommit {
-                undo_start: undo_start.clone(),
-                sub: None,
-                draft,
-                counts_floor,
-            },
-            &messenger,
-            &confirm,
-        )
-        .await
-        {
-            Ok(()) => {}
-            // Declining the confirmation is a user choice, not an error: report
-            // it as a clean abort naming the outcome — nothing committed.
-            Err(e) if e.downcast_ref::<CommitDeclined>().is_some() => {
-                frame.fail(
-                    &display,
-                    commit_step,
-                    Failure {
-                        reason: "aborted by user".into(),
-                        detail: vec!["no commit made".into()],
-                    },
-                );
-                anyhow::bail!("aborted — no commit made");
-            }
-            Err(e) => {
-                // Headline only: the chain prints once, in full, after the
-                // frame ends (main's boundary report) — not truncated
-                // in-frame.
-                frame.fail(
-                    &display,
-                    commit_step,
-                    Failure {
-                        reason: "failed".into(),
-                        detail: vec![],
-                    },
-                );
-                return Err(e);
-            }
-        }
-        frame.complete(&display, commit_step, "Committed 1 batch");
     }
+    frame.complete(
+        &deps.display,
+        commit_step,
+        format!("Committed {}", plural(count, "batch")),
+    );
+    Ok(())
+}
 
+/// The staged branch of the Run: the user did the partitioning — no plan,
+/// no review; draft one message over the index and commit it as staged.
+async fn staged_run(
+    git: &Git,
+    deps: &RunDeps,
+    undo_start: Option<String>,
+    staged_files: &[&FileStatus],
+) -> anyhow::Result<()> {
+    let display = &deps.display;
+    let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
+    // Step skeleton (ADR 0018): the staged branch's three steps (four
+    // with the gate) — no plan or review; the user did the partitioning.
+    let redact_on = deps.redact == Redact::On;
+    let mut labels: Vec<String> = vec!["Scan changes".into()];
+    if redact_on {
+        labels.push("Redaction gate".into());
+    }
+    labels.push("Draft message".into());
+    labels.push("Commit".into());
+    let frame = RunFrame::new(labels).await;
+    let _frame_guard = driver::install(frame.clone());
+    const SCAN: StepIdx = StepIdx::FIRST;
+    let mut ix = StepIx::AFTER_FIRST;
+    let redact_step = ix.take_if(redact_on);
+    let draft_step = ix.take();
+    let commit_step = ix.take();
+
+    frame.activate(SCAN);
+    let staged_paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();
+    let scan_stats = scanned(
+        &frame,
+        display,
+        SCAN,
+        git.staged_stats(&staged_paths),
+        staged_files.len(),
+    )?;
+    // Run-wide counts-grid geometry (see the unstaged branch): the
+    // staged branch lands one entry, so the floor equals its own
+    // geometry — kept for symmetry with the shared `commit_line`
+    // contract.
+    let counts_floor = counts_geometry(&scan_stats);
+
+    // Redaction Gate, second payload site (issue #155, ADR 0017): the
+    // staged branch's one LLM call sends `staged_diff_json`'s content.
+    // Gate reads the same per-file diffs itself rather than scanning
+    // inside `staged_diff_json` — that fn is shared with the confirm
+    // menu's Re-generate redraft, which stays ungated by design (the
+    // cheap second libgit2 read buys that boundary).
+    super::redact_gate(&frame, display, redact_step, redact::Override::Run, |rs| {
+        frame.fail_on_err(
+            display,
+            rs,
+            paths
+                .iter()
+                .map(|p| Ok((p.clone(), git.diff(Some(p.as_str()))?)))
+                .collect::<anyhow::Result<Vec<(String, String)>>>(),
+        )
+    })?;
+    // Commit the index exactly as the user staged it — no re-stage
+    // (issue #150). The historic `git add` over these paths folded each
+    // staged file's full workdir state into the index, silently
+    // swallowing hunks the user had deliberately left out of hunk-level
+    // staging (`git add -p` / lazygit). That fold existed to capture
+    // automatic rustfmt output before committing; the formatting step
+    // was removed (#87), leaving it vestigial. `paths` still feeds the
+    // diff, stats, and commit below; `Git::commit` commits the index
+    // as-is, so unstaged hunks survive for a follow-up Run.
+    frame.activate(draft_step);
+    let diff_str = frame.fail_on_err(display, draft_step, staged_diff_json(git, &paths))?;
+    let draft = frame.fail_on_err(
+        display,
+        draft_step,
+        (deps.messenger)(diff_str.clone()).await,
+    )?;
+    frame.complete(display, draft_step, "Drafted message");
+
+    frame.activate(commit_step);
+    let step_display = frame.step_display(display);
+    match generate_and_commit(
+        git,
+        &paths,
+        &step_display,
+        &frame,
+        DraftedCommit {
+            undo_start: undo_start.clone(),
+            sub: None,
+            draft,
+            counts_floor,
+        },
+        &deps.messenger,
+        &deps.confirm,
+    )
+    .await
+    {
+        Ok(()) => {}
+        // Declining the confirmation is a user choice, not an error: report
+        // it as a clean abort naming the outcome — nothing committed.
+        Err(e) if e.downcast_ref::<CommitDeclined>().is_some() => {
+            frame.fail(
+                display,
+                commit_step,
+                Failure {
+                    reason: "aborted by user".into(),
+                    detail: vec!["no commit made".into()],
+                },
+            );
+            anyhow::bail!("aborted — no commit made");
+        }
+        Err(e) => {
+            // Headline only: the chain prints once, in full, after the
+            // frame ends (main's boundary report) — not truncated
+            // in-frame.
+            frame.fail(
+                display,
+                commit_step,
+                Failure {
+                    reason: "failed".into(),
+                    detail: vec![],
+                },
+            );
+            return Err(e);
+        }
+    }
+    frame.complete(display, commit_step, "Committed 1 batch");
     Ok(())
 }
 
@@ -714,100 +889,6 @@ pub(crate) async fn default_run(
         );
     }
     commit_run(git, commit).await
-}
-
-/// Run an LLM call behind the live reasoning feed. On a terminal with a Run
-/// frame on screen the feed is the frame's [`FrameReasoningSink`] — the
-/// window rides the Plan step's live rows, its height budgeted against the
-/// whole frame (ADR 0018); otherwise the standalone probe-and-paint
-/// [`progress::ReasoningRenderer`] path, as before the timeline.
-async fn run_with_reasoning_feed<F, T>(
-    label: &'static str,
-    cold_start: Option<String>,
-    make_call: F,
-) -> anyhow::Result<T>
-where
-    F: FnOnce(reasoning_feed::ReasoningTap) -> BoxFuture<anyhow::Result<T>>,
-    T: Send,
-{
-    if let Some(frame) = driver::active_frame().filter(|f| f.is_tty()) {
-        let step = frame.active_index();
-        let mut sink = FrameReasoningSink {
-            frame: frame.clone(),
-            step: step.unwrap_or(StepIdx::FIRST),
-            label,
-            feed_width: frame.theme().width.saturating_sub(6).max(20),
-        };
-        return reasoning_feed::run(
-            &mut sink,
-            frame.window_budget(),
-            cold_start.as_deref(),
-            make_call,
-        )
-        .await;
-    }
-    // The DSR cursor-row query does up to ~200 ms of blocking tty I/O (poll
-    // + raw-mode byte reads against a deadline). Run it on the blocking pool
-    // so it stalls a worker, not the async reactor. A task panic degrades to
-    // the no-scroll [`cursor::WindowSizing::fallback`] — decoration must
-    // never break the commit.
-    let sizing = tokio::task::spawn_blocking(cursor::reasoning_window_rows)
-        .await
-        .unwrap_or_else(|_| cursor::WindowSizing::fallback());
-    let mut sink = progress::reasoning_sink(label, sizing.max_rows, sizing.cursor_row);
-    reasoning_feed::run(&mut sink, sizing.max_rows, cold_start.as_deref(), make_call).await
-}
-
-/// The reasoning feed as the frame's Plan-step live rows (ADR 0018): the
-/// window's rows replace the step's live output on every paint, and the
-/// spinner + elapsed ride the step's own label (animated by the frame's
-/// ticker), so only the window content repaints as reasoning streams. The
-/// loading notice (cold start past the grace window) is the same window's
-/// lone row. `finish` erases the window in one frame — the step's `✓`
-/// flip takes it from there.
-struct FrameReasoningSink {
-    frame: RunFrame,
-    step: StepIdx,
-    label: &'static str,
-    feed_width: usize,
-}
-
-impl reasoning_feed::ReasoningSink for FrameReasoningSink {
-    fn paint(&mut self, window: &[String], in_code_start: bool) {
-        let budget = self.frame.window_budget();
-        let mut rows = crate::render::markdown::reasoning_rows(
-            "⠋",
-            self.label,
-            window,
-            self.feed_width,
-            None,
-            budget,
-            in_code_start,
-        );
-        // Drop the spinner+elapsed headline row: the step's own label carries
-        // both (the ticker animates the glyph, the frame bakes the elapsed).
-        if !rows.is_empty() {
-            rows.remove(0);
-        }
-        self.frame.live(self.step, rows);
-    }
-
-    fn paint_loading(&mut self, _elapsed: Duration, notice: LoadingNotice) {
-        let rows: Vec<String> =
-            loading_rows("⠋", self.label, Duration::ZERO, notice, self.feed_width)
-                .into_iter()
-                .skip(1)
-                .collect();
-        self.frame.live(self.step, rows);
-    }
-
-    fn refresh(&mut self, window: &[String], in_code_start: bool, _elapsed: Duration) {
-        self.paint(window, in_code_start);
-    }
-
-    fn finish(&mut self) {
-        self.frame.clear_live(self.step);
-    }
 }
 
 /// Production entry point for the default `aic` run — wires the real LLM

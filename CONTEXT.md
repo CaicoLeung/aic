@@ -28,6 +28,10 @@ _Avoid_: group, chunk, package
 The conventional-commit message (with optional body) the LLM produces for a Batch's diff.
 _Avoid_: suggestion, proposal, generated text
 
+**Workdir Snapshot**:
+The plan-time capture of the unstaged branch's Scan phase (`WorkdirSnapshot` in `src/workflow/run/`): one traversal holding each file's raw index→workdir diff (nothing is staged on this branch, so the index equals HEAD) plus its derived views — the planner's envelope, the hunk counts that define the plan's index space, the raw pairs the Redaction Gate and the deterministic fallback consume, and the per-Batch slices the Draft phase sends. Every consumer that must agree on hunk numbering reads this one object; Batch staging deliberately does not (it re-reads the current diff per Batch).
+_Avoid_: diff cache, scan state, plan input
+
 **Batch staging**:
 The phase of a Run that maps a Batch's planned hunks onto the current index→workdir diff and stages them, tracking which original (plan-time) hunk indices have already landed. Staging re-reads the current diff rather than the plan-time snapshot, so a pre-commit hook that restages whole files (lint-staged/prettier) cannot desync later Batches of the same Run.
 _Avoid_: group staging, chunk staging, add -p
