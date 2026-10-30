@@ -143,6 +143,11 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      # Update the toolchain rather than trusting runner images: macOS images
+      # lag stable (v0.6.0 tag built with preinstalled rustc 1.98 < MSRV 1.99).
+      # Mirrors dist's rust-toolchain-version = "stable" in dist-workspace.toml.
+      - name: Use rustup to set correct Rust version
+        run: rustup update "stable" --no-self-update && rustup default "stable"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -234,6 +239,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Install Rust
+        run: rustup update "stable" --no-self-update && rustup default "stable"
       - name: Install cached dist
         uses: actions/download-artifact@v7
         with:
