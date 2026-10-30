@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::git::Git;
 use crate::git::diff::parse_file_patch;
-use crate::llm::generator::BatchPlanBatch;
 use crate::render::display::Display;
 
 /// Stages one Batch at a time, tracking per-file which original hunk indices
@@ -65,33 +64,15 @@ impl Staging {
     pub fn stage_batch(
         &mut self,
         git: &Git,
-        batch: &BatchPlanBatch,
+        files: &[(String, Vec<usize>)],
         display: &Display,
     ) -> Result<Vec<String>> {
-        // Gather each file's planned hunks across its (possibly several)
-        // `changes` entries, preserving first-seen file order. An empty `hunks`
-        // slice means "the whole file" for that entry; `validate_batch_plan`
-        // rejects mixing whole-file and per-hunk entries for the same file, so
-        // concatenating the slices yields the right `planned` for every
-        // reachable plan (a lone whole-file entry stays empty →
-        // `map_planned_hunks` expands it).
-        let mut files: Vec<String> = Vec::new();
-        let mut hunks_by_file: HashMap<String, Vec<usize>> = HashMap::new();
-        for change in &batch.changes {
-            if !hunks_by_file.contains_key(&change.file) {
-                files.push(change.file.clone());
-            }
-            hunks_by_file
-                .entry(change.file.clone())
-                .or_default()
-                .extend_from_slice(&change.hunks);
-        }
-
+        // `files` arrives pre-folded per file (`BatchPlanBatch::files`):
+        // first-seen order, one entry per file, its `hunks` the
+        // concatenation of the batch's `changes` entries for that file
+        // (an empty slice means "the whole file").
         let mut staged_paths: Vec<String> = Vec::new();
-        for file in &files {
-            let planned = hunks_by_file
-                .get(file)
-                .expect("every file in `files` has an entry in `hunks_by_file`");
+        for (file, planned) in files {
             let current = git.diff_workdir(Some(file.as_str()))?;
             if current.trim().is_empty() {
                 display.warn(&format!(
@@ -102,15 +83,15 @@ impl Staging {
                 continue;
             }
             let patch = parse_file_patch(&current);
-            // `hunk_count() == 0` is overloaded: an empty diff (already landed,
-            // warned above) and a non-empty binary/mode/rename delta both parse
-            // to zero hunks. Only the raw diff's emptiness separates them, so the
-            // whole-file branch self-guards on `!current.trim().is_empty()` —
-            // mirroring the marker condition in `main.rs`. Reordering or removing
-            // the warn-guard above can neither get an already-landed file
-            // re-staged nor let a real binary change fall through and be silently
-            // dropped (the class of bug this Run was returning Ok on).
-            if patch.hunk_count() == 0 && !current.trim().is_empty() {
+            // Zero hunks is overloaded: an empty diff (already landed,
+            // warned above) and a non-empty binary/mode/rename delta
+            // both parse that way. `is_non_textual` — the same
+            // predicate the planner's envelope marker keys on — is what
+            // separates them, so this whole-file branch can neither
+            // re-stage an already-landed file nor drop a real binary
+            // change silently (the class of bug this Run was returning
+            // Ok on).
+            if patch.is_non_textual(&current) {
                 git.add(&[file.as_str()])
                     .with_context(|| format!("staging whole file {file}"))?;
                 staged_paths.push(file.clone());

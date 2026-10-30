@@ -30,6 +30,28 @@ pub struct BatchPlanBatch {
     pub reason: Option<String>,
 }
 
+impl BatchPlanBatch {
+    /// The batch's per-file hunk requests, deduplicated by file in
+    /// first-seen order. A file split across several `changes` entries
+    /// (disjoint hunks) folds into one entry with its hunk lists
+    /// concatenated, so it stages as one pass and yields one commit
+    /// message — the contract the removed `unique_batch_files` helper
+    /// enforced. An empty `hunks` slice means "the whole file" for that
+    /// entry; `validate_batch_plan` rejects mixing whole-file and
+    /// per-hunk entries for the same file, so concatenation yields the
+    /// right request for every reachable plan.
+    pub fn files(&self) -> Vec<(String, Vec<usize>)> {
+        let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+        for change in &self.changes {
+            match out.iter_mut().find(|(f, _)| f == &change.file) {
+                Some((_, hunks)) => hunks.extend_from_slice(&change.hunks),
+                None => out.push((change.file.clone(), change.hunks.clone())),
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchPlanOutput {
     pub batches: Vec<BatchPlanBatch>,

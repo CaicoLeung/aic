@@ -146,9 +146,9 @@ impl WorkdirSnapshot {
         for f in files {
             let diff = git.diff_workdir(Some(f.path.as_str()))?;
             raw_diffs.insert(f.path.clone(), diff.clone());
-            let count = diff::parse_file_patch(&diff).hunk_count();
-            hunk_counts.push((f.path.clone(), count));
-            let scoped = if count == 0 && !diff.trim().is_empty() {
+            let patch = diff::parse_file_patch(&diff);
+            hunk_counts.push((f.path.clone(), patch.hunk_count()));
+            let scoped = if patch.is_non_textual(&diff) {
                 crate::llm::prompt::BINARY_MARKER.to_string()
             } else {
                 diff::format_diff_scoped(&diff, &f.path)
@@ -502,7 +502,7 @@ async fn commit_batches(
         // error after staging (not before) keeps the "remaining changes
         // are still staged" contract identical to drafting inline.
         let outcome = async {
-            let paths = staging.stage_batch(git, batch, &step_display)?;
+            let paths = staging.stage_batch(git, &batch.files(), &step_display)?;
             if paths.is_empty() {
                 // Every file in this batch already landed via an earlier
                 // batch or a pre-commit hook — nothing to commit.
