@@ -99,7 +99,7 @@ impl BatchReview {
 /// there is nothing to unwind.
 pub(crate) fn review_plan(
     mut plan: BatchPlanOutput,
-    file_hunk_counts: &[(String, usize)],
+    snapshot: &crate::workflow::run::WorkdirSnapshot,
     display: &Display,
     review: &BatchReview,
     frame: &RunFrame,
@@ -113,7 +113,7 @@ pub(crate) fn review_plan(
     let step_display = frame.step_display(display);
 
     loop {
-        let rows = paint_plan(&step_display, &plan, file_hunk_counts);
+        let rows = paint_plan(&step_display, &plan, snapshot.hunk_counts());
         match menu(&plan.batches, !history.is_empty())? {
             ReviewChoice::Continue => {
                 step_display.clear_last(rows);
@@ -142,7 +142,7 @@ pub(crate) fn review_plan(
                 step_display.clear_last(rows);
                 let before = plan.clone();
                 merge_batches(&mut plan, a, b)?;
-                generator::validate_batch_plan(&plan, file_hunk_counts)
+                generator::validate_batch_plan(&plan, snapshot.hunk_counts())
                     .context("merged batch plan failed validation")?;
                 history.push(before);
                 merges += 1;
@@ -435,6 +435,7 @@ mod tests {
 
     use crate::llm::generator::test_util::{batch, change, plan};
     use crate::render::display::DisplayWrite;
+    use crate::workflow::run::WorkdirSnapshot;
 
     /// Discarding sink so unit tests never paint stderr.
     struct Quiet;
@@ -592,7 +593,7 @@ mod tests {
         let one = plan(vec![batch(vec![change("a.rs", &[1])], None)]);
         let out = review_plan(
             one,
-            &counts,
+            &WorkdirSnapshot::from_hunk_counts(counts),
             &quiet_display(),
             &BatchReview::Disabled,
             &frame(),
@@ -612,7 +613,7 @@ mod tests {
         let one = plan(vec![batch(vec![change("a.rs", &[1])], None)]);
         let err = review_plan(
             one,
-            &counts,
+            &WorkdirSnapshot::from_hunk_counts(counts),
             &quiet_display(),
             &interactive(menu_queue(vec![ReviewChoice::Abort])),
             &frame(),
@@ -639,7 +640,7 @@ mod tests {
         ]);
         let out = review_plan(
             plan,
-            &counts,
+            &WorkdirSnapshot::from_hunk_counts(counts.clone()),
             &quiet_display(),
             &interactive(menu_queue(vec![
                 ReviewChoice::Merge(1, 0),
@@ -670,7 +671,7 @@ mod tests {
         ]);
         let out = review_plan(
             plan,
-            &counts,
+            &WorkdirSnapshot::from_hunk_counts(counts.clone()),
             &quiet_display(),
             &interactive(menu_queue(vec![
                 ReviewChoice::Merge(0, 1),
@@ -698,7 +699,7 @@ mod tests {
         ]);
         let err = review_plan(
             plan,
-            &counts,
+            &WorkdirSnapshot::from_hunk_counts(counts),
             &quiet_display(),
             &interactive(menu_queue(vec![ReviewChoice::Abort])),
             &frame(),

@@ -106,6 +106,124 @@ pub(crate) async fn commit_run(git: &Git, deps: RunDeps) -> anyhow::Result<()> {
     }
 }
 
+/// The plan-time workdir snapshot: one Scan-phase traversal capturing
+/// each unstaged file's raw workdir-vs-HEAD diff plus every derived
+/// view. It exists so the consumers that must agree on hunk numbering —
+/// the numbered view sent to the model, the counts behind
+/// `validate_batch_plan`, and each Batch's sliced draft input — all
+/// read from one capture. Staging does NOT read from it: the `staging`
+/// module re-reads a fresh diff per batch (so the Run survives
+/// pre-commit hooks that re-stage whole files) and remaps the plan-time
+/// indices onto the current diff via its internal `committed_hunks`.
+pub(crate) struct WorkdirSnapshot {
+    /// Raw per-file diffs keyed by path — the slice source behind
+    /// [`Self::batch_diff`].
+    raw_diffs: HashMap<String, String>,
+    /// Per-file hunk counts in scan order — the numbering the model saw.
+    hunk_counts: Vec<(String, usize)>,
+    /// The planner's envelope (`{"unstaged_files":[…]}`), built once
+    /// during the scan.
+    payload: String,
+    /// `(path, raw diff)` pairs in scan order — the Redaction Gate's
+    /// input and the deterministic fallback's regrouping source, so
+    /// both consume exactly what the model sees.
+    raw_pairs: Vec<(String, String)>,
+    /// Scan-order paths (the stats query's input).
+    paths: Vec<String>,
+}
+
+impl WorkdirSnapshot {
+    /// Capture the workdir diff of every file once. A changed file with
+    /// no textual hunks (binary/mode/rename) would yield an empty
+    /// scoped diff — the model reads that as "nothing changed" and
+    /// drops the file — so its envelope entry carries the explicit
+    /// binary marker instead, keeping the file plannable with an empty
+    /// hunks array.
+    pub(crate) fn scan(git: &Git, files: &[&crate::git::FileStatus]) -> anyhow::Result<Self> {
+        let mut raw_diffs = HashMap::new();
+        let mut hunk_counts = Vec::new();
+        let mut payload_files = Vec::new();
+        for f in files {
+            let diff = git.diff_workdir(Some(f.path.as_str()))?;
+            raw_diffs.insert(f.path.clone(), diff.clone());
+            let count = diff::parse_file_patch(&diff).hunk_count();
+            hunk_counts.push((f.path.clone(), count));
+            let scoped = if count == 0 && !diff.trim().is_empty() {
+                crate::llm::prompt::BINARY_MARKER.to_string()
+            } else {
+                diff::format_diff_scoped(&diff, &f.path)
+            };
+            payload_files.push(serde_json::json!({
+                "path": f.path,
+                "status": f.kind,
+                "diff": scoped
+            }));
+        }
+        let raw_pairs = files
+            .iter()
+            .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
+            .collect();
+        let paths = files.iter().map(|f| f.path.clone()).collect();
+        Ok(Self {
+            payload: serde_json::json!({ "unstaged_files": payload_files }).to_string(),
+            raw_diffs,
+            hunk_counts,
+            raw_pairs,
+            paths,
+        })
+    }
+
+    /// The planner's envelope over the snapshot's numbered views.
+    pub(crate) fn planner_payload(&self) -> &str {
+        &self.payload
+    }
+
+    /// Per-file hunk counts — the plan's index space. This is the only
+    /// numbering `validate_batch_plan` and the Review gate ever see.
+    pub(crate) fn hunk_counts(&self) -> &[(String, usize)] {
+        &self.hunk_counts
+    }
+
+    /// `(path, raw diff)` pairs in scan order.
+    pub(crate) fn raw_pairs(&self) -> &[(String, String)] {
+        &self.raw_pairs
+    }
+
+    /// Scan-order paths.
+    pub(crate) fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    /// One Batch's Drafted-Message input: its planned hunks sliced out
+    /// of the plan-time diffs — the numbering the model saw and the
+    /// plan refers to (ADR 0014).
+    pub(crate) fn batch_diff(&self, batch: &generator::BatchPlanBatch) -> anyhow::Result<String> {
+        diff_json::plan_batch_diff_json(batch, &self.raw_diffs)
+    }
+
+    /// The deterministic regrouping of the raw diffs (the fallback plan).
+    pub(crate) fn fallback_plan(&self) -> generator::BatchPlanOutput {
+        grouping::plan_from_diffs(&self.raw_pairs)
+    }
+
+    /// Counts-only construction for tests that drive phases without a
+    /// repo (the Review gate's unit tests); phases that need diffs go
+    /// through [`Self::scan`].
+    #[cfg(test)]
+    pub(crate) fn from_hunk_counts(counts: Vec<(String, usize)>) -> Self {
+        Self {
+            raw_diffs: HashMap::new(),
+            hunk_counts: counts,
+            payload: String::new(),
+            raw_pairs: Vec::new(),
+            paths: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
 /// The unstaged branch of the Run: scan the workdir, plan Batches (with the
 /// deterministic fallback), review, pre-draft every Batch concurrently
 /// (ADR 0014), then stage + commit Batch by Batch. The spine owns the step
@@ -150,50 +268,12 @@ async fn unstaged_run(
     let commit_step = ix.take();
 
     frame.activate(SCAN);
-    // Capture each file's raw workdir-vs-HEAD diff once. This snapshot
-    // feeds the two consumers that must agree on hunk numbering: the
-    // numbered view sent to the model, and `file_hunk_counts` for
-    // `validate_batch_plan`. Staging does NOT read from it — the `staging`
-    // module re-reads a fresh diff per batch (so the Run survives
-    // pre-commit hooks that re-stage whole files) and remaps the plan-time
-    // indices onto the current diff via its internal `committed_hunks`.
-    let mut file_hunk_counts: Vec<(String, usize)> = Vec::new();
-    let mut raw_diffs: HashMap<String, String> = HashMap::new();
-    let files = unstaged_files
-        .iter()
-        .map(|f| {
-            let diff = git.diff_workdir(Some(f.path.as_str()))?;
-            raw_diffs.insert(f.path.clone(), diff.clone());
-            let hunk_count = diff::parse_file_patch(&diff).hunk_count();
-            file_hunk_counts.push((f.path.clone(), hunk_count));
-            // A changed file with no textual hunks (binary/mode/rename)
-            // would yield an empty scoped diff — the model reads that as
-            // "nothing changed" and drops the file. Send an explicit marker
-            // instead so it includes the file with an empty hunks array.
-            let scoped = if hunk_count == 0 && !diff.trim().is_empty() {
-                crate::llm::prompt::BINARY_MARKER.to_string()
-            } else {
-                diff::format_diff_scoped(&diff, &f.path)
-            };
-            Ok(serde_json::json!({ "path": f.path, "status": f.kind, "diff": scoped }))
-        })
-        .collect::<anyhow::Result<Vec<_>>>();
-    let files = frame.fail_on_err(display, SCAN, files)?;
-    let diff = serde_json::json!({ "unstaged_files": files });
-    // (path, raw diff) pairs from the snapshot above — the single
-    // source for the Redaction Gate below and the deterministic
-    // fallback's regrouping, so both consume exactly what the model
-    // sees.
-    let raw_pairs: Vec<(String, String)> = unstaged_files
-        .iter()
-        .map(|f| (f.path.clone(), raw_diffs[&f.path].clone()))
-        .collect();
-    let scan_paths: Vec<String> = unstaged_files.iter().map(|f| f.path.clone()).collect();
+    let snapshot = frame.fail_on_err(display, SCAN, WorkdirSnapshot::scan(git, unstaged_files))?;
     let scan_stats = scanned(
         &frame,
         display,
         SCAN,
-        git.workdir_stats(&scan_paths),
+        git.workdir_stats(snapshot.paths()),
         unstaged_files.len(),
     )?;
     // Run-wide counts-grid geometry: every Commit entry footer of this
@@ -203,27 +283,25 @@ async fn unstaged_run(
     let counts_floor = counts_geometry(&scan_stats);
 
     // Redaction Gate, first payload site (issue #155, ADR 0017): the
-    // raw per-file diffs feed every LLM payload of this branch — the
-    // plan envelope above and each batch's Drafted Message input (sliced
-    // from `raw_diffs`) — so gating here once refuses before any Backend
-    // call. The confirmation menu's Re-generate redraft stays ungated by
-    // design: it re-sends content this gate already cleared. A refusal
-    // is the step's failed screen: the headline names the gate, the
-    // detail row carries the full files + patterns refusal (ADR 0018).
+    // snapshot's raw per-file diffs feed every LLM payload of this
+    // branch — the plan envelope above and each batch's Drafted Message
+    // input (sliced from the snapshot) — so gating here once refuses
+    // before any Backend call. The confirmation menu's Re-generate
+    // redraft stays ungated by design: it re-sends content this gate
+    // already cleared. A refusal is the step's failed screen: the
+    // headline names the gate, the detail row carries the full files +
+    // patterns refusal (ADR 0018).
     super::redact_gate(&frame, display, redact_step, redact::Override::Run, |_| {
-        Ok(&raw_pairs)
+        Ok(snapshot.raw_pairs())
     })?;
 
     frame.activate(plan_step);
-    let planned = frame.fail_on_err(display, plan_step, planner(diff.to_string()).await)?;
-    let mut result = plan_with_fallback(
-        &frame,
+    let planned = frame.fail_on_err(
         display,
         plan_step,
-        planned,
-        &file_hunk_counts,
-        &raw_pairs,
+        planner(snapshot.planner_payload().to_string()).await,
     )?;
+    let mut result = plan_with_fallback(&frame, display, plan_step, planned, &snapshot)?;
 
     // Batch Review (issue #157): the opt-in pre-draft gate — applies to
     // whichever plan proceeds (the LLM's or the deterministic
@@ -231,11 +309,9 @@ async fn unstaged_run(
     // for. Abort here is the cheapest exit: nothing staged, nothing
     // drafted.
     if let Some(rs) = review_step {
-        frame.activate(rs);
-        result = review_plan(result, &file_hunk_counts, display, review, &frame, rs)?;
+        result = review_plan(result, &snapshot, display, review, &frame, rs)?;
     }
-
-    let drafts = draft_all(&frame, display, draft_step, messenger, &result, &raw_diffs).await?;
+    let drafts = draft_all(&frame, display, draft_step, messenger, &result, &snapshot).await?;
 
     frame.activate(commit_step);
     commit_batches(
@@ -269,16 +345,15 @@ fn plan_with_fallback(
     display: &Display,
     plan_step: StepIdx,
     planned: generator::BatchPlanOutput,
-    file_hunk_counts: &[(String, usize)],
-    raw_pairs: &[(String, String)],
+    snapshot: &WorkdirSnapshot,
 ) -> anyhow::Result<generator::BatchPlanOutput> {
     let mut fallback_err: Option<String> = None;
-    let result = match generator::validate_batch_plan(&planned, file_hunk_counts) {
+    let result = match generator::validate_batch_plan(&planned, snapshot.hunk_counts()) {
         Ok(()) => planned,
         Err(plan_err) => {
             fallback_err = Some(plan_err.to_string());
-            let plan = grouping::plan_from_diffs(raw_pairs);
-            generator::validate_batch_plan(&plan, file_hunk_counts)
+            let plan = snapshot.fallback_plan();
+            generator::validate_batch_plan(&plan, snapshot.hunk_counts())
                 .context("deterministic fallback plan failed validation")?;
             plan
         }
@@ -329,7 +404,7 @@ async fn draft_all(
     draft_step: StepIdx,
     messenger: &CommitMessenger,
     plan: &generator::BatchPlanOutput,
-    raw_diffs: &HashMap<String, String>,
+    snapshot: &WorkdirSnapshot,
 ) -> anyhow::Result<Vec<anyhow::Result<generator::CommitOutput>>> {
     let count = plan.batches.len();
     let batch_diffs = frame.fail_on_err(
@@ -337,7 +412,7 @@ async fn draft_all(
         draft_step,
         plan.batches
             .iter()
-            .map(|b| diff_json::plan_batch_diff_json(b, raw_diffs))
+            .map(|b| snapshot.batch_diff(b))
             .collect::<anyhow::Result<Vec<_>>>(),
     )?;
     frame.activate(draft_step);
