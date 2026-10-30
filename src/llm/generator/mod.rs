@@ -18,9 +18,9 @@ pub struct CommitOutput {
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 pub struct BatchChange {
     /// Repo-relative file path. `path` is accepted as an alias: the diff
-    /// envelope the model sees names the key `path` (src/git/diff_json/),
-    /// so backends echoing that name is expected, not a model failure
-    /// (issue #180).
+    /// envelope the model sees (`WorkdirSnapshot::scan` in
+    /// src/workflow/run/) names the key `path`, so backends echoing that
+    /// name is expected, not a model failure (issue #180).
     #[serde(alias = "path")]
     pub file: String,
     /// 1-based indices of the hunks (numbered in the diff shown to the model)
