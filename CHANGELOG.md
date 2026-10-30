@@ -2,9 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1] - 2026-10-30
+
+> 🎉 **0.6.1** — 1 change · 1 contributor
+
+### Bug Fixes
+
+- Accept "path" as an alias for "file" in batch-plan changes
+
+
+### Contributors
+🎉 Thanks to the 1 contributor below!
+<table><tr><td align="center"><a href="https://github.com/CaicoLeung"><img src="https://github.com/CaicoLeung.png?size=96" width="64" height="64"><br><sub><b>@CaicoLeung</b></sub></a></td></tr></table>
 ## [0.6.0] - 2026-10-30
 
-> 🎉 **0.6.0** — 7 changes · 1 contributor
+> 🎉 **0.6.0** — 8 changes · 1 contributor
 
 ### Features
 
@@ -17,6 +29,7 @@ All notable changes to this project will be documented in this file.
 - Bump self_update to 1.3 to clear zip RUSTSEC advisories (#165)
 - Bump tokio to 1.54.1 to clear RUSTSEC-2026-0384 (#168)
 - Paint interactive menus and tighten timeline semantics
+- Rustup-update stable in Release build jobs
 
 ### Documentation
 
