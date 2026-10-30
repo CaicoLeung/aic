@@ -5,6 +5,9 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
+# Install Rust in CI via rustup instead of trusting runner images (macOS
+# images lag stable; v0.6.0 release build failed with preinstalled 1.98 < MSRV)
+rust-toolchain-version = "stable"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
