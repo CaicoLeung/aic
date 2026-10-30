@@ -29,3 +29,10 @@ install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
 unix-archive = ".tar.gz"
+# aarch64-apple-darwin defaults to the macos-14 runner image, which is in a
+# scheduled brownout ahead of its retirement on 2026-11-02 — Release runs
+# during a brownout window get the queued aarch64 job cancelled with no logs
+# (run 41107352927). Pin it to macos-15 (arm64) until dist's default table
+# moves off macos-14. x86_64-apple-darwin already builds on macos-15-intel.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
