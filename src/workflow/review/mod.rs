@@ -21,6 +21,7 @@ use crate::render::palette;
 use crate::render::timeline::driver::RunFrame;
 use crate::render::timeline::{Failure, StepIdx, plural};
 use crate::workflow::input::{select_in_frame, truncate};
+use crate::workflow::run::WorkdirSnapshot;
 use anyhow::Context;
 use console::Style;
 
@@ -99,7 +100,7 @@ impl BatchReview {
 /// there is nothing to unwind.
 pub(crate) fn review_plan(
     mut plan: BatchPlanOutput,
-    snapshot: &crate::workflow::run::WorkdirSnapshot,
+    snapshot: &WorkdirSnapshot,
     display: &Display,
     review: &BatchReview,
     frame: &RunFrame,
@@ -435,7 +436,6 @@ mod tests {
 
     use crate::llm::generator::test_util::{batch, change, plan};
     use crate::render::display::DisplayWrite;
-    use crate::workflow::run::WorkdirSnapshot;
 
     /// Discarding sink so unit tests never paint stderr.
     struct Quiet;

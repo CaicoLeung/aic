@@ -23,6 +23,18 @@ use crate::git::Git;
 use crate::git::diff::parse_file_patch;
 use crate::render::display::Display;
 
+/// One file's planned hunks for a Batch's staging pass — the element
+/// [`BatchPlanBatch::files`](crate::llm::generator::BatchPlanBatch::files)
+/// folds the batch's `changes` into. An empty `hunks` slice means "the
+/// whole file".
+#[derive(Debug, Clone)]
+pub struct FileHunks {
+    /// Repo-relative file path.
+    pub file: String,
+    /// 1-based plan-time hunk indices; empty means the whole file.
+    pub hunks: Vec<usize>,
+}
+
 /// Stages one Batch at a time, tracking per-file which original hunk indices
 /// have already landed in earlier batches of the same Run.
 #[derive(Default)]
@@ -64,7 +76,7 @@ impl Staging {
     pub fn stage_batch(
         &mut self,
         git: &Git,
-        files: &[(String, Vec<usize>)],
+        files: &[FileHunks],
         display: &Display,
     ) -> Result<Vec<String>> {
         // `files` arrives pre-folded per file (`BatchPlanBatch::files`):
@@ -72,7 +84,11 @@ impl Staging {
         // concatenation of the batch's `changes` entries for that file
         // (an empty slice means "the whole file").
         let mut staged_paths: Vec<String> = Vec::new();
-        for (file, planned) in files {
+        for FileHunks {
+            file,
+            hunks: planned,
+        } in files
+        {
             let current = git.diff_workdir(Some(file.as_str()))?;
             if current.trim().is_empty() {
                 display.warn(&format!(
@@ -91,7 +107,7 @@ impl Staging {
             // re-stage an already-landed file nor drop a real binary
             // change silently (the class of bug this Run was returning
             // Ok on).
-            if patch.is_non_textual(&current) {
+            if patch.is_non_textual() {
                 git.add(&[file.as_str()])
                     .with_context(|| format!("staging whole file {file}"))?;
                 staged_paths.push(file.clone());

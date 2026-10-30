@@ -24,6 +24,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::core::config;
 use crate::core::types::{BatchPlanner, BoxFuture, CommitMessenger};
+use crate::git::FileStatus;
 use crate::git::Git;
 use crate::git::diff;
 use crate::git::diff_json;
@@ -139,7 +140,7 @@ impl WorkdirSnapshot {
     /// drops the file — so its envelope entry carries the explicit
     /// binary marker instead, keeping the file plannable with an empty
     /// hunks array.
-    pub(crate) fn scan(git: &Git, files: &[&crate::git::FileStatus]) -> anyhow::Result<Self> {
+    pub(crate) fn scan(git: &Git, files: &[&FileStatus]) -> anyhow::Result<Self> {
         let mut raw_diffs = HashMap::new();
         let mut hunk_counts = Vec::new();
         let mut payload_files = Vec::new();
@@ -148,7 +149,7 @@ impl WorkdirSnapshot {
             raw_diffs.insert(f.path.clone(), diff.clone());
             let patch = diff::parse_file_patch(&diff);
             hunk_counts.push((f.path.clone(), patch.hunk_count()));
-            let scoped = if patch.is_non_textual(&diff) {
+            let scoped = if patch.is_non_textual() {
                 crate::llm::prompt::BINARY_MARKER.to_string()
             } else {
                 diff::format_diff_scoped(&diff, &f.path)
@@ -227,7 +228,7 @@ async fn unstaged_run(
     git: &Git,
     deps: &RunDeps,
     undo_start: Option<String>,
-    unstaged_files: &[&crate::git::FileStatus],
+    unstaged_files: &[&FileStatus],
 ) -> anyhow::Result<()> {
     let RunDeps {
         display,
@@ -589,7 +590,7 @@ async fn staged_run(
     git: &Git,
     deps: &RunDeps,
     undo_start: Option<String>,
-    staged_files: &[&crate::git::FileStatus],
+    staged_files: &[&FileStatus],
 ) -> anyhow::Result<()> {
     let display = &deps.display;
     let paths: Vec<String> = staged_files.iter().map(|f| f.path.clone()).collect();

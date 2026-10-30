@@ -90,6 +90,11 @@ pub struct FilePatch {
     /// Each hunk's full text, starting at its `@@ … @@` line and including
     /// every body line, in file order.
     hunks: Vec<String>,
+    /// Whether the raw diff parsed to zero hunks yet carried bytes — a
+    /// binary/mode/rename delta, not an already-landed empty diff.
+    /// Captured at parse time so the predicate never needs the raw text
+    /// the patch no longer travels with.
+    non_textual: bool,
 }
 
 impl FilePatch {
@@ -100,14 +105,16 @@ impl FilePatch {
 
     /// Whether this diff is a non-textual delta — binary content, a mode
     /// change, a rename — rather than an empty one: it parses to zero
-    /// hunks, yet the raw diff carries bytes. The distinction is
+    /// hunks, yet the raw diff carries bytes. Captured at parse time (the
+    /// one point the patch and its raw text meet) so the patch and the
+    /// predicate cannot drift apart at a call site. The distinction is
     /// load-bearing at both consumers: the planner's envelope swaps the
     /// (empty) scoped view for the explicit binary marker so the file
     /// stays plannable, and whole-file staging keys on it instead of
     /// re-staging a file whose changes already landed (an empty raw
     /// diff means exactly that).
-    pub fn is_non_textual(&self, raw: &str) -> bool {
-        self.hunk_count() == 0 && !raw.trim().is_empty()
+    pub fn is_non_textual(&self) -> bool {
+        self.non_textual
     }
 
     /// Rebuild a partial patch from selected hunks: the stable header plus
@@ -172,7 +179,12 @@ pub fn parse_file_patch(raw: &str) -> FilePatch {
         hunks.push(prev);
     }
 
-    FilePatch { header, hunks }
+    let non_textual = hunks.is_empty() && !raw.trim().is_empty();
+    FilePatch {
+        header,
+        hunks,
+        non_textual,
+    }
 }
 
 /// The LLM's numbered view of one file's diff: each hunk labelled with its
@@ -298,8 +310,8 @@ index 1..2 100644\n\
     #[test]
     fn is_non_textual_distinguishes_zero_hunk_shapes() {
         let binary = "diff --git a/lock.bin b/lock.bin\nindex 1..2 100644\nBinary files differ\n";
-        assert!(parse_file_patch(binary).is_non_textual(binary));
-        assert!(!parse_file_patch("").is_non_textual(""));
-        assert!(!parse_file_patch(two_hunk_patch()).is_non_textual(two_hunk_patch()));
+        assert!(parse_file_patch(binary).is_non_textual());
+        assert!(!parse_file_patch("").is_non_textual());
+        assert!(!parse_file_patch(two_hunk_patch()).is_non_textual());
     }
 }

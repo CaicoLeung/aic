@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::git::staging::FileHunks;
 use crate::llm::LlmConfig;
 use crate::llm::prompt::PromptConfig;
 
@@ -31,21 +32,24 @@ pub struct BatchPlanBatch {
 }
 
 impl BatchPlanBatch {
-    /// The batch's per-file hunk requests, deduplicated by file in
-    /// first-seen order. A file split across several `changes` entries
-    /// (disjoint hunks) folds into one entry with its hunk lists
+    /// The batch's per-file hunk requests ([`FileHunks`]), deduplicated
+    /// by file in first-seen order. A file split across several `changes`
+    /// entries (disjoint hunks) folds into one entry with its hunk lists
     /// concatenated, so it stages as one pass and yields one commit
     /// message — the contract the removed `unique_batch_files` helper
     /// enforced. An empty `hunks` slice means "the whole file" for that
     /// entry; `validate_batch_plan` rejects mixing whole-file and
     /// per-hunk entries for the same file, so concatenation yields the
     /// right request for every reachable plan.
-    pub fn files(&self) -> Vec<(String, Vec<usize>)> {
-        let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+    pub fn files(&self) -> Vec<FileHunks> {
+        let mut out: Vec<FileHunks> = Vec::new();
         for change in &self.changes {
-            match out.iter_mut().find(|(f, _)| f == &change.file) {
-                Some((_, hunks)) => hunks.extend_from_slice(&change.hunks),
-                None => out.push((change.file.clone(), change.hunks.clone())),
+            match out.iter_mut().find(|f| f.file == change.file) {
+                Some(found) => found.hunks.extend_from_slice(&change.hunks),
+                None => out.push(FileHunks {
+                    file: change.file.clone(),
+                    hunks: change.hunks.clone(),
+                }),
             }
         }
         out
