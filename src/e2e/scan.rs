@@ -61,20 +61,25 @@ fn scan_captures_counts_payload_and_raw_diffs_together() {
     );
 }
 
-/// A changed file with no textual hunks (mode/bit-flip content that
-/// parses to zero hunks) still enters the envelope — via the explicit
-/// binary marker — so the model cannot silently drop it.
+/// A changed file with no textual hunks (binary content that parses to
+/// zero hunks) still enters the envelope — via the explicit binary
+/// marker — so the model cannot silently drop it.
 #[test]
 fn scan_marks_non_textual_changes_instead_of_dropping_them() {
     let (dir, git) = with_git(gh::init_test_repo);
-    commit_file(dir.path(), "run.sh", "hello\n", "base");
-    // Pure mode change: no textual hunks, non-empty raw diff.
-    git_in(dir.path(), &["update-index", "--chmod=+x", "run.sh"]);
+    // Binary base, binary rewrite: a non-empty workdir diff with zero
+    // `@@` hunks on every platform. (A mode flip is not — Windows has
+    // no exec bit, so `update-index --chmod=+x` never surfaces as an
+    // unstaged change there.)
+    std::fs::write(dir.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+    git_in(dir.path(), &["add", "blob.bin"]);
+    git_in(dir.path(), &["commit", "-m", "add binary"]);
+    std::fs::write(dir.path().join("blob.bin"), [9u8, 9, 9, 9]).unwrap();
 
     let files = unstaged(&git);
     let snapshot = WorkdirSnapshot::scan(&git, &files.iter().collect::<Vec<_>>()).unwrap();
 
-    assert_eq!(snapshot.hunk_counts(), &[("run.sh".to_string(), 0)]);
+    assert_eq!(snapshot.hunk_counts(), &[("blob.bin".to_string(), 0)]);
     assert!(
         snapshot
             .planner_payload()
